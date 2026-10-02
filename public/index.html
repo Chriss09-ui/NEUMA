@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NEUMA · 需求层测试版</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">N</span><span>NEUMA</span></div>
+      <span class="stage-label">需求层测试版</span>
+      <span id="connection" class="connection" aria-live="polite">正在检查连接…</span>
+    </header>
+
+    <main class="workspace">
+      <aside class="agents-panel" aria-label="已确认的 Agent 需求">
+        <div class="agents-heading">
+          <div>
+            <p class="eyebrow">AGENT BRIEFS</p>
+            <h2>Agent 需求</h2>
+          </div>
+          <span id="agent-count" class="agent-count">0</span>
+        </div>
+        <p class="agents-note">确认后的需求会出现在这里。点击保存，刷新后才会保留。</p>
+        <button id="reset" type="button" class="agent-new">＋ 新对话</button>
+        <div id="agents-list" class="agents-list" aria-live="polite"></div>
+        <p class="agents-scope">当前仅保存需求说明，尚未创建可运行的 Agent。</p>
+      </aside>
+
+      <section class="conversation" aria-label="需求对话">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">DESCRIBE THE ROLE</p>
+            <h1>说说你想创建的 Agent</h1>
+            <p class="subtitle">我会把你的描述整理成一份需求说明，只在关键地方追问。对话会发送给已配置的模型服务处理。</p>
+          </div>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <div id="error" class="error" role="alert" hidden></div>
+        <form id="chat-form" class="composer" autocomplete="off">
+          <label class="sr-only" for="message">描述或修改 Agent 的需求</label>
+          <textarea id="message" rows="3" placeholder="例如：帮我做一个会议纪要 Agent。我会给它转写文字，它提炼结论和待办。" required></textarea>
+          <div class="composer-footer">
+            <span>输入具体工作、资料来源和交付结果即可</span>
+            <button id="send" type="submit">发送 <span aria-hidden="true">↗</span></button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="draft-panel" aria-label="当前需求说明">
+        <div class="draft-heading">
+          <div>
+            <p class="eyebrow">LIVE BRIEF</p>
+            <h2>当前需求说明</h2>
+          </div>
+          <span id="draft-status" class="status">等待描述</span>
+        </div>
+        <p class="panel-note">这是持续更新的同一份草稿。你可以在中间对话随时纠正或补充。</p>
+        <div id="draft-content" class="draft-content"></div>
+        <div class="panel-actions">
+          <button id="modify" type="button" class="secondary">继续修改</button>
+          <button id="save" type="button" class="secondary" disabled>保存当前对话</button>
+          <button id="restore" type="button" class="secondary" disabled>恢复已存对话</button>
+          <button id="export" type="button" class="secondary" disabled>导出 JSON</button>
+          <button id="diagnostics" type="button" class="secondary" disabled>导出诊断记录</button>
+          <button id="delete-saved" type="button" class="text-button" disabled>删除已存对话</button>
+        </div>
+        <p id="storage-note" class="storage-note" aria-live="polite"></p>
+        <p class="storage-note">遇到重复追问或报错时，请在刷新前导出诊断记录。文件包含当前对话与逐轮判定；仅点击后才下载。</p>
+        <div id="jev-status" class="jev-status" aria-live="polite">Jev 尚未参与判断</div>
+        <p class="experimental-note">Jev 的中文判断目前仅供本地测试；需求可交接不代表 Agent 已创建。</p>
+      </aside>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
