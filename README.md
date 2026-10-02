@@ -1,13 +1,14 @@
 # NEUMA 需求层测试版
 
-这个独立小应用只负责把自然语言整理成可修改的 Agent 需求说明。它不会创建或运行 Agent，也不依赖旧“司南”仓库或 OpenClaw。
+这个独立测试版的主功能仍是把自然语言整理成可修改的 Agent 需求说明。新增“我的项目”工作区，通过 Pi SDK 管理已有本地项目。Agent 创建目前仍停留在需求层；不依赖旧“司南”仓库或 OpenClaw。
 
 ## 启动
 
-需要 Node.js 20.6 或更新版本。项目没有第三方依赖。
+需要 Node.js 22.19 或更新版本。Pi SDK 固定使用 `@earendil-works/pi-coding-agent@1.0.0`；SDK 为 MIT 开源软件，模型调用费用由所选服务商决定。
 
 ```bash
 cd /Users/chriss/Desktop/办公智能体/neuma-requirements
+npm ci --ignore-scripts
 cp .env.example .env
 ```
 
@@ -30,6 +31,24 @@ npm start
 遇到重复追问或连接报错时，先在当前页面点击“导出诊断记录”，再刷新或开启新对话。下载的 `neuma-diagnostics.json` 包含当前对话、最近 40 次提交的草稿前后状态、模型建议、Jev 判断、实际选中的缺口、耗时和安全的错误类别。失败的提交也会记录，即使草稿尚未更新。原有“导出 JSON”只导出需求草稿，不含这些排查信息。
 
 诊断记录仅放在当前页面内存；不会自动写入浏览器存储、服务器日志或外部服务。刷新、开启新对话或切换需求会清除逐轮诊断，只有点击按钮才下载文件。文件包含对话原文，分享前请自行检查；API Key 和接口原始响应不在诊断文件中。
+
+## 我的项目：Pi SDK 接入实验
+
+点击顶部“我的项目”，可以在左侧粘贴项目完整路径，也可以在项目对话里说“把这个完整路径的项目加进来”。项目列表自动保存在本机 `.neuma/projects.json`，重启后恢复；聊天只放在本轮页面与服务器内存中，刷新或开启新对话会使用新的 Pi 会话。闲置 30 分钟的会话会释放；同时最多保留 12 份会话。
+
+登记只关联项目原位置，不复制或修改源码。单文件 HTML、带 `index.html` 的目录、含 `package.json` 的 Node 项目、Python 脚本和 macOS `.app` 会识别类型；其他项目也可以登记，再填写启动配置。新项目默认未启用启动。核对右侧启动程序与参数，勾选允许启动并保存，才能点击“启动并查看”，或让项目助手启动它。
+
+静态网页使用独立本机端口提供预览，拒绝隐藏文件和越界符号链接。Node/Python 等项目按已保存的程序和参数启动，不通过 Shell 解释参数，不自动安装依赖；启动参数填写 JSON 数组，例如 `["run", "dev"]`。需要 Node、Python 等运行环境已安装。程序的标准输出只用于提取本机页面地址，不回传整段日志；预览地址也可以手动填写，仅支持本机 HTTP 地址。页面通过一次成功访问验证后显示。只有进程存活而没有页面时会说明入口未验证；脚本可能运行后直接结束。macOS 桌面应用在自身窗口打开，目前不能管理其窗口和关闭生命周期。
+
+“停止”只停止由 NEUMA 启动并跟踪的进程或预览服务；“移除记录”停止受管理的运行后移除登记，保留原项目文件。关闭 NEUMA 服务时会停止受管理的项目。项目路径移动后需要重新登记。当前运行状态不写入磁盘，重启后按实际情况重新启动。
+
+Pi 复用 `NEUMA_LLM_CHAT_URL`、`NEUMA_LLM_MODEL`、`NEUMA_LLM_API_KEY`；接口必须以 `/chat/completions` 结尾，并支持流式回复和工具调用。SDK 不自动加载电脑或项目里的 Pi 扩展、技能、指令和模型配置；不写入 Pi 的全局凭据或聊天文件，也不启用分析、安装遥测、模型目录网络更新或缓存预热。必要的对话、项目名称、用途、路径、类型及状态会发送给已配置的模型；不读取 `.env` 或把 NEUMA 的模型密钥传给项目子进程。模型费用以服务商账单为准，SDK 内部占位费用不代表真实价格。
+
+Pi 只开放登记、列出、启动和停止项目四个自定义工具；任意 Shell、源码修改和删除能力均未开放。这是工具范围限制，不是项目代码的操作系统沙箱：用户启用并启动的项目代码仍使用本地账户可用权限。尚未实现任意桌面按钮操作、跨设备管理，以及自动调用所有小应用内部功能。
+
+接口：`GET /api/projects` 查询；`POST /api/projects` 接收 `{ "path": "完整路径" }`；`POST /api/projects/:id/configure` 接收 `{ "command": "npm", "args": ["run", "dev"], "url": "", "allowLaunch": true }`；同一路径的 `start`、`stop` 接收 `{}`，`remove` 接收 `{ "confirm": true }`。`POST /api/projects/turn` 接收 `{ "message": "...", "sessionId": "浏览器生成的唯一标识" }`；`POST /api/projects/cancel` 取消回复，已执行操作会保留。接口拒绝外部 Origin、非本机 Host 和跨站请求；项目变更要求 JSON 请求。
+
+实现依据：[Pi SDK](https://pi.dev/docs/latest/sdk)、[工具示例](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/sdk/05-tools.ts)、[权限说明](https://pi.dev/docs/latest/security)、[MIT 许可证](https://github.com/earendil-works/pi/blob/main/LICENSE)。
 
 ## 判断方式
 
