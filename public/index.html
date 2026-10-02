@@ -12,8 +12,12 @@
       <span class="stage-label">需求层测试版</span>
       <span id="connection" class="connection" aria-live="polite">正在检查连接…</span>
     </header>
+    <nav class="workspace-switch" aria-label="工作区">
+      <button id="requirements-tab" type="button" aria-controls="requirements-workspace" aria-pressed="true">创建 Agent</button>
+      <button id="projects-tab" type="button" aria-controls="projects-workspace" aria-pressed="false">我的项目</button>
+    </nav>
 
-    <main class="workspace">
+    <main id="requirements-workspace" class="workspace">
       <aside class="agents-panel" aria-label="已确认的 Agent 需求">
         <div class="agents-heading">
           <div>
@@ -73,6 +77,47 @@
       </aside>
     </main>
 
+    <main id="projects-workspace" class="workspace" hidden>
+      <aside class="agents-panel" aria-label="我的本地项目">
+        <div class="agents-heading"><h2>我的项目</h2><span id="project-count" class="agent-count">0</span></div>
+        <p class="agents-note">关联原位置，项目记录自动保存在这台电脑上。</p>
+        <form id="project-add-form" class="project-add-form">
+          <label for="project-path">项目完整路径</label>
+          <input id="project-path" type="text" placeholder="粘贴文件或文件夹的完整路径" required>
+          <button class="agent-new" type="submit">＋ 添加项目</button>
+        </form>
+        <label class="sr-only" for="project-search">搜索项目</label>
+        <input id="project-search" class="project-search" type="search" placeholder="搜索名称或用途">
+        <button id="project-refresh" class="text-button" type="button">刷新项目状态</button>
+        <div id="projects-list" class="agents-list" aria-live="polite"></div>
+      </aside>
+      <section class="conversation" aria-label="项目管理对话">
+        <div class="section-heading">
+          <p class="eyebrow">YOUR LOCAL PROJECTS</p>
+          <h1>让已有项目随时可用</h1>
+          <p class="subtitle">告诉我项目路径，或让我找到、启动和停止已添加的项目。</p>
+          <p id="pi-connection" class="project-engine" role="status">正在检查项目助手…</p>
+          <button id="project-new-chat" class="text-button" type="button">开启新的项目对话</button>
+        </div>
+        <div id="project-messages" class="messages" aria-live="polite"></div>
+        <div id="project-error" class="error" role="alert" hidden></div>
+        <form id="project-chat-form" class="composer" autocomplete="off">
+          <label class="sr-only" for="project-message">项目操作要求</label>
+          <textarea id="project-message" rows="3" placeholder="例如：把这个完整路径里的项目加进来。或者：打开我之前添加的记账工具。" required></textarea>
+          <div class="composer-footer">
+            <span>必要的项目信息和对话会交给已配置的模型处理</span>
+            <button id="project-cancel" class="text-button" type="button" hidden>停止回复</button>
+            <button id="project-send" class="primary" type="submit">发送 ↗</button>
+          </div>
+        </form>
+      </section>
+      <aside class="draft-panel" aria-label="项目详情与预览">
+        <div class="draft-heading"><h2>项目详情</h2><span id="project-state" class="status">未选择</span></div>
+        <div id="project-details"><p class="panel-note">选择一个项目，查看位置、启动方式和预览。</p></div>
+      </aside>
+    </main>
+
     <script type="module" src="/app.js"></script>
+    <script type="module" src="/projects.js"></script>
   </body>
 </html>

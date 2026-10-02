@@ -71,3 +71,33 @@ test("失败响应提供安全错误类别，不输出密钥或原始接口响�
     attempts: 3, causeCode: "ENOTFOUND", providerModel: "mimo-v2.6-pro" });
   assert.equal("draft" in payload, false);
 });
+
+test("项目接口拒绝外部网页请求与非本机 Host，不执行任何项目操作", async () => {
+  let calls = 0;
+  const handler = createRequestHandler({ config: {}, projects: { list: async () => { calls++; return []; } } });
+  for (const headers of [
+    { host: "127.0.0.1:3000", origin: "https://outside.example" },
+    { host: "outside.example:3000" },
+    { host: "127.0.0.1:3000", origin: "null" },
+    { host: "127.0.0.1:3000", "sec-fetch-site": "cross-site" },
+  ]) {
+    const input = request("GET", "/api/projects"); input.headers = headers;
+    const result = { status: null };
+    await handler(input, { writeHead(status) { result.status = status; }, end() {} });
+    assert.equal(result.status, 403);
+  }
+  assert.equal(calls, 0);
+});
+
+test("项目变更要求 JSON 和明确移除确认，项目对话使用独立接口", async () => {
+  let removed = false;
+  const handler = createRequestHandler({ config: {},
+    projects: { list: async () => [], remove: async () => { removed = true; } },
+    projectAgent: { prompt: async (body) => ({ engine: "pi", reply: body.message, projects: [] }) },
+  });
+  assert.equal((await invoke(handler, "POST", "/api/projects/test/remove", {})).status, 400);
+  assert.equal(removed, false);
+  assert.equal((await invoke(handler, "POST", "/api/projects/test/start")).status, 400);
+  const result = await invoke(handler, "POST", "/api/projects/turn", { message: "查看项目", sessionId: "fixture-session-12345" });
+  assert.equal(result.status, 200); assert.equal(JSON.parse(result.text).engine, "pi");
+});

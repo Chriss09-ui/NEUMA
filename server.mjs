@@ -4,12 +4,16 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputError, ProviderError, processTurn } from "./core.mjs";
 import { getProviderConfig, makeProviders } from "./providers.mjs";
+import { ProjectManager } from "./projects.mjs";
+import { PiProjectAgent } from "./pi-runtime.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
+  ["/projects.js", ["projects.js", "text/javascript; charset=utf-8"]],
+  ["/project-view.js", ["project-view.js", "text/javascript; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -38,10 +42,20 @@ async function readJson(request) {
   }
 }
 
-export function createRequestHandler({ config = getProviderConfig(), providers = makeProviders(config) } = {}) {
-  return async (request, response) => {
+export function createRequestHandler({ config = getProviderConfig(), providers = makeProviders(config),
+  dataDir = resolve(ROOT, ".neuma"), projects = new ProjectManager({ dataDir, blockedPort: Number(process.env.PORT || 3000) }),
+  projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }) } = {}) {
+  const handler = async (request, response) => {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
     try {
+      if (path.startsWith("/api/")) {
+        const host = request.headers.host;
+        const origin = request.headers.origin;
+        const validHost = !host || ["localhost", "127.0.0.1", "[::1]"].includes(new URL(`http://${host}`).hostname);
+        if (!validHost || (origin && origin !== `http://${host}`) || request.headers["sec-fetch-site"] === "cross-site") {
+          return sendJson(response, 403, { error: "项目操作仅允许从本机 NEUMA 页面发起" });
+        }
+      }
       if (request.method === "GET" && path === "/api/health") {
         return sendJson(response, 200, {
           ok: true,
@@ -49,7 +63,29 @@ export function createRequestHandler({ config = getProviderConfig(), providers =
           jevConfigured: config.jevConfigured,
           jevModel: config.jevModel,
           experimental: true,
+          pi: { engine: "pi", configured: config.llmConfigured },
         });
+      }
+      if (request.method === "GET" && path === "/api/projects") {
+        return sendJson(response, 200, { projects: await projects.list() });
+      }
+      if (request.method === "POST" && path === "/api/projects/turn") {
+        return sendJson(response, 200, await projectAgent.prompt(await readJson(request)));
+      }
+      if (request.method === "POST" && path === "/api/projects/cancel") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await projectAgent.cancel(body.sessionId));
+      }
+      if (request.method === "POST" && path === "/api/projects") {
+        const body = await readJson(request);
+        return sendJson(response, 200, { project: await projects.add(body) });
+      }
+      const operation = path.match(/^\/api\/projects\/([\w-]+)\/(configure|start|stop|remove)$/);
+      if (request.method === "POST" && operation) {
+        const body = await readJson(request), [, id, action] = operation;
+        if (action === "remove" && body.confirm !== true) throw new InputError("请确认移除项目记录");
+        const project = action === "configure" ? await projects.configure(id, body) : await projects[action](id);
+        return sendJson(response, 200, { project });
       }
       if (request.method === "POST" && path === "/api/requirements/turn") {
         const body = await readJson(request);
@@ -77,10 +113,16 @@ export function createRequestHandler({ config = getProviderConfig(), providers =
         diagnostic: { ...diagnostic, providerModel: config.model || null } });
     }
   };
+  handler.dispose = async () => { await projectAgent.dispose(); await projects.dispose(); };
+  return handler;
 }
 
 export function createApp(options = {}) {
-  return createServer(createRequestHandler(options));
+  const handler = createRequestHandler(options);
+  const server = createServer(handler);
+  server.on("close", () => { void handler.dispose(); });
+  server.dispose = handler.dispose;
+  return server;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -90,5 +132,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   server.listen(port, "127.0.0.1", () => {
     process.stdout.write(`NEUMA 需求层测试版：http://127.0.0.1:${port}\n`);
     process.stdout.write(`兼容模型：${config.llmConfigured ? "已配置" : "未配置"}；Jev：${config.jevConfigured ? "已配置" : "未配置"}\n`);
+  });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {
+    await server.dispose(); server.close();
   });
 }
