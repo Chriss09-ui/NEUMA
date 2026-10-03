@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { blankSession, clearSession, deleteRequirement, hasSavedSession, initializeSession,
   loadSavedRequirements, loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
-  upsertConfirmedRequirement } from "../public/state.js";
+  upsertConfirmedRequirement, appendAgentPreview, deleteAgentPreview, loadAgentPreview,
+  saveAgentPreview } from "../public/state.js";
 
 const SAVED_KEY = "neuma.requirements.session.optin.v1";
 const LEGACY_KEY = "neuma.requirements.session.v1";
@@ -130,4 +131,43 @@ test("只有手动保存的 Agent 需求会留下，删除只影响选中条目�
     "整理项目周报");
   assert.equal(deleteRequirement(local, "weekly"), true);
   assert.deepEqual(loadSavedRequirements(local).map((item) => item.id), ["meeting"]);
+});
+
+test("智能体预览记录按入口隔离，手动保存不会进入主 Agent 的需求上下文", () => {
+  const local = storage();
+  const main = blankSession();
+  const weekly = appendAgentPreview([], "这是周报素材");
+  const meeting = appendAgentPreview([], "这是会议素材");
+  assert.deepEqual(loadAgentPreview(local, "weekly"), []);
+  assert.equal(saveAgentPreview(local, "weekly", weekly), true);
+  assert.equal(saveAgentPreview(local, "meeting", meeting), true);
+  assert.deepEqual(loadAgentPreview(local, "weekly"), weekly);
+  assert.deepEqual(loadAgentPreview(local, "meeting"), meeting);
+  assert.deepEqual(recentUserMessages(main.messages), []);
+  assert.deepEqual(loadSavedRequirements(local), []);
+  assert.equal(deleteAgentPreview(local, "weekly"), true);
+  assert.deepEqual(loadAgentPreview(local, "weekly"), []);
+  assert.deepEqual(loadAgentPreview(local, "meeting"), meeting);
+});
+
+test("预览记录限制输入体积，损坏或执行回复不能被当成预览结果恢复", () => {
+  const local = storage();
+  const old = [{ role: "user", content: "原始输入" }];
+  const next = appendAgentPreview(old, "  新输入  ");
+  assert.equal(old.length, 1);
+  assert.equal(next.at(-1).content, "新输入");
+  assert.throws(() => appendAgentPreview([], " "), /1～4000/);
+  assert.throws(() => appendAgentPreview([], "字".repeat(4001)), /1～4000/);
+  const many = Array.from({ length: 80 }, (_, i) => ({ role: "user", content: String(i) }));
+  assert.equal(appendAgentPreview(many, "最新").length, 80);
+  local.setItem("neuma.agent.preview.v1.a", "{broken");
+  assert.deepEqual(loadAgentPreview(local, "a"), []);
+  local.setItem("neuma.agent.preview.v1.a", JSON.stringify([
+    ...old, { role: "assistant", content: "任务已完成" }, { role: "user", content: "字".repeat(4001) },
+  ]));
+  assert.deepEqual(loadAgentPreview(local, "a"), old);
+  const unavailable = { getItem() { throw new Error(); }, setItem() { throw new Error(); }, removeItem() { throw new Error(); } };
+  assert.deepEqual(loadAgentPreview(unavailable, "a"), []);
+  assert.equal(saveAgentPreview(unavailable, "a", old), false);
+  assert.equal(deleteAgentPreview(unavailable, "a"), false);
 });

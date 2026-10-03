@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
+import { EventEmitter } from "node:events";
 import { createRequestHandler } from "../server.mjs";
 import { emptyDraft, ProviderError } from "../core.mjs";
 
@@ -37,6 +38,13 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.equal(page.status, 200);
   assert.match(page.text, /需求层测试版/);
   assert.match(page.text, /id="agents-list"/);
+  assert.match(page.text, /id="sidebar-agent-list"/);
+  assert.match(page.text, /id="page-agent"/);
+  assert.match(page.text, /让主 Agent 帮我迭代/);
+  const agentUi = await invoke(handler, "GET", "/agents.js");
+  assert.equal(agentUi.status, 200);
+  assert.match(agentUi.headers["content-type"], /javascript/);
+  assert.equal((await invoke(handler, "GET", "/chat-ui.js")).status, 200);
   assert.match(page.text, /id="reset"[^>]*>＋ 新对话/);
   assert.match(page.text, /id="diagnostics"[^>]*>导出诊断记录/);
 
@@ -53,6 +61,69 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(result.confirmationQuestion, /这份需求可以确认吗/);
   assert.equal(result.diagnostic.decision.selectedGap, "none");
   assert.equal(result.diagnostic.providerModel, null);
+});
+
+class StreamingResponse extends EventEmitter {
+  text = "";
+  writableEnded = false;
+  destroyed = false;
+  writeHead(status, headers) { this.status = status; this.headers = headers; }
+  write(content) { this.text += content; }
+  end(content = "") { this.text += content; this.writableEnded = true; }
+}
+
+test("项目流在整轮结束前送出进度，最后返回完整结果", async () => {
+  let release, started;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const ready = new Promise((resolve) => { started = resolve; });
+  const handler = createRequestHandler({ config: {}, projectAgent: {
+    async prompt(body, progress) {
+      progress({ type: "status", phase: "thinking" }); started();
+      await hold;
+      progress({ type: "text-delta", delta: "你好" });
+      return { reply: "你好", projects: [], actions: [] };
+    },
+  } });
+  const input = request("POST", "/api/projects/turn", { message: "你好", sessionId: "stream-session-12345" });
+  input.headers.accept = "application/x-ndjson";
+  const response = new StreamingResponse();
+  const pending = handler(input, response);
+  await ready;
+  assert.equal(response.writableEnded, false);
+  assert.match(response.headers["content-type"], /ndjson/);
+  assert.equal(JSON.parse(response.text.trim()).phase, "thinking");
+  release(); await pending;
+  const events = response.text.trim().split("\n").map(JSON.parse);
+  assert.equal(events[1].delta, "你好");
+  assert.equal(events.at(-1).type, "done");
+  assert.equal(events.at(-1).result.reply, "你好");
+});
+
+test("流中异常只发送安全错误，不泄露 SDK 原始内容", async () => {
+  const handler = createRequestHandler({ config: {}, projectAgent: { prompt: async () => { throw new Error("private-provider-payload"); } } });
+  const input = request("POST", "/api/projects/turn", { message: "你好" }); input.headers.accept = "application/x-ndjson";
+  const response = new StreamingResponse();
+  await handler(input, response);
+  assert.equal(response.text.includes("private-provider-payload"), false);
+  assert.equal(JSON.parse(response.text).type, "error");
+  assert.equal(response.writableEnded, true);
+});
+
+test("浏览器中断流会取消对应的项目会话", async () => {
+  let started, finish;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const cancelled = [];
+  const handler = createRequestHandler({ config: {}, projectAgent: {
+    async prompt() { started(); await new Promise((resolve) => { finish = resolve; }); return { reply: "已停止" }; },
+    async cancel(id) { cancelled.push(id); finish(); },
+  } });
+  const input = request("POST", "/api/projects/turn", { message: "你好", sessionId: "stream-session-12345" }); input.headers.accept = "application/x-ndjson";
+  const response = new StreamingResponse(), pending = handler(input, response);
+  await ready;
+  response.destroyed = true; response.emit("close");
+  await pending;
+  assert.deepEqual(cancelled, ["stream-session-12345"]);
+  assert.equal(response.text, "");
 });
 
 test("失败响应提供安全错误类别，不输出密钥或原始接口响应", async () => {

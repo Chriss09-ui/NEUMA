@@ -20,7 +20,9 @@ async function waitFor(action) {
 test("登记原项目、识别类型、规范化路径去重并在重启后恢复", async (t) => {
   const { root, app, manager } = await fixture(t);
   await writeFile(join(app, "package.json"), JSON.stringify({ scripts: { start: "node main.mjs" } }));
-  const [first, duplicate] = await Promise.all([manager.add({ path: app, description: "本地工具" }), manager.add({ path: app })]);
+  // Path inspection is asynchronous, so either concurrent registration may arrive first.
+  const registration = { path: app, description: "本地工具" };
+  const [first, duplicate] = await Promise.all([manager.add(registration), manager.add(registration)]);
   assert.equal(first.id, duplicate.id); assert.equal(first.kind, "node"); assert.equal(first.allowLaunch, false);
   assert.deepEqual(first.launch.args, ["run", "start"]);
   const alias = join(root, "alias"); await symlink(app, alias);

@@ -34,13 +34,38 @@ test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", 
   const agent = new PiProjectAgent({ config: { llmConfigured: true, chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`,
     model: "fixture-model", apiKey: "fixture-only", llmTimeoutMs: 5000 }, manager, cwd: root, dataDir: join(root, "data") });
   t.after(async () => { await agent.dispose(); await manager.dispose(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
-  const first = await agent.prompt({ message: `添加 ${app}`, sessionId: "fixture-session-12345" });
+  const progress = [];
+  const first = await agent.prompt({ message: `添加 ${app}`, sessionId: "fixture-session-12345" }, (event) => progress.push(event));
   assert.equal(first.engine, "pi"); assert.equal(first.projects.length, 1);
   assert.equal(first.actions[0].tool, "add_project"); assert.match(first.reply, /已添加/);
   const second = await agent.prompt({ message: "看看刚才的项目", sessionId: "fixture-session-12345" });
   assert.equal(second.projects.length, 1); assert.match(second.reply, /仍然/);
   assert.ok(requests[2].messages.some((entry) => entry.role === "tool"));
   assert.equal(first.projects[0].allowLaunch, false);
+  assert.ok(progress.some((event) => event.type === "text-delta" && event.delta.includes("已添加")));
+  assert.ok(progress.some((event) => event.type === "status" && event.label === "正在登记项目…"));
+});
+
+test("项目进度只发送显示文本与操作状态，不转发思考原文或工具参数", async () => {
+  let listener;
+  const progress = [];
+  const session = {
+    subscribe(fn) { listener = fn; return () => {}; },
+    async prompt() {
+      listener({ type: "message_start", message: { role: "assistant" } });
+      listener({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "private-thought" } });
+      listener({ type: "tool_execution_start", toolName: "list_projects", args: { secret: "private-tool-input" } });
+      listener({ type: "tool_execution_end", result: { secret: "private-tool-result" } });
+      listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "项目已列出。" } });
+    },
+    messages: [], getLastAssistantText: () => "项目已列出。", dispose() {}, async abort() {},
+  };
+  const agent = new PiProjectAgent({ config: { llmConfigured: true }, manager: { list: async () => [] }, sessionFactory: async () => session });
+  await agent.prompt({ message: "查看项目", sessionId: "stream-session-12345" }, (event) => progress.push(event));
+  assert.equal(JSON.stringify(progress).includes("private-"), false);
+  assert.ok(progress.some((event) => event.label === "正在查看项目…"));
+  assert.equal(progress.at(-1).delta, "项目已列出。");
+  await agent.dispose();
 });
 
 test("模型不能借项目文字登记用户本轮没有提供的路径", async () => {
