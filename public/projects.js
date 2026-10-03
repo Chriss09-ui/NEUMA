@@ -9,6 +9,8 @@ let sessionId = crypto.randomUUID(), messages = [];
 let pendingReply = null, replyView = null, activeController = null, cancelling = false;
 let route = { page: "chat", projectView: "list" };
 let contextId = null, listSignature = "";
+let folderController = null, suggestedProjectName = "";
+let adding = false, renderedConfiguration;
 
 function showError(target, message = "") { const el = byId(target); el.textContent = message; el.hidden = !message; }
 function clearErrors() { for (const id of ["project-error", "add-error", "manage-error"]) showError(id); }
@@ -16,7 +18,14 @@ function navigate(detail) { document.dispatchEvent(new CustomEvent("neuma:naviga
 function feedback(message = "") { const el = byId("project-feedback"); el.textContent = message; el.hidden = !message; }
 
 async function api(path, body) {
-  const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const setup = body !== undefined && (path === "/api/projects" || path.endsWith("/inspect"));
+  const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json", ...(setup ? { accept: "application/x-ndjson" } : {}) }, body: JSON.stringify(body) });
+  if (setup) return readReply(response, (event) => {
+    if (event.type !== "status" || !event.label) return;
+    if (adding) byId("project-folder-status").textContent = event.label;
+    else feedback(event.label);
+  }, { incompleteMessage: "项目检查连接中断，记录会保留，可以在详情中重新识别。",
+    isComplete: (result) => typeof result?.project?.id === "string" });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "项目操作失败，请重试");
   return result;
@@ -38,7 +47,7 @@ function renderMessages(scrollToEnd = true) {
     welcome.append(node("span", "welcome-eyebrow", "好用的工具，随时在手边"));
     const title = node("h2", "welcome-title", "让你的项目，");
     title.append(node("br"), node("span", "", "随时为你所用。"));
-    welcome.append(title, node("p", "welcome-description", "给我一个本地路径，我来帮你登记。\n核对启动方式后，一句话就能打开。"));
+    welcome.append(title, node("p", "welcome-description", "给我一个本地路径，我来识别和配置。\n准备好后，一句话就能打开。"));
     const chips = node("div", "suggestions");
     const suggestions = [
       ["添加项目", "关联电脑上的文件夹", () => navigate({ page: "projects", projectView: "add" }), "meeting"],
@@ -67,14 +76,16 @@ function renderMessages(scrollToEnd = true) {
     if (message.status) {
       const view = createReplyView("项目助手"); view.update(message); container.append(view.row);
       if (message.projectId && projects.some((item) => item.id === message.projectId)) {
-        const action = node("button", "secondary reply-project-link", "核对启动方式 →"); action.type = "button";
+        const action = node("button", "secondary reply-project-link", "查看项目 →"); action.type = "button";
         action.addEventListener("click", () => openProject(message.projectId)); view.row.append(action);
       }
       if (message === pendingReply) replyView = view;
       continue;
     }
     const wrapper = node("div", `message ${message.role}`);
-    wrapper.append(node("div", "message-label", message.role === "user" ? "你" : "项目助手"), node("div", "bubble", message.content));
+    wrapper.setAttribute("role", "group");
+    wrapper.setAttribute("aria-label", "项目助手的回复");
+    wrapper.append(node("div", "bubble", message.content));
     container.append(wrapper);
   }
   container.scrollTop = follow ? container.scrollHeight : previousTop;
@@ -94,8 +105,10 @@ function render() {
   }
   byId("project-count").textContent = projects.length;
   const project = projects.find((item) => item.id === selectedId);
-  if (renderedId !== selectedId) {
+  const configuration = JSON.stringify([project?.setup, project?.launch, project?.allowLaunch, project?.root]);
+  if (renderedId !== selectedId || renderedConfiguration !== configuration) {
     renderedId = selectedId;
+    renderedConfiguration = configuration;
     renderProjectDetails({ container: details, project, onConfigure: (body) => runAction("configure", body), onAction: (action) => runAction(action) });
   }
   const state = byId("project-state");
@@ -108,6 +121,12 @@ function render() {
   byId("project-context-open").textContent = context?.name ?? "";
   byId("project-assistant-state").textContent = chatting ? "正在回复…" : "用一句话管理项目";
   for (const el of byId("project-add-form").querySelectorAll("input, button")) el.disabled = busy;
+  byId("project-choose-folder").disabled = busy || Boolean(folderController);
+  byId("project-choose-folder").textContent = folderController ? "选择中…" : byId("project-path").value ? "重新选择" : "选择文件夹";
+  byId("project-path").disabled = busy || Boolean(folderController);
+  byId("project-add-submit").disabled = busy || Boolean(folderController);
+  byId("project-add-submit").textContent = adding ? "正在识别…" : "添加并自动配置";
+  byId("project-add-form").setAttribute("aria-busy", String(adding));
   byId("project-send").disabled = byId("project-new-chat").disabled = busy;
   input.disabled = busy && !chatting;
   byId("project-send").hidden = chatting;
@@ -133,30 +152,78 @@ async function runAction(action, body = {}) {
   const actionId = selectedId;
   busy = true; showError("manage-error"); feedback(); render();
   try {
-    await api(`/api/projects/${actionId}/${action}`, action === "remove" ? { confirm: true } : body);
-    if (action === "configure" || action === "remove") renderedId = undefined;
+    const result = await api(`/api/projects/${actionId}/${action}`, action === "remove" ? { confirm: true } : body);
+    if (["configure", "inspect", "remove"].includes(action)) renderedId = undefined;
     await refresh();
-    feedback({ configure: "启动方式已保存", start: "已提交启动，请查看项目状态", stop: "项目已停止", remove: "项目记录已移除，原文件已保留" }[action]);
+    feedback(action === "inspect" ? result.project.canLaunch ? "启动方式已配好，可以直接打开。"
+      : result.project.setup?.status === "paused" ? "检查已暂停，可以稍后继续。" : "项目检查已结束，请查看下方结果。"
+      : { configure: "启动方式已保存", start: "", stop: "项目已停止", remove: "项目记录已移除，原文件已保留" }[action]);
   } catch (failure) { showError("manage-error", failure.message); }
   finally { busy = false; render(); }
 }
 
+async function chooseProjectFolder() {
+  if (busy || folderController || route.page !== "projects" || route.projectView !== "add") return;
+  const controller = new AbortController();
+  let focusId = "project-path";
+  folderController = controller;
+  showError("add-error");
+  byId("project-folder-status").textContent = "请在系统窗口中选择项目文件夹…";
+  render();
+  try {
+    const response = await fetch("/api/projects/pick-folder", { method: "POST",
+      headers: { "content-type": "application/json" }, body: "{}", signal: controller.signal });
+    const result = await response.json();
+    if (controller.signal.aborted || folderController !== controller) return;
+    if (!response.ok) throw new Error(result.error || "暂时无法选择文件夹，请手动填写路径。");
+    if (result.cancelled) {
+      byId("project-folder-status").textContent = "已取消选择。可以重新选择，也可以直接填写本机路径。";
+      focusId = "project-choose-folder";
+      return;
+    }
+    if (typeof result.path !== "string" || !result.path) throw new Error("没有取得文件夹路径，请重新选择。");
+    byId("project-path").value = result.path;
+    const name = byId("project-name");
+    if (!name.value.trim() || name.value === suggestedProjectName) name.value = result.name || "";
+    suggestedProjectName = result.name || "";
+    byId("project-folder-status").textContent = "文件夹已选好，PI 会自动检查项目并配置启动方式。";
+    focusId = "project-add-submit";
+  } catch (error) {
+    if (controller.signal.aborted || folderController !== controller) return;
+    showError("add-error", error.message);
+    byId("project-folder-status").textContent = "也可以直接粘贴项目的完整路径。";
+  } finally {
+    if (folderController === controller) {
+      folderController = null; render(); byId(focusId).focus({ preventScroll: true });
+    }
+  }
+}
+byId("project-choose-folder").addEventListener("click", chooseProjectFolder);
+byId("project-path").addEventListener("input", () => {
+  byId("project-folder-status").textContent = "只需提供路径，PI 会检查项目说明和入口，自动配置启动方式。";
+  render();
+});
+
 byId("project-add-form").addEventListener("submit", async (event) => {
-  event.preventDefault(); if (busy) return;
-  busy = true; showError("add-error"); render();
+  event.preventDefault(); if (busy || folderController) return;
+  busy = adding = true; showError("add-error");
+  byId("project-folder-status").textContent = "正在添加并检查项目…"; render();
   try {
     const name = byId("project-name").value.trim(), description = byId("project-description").value.trim();
     const result = await api("/api/projects", { path: byId("project-path").value.trim(),
       ...(name ? { name } : {}), ...(description ? { description } : {}) });
     for (const id of ["project-path", "project-name", "project-description"]) byId(id).value = "";
+    suggestedProjectName = "";
+    byId("project-folder-status").textContent = "选择项目所在的文件夹，也可以直接填写本机路径。";
     await refresh();
     if (route.page === "projects" && route.projectView === "add") {
       byId("project-search").value = ""; renderedId = undefined;
       openProject(result.project.id);
     }
-    feedback("项目已添加。核对启动方式后，就可以随时打开。");
+    feedback(result.project.canLaunch ? "项目已添加，启动方式已配好。点击“打开项目”即可使用。"
+      : result.project.setup?.summary || "项目已添加，可以在详情中自动识别启动方式。");
   } catch (failure) { showError("add-error", failure.message); }
-  finally { busy = false; render(); }
+  finally { busy = adding = false; render(); }
 });
 
 byId("project-chat-form").addEventListener("submit", async (event) => {
@@ -231,9 +298,16 @@ byId("project-refresh").addEventListener("click", () => { showError("manage-erro
 const watching = () => route.page === "projects";
 document.addEventListener("neuma:route", (event) => {
   const before = watching();
+  const wasAdding = route.page === "projects" && route.projectView === "add";
   route = event.detail;
+  const adding = route.page === "projects" && route.projectView === "add";
+  if (!adding && folderController) {
+    folderController.abort(); folderController = null;
+    byId("project-folder-status").textContent = "选择项目所在的文件夹，也可以直接填写本机路径。";
+  }
   render();
   if (watching() && !before) { clearErrors(); void refresh(); }
+  if (adding && !wasAdding && !byId("project-path").value.trim()) void chooseProjectFolder();
 });
 document.addEventListener("neuma:settings-changed", () => {
   activeController?.abort(); activeController = null;

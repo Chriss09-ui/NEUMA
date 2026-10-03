@@ -42,6 +42,22 @@ test("保持兼容旧版 JSON 回复与安全错误", async () => {
   await assert.rejects(readReply(Response.json({ error: "未配置模型" }, { status: 502 }), () => {}), /未配置模型/);
 });
 
+test("调用方可区分需求断流提示，并读取后端安全诊断", async () => {
+  await assert.rejects(readReply(streamResponse([]), () => {}, { incompleteMessage: "需求回复尚未完成" }), /需求回复尚未完成/);
+  await assert.rejects(readReply(Response.json({ error: "回复失败", diagnostic: { reason: "upstream_error", stage: "reply" } }, { status: 502 }), () => {}),
+    (error) => error.diagnostic.reason === "upstream_error" && error.diagnostic.stage === "reply");
+});
+
+test("自动配置的完成事件按项目结果判断，无需聊天 reply，断流仍报错", async () => {
+  const encode = (event) => new TextEncoder().encode(`${JSON.stringify(event)}\n`);
+  const options = { isComplete: (result) => typeof result?.project?.id === "string", incompleteMessage: "项目检查连接中断" };
+  const part = encode({ type: "done", result: { project: { id: "fixture", canLaunch: true } } });
+  const result = await readReply(streamResponse([part]), () => {}, options);
+  assert.equal(result.project.canLaunch, true);
+  await assert.rejects(readReply(streamResponse([]), () => {}, options), /项目检查连接中断/);
+  await assert.rejects(readReply(streamResponse([part]), () => {}), /回复尚未完成/);
+});
+
 test("发送立即加入用户消息，失败重发复用原消息且不污染模型上下文", () => {
   const messages = [{ role: "user", content: "上一轮", delivery: "sent" }];
   const user = addUserMessage(messages, "当前问题");

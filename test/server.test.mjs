@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { createRequestHandler } from "../server.mjs";
-import { emptyDraft, ProviderError } from "../core.mjs";
+import { emptyDraft, ProviderError, CONFIRMATION_QUESTION } from "../core.mjs";
 
 function request(method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
@@ -40,7 +40,9 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(page.text, /id="agents-list"/);
   assert.match(page.text, /id="sidebar-agent-list"/);
   assert.match(page.text, /id="page-agent"/);
-  assert.match(page.text, /让主 Agent 帮我迭代/);
+  assert.match(page.text, /让 NUEMA 帮我迭代/);
+  assert.match(page.text, /<h1 id="chat-title">NUEMA<\/h1>/);
+  assert.doesNotMatch(page.text, /主\s*Agent|NEUMA/);
   const agentUi = await invoke(handler, "GET", "/agents.js");
   assert.equal(agentUi.status, 200);
   assert.match(agentUi.headers["content-type"], /javascript/);
@@ -71,6 +73,220 @@ class StreamingResponse extends EventEmitter {
   write(content) { this.text += content; }
   end(content = "") { this.text += content; this.writableEnded = true; }
 }
+
+test("添加和重新识别共用项目检查流程，流式发送进度和最终配置", async () => {
+  for (const path of ["/api/projects", "/api/projects/fixture/inspect"]) {
+    let seen;
+    const configure = async (input, { onProgress, signal }) => {
+      seen = input; assert.equal(signal.aborted, false);
+      onProgress({ type: "status", label: "正在检查入口…" });
+      return { id: "fixture", canLaunch: true, setup: { status: "ready" } };
+    };
+    const handler = createRequestHandler({ config: {}, projects: { add: configure, inspect: configure } });
+    const input = request("POST", path, { path: "/demo/project" }); input.headers.accept = "application/x-ndjson";
+    const response = new StreamingResponse(); await handler(input, response);
+    const events = response.text.trim().split("\n").map(JSON.parse);
+    assert.equal(events.at(-1).result.project.canLaunch, true);
+    assert.ok(events.some((event) => event.label === "正在检查入口…"));
+    assert.deepEqual(seen, path.endsWith("inspect") ? "fixture" : { path: "/demo/project" });
+    assert.equal(response.listenerCount("close"), 0);
+  }
+});
+
+test("断开添加检查会传递取消信号，不发送迟到的成功事件", async () => {
+  let entered, signal;
+  const ready = new Promise((done) => { entered = done; });
+  const handler = createRequestHandler({ config: {}, projects: { add: async (_body, options) => {
+    signal = options.signal; entered(); await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+    return { setup: { status: "failed" } };
+  } } });
+  const input = request("POST", "/api/projects", { path: "/demo/project" }); input.headers.accept = "application/x-ndjson";
+  const response = new StreamingResponse(); const pending = handler(input, response); await ready;
+  response.destroyed = true; response.emit("close"); await pending;
+  assert.equal(signal.aborted, true); assert.doesNotMatch(response.text, /"type":"done"/);
+});
+
+test("选择文件夹接口只回填路径，不登记或启动项目", async () => {
+  let picks = 0;
+  const handler = createRequestHandler({ config: {},
+    pickProjectFolder: async () => { picks++; return { cancelled: false, path: "/demo/project", name: "project" }; },
+    projects: { add: async () => assert.fail("选择文件夹时不应登记项目"), start: async () => assert.fail("不应启动项目") },
+  });
+  const response = new StreamingResponse();
+  await handler(request("POST", "/api/projects/pick-folder", {}), response);
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.text), { cancelled: false, path: "/demo/project", name: "project" });
+  assert.equal(picks, 1);
+  assert.equal(response.listenerCount("close"), 0);
+});
+
+test("文件夹选择拒绝跨站与非 JSON 请求，GET 不会弹出窗口", async () => {
+  const handler = createRequestHandler({ config: {}, pickProjectFolder: async () => assert.fail("不应打开系统窗口") });
+  assert.equal((await invoke(handler, "GET", "/api/projects/pick-folder")).status, 404);
+  assert.equal((await invoke(handler, "POST", "/api/projects/pick-folder")).status, 400);
+  const input = request("POST", "/api/projects/pick-folder", {});
+  input.headers.host = "127.0.0.1:3000"; input.headers.origin = "https://unrelated.example";
+  const response = new StreamingResponse();
+  await handler(input, response);
+  assert.equal(response.status, 403);
+});
+
+test("退出选择页面中断请求，关闭系统选择窗口且不返回迟到的路径", async () => {
+  let started, seenSignal;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const handler = createRequestHandler({ config: {}, pickProjectFolder: async ({ signal }) => {
+    seenSignal = signal; started();
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    signal.throwIfAborted();
+  } });
+  const response = new StreamingResponse();
+  const pending = handler(request("POST", "/api/projects/pick-folder", {}), response);
+  await ready;
+  response.destroyed = true; response.emit("close");
+  await pending;
+  assert.equal(seenSignal.aborted, true);
+  assert.equal(response.text, "");
+  assert.equal(response.listenerCount("close"), 0);
+});
+
+function requirementStream(handler, body = { message: "创建助手" }) {
+  const input = request("POST", "/api/requirements/turn", body);
+  input.headers.accept = "application/x-ndjson";
+  const response = new StreamingResponse();
+  return { response, pending: handler(input, response), events: () => response.text.trim().split("\n").filter(Boolean).map(JSON.parse) };
+}
+
+test("主 Agent 先核对需求再真正送出回复片段，最后追加规则选定的问题", async () => {
+  let release, started;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const ready = new Promise((resolve) => { started = resolve; });
+  const draft = emptyDraft();
+  let checked = false;
+  const handler = createRequestHandler({ config: {}, providers: {
+    generateDraft: async () => ({ draft, proposedGap: "invalid", question: "不能显示的模型候选问题" }),
+    judgeJev: async () => { checked = true; throw new Error("暂时不可用"); },
+    async streamReply({ summary, onDelta }) {
+      assert.equal(checked, true);
+      assert.equal(summary, "我先确认你最想解决的事。");
+      onDelta("我们先从"); started();
+      await hold;
+      onDelta("最想解决的事情开始。");
+    },
+  } });
+  const stream = requirementStream(handler);
+  await ready;
+  assert.equal(stream.response.writableEnded, false);
+  assert.equal(stream.events().some((e) => e.delta === "我们先从"), true);
+  assert.equal(stream.events().some((e) => e.type === "done"), false);
+  release(); await stream.pending;
+  const events = stream.events(), result = events.at(-1).result;
+  assert.equal(result.question, "你最希望这个 Agent 先帮你完成哪一件具体的事？");
+  assert.equal(result.reply, `我们先从最想解决的事情开始。\n\n${result.question}`);
+  assert.equal(events.filter((e) => e.type === "text-delta").map((e) => e.delta).join(""), result.reply);
+  assert.equal(stream.response.text.includes("不能显示的模型候选问题"), true); // Diagnostic only, never reply text.
+  assert.equal(result.reply.includes("不能显示的模型候选问题"), false);
+  assert.equal(result.diagnostic.reply.mode, "stream");
+});
+
+test("首字前失败使用已校验回复；已有文字后失败不重播或提交需求", async () => {
+  for (const output of ["", "\n  ", "我们先梳理"]) {
+    let calls = 0;
+    const handler = createRequestHandler({ config: {}, providers: {
+      generateDraft: async () => ({ draft: emptyDraft(), proposedGap: "goal", question: "你最想做什么？" }),
+      async streamReply({ onDelta }) {
+        calls++;
+        if (output) onDelta(output);
+        throw new Error("private-upstream-data");
+      },
+    } });
+    const stream = requirementStream(handler);
+    await stream.pending;
+    const events = stream.events();
+    assert.equal(calls, 1);
+    assert.equal(stream.response.text.includes("private-upstream-data"), false);
+    if (output.trim()) {
+      assert.equal(events.at(-1).type, "error");
+      assert.equal(events.some((e) => e.type === "done"), false);
+      assert.equal(events.filter((e) => e.type === "text-delta").length, 1);
+    } else {
+      assert.equal(events.at(-1).result.reply, "我先确认你最想解决的事。\n\n你最想做什么？");
+      assert.equal(events.at(-1).result.diagnostic.reply.mode, "fallback");
+    }
+  }
+});
+
+test("主 Agent 在提取、核对、输出期间断开都取消上游且不发送完成事件", async () => {
+  for (const phase of ["draft", "judge", "reply"]) {
+    let started, seenSignal;
+    const ready = new Promise((resolve) => { started = resolve; });
+    const pendingUntilAbort = async (signal) => {
+      seenSignal = signal; started();
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+      signal.throwIfAborted();
+    };
+    const handler = createRequestHandler({ config: {}, providers: {
+      async generateDraft({ signal }) {
+        if (phase === "draft") await pendingUntilAbort(signal);
+        return { draft: emptyDraft(), proposedGap: "goal", question: "你最想做什么？" };
+      },
+      async judgeJev({ signal }) {
+        if (phase === "judge") await pendingUntilAbort(signal);
+        throw new Error("不可用");
+      },
+      async streamReply({ signal, onDelta }) {
+        onDelta("先来了解你的想法。");
+        if (phase === "reply") await pendingUntilAbort(signal);
+      },
+    } });
+    const stream = requirementStream(handler);
+    await ready;
+    stream.response.destroyed = true;
+    stream.response.emit("close");
+    await stream.pending;
+    assert.equal(seenSignal.aborted, true);
+    assert.equal(stream.events().some((e) => ["done", "error"].includes(e.type)), false);
+    assert.equal(stream.response.listenerCount("close"), 0);
+  }
+});
+
+test("确认清单与明确确认保持原文，无需额外调用模型", async () => {
+  const draft = emptyDraft();
+  for (const key of ["goal", "scenario", "inputSource", "task", "deliverable"]) draft[key] = { value: key, source: "user" };
+  let replyCalls = 0, draftCalls = 0;
+  const handler = createRequestHandler({ config: {}, providers: {
+    async generateDraft() { draftCalls++; return { draft, proposedGap: "none", question: "" }; },
+    async streamReply() { replyCalls++; },
+  } });
+  const preview = requirementStream(handler);
+  await preview.pending;
+  const previewResult = preview.events().at(-1).result;
+  assert.equal(previewResult.reply, `我整理出的需求是：\n${previewResult.summary}\n\n${CONFIRMATION_QUESTION}`);
+  assert.equal(previewResult.confirmed, false);
+  const approved = requirementStream(handler, { message: "确认", draft, lastQuestion: CONFIRMATION_QUESTION });
+  await approved.pending;
+  const approvedResult = approved.events().at(-1).result;
+  assert.equal(approvedResult.confirmed, true);
+  assert.match(approvedResult.reply, /当前可以预览交互，任务执行能力尚未接入/);
+  assert.equal(draftCalls, 1);
+  assert.equal(replyCalls, 0);
+});
+
+test("主 Agent 流式输入与模型提取错误不进入回复阶段", async () => {
+  let replyCalls = 0;
+  const handler = createRequestHandler({ config: {}, providers: {
+    async generateDraft() { throw new Error("private-payload"); },
+    async streamReply() { replyCalls++; },
+  } });
+  for (const message of ["", "创建助手"]) {
+    const stream = requirementStream(handler, { message });
+    await stream.pending;
+    const events = stream.events();
+    assert.equal(events.at(-1).type, "error");
+    assert.equal(events.some((e) => e.type === "done"), false);
+    assert.equal(stream.response.text.includes("private-payload"), false);
+  }
+  assert.equal(replyCalls, 0);
+});
 
 test("项目流在整轮结束前送出进度，最后返回完整结果", async () => {
   let release, started;

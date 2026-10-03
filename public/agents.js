@@ -69,7 +69,9 @@ function renderMessages(agent) {
   }
   for (const message of messages) {
     const row = element("div", "message user", "");
-    row.append(element("div", "message-label", "你 · 预览输入"), element("div", "bubble", message.content));
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", "发送的预览消息");
+    row.append(element("div", "bubble", message.content));
     container.append(row);
   }
   if (messages.length) container.append(element("p", "preview-receipt", "以上输入仅用于交互预览，尚未执行任务。"));
@@ -83,7 +85,7 @@ function renderWorkspace() {
   byId("agent-workspace").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
   byId("agent-title").textContent = agent?.name ?? "找不到智能体";
-  byId("agent-subtitle").textContent = agent?.draft.goal?.value ?? "请回到主 Agent 创建或确认需求。";
+  byId("agent-subtitle").textContent = agent?.draft.goal?.value ?? "请回到 NUEMA 创建或确认需求。";
   if (!agent) return;
   byId("agent-conversation-title").textContent = agent.name;
   byId("agent-message-label").textContent = `给 ${agent.name} 的预览输入`;

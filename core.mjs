@@ -326,7 +326,8 @@ function confirmationOnly(draft, confirmed, question, reason) {
   };
 }
 
-export async function processTurn(request, { generateDraft, judgeJev }) {
+export async function processTurn(request, { generateDraft, judgeJev }, { signal, onProgress } = {}) {
+  signal?.throwIfAborted();
   const message = cleanText(request?.message, 4000);
   if (!message) throw new InputError("请输入你希望 Agent 做什么，或说明要修改的内容");
   if (typeof request?.message !== "string" || request.message.length > 4000) {
@@ -355,7 +356,8 @@ export async function processTurn(request, { generateDraft, judgeJev }) {
     }
   }
   const modelStartedAt = Date.now();
-  const modelResult = await generateDraft({ message, previousDraft, lastQuestion, userMessages });
+  const modelResult = await generateDraft({ message, previousDraft, lastQuestion, userMessages, signal });
+  signal?.throwIfAborted();
   const modelMs = Date.now() - modelStartedAt;
   const draft = requireModelDraft(modelResult?.draft);
   if (!draft.routingCondition.value && hasGroundedFact(draft.scenario)
@@ -368,9 +370,11 @@ export async function processTurn(request, { generateDraft, judgeJev }) {
   let jevMs = null;
   let jev = { used: false, reason: "not_configured", selectedGap: null, model: null };
   if (judgeJev) {
+    onProgress?.({ type: "status", phase: "checking", label: "正在核对需求…" });
     const jevStartedAt = Date.now();
     try {
-      const result = await judgeJev({ message, draft, lastQuestion, userMessages });
+      const result = await judgeJev({ message, draft, lastQuestion, userMessages, signal });
+      signal?.throwIfAborted();
       if (!validJevAnswers(result)) {
         throw new ProviderError("Jev 返回的判断格式无效",
           { stage: "jev", reason: "invalid_response" });
@@ -379,12 +383,14 @@ export async function processTurn(request, { generateDraft, judgeJev }) {
       jev = { used: true, reason: null, selectedGap: result.answers.next_gap.choice,
         model: cleanText(result.model, 80) || null };
     } catch (error) {
+      signal?.throwIfAborted();
       jev = { used: false, reason: "unavailable", selectedGap: null, model: null };
       jevFailure = error instanceof ProviderError ? error.diagnostic
         : { stage: "jev", reason: "unknown" };
     }
     jevMs = Date.now() - jevStartedAt;
   }
+  signal?.throwIfAborted();
   const skipOptionalBoundary = declinesExtraBoundary(message, lastQuestion);
   const decision = decideNext(draft, modelResult, jevResult, { skipOptionalBoundary });
   const draftChanged = JSON.stringify(draft) !== JSON.stringify(previousDraft);

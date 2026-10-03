@@ -1,7 +1,7 @@
 import { blankSession, clearSession, deleteRequirement, initializeSession, loadSavedRequirements,
   loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement } from "./state.js";
-import { addUserMessage, createReplyView, mountWelcome, renderUserMessage } from "./chat-ui.js";
+import { addUserMessage, createReplyView, mountWelcome, readReply, renderUserMessage } from "./chat-ui.js";
 
 let browserStorage;
 try { browserStorage = window.localStorage; } catch { browserStorage = null; }
@@ -13,6 +13,7 @@ let pendingLegacy = initial.legacySession.messages.length || initial.legacySessi
 let agents = loadSavedRequirements(browserStorage);
 let activeAgentId = null;
 let busy = false;
+let pendingReply = null, replyView = null, activeController = null;
 let diagnosticTurns = [];
 
 const messagesEl = document.getElementById("messages");
@@ -23,6 +24,7 @@ const errorEl = document.getElementById("error");
 const agentsErrorEl = document.getElementById("agents-error");
 const inputEl = document.getElementById("message");
 const sendEl = document.getElementById("send");
+const cancelEl = document.getElementById("cancel-reply");
 const exportEl = document.getElementById("export");
 const diagnosticsEl = document.getElementById("diagnostics");
 const saveEl = document.getElementById("save");
@@ -76,7 +78,9 @@ function showAgentsError(message) {
   agentsErrorEl.hidden = !message;
 }
 
-function renderMessages() {
+function renderMessages(scrollToEnd = true) {
+  const scrollTop = messagesEl.scrollTop;
+  replyView = null;
   messagesEl.replaceChildren();
   {
     const welcome = element("div", "welcome");
@@ -103,29 +107,24 @@ function renderMessages() {
   }
   for (const message of session.messages) {
     if (message.role === "user") { messagesEl.append(renderUserMessage(message, inputEl)); continue; }
-    const wrapper = element("div", `message ${message.role}`);
-    wrapper.append(element("div", "message-label", message.role === "user" ? "你" : "主 Agent"));
-    wrapper.append(element("div", "bubble", message.content));
-    messagesEl.append(wrapper);
-  }
-  if (busy) {
-    const activity = createReplyView("主 Agent");
-    activity.update({ content: "", status: "thinking", label: "正在整理需求…" });
-    messagesEl.append(activity.row);
+    const view = createReplyView("NUEMA");
+    view.update({ ...message, status: message.status || "complete" });
+    messagesEl.append(view.row);
+    if (message === pendingReply) replyView = view;
   }
   const delivered = session.confirmed && agents.find((item) => item.id === activeAgentId);
   if (delivered) {
     const needsSave = delivered.dirty || !delivered.persisted;
     const card = element("div", "delivery-card");
     card.append(element("span", "agent-type", "独立对话入口"), element("strong", "", delivered.name),
-      element("p", "muted-note", "已加入左侧“我的智能体”。先预览对话方式，后续可以随时让主 Agent 协助迭代。"));
+      element("p", "muted-note", "已加入左侧“我的智能体”。先预览对话方式，后续可以随时让 NUEMA 协助迭代。"));
     card.append(button("primary", needsSave ? "保存需求并进入预览" : "进入对话预览", () => {
       if (needsSave && !saveAgent(delivered.id)) return;
       navigate({ page: "agent", agentId: delivered.id });
     }));
     messagesEl.append(card);
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  messagesEl.scrollTop = scrollToEnd ? messagesEl.scrollHeight : scrollTop;
 }
 
 function appendField(label, value, source = "", emptyLabel = "尚未明确") {
@@ -228,7 +227,7 @@ function renderAgents() {
     const actions = element("div", "agent-actions");
     actions.append(button("secondary", "进入对话", () => navigate({ page: "agent", agentId: agent.id }),
       `进入 ${agent.name} 的对话预览`));
-    actions.append(button("ghost-button", "让主 Agent 迭代", () => openAgent(agent.id), `让主 Agent 迭代 ${agent.name}`));
+    actions.append(button("ghost-button", "让 NUEMA 迭代", () => openAgent(agent.id), `让 NUEMA 迭代 ${agent.name}`));
     if (agent.dirty || !agent.persisted) {
       actions.append(button("secondary", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
         `保存 ${agent.name} 的需求`));
@@ -303,8 +302,8 @@ function removeAgent(id) {
   render();
 }
 
-function render() {
-  renderMessages();
+function render(scrollToEnd = true) {
+  renderMessages(scrollToEnd);
   renderDraft();
   renderJev();
   renderAgents();
@@ -312,8 +311,10 @@ function render() {
   document.getElementById("iteration-context").hidden = !editingAgent;
   document.getElementById("iteration-agent-name").textContent = editingAgent?.name ?? "";
   sendEl.disabled = busy;
+  sendEl.hidden = busy;
+  cancelEl.hidden = !busy;
+  cancelEl.disabled = activeController?.signal.aborted === true;
   inputEl.disabled = false;
-  sendEl.textContent = busy ? "整理中…" : "发送";
   resetEl.disabled = busy;
   modifyEl.disabled = busy || !session.draft;
   saveEl.disabled = !session.draft || busy;
@@ -343,6 +344,11 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   let httpStatus = null;
   let serverDiagnostic = null;
   const user = addUserMessage(session.messages, message);
+  const reply = { role: "assistant", content: "", status: "thinking", label: "正在整理需求…" };
+  const controller = new AbortController();
+  activeController = controller;
+  pendingReply = reply;
+  session.messages.push(reply);
   inputEl.value = "";
   inputEl.dispatchEvent(new Event("input"));
   busy = true;
@@ -351,13 +357,25 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   try {
     const response = await fetch("/api/requirements/turn", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", accept: "application/x-ndjson" },
       body: JSON.stringify({ message, draft: session.draft, lastQuestion: session.lastQuestion,
         userMessages }),
+      signal: controller.signal,
     });
     httpStatus = response.status;
     stage = "parse_response";
-    const payload = await response.json();
+    const payload = await readReply(response, (progress) => {
+      if (controller.signal.aborted) return;
+      const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+      if (progress.type === "text-start") { reply.content = ""; reply.status = "thinking"; reply.label = ""; }
+      if (progress.type === "text-delta" && typeof progress.delta === "string") {
+        reply.content += progress.delta; reply.status = "writing";
+      }
+      if (progress.type === "status") { reply.status = "thinking"; reply.label = progress.label || "正在整理需求…"; }
+      replyView?.update(reply);
+      if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+    }, { incompleteMessage: "连接中断，回复尚未完成。需求说明仍保留本轮开始前的内容。" });
+    controller.signal.throwIfAborted();
     serverDiagnostic = payload.diagnostic ?? null;
     if (!response.ok) throw new Error(payload.error || "需求整理失败，请重试");
     stage = "update_session";
@@ -367,12 +385,12 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     session.lastQuestion = payload.question || payload.confirmationQuestion || "";
     session.jev = payload.jev;
     user.delivery = "sent";
-    const assistantMessage = payload.confirmed
+    const assistantMessage = typeof payload.reply === "string" ? payload.reply : payload.confirmed
       ? `需求已确认：\n${payload.summary}\n\n独立对话入口已加入左侧“我的智能体”。当前可以预览交互，任务执行能力尚未接入。`
       : payload.status === "ready"
         ? `我整理出的需求是：\n${payload.summary}\n\n${payload.confirmationQuestion}`
         : `${payload.summary}\n\n${payload.question}`;
-    session.messages.push({ role: "assistant", content: assistantMessage });
+    Object.assign(reply, { content: assistantMessage, status: "complete" });
     diagnosticTurn.result = {
       outcome: "success", httpStatus, status: payload.status,
       question: payload.question, confirmationQuestion: payload.confirmationQuestion,
@@ -387,19 +405,31 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     }
     pendingLegacy = null;
   } catch (error) {
-    user.delivery = "failed";
-    if (!inputEl.value.trim()) { inputEl.value = message; inputEl.dispatchEvent(new Event("input")); }
+    const stopped = controller.signal.aborted || error.reason === "cancelled";
+    user.delivery = stopped ? "stopped" : "failed";
+    reply.status = stopped ? "stopped" : "error";
+    if (!stopped && !inputEl.value.trim()) { inputEl.value = message; inputEl.dispatchEvent(new Event("input")); }
     const errorMessage = error instanceof Error ? error.message : "请求失败，请重试";
-    showError(errorMessage);
-    diagnosticTurn.result = { outcome: "error", stage, httpStatus,
-      message: errorMessage, diagnostic: serverDiagnostic };
+    reply.error = stopped ? "本轮未完成，需求说明未更新。" : errorMessage;
+    if (!stopped) showError(errorMessage);
+    diagnosticTurn.result = { outcome: stopped ? "cancelled" : "error", stage, httpStatus,
+      message: stopped ? "已停止回复" : errorMessage, diagnostic: error.diagnostic ?? serverDiagnostic };
   } finally {
     diagnosticTurn.durationMs = Math.round(performance.now() - startedAt);
     diagnosticTurns = [...diagnosticTurns, diagnosticTurn].slice(-40);
     busy = false;
-    render();
+    pendingReply = replyView = activeController = null;
+    render(false);
     if (!document.getElementById("page-chat").hidden) inputEl.focus({ preventScroll: true });
   }
+});
+
+cancelEl.addEventListener("click", () => {
+  if (!busy || !activeController || activeController.signal.aborted) return;
+  pendingReply.status = "stopping";
+  replyView?.update(pendingReply);
+  cancelEl.disabled = true;
+  activeController.abort();
 });
 
 modifyEl.addEventListener("click", () => {

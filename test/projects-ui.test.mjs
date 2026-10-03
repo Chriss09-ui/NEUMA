@@ -10,7 +10,7 @@ const fixture = [
   { id: "two", name: "会议纪要", path: "/demo/meetings", kind: "node", description: "整理会议", status: "stopped" },
 ];
 
-async function setup({ turn, add } = {}) {
+async function setup({ turn, add, pick, inspect } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -48,13 +48,15 @@ async function setup({ turn, add } = {}) {
     renderUserMessage: (message) => message,
     createReplyView: () => ({ row: new Element(), update() {} }),
     addUserMessage: (messages, content) => { const message = { role: "user", content }; messages.push(message); return message; },
-    readReply: (response) => response.json(), STATUS_LABELS: { stopped: "未运行" }, updateProjectStatus() {},
+    readReply: (response, onProgress) => { onProgress?.({ type: "status", label: "正在阅读项目说明与启动入口…" }); return response.json(); }, STATUS_LABELS: { stopped: "未运行" }, updateProjectStatus() {},
     renderProjectDetails: (options) => renders.push(options),
     renderProjectList: (options) => { list = options; get("projects-list").versions = (get("projects-list").versions ?? 0) + 1; },
     fetch: async (path, options = {}) => {
-      const body = options.body ? JSON.parse(options.body) : undefined; requests.push({ path, body });
+      const body = options.body ? JSON.parse(options.body) : undefined; requests.push({ path, body, signal: options.signal });
       const result = path === "/api/projects/turn" ? await (turn?.(body) ?? { reply: "收到", projects: fixture, actions: [] })
-        : path === "/api/projects" && body ? await (add?.(body) ?? { project: fixture[1] }) : { projects: fixture };
+        : path === "/api/projects/pick-folder" ? await (pick?.(options.signal) ?? { cancelled: true })
+          : path.endsWith("/inspect") ? await inspect(body)
+            : path === "/api/projects" && body ? await (add?.(body) ?? { project: fixture[1] }) : { projects: fixture };
       return { ok: true, json: async () => result };
     },
   });
@@ -78,6 +80,31 @@ test("从项目详情问助手携带明确项目路径，保留草稿且可取�
   assert.equal(ui.navigations.at(-1).projectView, "list");
   await ui.click("project-context-clear");
   assert.equal(ui.get("project-context").hidden, true);
+});
+
+test("只填路径即可添加并配置，检查中阻止重复提交，完成显示可直接启动", async () => {
+  let release;
+  const ui = await setup({ add: () => new Promise((done) => { release = done; }) });
+  ui.get("project-path").value = "/demo/meetings"; ui.route("add");
+  const pending = ui.submit("project-add-form");
+  assert.equal(ui.get("project-add-submit").textContent, "正在识别…");
+  assert.equal(ui.get("project-add-form").attributes.get("aria-busy"), "true");
+  await ui.submit("project-add-form");
+  assert.equal(ui.requests.filter((request) => request.path === "/api/projects" && request.body).length, 1);
+  assert.deepEqual(ui.requests.find((request) => request.path === "/api/projects" && request.body).body, { path: "/demo/meetings" });
+  release({ project: { ...fixture[1], canLaunch: true, setup: { status: "ready" } } }); await pending;
+  assert.match(ui.get("project-feedback").textContent, /启动方式已配好/);
+  assert.equal(ui.get("project-add-submit").textContent, "添加并自动配置");
+});
+
+test("无法确定入口时显示具体缺口，已有项目可直接触发 PI 重新识别", async () => {
+  const ui = await setup({ add: async () => ({ project: { ...fixture[1], canLaunch: false, setup: { status: "needs_input", summary: "有两个应用，你想打开哪一个？" } } }),
+    inspect: async () => ({ project: { ...fixture[0], canLaunch: true, setup: { status: "ready", summary: "已找到网页入口。" } } }) });
+  ui.get("project-path").value = "/demo/meetings"; ui.route("add"); await ui.submit("project-add-form");
+  assert.equal(ui.get("project-feedback").textContent, "有两个应用，你想打开哪一个？");
+  ui.select("one"); await ui.renders.at(-1).onAction("inspect");
+  assert.ok(ui.requests.some((request) => request.path === "/api/projects/one/inspect"));
+  assert.equal(ui.get("project-feedback").textContent, "启动方式已配好，可以直接打开。");
 });
 
 test("轮询没有变化时不重建列表；切回详情保留未提交的启动配置", async () => {
@@ -106,16 +133,86 @@ test("助手回复期间可以查看项目，结束不跳回对话，也不清�
 });
 
 test("添加完成选中新项目；提交后离开弹窗时不强行跳转", async () => {
-  const ui = await setup(); ui.route("add");
+  const ui = await setup();
   ui.get("project-path").value = "/demo/meetings";
+  ui.route("add");
   await ui.submit("project-add-form");
   assert.equal(ui.navigations.at(-1).projectView, "list");
   assert.equal(ui.renders.at(-1).project.id, "two");
   let resolve;
   const dismissed = await setup({ add: () => new Promise((done) => { resolve = done; }) });
-  dismissed.route("add"); dismissed.get("project-path").value = "/demo/meetings";
+  dismissed.get("project-path").value = "/demo/meetings"; dismissed.route("add");
   const pending = dismissed.submit("project-add-form");
   dismissed.route("assistant");
   resolve({ project: fixture[1] }); await pending;
   assert.equal(dismissed.navigations.length, 0);
+});
+
+test("添加入口自动选择文件夹，填入路径和名称后才由用户确认登记", async () => {
+  let resolve;
+  const ui = await setup({ pick: () => new Promise((done) => { resolve = done; }) });
+  ui.route("add");
+  assert.equal(ui.get("project-choose-folder").disabled, true);
+  assert.equal(ui.get("project-add-submit").disabled, true);
+  await ui.click("project-choose-folder");
+  await ui.submit("project-add-form");
+  assert.equal(ui.requests.filter((r) => r.path === "/api/projects/pick-folder").length, 1);
+  assert.equal(ui.requests.some((r) => r.path === "/api/projects" && r.body), false);
+  resolve({ cancelled: false, path: "/demo/meetings", name: "会议纪要" }); await settle();
+  assert.equal(ui.get("project-path").value, "/demo/meetings");
+  assert.equal(ui.get("project-name").value, "会议纪要");
+  assert.equal(ui.get("project-add-submit").disabled, false);
+  assert.equal(ui.get("project-choose-folder").textContent, "重新选择");
+  assert.equal(ui.document.activeElement, ui.get("project-add-submit"));
+  await ui.submit("project-add-form");
+  assert.deepEqual(ui.requests.find((r) => r.path === "/api/projects" && r.body).body,
+    { path: "/demo/meetings", name: "会议纪要" });
+});
+
+test("取消选取不清空已填写的名称与用途，手动路径仍能添加", async () => {
+  const ui = await setup();
+  ui.get("project-name").value = "我的工具"; ui.get("project-description").value = "保留说明";
+  ui.route("add"); await settle();
+  assert.equal(ui.get("add-error").hidden, true);
+  assert.match(ui.get("project-folder-status").textContent, /已取消/);
+  assert.equal(ui.document.activeElement, ui.get("project-choose-folder"));
+  ui.get("project-path").value = "/demo/meetings";
+  await ui.submit("project-add-form");
+  assert.deepEqual(ui.requests.find((r) => r.path === "/api/projects" && r.body).body,
+    { path: "/demo/meetings", name: "我的工具", description: "保留说明" });
+});
+
+test("关闭添加窗口会取消选择请求，迟到结果不能覆盖重开的表单", async () => {
+  let resolve;
+  const ui = await setup({ pick: () => new Promise((done) => { resolve = done; }) });
+  ui.route("add");
+  const request = ui.requests.find((r) => r.path === "/api/projects/pick-folder");
+  ui.route("assistant");
+  assert.equal(request.signal.aborted, true);
+  ui.get("project-path").value = "/manual/new"; ui.get("project-name").value = "新草稿";
+  ui.route("add");
+  resolve({ path: "/old/result", name: "旧结果" }); await settle();
+  assert.equal(ui.get("project-path").value, "/manual/new");
+  assert.equal(ui.get("project-name").value, "新草稿");
+  assert.equal(ui.requests.filter((r) => r.path === "/api/projects/pick-folder").length, 1);
+});
+
+test("选择失败可以重试，重新选取只更新自动名称，不覆盖用户命名", async () => {
+  let count = 0;
+  const ui = await setup({ pick: async () => {
+    count++;
+    if (count === 1) throw new Error("无法打开选择器");
+    return { path: `/demo/folder${count}`, name: `folder${count}` };
+  } });
+  ui.route("add"); await settle();
+  assert.equal(ui.get("add-error").hidden, false);
+  assert.equal(ui.get("project-path").disabled, false);
+  await ui.click("project-choose-folder");
+  assert.equal(ui.get("project-name").value, "folder2");
+  await ui.click("project-choose-folder");
+  assert.equal(ui.get("project-name").value, "folder3");
+  ui.get("project-name").value = "自定义名称";
+  await ui.click("project-choose-folder");
+  assert.equal(ui.get("project-path").value, "/demo/folder4");
+  assert.equal(ui.get("project-name").value, "自定义名称");
 });
