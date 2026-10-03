@@ -26,7 +26,9 @@ export function recoverInput(input, content) {
 
 export function renderUserMessage(message, input) {
   const row = node("div", "message user");
-  row.append(node("div", "message-label", "你"), node("div", "bubble", message.content));
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", "发送的消息");
+  row.append(node("div", "bubble", message.content));
   if (["failed", "stopped"].includes(message.delivery)) {
     const footer = node("div", "message-recovery");
     const edit = node("button", "link-button", "重新编辑"); edit.type = "button";
@@ -39,13 +41,15 @@ export function renderUserMessage(message, input) {
 
 export function createReplyView(label) {
   const row = node("div", "message assistant");
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `${label}的回复`);
   const bubble = node("div", "bubble");
   const activity = node("div", "reply-activity"); activity.setAttribute("role", "status");
   const indicator = node("span", "thinking-indicator"); indicator.setAttribute("aria-hidden", "true");
   const caption = node("span", "thinking-label");
   const error = node("p", "reply-error");
   activity.append(indicator, caption);
-  row.append(node("div", "message-label", label), bubble, activity, error);
+  row.append(bubble, activity, error);
   return {
     row,
     update(message) {
@@ -69,10 +73,14 @@ export function createReplyView(label) {
 function replyError(payload) {
   const error = new Error(payload.error || "回复中断，请检查连接后重试。");
   error.reason = payload.diagnostic?.reason;
+  error.diagnostic = payload.diagnostic ?? null;
   return error;
 }
 
-export async function readReply(response, onProgress) {
+export async function readReply(response, onProgress, {
+  incompleteMessage = "连接中断，回复尚未完成。已执行的项目操作可能保留，请先查看项目状态。",
+  isComplete = (result) => typeof result?.reply === "string",
+} = {}) {
   if (!response.headers.get("content-type")?.includes("application/x-ndjson")) {
     const result = await response.json();
     if (!response.ok) throw replyError(result);
@@ -101,7 +109,7 @@ export async function readReply(response, onProgress) {
       if (done) break;
     }
     processLine(buffer);
-    if (!result || typeof result.reply !== "string") throw new Error("连接中断，回复尚未完成。已执行的项目操作可能保留，请先查看项目状态。");
+    if (!isComplete(result)) throw new Error(incompleteMessage);
     return result;
   } finally {
     await reader.cancel().catch(() => {});

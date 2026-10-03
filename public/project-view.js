@@ -49,7 +49,7 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
     const empty = node("div", "detail-empty");
     const link = node("a", "primary", "添加项目"); link.href = "#projects/add";
     empty.append(node("span", "empty-symbol", "＋"), node("h3", "", "给常用工具一个固定位置"),
-      node("p", "", "选择左侧项目，查看详情与预览；\n也可以添加一个新的本地项目。"), link);
+      node("p", "", "选择左侧项目，查看详情或直接打开；\n也可以添加一个新的本地项目。"), link);
     container.append(empty);
     return;
   }
@@ -58,9 +58,9 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
   if (project.description) meta.append(node("p", "", project.description));
 
   const form = node("form", "project-config");
-  const launch = node("details", "project-launch"); launch.open = !project.allowLaunch;
+  const launch = node("details", "project-launch");
   const summary = node("summary");
-  summary.append(node("span", "", "启动方式"), node("small", "", project.allowLaunch ? "已核对 · 点击修改" : "首次使用，请先核对"));
+  summary.append(node("span", "", "高级配置"), node("small", "", "需要时再手动调整"));
   launch.append(summary, form);
   const fields = {};
   const field = (key, label, value, multiline = false, placeholder = "") => {
@@ -77,7 +77,7 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
   } else form.append(node("p", "project-action-note", "这是静态网页，会通过独立的本机预览地址打开。"));
   const permission = node("label", "launch-permission"), check = node("input");
   check.type = "checkbox"; check.checked = project.allowLaunch;
-  permission.append(check, node("span", "", "允许 NEUMA 按此方式启动这个项目。启动会运行项目自己的代码。"));
+  permission.append(check, node("span", "", "允许 NUEMA 按此方式启动这个项目。启动会运行项目自己的代码。"));
   form.append(permission);
   const save = node("button", "secondary", "保存启动方式"); save.type = "submit"; form.append(save);
   form.addEventListener("submit", (event) => {
@@ -91,35 +91,35 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
   fields.args?.addEventListener("input", () => fields.args.setCustomValidity(""));
 
   const actions = node("div", "project-actions");
-  for (const [action, label, className] of [["start", "启动并查看", "primary"], ["stop", "停止", "secondary"], ["remove", "移除记录", "ghost-button"]]) {
+  for (const [action, label, className] of [["start", "打开项目", "primary"],
+    ["inspect", project.setup?.status === "paused" ? "继续检查" : project.canLaunch ? "重新识别" : "自动识别启动方式", "secondary"], ["stop", "停止", "secondary"], ["remove", "移除记录", "ghost-button"]]) {
     const button = node("button", className, label);
     button.type = "button"; button.dataset.projectAction = action;
     button.addEventListener("click", () => { void onAction(action); }); actions.append(button);
   }
+  const setup = node("div", "project-setup"); setup.setAttribute("role", "status");
+  setup.append(node("span", "project-setup-mark", project.setup?.status === "checking" ? "◌" : project.canLaunch ? "✓" : "·"));
+  const setupText = node("div");
+  setupText.append(node("strong", "", project.setup?.status === "checking" ? "正在识别项目" : project.setup?.status === "paused" ? "检查已暂停" : project.canLaunch ? "启动方式已配好" : "让 PI 帮你配置"),
+    node("p", "", project.setup?.summary || "自动检查项目说明和入口，识别后即可一键打开，无需填写启动参数。"));
+  setup.append(setupText);
   const note = node("p", "project-action-note"); note.id = "project-runtime-note";
-  const link = node("a", "project-preview-link", "在新窗口打开页面 ↗"); link.id = "project-preview-link";
-  link.target = "_blank"; link.rel = "noopener noreferrer"; link.hidden = true;
-  const preview = node("iframe", "project-preview"); preview.id = "project-preview";
-  preview.title = `${project.name} 的页面预览`; preview.setAttribute("sandbox", "allow-scripts allow-forms allow-downloads"); preview.hidden = true;
-  container.append(meta, actions, note, launch, link, preview);
+  container.append(meta, setup, actions, note, launch);
 }
 
 export function updateProjectStatus(container, project, busy) {
   if (!project) return;
   for (const el of container.querySelectorAll("input, textarea, button")) {
     const action = el.dataset.projectAction;
-    el.disabled = busy || (action === "start" ? !project.canLaunch || project.canStop
+    el.disabled = busy || project.setup?.status === "checking" || (action === "start" ? !project.canLaunch || project.openingPage || project.status === "starting"
+      : action === "inspect" ? project.canStop
       : action === "stop" ? !project.canStop : !action && project.canStop);
+    if (action === "start") el.textContent = project.openingPage || project.status === "starting" ? "正在打开…" : "打开项目";
   }
   const note = container.querySelector("#project-runtime-note");
-  note.textContent = project.error || (project.status === "running" && !project.url
-    ? "进程正在运行，页面入口尚未验证。脚本工具可能没有网页。"
-    : project.canStop ? "运行中无法修改启动方式，停止后可编辑。"
-      : !project.canLaunch ? "核对并勾选允许启动后保存，就可以启动或让项目助手打开它。" : "移除记录只删除登记，原项目文件会保留。");
-  const link = container.querySelector("#project-preview-link"), preview = container.querySelector("#project-preview");
-  link.hidden = preview.hidden = !project.url;
-  if (project.url) {
-    link.href = project.url;
-    if (preview.getAttribute("src") !== project.url) preview.src = project.url;
-  } else preview.removeAttribute("src");
+  note.textContent = project.error || project.openError || (project.openingPage || project.status === "starting"
+    ? "正在准备项目，完成后会自动打开窗口。"
+    : project.canStop ? project.pageOpened ? "项目已打开，保持运行即可使用。" : "项目正在运行。"
+      : project.status === "external" ? "项目已在独立窗口打开。"
+        : !project.canLaunch ? "识别遇到问题时，可以点“问问助手”继续说明，或重新识别。" : "点击后会自动启动并打开项目。原项目文件会保留。");
 }

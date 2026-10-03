@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { InputError, ProviderError, processTurn } from "./core.mjs";
 import { getProviderConfig, makeProviders } from "./providers.mjs";
 import { ProjectManager } from "./projects.mjs";
-import { PiProjectAgent } from "./pi-runtime.mjs";
+import { createProjectFolderPicker } from "./project-folder-picker.mjs";
+import { PiProjectAgent, createProjectAnalyzer } from "./pi-runtime.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,87 @@ async function streamProjectReply(response, agent, body, config) {
   }
 }
 
+async function streamProjectSetup(response, action, config) {
+  const controller = new AbortController();
+  const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+  response.on("close", disconnected);
+  response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
+  response.flushHeaders?.();
+  const write = (event) => {
+    if (!controller.signal.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+  };
+  try {
+    if (response.destroyed) return;
+    write({ type: "status", label: "正在添加并检查项目…" });
+    const project = await action({ signal: controller.signal, onProgress: write });
+    write({ type: "done", result: { project } });
+  } catch (error) { write({ type: "error", ...safeFailure(error, config).payload }); }
+  finally { response.removeListener("close", disconnected); response.end(); }
+}
+
+function requirementReply(result) {
+  if (result.confirmed) return `需求已确认：\n${result.summary}\n\n独立对话入口已加入左侧“我的智能体”。当前可以预览交互，任务执行能力尚未接入。`;
+  if (result.status === "ready") return `我整理出的需求是：\n${result.summary}\n\n${result.confirmationQuestion}`;
+  return `${result.summary}\n\n${result.question}`;
+}
+
+async function streamRequirementReply(response, providers, body, config) {
+  const controller = new AbortController();
+  const { signal } = controller;
+  const disconnected = () => {
+    if (!response.writableEnded) controller.abort();
+  };
+  response.on("close", disconnected);
+  response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+  response.flushHeaders?.();
+  const write = (event) => {
+    if (!response.destroyed && !response.writableEnded && !signal.aborted) response.write(`${JSON.stringify(event)}\n`);
+  };
+  let reply = "";
+  const append = (delta) => {
+    signal.throwIfAborted();
+    if (typeof delta !== "string" || !delta) return;
+    if (!reply && !delta.trim()) return;
+    if (!reply) write({ type: "text-start" });
+    reply += delta;
+    write({ type: "text-delta", delta });
+  };
+  try {
+    if (response.destroyed) return;
+    write({ type: "status", phase: "thinking", label: "正在整理需求…" });
+    const result = await processTurn(body, providers, { signal, onProgress: write });
+    signal.throwIfAborted();
+    let replyDiagnostic = { mode: "direct" };
+    // Confirmation text stays exact; ordinary replies may rephrase only the checked summary.
+    if (result.status === "needs_input" && result.diagnostic.model.used !== false
+        && typeof providers.streamReply === "function") {
+      write({ type: "status", phase: "writing", label: "正在组织回复…" });
+      try {
+        await providers.streamReply({ summary: result.summary, signal, onDelta: append });
+        signal.throwIfAborted();
+        if (!reply.trim()) throw new ProviderError("模型未返回回复文字", { stage: "llm", reason: "missing_content" });
+        append(`\n\n${result.question}`);
+        replyDiagnostic = { mode: "stream" };
+      } catch (error) {
+        signal.throwIfAborted();
+        // Before any visible text, the validated response is a safe fallback. Never replay a partial reply.
+        if (reply) throw error;
+        append(requirementReply(result));
+        replyDiagnostic = { mode: "fallback", failure: safeFailure(error, config).payload.diagnostic };
+      }
+    } else {
+      append(requirementReply(result));
+    }
+    write({ type: "done", result: { ...result, reply,
+      diagnostic: { ...result.diagnostic, reply: replyDiagnostic, providerModel: config.model || null } } });
+  } catch (error) {
+    if (!signal.aborted) write({ type: "error", ...safeFailure(error, config).payload });
+  } finally {
+    response.removeListener("close", disconnected);
+    response.end();
+  }
+}
+
 async function readJson(request) {
   if (!request.headers["content-type"]?.startsWith("application/json")) {
     throw new InputError("请求必须使用 JSON 格式");
@@ -79,7 +161,9 @@ async function readJson(request) {
 
 export function createRequestHandler({ config = getProviderConfig(), providers: injectedProviders,
   dataDir = resolve(ROOT, ".neuma"), envPath = resolve(ROOT, ".env"),
-  projects = new ProjectManager({ dataDir, blockedPort: Number(process.env.PORT || 3000) }),
+  pickProjectFolder = createProjectFolderPicker(),
+  projects = new ProjectManager({ dataDir, blockedPort: Number(process.env.PORT || 3000),
+    analyzeProject: createProjectAnalyzer({ config, dataDir }) }),
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }) } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
   const handler = async (request, response) => {
@@ -90,7 +174,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         const origin = request.headers.origin;
         const validHost = !host || ["localhost", "127.0.0.1", "[::1]"].includes(new URL(`http://${host}`).hostname);
         if (!validHost || (origin && origin !== `http://${host}`) || request.headers["sec-fetch-site"] === "cross-site") {
-          return sendJson(response, 403, { error: "项目操作仅允许从本机 NEUMA 页面发起" });
+          return sendJson(response, 403, { error: "项目操作仅允许从本机 NUEMA 页面发起" });
         }
       }
       if (request.method === "GET" && path === "/api/health") {
@@ -119,6 +203,22 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (request.method === "GET" && path === "/api/projects") {
         return sendJson(response, 200, { projects: await projects.list() });
       }
+      if (request.method === "POST" && path === "/api/projects/pick-folder") {
+        await readJson(request);
+        const controller = new AbortController();
+        const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+        response.on("close", disconnected);
+        try {
+          if (response.destroyed) return;
+          const result = await pickProjectFolder({ signal: controller.signal });
+          if (!controller.signal.aborted) sendJson(response, 200, result);
+        } catch (error) {
+          if (!controller.signal.aborted) throw error;
+        } finally {
+          response.removeListener("close", disconnected);
+        }
+        return;
+      }
       if (request.method === "POST" && path === "/api/projects/turn") {
         const body = await readJson(request);
         if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, projectAgent, body, config);
@@ -130,17 +230,20 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       if (request.method === "POST" && path === "/api/projects") {
         const body = await readJson(request);
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.add(body, options), config);
         return sendJson(response, 200, { project: await projects.add(body) });
       }
-      const operation = path.match(/^\/api\/projects\/([\w-]+)\/(configure|start|stop|remove)$/);
+      const operation = path.match(/^\/api\/projects\/([\w-]+)\/(configure|inspect|start|stop|remove)$/);
       if (request.method === "POST" && operation) {
         const body = await readJson(request), [, id, action] = operation;
         if (action === "remove" && body.confirm !== true) throw new InputError("请确认移除项目记录");
+        if (action === "inspect" && request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.inspect(id, options), config);
         const project = action === "configure" ? await projects.configure(id, body) : await projects[action](id);
         return sendJson(response, 200, { project });
       }
       if (request.method === "POST" && path === "/api/requirements/turn") {
         const body = await readJson(request);
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamRequirementReply(response, providers, body, config);
         const result = await processTurn(body, providers);
         return sendJson(response, 200, { ...result,
           diagnostic: { ...result.diagnostic, providerModel: config.model || null } });
@@ -175,7 +278,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const config = getProviderConfig();
   const server = createApp({ config });
   server.listen(port, "127.0.0.1", () => {
-    process.stdout.write(`NEUMA 需求层测试版：http://127.0.0.1:${port}\n`);
+    process.stdout.write(`NUEMA 需求层测试版：http://127.0.0.1:${port}\n`);
     process.stdout.write(`兼容模型：${config.llmConfigured ? "已配置" : "未配置"}；Jev：${config.jevConfigured ? "已配置" : "未配置"}\n`);
   });
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {

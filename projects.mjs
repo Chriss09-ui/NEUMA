@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { InputError } from "./core.mjs";
 
@@ -29,6 +29,19 @@ export function localUrl(value) {
   } catch { throw new InputError("预览地址必须是本机的 http 地址"); }
 }
 
+export function openProjectPage(value, { platform = process.platform, run = execFile } = {}) {
+  const url = localUrl(value);
+  if (!url) throw new InputError("项目页面尚未就绪");
+  const commands = { darwin: ["/usr/bin/open", [url]], linux: ["xdg-open", [url]],
+    win32: ["rundll32.exe", ["url.dll,FileProtocolHandler", url]] };
+  const command = commands[platform];
+  if (!command) throw new InputError("当前系统暂不支持自动打开项目窗口");
+  const env = Object.fromEntries(["PATH", "HOME", "USER", "LANG", "SYSTEMROOT", "USERPROFILE", "APPDATA", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+    .filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
+  return new Promise((done, reject) => run(command[0], command[1], { timeout: 10_000, maxBuffer: 16_384, env, windowsHide: true },
+    (error) => error ? reject(new InputError("项目正在运行，但窗口未能打开。请再次点击“打开项目”。")) : done()));
+}
+
 async function canonicalPath(value) {
   if (typeof value !== "string" || !value.trim() || value.includes("\0")) throw new InputError("请提供项目的完整本地路径");
   const expanded = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value.trim();
@@ -42,14 +55,14 @@ async function inspectProject(value) {
   const info = await stat(path);
   const root = info.isDirectory() ? path : dirname(path);
   const files = info.isDirectory() ? (await readdir(root)).filter((name) => !name.startsWith(".")
-    && !["node_modules", "venv", "__pycache__"].includes(name)).slice(0, 100) : [basename(path)];
+    && !["node_modules", "venv", "__pycache__"].includes(name)) : [basename(path)];
   let kind = "other", launch = null, entry = null, scripts = [];
   if (path.endsWith(".app") && process.platform === "darwin") {
     kind = "desktop"; launch = { command: "open", args: [path], url: null };
   } else if (info.isDirectory() && files.includes("package.json")) {
     try {
       const manifestPath = await realpath(join(root, "package.json"));
-      if (!inside(root, manifestPath) || (await stat(manifestPath)).size > 128_000) throw new Error();
+      if (!inside(root, manifestPath)) throw new Error();
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       scripts = Object.keys(manifest.scripts ?? {}).filter((name) => /^[\w:-]+$/.test(name));
       const script = ["dev", "start", "serve"].find((name) => scripts.includes(name));
@@ -87,13 +100,16 @@ async function staticPreview(project) {
 }
 
 export class ProjectManager {
-  constructor({ dataDir, spawnImpl = spawn, blockedPort = 3000 } = {}) {
+  constructor({ dataDir, spawnImpl = spawn, blockedPort = 3000, analyzeProject, openBrowser = openProjectPage } = {}) {
     this.dataDir = dataDir;
     this.spawnImpl = spawnImpl;
     this.blockedPort = blockedPort;
     this.records = null;
     this.runs = new Map();
     this.queue = Promise.resolve();
+    this.analyzeProject = analyzeProject;
+    this.inspections = new Map();
+    this.openBrowser = openBrowser;
   }
 
   async load() {
@@ -129,8 +145,11 @@ export class ProjectManager {
 
   view(project) {
     const run = this.runs.get(project.id);
+    const inspecting = this.inspections.has(project.id);
     return { ...project, status: run?.status ?? "stopped", url: run?.url ?? null,
-      error: run?.error ?? null, canLaunch: project.allowLaunch === true && (project.kind === "web" || Boolean(project.launch)),
+      setup: inspecting ? { status: "checking", summary: "PI 正在检查项目文件并识别启动方式…" } : project.setup,
+      pageOpened: Boolean(run?.pageOpened), openingPage: Boolean(run?.openingPage || run?.checkingPage), openError: run?.openError ?? null,
+      error: run?.error ?? null, canLaunch: !inspecting && project.allowLaunch === true && (project.kind === "web" || Boolean(project.launch)),
       canStop: ["starting", "running"].includes(run?.status) };
   }
 
@@ -143,9 +162,10 @@ export class ProjectManager {
     return project;
   }
 
-  async add({ path, name, description = "" }) {
+  async add({ path, name, description = "" }, options = {}) {
+    options.signal?.throwIfAborted();
     const detected = await inspectProject(path);
-    return this.change(() => {
+    const project = await this.change(() => {
       const existing = this.records.find((item) => item.path === detected.path);
       if (existing) return this.view(existing);
       if (this.records.length >= 500) throw new InputError("当前测试版最多登记 500 个项目");
@@ -154,10 +174,46 @@ export class ProjectManager {
       this.records.push(project);
       return this.view(project);
     });
+    if (!this.analyzeProject || project.allowLaunch) return project;
+    return this.inspect(project.id, options);
+  }
+
+  async inspect(id, { signal, instructions, onProgress = () => {} } = {}) {
+    signal?.throwIfAborted();
+    await this.queue;
+    const project = await this.get(id);
+    if (this.view(project).canStop) throw new InputError("请先停止项目，再重新识别启动方式");
+    if (this.inspections.has(id)) return this.inspections.get(id).pending;
+    const controller = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const item = { controller };
+    this.inspections.set(id, item);
+    item.pending = (async () => {
+      let result;
+      try {
+        if (!this.analyzeProject) throw new InputError("自动识别暂不可用，请检查模型设置后重试。");
+        const detected = await inspectProject(project.path);
+        result = await this.analyzeProject({ ...project, ...detected, name: project.name }, { signal: combined, instructions, onProgress });
+        combined.throwIfAborted();
+      } catch (error) {
+        result = { setup: { status: "failed", summary: combined.aborted ? "项目检查已停止，可以随时重新识别。"
+          : error instanceof InputError ? error.message : "项目检查暂时失败，请重试。" } };
+      }
+      await this.change(async () => {
+        const current = await this.get(id);
+        if (result.setup?.status === "ready") {
+          Object.assign(current, result, { allowLaunch: true });
+        } else {
+          current.setup = result.setup; current.allowLaunch = false;
+        }
+      });
+    })().finally(() => this.inspections.delete(id)).then(async () => this.view(await this.get(id)));
+    return item.pending;
   }
 
   async configure(id, { command, args, url, allowLaunch }) {
     if (typeof allowLaunch !== "boolean") throw new InputError("请明确是否启用这个启动方式");
+    if (this.inspections.has(id)) throw new InputError("正在识别项目，请完成后再修改启动方式");
     return this.change(async () => {
       const project = await this.get(id);
       if (this.view(project).canStop) throw new InputError("请先停止项目，再修改启动方式");
@@ -177,6 +233,8 @@ export class ProjectManager {
         project.launch = { command, args, url: localUrl(url) };
       }
       project.allowLaunch = allowLaunch;
+      project.setup = { status: allowLaunch ? "ready" : "needs_input", source: "manual", summary: allowLaunch ? "已保存自定义启动方式。" : "启动方式已停用。" };
+      this.analyzeProject?.forget?.(project.path);
       return this.view(project);
     });
   }
@@ -184,8 +242,13 @@ export class ProjectManager {
   async start(id) {
     await this.queue;
     const project = await this.get(id);
-    if (!this.view(project).canLaunch) throw new InputError("请先在项目详情中核对并启用启动方式");
-    if (this.view(project).canStop) return this.view(project);
+    if (!this.view(project).canLaunch) throw new InputError("启动方式尚未就绪，请先自动识别启动方式");
+    if (this.view(project).canStop) {
+      const existing = this.runs.get(id);
+      if (existing.url) await this.openPage(existing);
+      else if (existing.getPageUrl && !existing.checkingPage) void this.verifyUrl(existing, existing.getPageUrl);
+      return this.view(project);
+    }
     // Reserve before awaiting so overlapping UI and Agent calls cannot start duplicate processes.
     const run = { status: "starting", url: null, child: null, server: null };
     this.runs.set(id, run);
@@ -195,7 +258,7 @@ export class ProjectManager {
       if (project.kind === "web") {
         const preview = await staticPreview(project);
         if (run.status === "stopped") await new Promise((done) => preview.server.close(done));
-        else Object.assign(run, preview);
+        else { Object.assign(run, preview); await this.openPage(run); }
       } else {
         const childEnv = Object.fromEntries(["PATH", "HOME", "USER", "LANG", "TMPDIR", "SYSTEMROOT", "USERPROFILE", "APPDATA"]
           .filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
@@ -220,7 +283,10 @@ export class ProjectManager {
         child.stderr?.resume();
         await sleep(200);
         if (run.status === "starting") run.status = "running";
-        if (project.kind !== "desktop") void this.verifyUrl(run, () => candidate);
+        if (project.kind !== "desktop") {
+          run.getPageUrl = () => candidate;
+          void this.verifyUrl(run, run.getPageUrl);
+        }
       }
     } catch (error) {
       run.status = "failed"; run.error = error instanceof InputError ? error.message : "项目无法启动，请检查路径和运行环境";
@@ -230,23 +296,41 @@ export class ProjectManager {
   }
 
   async verifyUrl(run, candidate) {
+    if (run.checkingPage) return;
+    run.checkingPage = true; run.openError = null;
+    try {
     for (let attempt = 0; attempt < 30 && ["starting", "running"].includes(run.status); attempt++) {
       try {
         const url = candidate();
         if (url && Number(new URL(url).port || 80) !== this.blockedPort) {
           const response = await fetch(url, { signal: AbortSignal.timeout(500), redirect: "error" });
           await response.body?.cancel();
-          if (response.ok) { if (run.status === "running") run.url = url; return; }
+          if (response.ok && run.status === "running") {
+            run.url = url; await this.openPage(run); return;
+          }
         }
       } catch { /* An alive process can take time to expose its page. */ }
       await sleep(300);
     }
+    if (run.status === "running") run.openError = "项目正在运行，暂时没有发现可打开的网页。可以再试一次；脚本工具可能没有窗口。";
+    } finally { run.checkingPage = false; }
+  }
+
+  async openPage(run) {
+    if (run.openingPage) return run.openingPage;
+    if (run.status !== "running" || !run.url) return;
+    run.openError = null;
+    run.openingPage = Promise.resolve().then(() => { if (run.status === "running") return this.openBrowser(run.url); })
+      .then(() => { if (run.status === "running") run.pageOpened = true; })
+      .catch(() => { if (run.status === "running") run.openError = "项目正在运行，但窗口未能打开。请再次点击“打开项目”。"; })
+      .finally(() => { run.openingPage = null; });
+    return run.openingPage;
   }
 
   async stop(id) {
     const project = await this.get(id), run = this.runs.get(id);
     if (!run || !this.view(project).canStop) return this.view(project);
-    run.status = "stopped"; run.url = null;
+    run.status = "stopped"; run.url = null; run.pageOpened = false; run.openError = null;
     if (run.server) await new Promise((done) => run.server.close(done));
     if (run.child?.pid) {
       const kill = (signal) => {
@@ -261,9 +345,17 @@ export class ProjectManager {
   }
 
   async remove(id) {
+    const inspection = this.inspections.get(id);
+    if (inspection) { inspection.controller.abort(); await inspection.pending; }
+    this.analyzeProject?.forget?.((await this.get(id)).path);
     await this.stop(id);
     return this.change(() => { this.records = this.records.filter((item) => item.id !== id); return { removed: true }; });
   }
 
-  async dispose() { await Promise.allSettled([...this.runs.keys()].map((id) => this.stop(id))); }
+  async dispose() {
+    for (const item of this.inspections.values()) item.controller.abort();
+    await Promise.allSettled([...this.inspections.values()].map((item) => item.pending));
+    this.analyzeProject?.dispose?.();
+    await Promise.allSettled([...this.runs.keys()].map((id) => this.stop(id)));
+  }
 }

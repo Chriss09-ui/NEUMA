@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>NEUMA · 需求层测试版</title>
+    <title>NUEMA · 需求层测试版</title>
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
@@ -11,16 +11,16 @@
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">N</span>
-          <span class="brand-text"><strong>NEUMA</strong><small>需求层测试版</small></span>
+          <span class="brand-text"><strong>NUEMA</strong><small>需求层测试版</small></span>
           <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="收起主导航" title="收起主导航" aria-expanded="true" aria-controls="sidebar-details">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="sidebar-toggle-arrow" d="m16 9-3 3 3 3"/></svg>
           </button>
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <a class="nav-item" href="#chat" data-page="chat" aria-label="主 Agent" title="主 Agent">
+          <a class="nav-item" href="#chat" data-page="chat" aria-label="NUEMA" title="NUEMA">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z"/></svg>
-            <span>主 Agent</span>
+            <span>NUEMA</span>
           </a>
           <a class="nav-item" href="#projects/assistant" data-page="projects" aria-label="管理项目" title="管理项目">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
@@ -38,11 +38,11 @@
             <h2 id="sidebar-agents-title">我的智能体</h2>
             <div class="sidebar-section-actions">
               <a class="sidebar-manage" href="#agents" data-page="agents" aria-label="管理我的智能体">管理</a>
-              <button id="sidebar-create-agent" class="ghost-button" type="button" aria-label="通过主 Agent 创建智能体">＋</button>
+              <button id="sidebar-create-agent" class="ghost-button" type="button" aria-label="通过 NUEMA 创建智能体">＋</button>
             </div>
           </div>
           <nav id="sidebar-agent-list" class="sidebar-agent-list" aria-label="我的智能体"></nav>
-          <p id="sidebar-agents-empty" class="sidebar-empty">向主 Agent 描述需求，确认后会出现在这里。</p>
+          <p id="sidebar-agents-empty" class="sidebar-empty">向 NUEMA 描述需求，确认后会出现在这里。</p>
         </section>
 
         <div class="sidebar-footer">
@@ -64,7 +64,7 @@
         <section id="page-chat" class="page page-chat" data-page="chat" aria-labelledby="chat-title">
           <header class="page-header chat-header">
             <div>
-              <div class="identity-heading"><h1 id="chat-title">主 Agent</h1><span class="identity-badge">创建与迭代</span></div>
+              <div class="identity-heading"><h1 id="chat-title">NUEMA</h1><span class="identity-badge">创建与迭代</span></div>
               <p id="chat-subtitle" class="page-subtitle">从一个想法开始，做一个懂你工作的智能体。</p>
             </div>
             <button id="chat-panel-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="requirements-panel">
@@ -95,7 +95,10 @@
                 <textarea id="message" rows="2" placeholder="说说你想交给智能体的工作…" required></textarea>
                 <div class="composer-footer">
                   <span><kbd>↵</kbd> 发送 <span class="shortcut-detail">· Shift + Enter 换行</span></span>
-                  <button id="send" class="primary" type="submit">发送</button>
+                  <div class="composer-actions">
+                    <button id="cancel-reply" class="stop-button" type="button" aria-label="停止回复" title="停止回复" hidden><span aria-hidden="true"></span></button>
+                    <button id="send" class="primary" type="submit">发送</button>
+                  </div>
                 </div>
               </form>
             </section>
@@ -131,7 +134,7 @@
               <details class="panel-disclosure">
                 <summary>关于这份需求<span aria-hidden="true">＋</span></summary>
                 <div class="disclosure-content">
-                  <p class="muted-note">确认后，智能体会拥有左侧的独立入口。后续可以回到主 Agent 继续迭代。</p>
+                  <p class="muted-note">确认后，智能体会拥有左侧的独立入口。后续可以回到 NUEMA 继续迭代。</p>
                   <div id="jev-status" class="jev-status" aria-live="polite">Jev 尚未参与判断</div>
                 </div>
               </details>
@@ -150,13 +153,13 @@
               <p id="agent-subtitle" class="page-subtitle"></p>
             </div>
             <div class="header-actions">
-              <button id="agent-iterate" class="secondary" type="button">让主 Agent 帮我迭代</button>
+              <button id="agent-iterate" class="secondary" type="button">让 NUEMA 帮我迭代</button>
               <button id="agent-panel-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="agent-panel">智能体说明</button>
             </div>
           </header>
           <div id="agent-missing" class="empty-state card" hidden>
             <p>这个智能体入口已移除，或需求尚未保存。</p>
-            <a class="text-link" href="#chat">回到主 Agent</a>
+            <a class="text-link" href="#chat">回到 NUEMA</a>
           </div>
           <div id="agent-workspace" class="chat-layout">
             <section class="conversation" aria-label="用户智能体的独立对话">
@@ -182,7 +185,7 @@
               <div class="delivery-spec">
                 <strong>交付约定</strong>
                 <p>在本项目中直接对话，沿用统一的输入与消息样式。</p>
-                <p>首期应完成已确认的基本任务；后续由主 Agent 协助迭代。</p>
+                <p>首期应完成已确认的基本任务；后续由 NUEMA 协助迭代。</p>
               </div>
               <div class="panel-actions">
                 <button id="agent-save-entry" class="secondary" type="button">保存智能体需求</button>
@@ -230,7 +233,7 @@
             </aside>
             <div class="project-stage">
             <div id="project-feedback" class="project-feedback" role="status" hidden></div>
-            <section id="manage-projects" class="project-detail" aria-label="项目详情与预览" hidden>
+            <section id="manage-projects" class="project-detail" aria-label="项目详情" hidden>
               <div class="side-heading">
                 <div class="detail-heading"><h2>项目详情</h2><span id="project-state" class="status">未选择</span></div>
                 <button id="project-ask" class="secondary" type="button">问问助手 ↗</button>
@@ -271,13 +274,16 @@
           <dialog id="project-add-panel" class="project-add-dialog" aria-labelledby="project-add-title">
             <button id="project-add-close" class="dialog-close ghost-button" type="button" aria-label="关闭添加项目">×</button>
           <form id="project-add-form" class="card form-card">
-            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">关联项目文件夹，原文件会留在原处。</p></div></div>
-            <label class="field">
-              <span class="field-name">项目完整路径 <b>必填</b></span>
-              <input id="project-path" type="text" placeholder="/Users/你的名字/Projects/my-app" required spellcheck="false" autofocus>
-              <span class="field-help">在访达中选中文件夹，按 ⌥ Option + ⌘ Command + C 即可复制完整路径。</span>
-            </label>
-            <div class="field-grid">
+            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">给一个路径，剩下的交给 PI。</p></div></div>
+            <div class="field">
+              <label class="field-name" for="project-path">项目文件夹 <b>必填</b></label>
+              <div class="project-path-control">
+                <input id="project-path" type="text" placeholder="选择文件夹，或粘贴完整路径" required spellcheck="false" autofocus aria-describedby="project-folder-status">
+                <button id="project-choose-folder" class="secondary" type="button">选择文件夹</button>
+              </div>
+              <span id="project-folder-status" class="field-help" role="status">选择项目所在的文件夹，也可以直接填写本机路径。</span>
+            </div>
+            <details class="project-add-options"><summary>名称与用途 <span class="muted-note">可选，不填也能添加</span></summary><div class="field-grid">
               <label class="field">
                 <span class="field-name">显示名称</span>
                 <input id="project-name" type="text" maxlength="100" placeholder="默认使用文件夹名">
@@ -286,12 +292,12 @@
                 <span class="field-name">用途说明</span>
                 <input id="project-description" type="text" maxlength="500" placeholder="例如：每月记账的小工具">
               </label>
-            </div>
+            </div></details>
             <div id="add-error" class="error" role="alert" hidden></div>
-            <p class="muted-note">添加后可以核对启动方式，再决定是否允许启动。</p>
+            <p class="muted-note">PI 会阅读项目说明和启动入口，自动保存配置。原文件保留在原处，准备好后由你点击启动。</p>
             <div class="form-actions">
               <button id="project-add-cancel" class="secondary" type="button">取消</button>
-              <button class="primary" type="submit">添加项目</button>
+              <button id="project-add-submit" class="primary" type="submit">添加并自动配置</button>
             </div>
           </form>
 
@@ -303,7 +309,7 @@
           <header class="page-header">
             <div>
               <div class="identity-heading"><h1 id="agents-title">我的智能体</h1><span id="agent-count" class="count">0</span></div>
-              <p class="page-subtitle">进入独立对话、保存需求，或交给主 Agent 继续迭代。</p>
+              <p class="page-subtitle">进入独立对话、保存需求，或交给 NUEMA 继续迭代。</p>
             </div>
             <button id="agents-create" class="primary" type="button">＋ 创建智能体</button>
           </header>
