@@ -1,6 +1,7 @@
 const STORAGE_KEY = "neuma.requirements.session.optin.v1";
 const LEGACY_STORAGE_KEY = "neuma.requirements.session.v1";
 const REQUIREMENTS_KEY = "neuma.requirements.saved-list.v1";
+const AGENT_PREVIEW_PREFIX = "neuma.agent.preview.v1.";
 
 export function blankSession() {
   return { messages: [], draft: null, status: "idle", confirmed: false, lastQuestion: "", jev: null };
@@ -10,7 +11,7 @@ export function recentUserMessages(messages) {
   const result = [];
   let remaining = 12000;
   for (const item of messages.slice().reverse()) {
-    if (item?.role !== "user" || typeof item.content !== "string") continue;
+    if (item?.role !== "user" || typeof item.content !== "string" || ["pending", "failed", "stopped"].includes(item.delivery)) continue;
     const content = item.content.trim().slice(0, Math.min(4000, remaining));
     if (content) {
       result.unshift(content);
@@ -148,6 +149,46 @@ export function deleteRequirement(storage, id) {
       .map(({ id: itemId, name, draft, updatedAt }) => ({ id: itemId, name, draft, updatedAt }));
     if (remaining.length) storage.setItem(REQUIREMENTS_KEY, JSON.stringify(remaining));
     else storage.removeItem(REQUIREMENTS_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function previewMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.filter((item) => item?.role === "user" && typeof item.content === "string"
+    && item.content.trim() && item.content.length <= 4000)
+    .slice(-80).map((item) => ({ role: "user", content: item.content }));
+}
+
+export function loadAgentPreview(storage, id) {
+  try {
+    return previewMessages(JSON.parse(storage.getItem(AGENT_PREVIEW_PREFIX + id) ?? "[]"));
+  } catch {
+    return [];
+  }
+}
+
+export function appendAgentPreview(messages, content) {
+  if (typeof content !== "string" || !content.trim() || content.length > 4000) {
+    throw new Error("预览输入需为 1～4000 字");
+  }
+  return [...previewMessages(messages), { role: "user", content: content.trim() }].slice(-80);
+}
+
+export function saveAgentPreview(storage, id, messages) {
+  try {
+    storage.setItem(AGENT_PREVIEW_PREFIX + id, JSON.stringify(previewMessages(messages)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function deleteAgentPreview(storage, id) {
+  try {
+    storage.removeItem(AGENT_PREVIEW_PREFIX + id);
     return true;
   } catch {
     return false;

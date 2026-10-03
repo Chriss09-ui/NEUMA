@@ -109,7 +109,7 @@ export class PiProjectAgent {
     this.sessions = new Map();
   }
 
-  async prompt({ message, sessionId }) {
+  async prompt({ message, sessionId }, onProgress = () => {}) {
     if (typeof message !== "string" || !message.trim() || message.length > 12_000) throw new InputError("请输入不超过 12000 字的项目操作要求");
     if (typeof sessionId !== "string" || !/^[\w-]{16,80}$/.test(sessionId)) throw new InputError("项目对话标识无效，请开启新对话");
     if (!this.config.llmConfigured) throw new ProviderError("请先配置模型接口、模型名和 API Key", { stage: "pi", reason: "not_configured" });
@@ -131,12 +131,23 @@ export class PiProjectAgent {
     Object.assign(item.turn, { message: message.trim(), toolCalls: 0, actions: [] });
     let timeout, unsubscribe = () => {}, timedOut = false, exhausted = false, failed = false;
     try {
+      onProgress({ type: "status", phase: "thinking" });
       item.session ??= await this.sessionFactory({ config: this.config, manager: this.manager,
         turn: item.turn, cwd: this.cwd, dataDir: this.dataDir });
       if (item.cancelled) throw new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
       let requests = 0;
       unsubscribe = item.session.subscribe((event) => {
         if (event.type === "turn_start" && ++requests > 6) { exhausted = true; void item.session.abort(); }
+        if (item.cancelled || timedOut || exhausted) return;
+        if (event.type === "message_start" && event.message?.role === "assistant") onProgress({ type: "text-start" });
+        if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+          onProgress({ type: "text-delta", delta: event.assistantMessageEvent.delta });
+        }
+        if (event.type === "tool_execution_start") {
+          const labels = { list_projects: "正在查看项目…", add_project: "正在登记项目…", start_project: "正在启动项目…", stop_project: "正在停止项目…" };
+          onProgress({ type: "status", phase: "tool", label: labels[event.toolName] || "正在处理项目…" });
+        }
+        if (event.type === "tool_execution_end") onProgress({ type: "status", phase: "thinking" });
       });
       timeout = setTimeout(() => { timedOut = true; void item.session.abort(); }, this.config.llmTimeoutMs ?? 90_000);
       await item.session.prompt(message.trim());
@@ -150,6 +161,7 @@ export class PiProjectAgent {
       return { reply, sessionId, engine: "pi", actions: item.turn.actions, projects: await this.manager.list() };
     } catch (error) {
       failed = true;
+      if (item.cancelled) throw new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
       if (error instanceof InputError || error instanceof ProviderError) throw error;
       throw new ProviderError("项目助手调用失败，请检查模型连接和工具调用支持；已完成的项目操作仍会保留", { stage: "pi", reason: "request_failed" });
     } finally {

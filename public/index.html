@@ -7,117 +7,387 @@
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand"><span class="brand-mark">N</span><span>NEUMA</span></div>
-      <span class="stage-label">需求层测试版</span>
-      <span id="connection" class="connection" aria-live="polite">正在检查连接…</span>
-    </header>
-    <nav class="workspace-switch" aria-label="工作区">
-      <button id="requirements-tab" type="button" aria-controls="requirements-workspace" aria-pressed="true">创建 Agent</button>
-      <button id="projects-tab" type="button" aria-controls="projects-workspace" aria-pressed="false">我的项目</button>
-    </nav>
-
-    <main id="requirements-workspace" class="workspace">
-      <aside class="agents-panel" aria-label="已确认的 Agent 需求">
-        <div class="agents-heading">
-          <div>
-            <p class="eyebrow">AGENT BRIEFS</p>
-            <h2>Agent 需求</h2>
-          </div>
-          <span id="agent-count" class="agent-count">0</span>
+    <div id="app-shell" class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">N</span>
+          <span class="brand-text"><strong>NEUMA</strong><small>需求层测试版</small></span>
+          <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="收起主导航" title="收起主导航" aria-expanded="true" aria-controls="sidebar-details">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="sidebar-toggle-arrow" d="m16 9-3 3 3 3"/></svg>
+          </button>
         </div>
-        <p class="agents-note">确认后的需求会出现在这里。点击保存，刷新后才会保留。</p>
-        <button id="reset" type="button" class="agent-new">＋ 新对话</button>
-        <div id="agents-list" class="agents-list" aria-live="polite"></div>
-        <p class="agents-scope">当前仅保存需求说明，尚未创建可运行的 Agent。</p>
+
+        <nav class="nav" aria-label="主导航">
+          <a class="nav-item" href="#chat" data-page="chat" aria-label="主 Agent" title="主 Agent">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z"/></svg>
+            <span>主 Agent</span>
+          </a>
+          <a class="nav-item" href="#projects/assistant" data-page="projects" aria-label="管理项目" title="管理项目">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+            <span>管理项目</span>
+          </a>
+          <a id="sidebar-agents-shortcut" class="nav-item sidebar-agents-shortcut" href="#agents" data-page="agents" aria-label="我的智能体" title="我的智能体" inert>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="6" width="14" height="14" rx="4"/><path d="M12 3v3M9 11v2M15 11v2M9 16h6M2 11v4M22 11v4"/></svg>
+            <span>我的智能体</span>
+          </a>
+        </nav>
+
+        <div id="sidebar-details" class="sidebar-details">
+        <section class="sidebar-agents" aria-labelledby="sidebar-agents-title">
+          <div class="sidebar-section-heading">
+            <h2 id="sidebar-agents-title">我的智能体</h2>
+            <div class="sidebar-section-actions">
+              <a class="sidebar-manage" href="#agents" data-page="agents" aria-label="管理我的智能体">管理</a>
+              <button id="sidebar-create-agent" class="ghost-button" type="button" aria-label="通过主 Agent 创建智能体">＋</button>
+            </div>
+          </div>
+          <nav id="sidebar-agent-list" class="sidebar-agent-list" aria-label="我的智能体"></nav>
+          <p id="sidebar-agents-empty" class="sidebar-empty">向主 Agent 描述需求，确认后会出现在这里。</p>
+        </section>
+
+        <div class="sidebar-footer">
+          <div class="service-status" aria-live="polite">
+            <span class="service-row"><i id="llm-dot" class="dot"></i><span>模型服务</span><em id="llm-state">检查中</em></span>
+            <span class="service-row"><i id="jev-dot" class="dot"></i><span>Jev 判断</span><em id="jev-state">检查中</em></span>
+          </div>
+          <p class="sidebar-note">仅在本机运行</p>
+        </div>
+        </div>
+        <a class="nav-item sidebar-settings" href="#settings" data-page="settings" aria-label="设置" title="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M18 7h2M4 17h3M12 17h8"/><circle cx="15.5" cy="7" r="2.5"/><circle cx="9.5" cy="17" r="2.5"/></svg>
+          <span>设置</span>
+        </a>
       </aside>
 
-      <section class="conversation" aria-label="需求对话">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">DESCRIBE THE ROLE</p>
-            <h1>说说你想创建的 Agent</h1>
-            <p class="subtitle">我会把你的描述整理成一份需求说明，只在关键地方追问。对话会发送给已配置的模型服务处理。</p>
-          </div>
-        </div>
-        <div id="messages" class="messages" aria-live="polite"></div>
-        <div id="error" class="error" role="alert" hidden></div>
-        <form id="chat-form" class="composer" autocomplete="off">
-          <label class="sr-only" for="message">描述或修改 Agent 的需求</label>
-          <textarea id="message" rows="3" placeholder="例如：帮我做一个会议纪要 Agent。我会给它转写文字，它提炼结论和待办。" required></textarea>
-          <div class="composer-footer">
-            <span>输入具体工作、资料来源和交付结果即可</span>
-            <button id="send" type="submit">发送 <span aria-hidden="true">↗</span></button>
-          </div>
-        </form>
-      </section>
+      <main class="main" id="main-content">
+        <!-- 对话 -->
+        <section id="page-chat" class="page page-chat" data-page="chat" aria-labelledby="chat-title">
+          <header class="page-header chat-header">
+            <div>
+              <div class="identity-heading"><h1 id="chat-title">主 Agent</h1><span class="identity-badge">创建与迭代</span></div>
+              <p id="chat-subtitle" class="page-subtitle">从一个想法开始，做一个懂你工作的智能体。</p>
+            </div>
+            <button id="chat-panel-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="requirements-panel">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M14 4v16"/></svg>
+              <span>需求说明</span>
+            </button>
+          </header>
 
-      <aside class="draft-panel" aria-label="当前需求说明">
-        <div class="draft-heading">
-          <div>
-            <p class="eyebrow">LIVE BRIEF</p>
-            <h2>当前需求说明</h2>
+          <div id="setup-banner" class="banner" hidden>
+            <span>模型服务尚未配置，对话暂时无法使用。</span>
+            <a href="#settings">前往设置</a>
           </div>
-          <span id="draft-status" class="status">等待描述</span>
-        </div>
-        <p class="panel-note">这是持续更新的同一份草稿。你可以在中间对话随时纠正或补充。</p>
-        <div id="draft-content" class="draft-content"></div>
-        <div class="panel-actions">
-          <button id="modify" type="button" class="secondary">继续修改</button>
-          <button id="save" type="button" class="secondary" disabled>保存当前对话</button>
-          <button id="restore" type="button" class="secondary" disabled>恢复已存对话</button>
-          <button id="export" type="button" class="secondary" disabled>导出 JSON</button>
-          <button id="diagnostics" type="button" class="secondary" disabled>导出诊断记录</button>
-          <button id="delete-saved" type="button" class="text-button" disabled>删除已存对话</button>
-        </div>
-        <p id="storage-note" class="storage-note" aria-live="polite"></p>
-        <p class="storage-note">遇到重复追问或报错时，请在刷新前导出诊断记录。文件包含当前对话与逐轮判定；仅点击后才下载。</p>
-        <div id="jev-status" class="jev-status" aria-live="polite">Jev 尚未参与判断</div>
-        <p class="experimental-note">Jev 的中文判断目前仅供本地测试；需求可交接不代表 Agent 已创建。</p>
-      </aside>
-    </main>
 
-    <main id="projects-workspace" class="workspace" hidden>
-      <aside class="agents-panel" aria-label="我的本地项目">
-        <div class="agents-heading"><h2>我的项目</h2><span id="project-count" class="agent-count">0</span></div>
-        <p class="agents-note">关联原位置，项目记录自动保存在这台电脑上。</p>
-        <form id="project-add-form" class="project-add-form">
-          <label for="project-path">项目完整路径</label>
-          <input id="project-path" type="text" placeholder="粘贴文件或文件夹的完整路径" required>
-          <button class="agent-new" type="submit">＋ 添加项目</button>
-        </form>
-        <label class="sr-only" for="project-search">搜索项目</label>
-        <input id="project-search" class="project-search" type="search" placeholder="搜索名称或用途">
-        <button id="project-refresh" class="text-button" type="button">刷新项目状态</button>
-        <div id="projects-list" class="agents-list" aria-live="polite"></div>
-      </aside>
-      <section class="conversation" aria-label="项目管理对话">
-        <div class="section-heading">
-          <p class="eyebrow">YOUR LOCAL PROJECTS</p>
-          <h1>让已有项目随时可用</h1>
-          <p class="subtitle">告诉我项目路径，或让我找到、启动和停止已添加的项目。</p>
-          <p id="pi-connection" class="project-engine" role="status">正在检查项目助手…</p>
-          <button id="project-new-chat" class="text-button" type="button">开启新的项目对话</button>
-        </div>
-        <div id="project-messages" class="messages" aria-live="polite"></div>
-        <div id="project-error" class="error" role="alert" hidden></div>
-        <form id="project-chat-form" class="composer" autocomplete="off">
-          <label class="sr-only" for="project-message">项目操作要求</label>
-          <textarea id="project-message" rows="3" placeholder="例如：把这个完整路径里的项目加进来。或者：打开我之前添加的记账工具。" required></textarea>
-          <div class="composer-footer">
-            <span>必要的项目信息和对话会交给已配置的模型处理</span>
-            <button id="project-cancel" class="text-button" type="button" hidden>停止回复</button>
-            <button id="project-send" class="primary" type="submit">发送 ↗</button>
+          <div id="chat-requirements" class="chat-layout">
+            <section class="conversation" aria-label="需求对话">
+              <div class="conversation-bar">
+                <span class="conversation-title"><i class="conversation-dot"></i> 一起把想法变清楚</span>
+                <button id="reset" type="button" class="new-chat-button">＋ 新对话</button>
+              </div>
+              <div id="iteration-context" class="context-banner" hidden>
+                <span>当前智能体 <strong id="iteration-agent-name"></strong></span>
+                <button id="iteration-back" class="text-link link-button" type="button">返回智能体</button>
+              </div>
+              <div id="messages" class="messages" aria-live="polite"></div>
+              <div id="error" class="error" role="alert" hidden></div>
+              <form id="chat-form" class="composer" autocomplete="off">
+                <label class="sr-only" for="message">描述或修改 Agent 的需求</label>
+                <textarea id="message" rows="2" placeholder="说说你想交给智能体的工作…" required></textarea>
+                <div class="composer-footer">
+                  <span><kbd>↵</kbd> 发送 <span class="shortcut-detail">· Shift + Enter 换行</span></span>
+                  <button id="send" class="primary" type="submit">发送</button>
+                </div>
+              </form>
+            </section>
+
+            <aside id="requirements-panel" class="side-panel" aria-label="当前需求说明">
+              <div class="side-heading">
+                <h2>需求说明</h2>
+                <span id="draft-status" class="status">等待描述</span>
+              </div>
+              <p class="muted-note">边聊边整理，你随时可以修改。</p>
+              <ol class="brief-steps" aria-label="创建进度">
+                <li id="brief-step-describe" aria-current="step"><span>1</span>描述想法</li>
+                <li id="brief-step-confirm"><span>2</span>确认需求</li>
+                <li id="brief-step-preview"><span>3</span>对话预览</li>
+              </ol>
+              <div id="draft-content" class="draft-content"></div>
+              <details class="panel-disclosure" id="conversation-tools">
+                <summary>保存与导出<span aria-hidden="true">＋</span></summary>
+                <div class="disclosure-content">
+              <div class="panel-actions">
+                <button id="modify" type="button" class="secondary">继续修改</button>
+                <button id="export" type="button" class="secondary" disabled>导出 JSON</button>
+                <button id="save" type="button" class="secondary" disabled>保存当前对话</button>
+                <button id="restore" type="button" class="secondary" disabled>恢复已存对话</button>
+              </div>
+              <div class="panel-links">
+                <button id="diagnostics" type="button" class="link-button" disabled>导出诊断记录</button>
+                <button id="delete-saved" type="button" class="link-button danger" disabled>删除已存对话</button>
+              </div>
+              <p id="storage-note" class="muted-note small" aria-live="polite"></p>
+                </div>
+              </details>
+              <details class="panel-disclosure">
+                <summary>关于这份需求<span aria-hidden="true">＋</span></summary>
+                <div class="disclosure-content">
+                  <p class="muted-note">确认后，智能体会拥有左侧的独立入口。后续可以回到主 Agent 继续迭代。</p>
+                  <div id="jev-status" class="jev-status" aria-live="polite">Jev 尚未参与判断</div>
+                </div>
+              </details>
+              <p class="panel-footnote">当前为需求预览阶段<br>任务执行能力将在后续接入</p>
+            </aside>
           </div>
-        </form>
-      </section>
-      <aside class="draft-panel" aria-label="项目详情与预览">
-        <div class="draft-heading"><h2>项目详情</h2><span id="project-state" class="status">未选择</span></div>
-        <div id="project-details"><p class="panel-note">选择一个项目，查看位置、启动方式和预览。</p></div>
-      </aside>
-    </main>
 
+
+        </section>
+
+        <!-- 用户智能体：需求层的交互预览 -->
+        <section id="page-agent" class="page page-chat" data-page="agent" aria-labelledby="agent-title" hidden>
+          <header class="page-header">
+            <div>
+              <div class="identity-heading"><h1 id="agent-title">我的智能体</h1><span class="identity-badge">用户智能体</span></div>
+              <p id="agent-subtitle" class="page-subtitle"></p>
+            </div>
+            <div class="header-actions">
+              <button id="agent-iterate" class="secondary" type="button">让主 Agent 帮我迭代</button>
+              <button id="agent-panel-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="agent-panel">智能体说明</button>
+            </div>
+          </header>
+          <div id="agent-missing" class="empty-state card" hidden>
+            <p>这个智能体入口已移除，或需求尚未保存。</p>
+            <a class="text-link" href="#chat">回到主 Agent</a>
+          </div>
+          <div id="agent-workspace" class="chat-layout">
+            <section class="conversation" aria-label="用户智能体的独立对话">
+              <div class="conversation-bar">
+                <span id="agent-conversation-title" class="conversation-title"></span>
+                <button id="agent-new-chat" class="new-chat-button" type="button">＋ 新对话</button>
+              </div>
+              <p class="preview-note">交互预览 · 可体验独立对话和输入。当前仍在需求层，任务执行将在后续接入。</p>
+              <div id="agent-messages" class="messages" aria-live="polite"></div>
+              <div id="agent-error" class="error" role="alert" hidden></div>
+              <form id="agent-chat-form" class="composer" autocomplete="off">
+                <label id="agent-message-label" class="sr-only" for="agent-message">给当前智能体的预览输入</label>
+                <textarea id="agent-message" rows="3" maxlength="4000" placeholder="在这里输入任务，预览与这个智能体的对话方式…" required></textarea>
+                <div class="composer-footer">
+                  <span>预览输入不会执行任务</span>
+                  <button class="primary" type="submit">发送预览</button>
+                </div>
+              </form>
+            </section>
+            <aside id="agent-panel" class="side-panel" aria-label="智能体需求与交付约定">
+              <div class="side-heading"><h2>智能体说明</h2><span class="status">需求已确认</span></div>
+              <div id="agent-brief" class="draft-content"></div>
+              <div class="delivery-spec">
+                <strong>交付约定</strong>
+                <p>在本项目中直接对话，沿用统一的输入与消息样式。</p>
+                <p>首期应完成已确认的基本任务；后续由主 Agent 协助迭代。</p>
+              </div>
+              <div class="panel-actions">
+                <button id="agent-save-entry" class="secondary" type="button">保存智能体需求</button>
+                <button id="agent-save-chat" class="secondary" type="button">保存预览对话</button>
+              </div>
+              <p id="agent-storage-note" class="muted-note small" aria-live="polite"></p>
+            </aside>
+          </div>
+        </section>
+
+        <!-- 项目列表常驻，助手与详情共用右侧工作区。 -->
+        <section id="page-projects" class="page page-projects" data-page="projects" aria-labelledby="projects-title" hidden>
+          <header class="page-header">
+            <div>
+              <h1 id="projects-title">管理项目</h1>
+              <p class="page-subtitle">常用的项目放在手边，想做的事交给助手。</p>
+            </div>
+            <a id="project-add-link" class="primary" href="#projects/add">＋ 添加项目</a>
+          </header>
+          <div id="project-workspace" class="project-workspace">
+            <aside id="project-library" class="project-library" aria-label="项目列表">
+              <div class="library-controls">
+                <span class="library-caption">项目工作区</span>
+                <button id="project-library-toggle" class="library-toggle" type="button" aria-label="收起项目栏" title="收起项目栏" aria-expanded="true" aria-controls="project-library-body">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="library-toggle-arrow" d="m16 9-3 3 3 3"/></svg>
+                </button>
+              </div>
+              <button id="project-assistant-home" class="assistant-home" type="button" aria-label="项目助手" title="项目助手" aria-pressed="true" aria-controls="chat-projects">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-10.8 6.8L4 20l1.4-5A7.5 7.5 0 1 1 20 11.5Z"/><path d="M8 10h8M8 13h5"/></svg>
+                <span><strong>项目助手</strong><small id="project-assistant-state">用一句话管理项目</small></span>
+              </button>
+              <div id="project-library-body" class="project-library-body">
+              <div class="library-heading"><h2>项目列表 <span id="project-count" class="count">0</span></h2>
+                <button id="project-refresh" class="icon-button" type="button" title="刷新项目状态" aria-label="刷新项目状态">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20v-4h-4"/></svg>
+                </button>
+              </div>
+              <div class="list-toolbar">
+                <label class="sr-only" for="project-search">搜索项目</label>
+                <input id="project-search" class="search" type="search" placeholder="搜索名称或用途">
+              </div>
+              <div id="projects-list" class="item-list" aria-live="polite"></div>
+              <p class="library-footnote">选择项目查看详情<br>助手对话会为你保留</p>
+              </div>
+            </aside>
+            <div class="project-stage">
+            <div id="project-feedback" class="project-feedback" role="status" hidden></div>
+            <section id="manage-projects" class="project-detail" aria-label="项目详情与预览" hidden>
+              <div class="side-heading">
+                <div class="detail-heading"><h2>项目详情</h2><span id="project-state" class="status">未选择</span></div>
+                <button id="project-ask" class="secondary" type="button">问问助手 ↗</button>
+              </div>
+              <div id="manage-error" class="error" role="alert" hidden></div>
+              <div id="project-details"></div>
+            </section>
+
+            <section id="chat-projects" class="conversation" aria-label="项目助手对话">
+              <div id="project-setup-banner" class="banner" hidden>
+                <span>模型服务尚未配置，对话暂时无法使用。</span>
+                <a href="#settings">前往设置</a>
+              </div>
+              <div class="conversation-bar">
+                <span class="conversation-title"><i class="conversation-dot"></i> 项目助手</span>
+                <button id="project-new-chat" type="button" class="new-chat-button">＋ 新对话</button>
+              </div>
+              <div id="project-messages" class="messages" aria-live="polite"></div>
+              <div id="project-error" class="error" role="alert" hidden></div>
+              <form id="project-chat-form" class="composer" autocomplete="off">
+                <div id="project-context" class="project-context" hidden>
+                  <span>正在讨论</span><button id="project-context-open" type="button" class="context-project"></button>
+                  <button id="project-context-clear" class="ghost-button" type="button" aria-label="取消项目关联">×</button>
+                </div>
+                <label class="sr-only" for="project-message">项目操作要求</label>
+                <textarea id="project-message" rows="2" placeholder="给我一个项目路径，或告诉我想打开哪个项目…" required></textarea>
+                <div class="composer-footer">
+                  <span id="project-compose-hint">Enter 发送 · Shift + Enter 换行</span>
+                  <div class="composer-actions">
+                    <button id="project-cancel" class="stop-button" type="button" aria-label="停止回复" title="停止回复" hidden><span aria-hidden="true"></span></button>
+                    <button id="project-send" class="primary" type="submit">发送</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+            </div>
+          </div>
+          <dialog id="project-add-panel" class="project-add-dialog" aria-labelledby="project-add-title">
+            <button id="project-add-close" class="dialog-close ghost-button" type="button" aria-label="关闭添加项目">×</button>
+          <form id="project-add-form" class="card form-card">
+            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">关联项目文件夹，原文件会留在原处。</p></div></div>
+            <label class="field">
+              <span class="field-name">项目完整路径 <b>必填</b></span>
+              <input id="project-path" type="text" placeholder="/Users/你的名字/Projects/my-app" required spellcheck="false" autofocus>
+              <span class="field-help">在访达中选中文件夹，按 ⌥ Option + ⌘ Command + C 即可复制完整路径。</span>
+            </label>
+            <div class="field-grid">
+              <label class="field">
+                <span class="field-name">显示名称</span>
+                <input id="project-name" type="text" maxlength="100" placeholder="默认使用文件夹名">
+              </label>
+              <label class="field">
+                <span class="field-name">用途说明</span>
+                <input id="project-description" type="text" maxlength="500" placeholder="例如：每月记账的小工具">
+              </label>
+            </div>
+            <div id="add-error" class="error" role="alert" hidden></div>
+            <p class="muted-note">添加后可以核对启动方式，再决定是否允许启动。</p>
+            <div class="form-actions">
+              <button id="project-add-cancel" class="secondary" type="button">取消</button>
+              <button class="primary" type="submit">添加项目</button>
+            </div>
+          </form>
+
+          </dialog>
+        </section>
+
+        <!-- 智能体管理从左侧“我的智能体”进入 -->
+        <section id="page-agents" class="page" data-page="agents" aria-labelledby="agents-title" hidden>
+          <header class="page-header">
+            <div>
+              <div class="identity-heading"><h1 id="agents-title">我的智能体</h1><span id="agent-count" class="count">0</span></div>
+              <p class="page-subtitle">进入独立对话、保存需求，或交给主 Agent 继续迭代。</p>
+            </div>
+            <button id="agents-create" class="primary" type="button">＋ 创建智能体</button>
+          </header>
+          <p class="agents-preview-note muted-note">当前可预览交互、保存需求；任务执行能力将在后续接入。</p>
+          <div id="manage-agents">
+            <div id="agents-error" class="error" role="alert" hidden></div>
+            <div id="agents-list" class="agent-grid" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- 设置 -->
+        <section id="page-settings" class="page page-narrow" data-page="settings" aria-labelledby="settings-title" hidden>
+          <header class="page-header">
+            <div>
+              <h1 id="settings-title">设置</h1>
+              <p class="page-subtitle">连接模型，让你的工作台准备就绪。密钥仅保存在本机。</p>
+            </div>
+          </header>
+
+          <form id="settings-form" class="settings-form" autocomplete="off">
+            <section class="card form-card">
+              <div class="card-heading">
+                <div>
+                  <h2>模型服务</h2>
+                  <p class="muted-note">需求 Agent 和项目助手共用。接口需兼容 OpenAI，并支持流式回复和工具调用。</p>
+                </div>
+                <span id="settings-llm-status" class="status">检查中</span>
+              </div>
+              <label class="field">
+                <span class="field-name">接口地址</span>
+                <input id="settings-chat-url" type="url" required spellcheck="false" placeholder="https://api.xiaomimimo.com/v1/chat/completions">
+                <span class="field-help">以 /chat/completions 结尾。<button id="settings-use-mimo" class="inline-button" type="button">使用小米 MiMo 按量付费地址</button></span>
+              </label>
+              <label class="field">
+                <span class="field-name">模型名</span>
+                <input id="settings-model" type="text" required spellcheck="false" placeholder="mimo-v2.6-pro">
+              </label>
+              <div class="field">
+                <label class="field-name" for="settings-api-key">API Key</label>
+                <div class="secret-input">
+                  <input id="settings-api-key" type="password" spellcheck="false" autocomplete="new-password">
+                  <button class="ghost-button" type="button" data-reveal="settings-api-key">显示</button>
+                </div>
+                <span id="settings-api-key-help" class="field-help">留空表示不修改。</span>
+              </div>
+            </section>
+
+            <section class="card form-card">
+              <div class="card-heading">
+                <div>
+                  <h2>Jev 需求判断 <span class="optional">可选</span></h2>
+                  <p class="muted-note">TypeSafe Jev 协助判断需求缺口。不配置时由需求 Agent 与规则判断。</p>
+                </div>
+                <span id="settings-jev-status" class="status">检查中</span>
+              </div>
+              <div class="field">
+                <label class="field-name" for="settings-jev-key">TypeSafe API Key</label>
+                <div class="secret-input">
+                  <input id="settings-jev-key" type="password" spellcheck="false" autocomplete="new-password">
+                  <button class="ghost-button" type="button" data-reveal="settings-jev-key">显示</button>
+                </div>
+                <span class="field-help"><span id="settings-jev-key-help">留空表示不修改。</span>
+                  <button id="settings-clear-jev" class="inline-button danger" type="button" hidden>清除此 Key</button></span>
+              </div>
+              <label class="field">
+                <span class="field-name">Jev 模型</span>
+                <input id="settings-jev-model" type="text" spellcheck="false" placeholder="jev-1.13.0">
+              </label>
+            </section>
+
+            <div id="settings-error" class="error" role="alert" hidden></div>
+            <div class="form-actions">
+              <p id="settings-note" class="muted-note" aria-live="polite">保存后立即生效，无需重启。进行中的项目对话会重新开始。</p>
+              <button id="settings-save" class="primary" type="submit">保存设置</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/shell.js"></script>
     <script type="module" src="/app.js"></script>
+    <script type="module" src="/agents.js"></script>
     <script type="module" src="/projects.js"></script>
+    <script type="module" src="/settings.js"></script>
   </body>
 </html>

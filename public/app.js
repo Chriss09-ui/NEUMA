@@ -1,6 +1,7 @@
 import { blankSession, clearSession, deleteRequirement, initializeSession, loadSavedRequirements,
   loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement } from "./state.js";
+import { addUserMessage, createReplyView, mountWelcome, renderUserMessage } from "./chat-ui.js";
 
 let browserStorage;
 try { browserStorage = window.localStorage; } catch { browserStorage = null; }
@@ -18,8 +19,8 @@ const messagesEl = document.getElementById("messages");
 const draftEl = document.getElementById("draft-content");
 const statusEl = document.getElementById("draft-status");
 const jevEl = document.getElementById("jev-status");
-const connectionEl = document.getElementById("connection");
 const errorEl = document.getElementById("error");
+const agentsErrorEl = document.getElementById("agents-error");
 const inputEl = document.getElementById("message");
 const sendEl = document.getElementById("send");
 const exportEl = document.getElementById("export");
@@ -39,6 +40,11 @@ const AGENT_TYPE_LABEL = {
   "Knowledge Agent": "知识类", "Analysis Agent": "分析类",
   "Generation Agent": "生成类", "Data Agent": "数据类", "Workflow Agent": "流程类",
 };
+const SUGGESTIONS = [
+  ["整理会议", "从转写到结论与待办", "帮我做一个会议纪要 Agent。我会给它会议转写文字，它提炼结论和待办。", "meeting"],
+  ["写好周报", "把零散记录变成进展", "帮我做一个周报 Agent。我每周把工作记录发给它，它整理成进展、问题和下周计划。", "report"],
+  ["回复客户", "先起草，再由你把关", "帮我做一个客服回复 Agent。我贴客户的问题，它起草回复，由我审核后再发。", "reply"],
+];
 
 function element(tag, className = "", text = "") {
   const node = document.createElement(tag);
@@ -47,25 +53,77 @@ function element(tag, className = "", text = "") {
   return node;
 }
 
+function button(className, text, onClick, label = "") {
+  const node = element("button", className, text);
+  node.type = "button";
+  node.disabled = busy;
+  if (label) node.setAttribute("aria-label", label);
+  node.addEventListener("click", onClick);
+  return node;
+}
+
+function navigate(detail) {
+  document.dispatchEvent(new CustomEvent("neuma:navigate", { detail }));
+}
+
 function showError(message) {
   errorEl.textContent = message;
   errorEl.hidden = !message;
 }
 
+function showAgentsError(message) {
+  agentsErrorEl.textContent = message;
+  agentsErrorEl.hidden = !message;
+}
+
 function renderMessages() {
   messagesEl.replaceChildren();
-  if (session.messages.length === 0) {
+  {
     const welcome = element("div", "welcome");
-    welcome.append(element("strong", "", "从一句话开始"));
-    welcome.append(element("p", "", "例如：“帮我做一个周报 Agent。我每周把工作记录发给它，它整理成进展、问题和下周计划。”"));
-    messagesEl.append(welcome);
-    return;
+    welcome.append(element("span", "welcome-eyebrow", "留点时间，给更重要的事"));
+    const title = element("h2", "welcome-title", "把重复的工作，");
+    title.append(element("br"), element("span", "", "交给你的智能体。"));
+    welcome.append(title);
+    welcome.append(element("p", "welcome-description", "说说你想完成什么。我会帮你理清需求，\n一步步建立专属的工作助手。"));
+    const chips = element("div", "suggestions");
+    for (const [label, description, text, icon] of SUGGESTIONS) {
+      const suggestion = button("suggestion", "", () => {
+        inputEl.value = text;
+        inputEl.dispatchEvent(new Event("input"));
+        inputEl.focus();
+      });
+      const mark = element("span", `suggestion-icon icon-${icon}`);
+      mark.setAttribute("aria-hidden", "true");
+      suggestion.append(mark, element("strong", "", label), element("small", "", description));
+      chips.append(suggestion);
+    }
+    welcome.append(chips);
+    mountWelcome(messagesEl, welcome, session.messages.length > 0);
+    if (session.messages.length === 0) return;
   }
   for (const message of session.messages) {
+    if (message.role === "user") { messagesEl.append(renderUserMessage(message, inputEl)); continue; }
     const wrapper = element("div", `message ${message.role}`);
-    wrapper.append(element("div", "message-label", message.role === "user" ? "你" : "NEUMA · 需求 Agent"));
+    wrapper.append(element("div", "message-label", message.role === "user" ? "你" : "主 Agent"));
     wrapper.append(element("div", "bubble", message.content));
     messagesEl.append(wrapper);
+  }
+  if (busy) {
+    const activity = createReplyView("主 Agent");
+    activity.update({ content: "", status: "thinking", label: "正在整理需求…" });
+    messagesEl.append(activity.row);
+  }
+  const delivered = session.confirmed && agents.find((item) => item.id === activeAgentId);
+  if (delivered) {
+    const needsSave = delivered.dirty || !delivered.persisted;
+    const card = element("div", "delivery-card");
+    card.append(element("span", "agent-type", "独立对话入口"), element("strong", "", delivered.name),
+      element("p", "muted-note", "已加入左侧“我的智能体”。先预览对话方式，后续可以随时让主 Agent 协助迭代。"));
+    card.append(button("primary", needsSave ? "保存需求并进入预览" : "进入对话预览", () => {
+      if (needsSave && !saveAgent(delivered.id)) return;
+      navigate({ page: "agent", agentId: delivered.id });
+    }));
+    messagesEl.append(card);
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -86,16 +144,23 @@ function renderDraft() {
   const draft = session.draft;
   statusEl.className = `status ${session.status}`;
   statusEl.textContent = session.confirmed ? "需求已确认"
-    : session.status === "ready" ? "待用户确认"
+    : session.status === "ready" ? "待你确认"
     : session.status === "needs_input" ? "待补充" : "等待描述";
-  exportEl.disabled = !draft;
+  exportEl.disabled = !draft || busy;
+  const currentStep = session.confirmed ? "preview" : session.status === "ready" ? "confirm" : "describe";
+  for (const step of ["describe", "confirm", "preview"]) {
+    const item = document.getElementById(`brief-step-${step}`);
+    if (step === currentStep) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+  }
   if (!draft) {
-    appendField("Agent 名称", "", "", "描述后会出现在这里");
-    appendField("核心目标", "");
-    appendField("使用场景", "");
-    appendField("每次输入", "");
-    appendField("核心任务", "");
-    appendField("输出结果", "");
+    const empty = element("div", "brief-empty");
+    const illustration = element("div", "brief-illustration");
+    illustration.setAttribute("aria-hidden", "true");
+    illustration.append(element("span"), element("span"), element("span"));
+    empty.append(illustration, element("h3", "", "想法在这里成形"),
+      element("p", "", "聊过的目标、材料和预期结果，\n会整理成一份清晰的需求说明。"));
+    draftEl.append(empty);
     return;
   }
   appendField("Agent 名称", draft.name?.value, draft.name?.source);
@@ -134,77 +199,88 @@ function renderJev() {
   }
 }
 
+function formatTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function renderAgents() {
   agentsEl.replaceChildren();
   agentCountEl.textContent = String(agents.length);
   if (!agents.length) {
-    agentsEl.append(element("p", "agents-empty", "确认第一份 Agent 需求后，它会出现在这里。"));
-    return;
+    const empty = element("div", "empty-state");
+    empty.append(element("span", "empty-symbol", "✳"), element("h2", "", "给自己添一位工作助手"));
+    empty.append(element("p", "", "从一项重复的工作开始。确认需求后，你的智能体就会出现在这里。"));
+    empty.append(button("primary", "创建第一个智能体", () => document.getElementById("agents-create").click()));
+    agentsEl.append(empty);
   }
   for (const agent of agents) {
-    const card = element("article", `agent-card${agent.id === activeAgentId ? " active" : ""}`);
-    const open = element("button", "agent-open");
-    open.type = "button";
-    open.disabled = busy;
-    open.setAttribute("aria-pressed", String(agent.id === activeAgentId));
-    open.setAttribute("aria-label", `打开 ${agent.name} 的需求`);
-    open.append(element("strong", "agent-name", agent.name));
-    open.append(element("span", "agent-goal", agent.draft.goal?.value || "需求已确认"));
-    open.addEventListener("click", () => openAgent(agent.id));
-    const footer = element("div", "agent-footer");
-    footer.append(element("span", "agent-save-state", agent.dirty && agent.persisted
-      ? "修改未保存" : agent.persisted ? "已保存" : "仅当前页"));
+    const card = element("article", `card agent-card${agent.id === activeAgentId ? " active" : ""}`);
+    const top = element("div", "agent-card-top");
+    top.append(element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "Agent"));
+    const state = agent.dirty && agent.persisted ? ["warn", "修改未保存"]
+      : agent.persisted ? ["ok", "已保存"] : ["", "仅当前页"];
+    top.append(element("span", `status ${state[0]}`, state[1]));
+    card.append(top, element("h3", "", agent.name));
+    card.append(element("p", "", agent.draft.goal?.value || "需求已确认"));
+    const time = formatTime(agent.updatedAt);
+    if (time) card.append(element("span", "agent-meta", `更新于 ${time}${agent.id === activeAgentId ? " · 正在对话中编辑" : ""}`));
     const actions = element("div", "agent-actions");
+    actions.append(button("secondary", "进入对话", () => navigate({ page: "agent", agentId: agent.id }),
+      `进入 ${agent.name} 的对话预览`));
+    actions.append(button("ghost-button", "让主 Agent 迭代", () => openAgent(agent.id), `让主 Agent 迭代 ${agent.name}`));
     if (agent.dirty || !agent.persisted) {
-      const save = element("button", "agent-action", agent.persisted ? "保存修改" : "保存");
-      save.type = "button";
-      save.disabled = busy;
-      save.setAttribute("aria-label", `保存 ${agent.name} 的需求`);
-      save.addEventListener("click", () => saveAgent(agent.id));
-      actions.append(save);
+      actions.append(button("secondary", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
+        `保存 ${agent.name} 的需求`));
     }
-    const remove = element("button", "agent-action danger", "删除");
-    remove.type = "button";
-    remove.disabled = busy;
-    remove.setAttribute("aria-label", `删除 ${agent.name} 的需求`);
-    remove.addEventListener("click", () => removeAgent(agent.id));
-    actions.append(remove);
-    footer.append(actions);
-    card.append(open, footer);
+    actions.append(button("ghost-button", "导出", () => downloadJson(`${agent.name}.json`,
+      { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt, exportedAt: new Date().toISOString() })));
+    actions.append(button("ghost-button danger", "删除", () => removeAgent(agent.id), `删除 ${agent.name} 的需求`));
+    card.append(actions);
     agentsEl.append(card);
   }
+  document.dispatchEvent(new CustomEvent("neuma:agents-changed", { detail: { items: agents, busy } }));
 }
 
 function openAgent(id) {
   if (busy) return;
   const agent = agents.find((item) => item.id === id);
   if (!agent) return;
-  if ((session.draft || session.messages.length)
+  if (agent.id !== activeAgentId && (session.draft || session.messages.length)
     && !window.confirm(`打开“${agent.name}”会替换当前对话和草稿。继续吗？`)) return;
-  session = blankSession();
-  diagnosticTurns = [];
-  session.draft = structuredClone(agent.draft);
-  session.status = "ready";
-  session.confirmed = true;
-  session.messages.push({ role: "assistant",
-    content: `已打开“${agent.name}”的需求说明。你可以在下方描述要修改的地方。` });
-  activeAgentId = id;
-  pendingLegacy = null;
-  inputEl.value = "";
+  if (agent.id !== activeAgentId) {
+    session = blankSession();
+    diagnosticTurns = [];
+    session.draft = structuredClone(agent.draft);
+    session.status = "ready";
+    session.confirmed = true;
+    session.messages.push({ role: "assistant",
+      content: `我们继续迭代“${agent.name}”。右侧是当前确认的需求，你可以告诉我希望调整什么；确认修改后会更新同一个智能体入口。` });
+    activeAgentId = id;
+    pendingLegacy = null;
+    inputEl.value = "";
+  }
   showError("");
+  showAgentsError("");
   render();
+  navigate({ page: "chat" });
 }
 
 function saveAgent(id) {
   if (busy) return;
   const agent = agents.find((item) => item.id === id);
   if (!agent || !saveRequirement(browserStorage, agent)) {
-    showError("浏览器无法保存 Agent 需求，请导出 JSON");
-    return;
+    showAgentsError("浏览器无法保存 Agent 需求，请先导出");
+    showError("浏览器无法保存 Agent 需求，请先导出");
+    document.dispatchEvent(new CustomEvent("neuma:agent-saved", { detail: { id, ok: false } }));
+    return false;
   }
   agents = agents.map((item) => item.id === id ? { ...item, persisted: true, dirty: false } : item);
+  showAgentsError("");
   showError("");
   render();
+  document.dispatchEvent(new CustomEvent("neuma:agent-saved", { detail: { id, ok: true } }));
+  return true;
 }
 
 function removeAgent(id) {
@@ -212,17 +288,18 @@ function removeAgent(id) {
   const agent = agents.find((item) => item.id === id);
   if (!agent || !window.confirm(`删除“${agent.name}”的需求？${agent.persisted ? "浏览器中保存的版本也会删除。" : ""}${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
   if (agent.persisted && !deleteRequirement(browserStorage, id)) {
-    showError("浏览器无法删除这份 Agent 需求");
+    showAgentsError("浏览器无法删除这份 Agent 需求");
     return;
   }
   agents = agents.filter((item) => item.id !== id);
+  document.dispatchEvent(new CustomEvent("neuma:agent-removed", { detail: { id } }));
   if (activeAgentId === id) {
     session = blankSession();
     diagnosticTurns = [];
     activeAgentId = null;
     inputEl.value = "";
   }
-  showError("");
+  showAgentsError("");
   render();
 }
 
@@ -231,11 +308,14 @@ function render() {
   renderDraft();
   renderJev();
   renderAgents();
+  const editingAgent = agents.find((item) => item.id === activeAgentId);
+  document.getElementById("iteration-context").hidden = !editingAgent;
+  document.getElementById("iteration-agent-name").textContent = editingAgent?.name ?? "";
   sendEl.disabled = busy;
-  inputEl.disabled = busy;
-  sendEl.textContent = busy ? "正在整理…" : "发送 ↗";
+  inputEl.disabled = false;
+  sendEl.textContent = busy ? "整理中…" : "发送";
   resetEl.disabled = busy;
-  modifyEl.disabled = busy;
+  modifyEl.disabled = busy || !session.draft;
   saveEl.disabled = !session.draft || busy;
   diagnosticsEl.disabled = busy || (!diagnosticTurns.length && !session.messages.length);
   restoreEl.disabled = busy || (!hasSavedCopy && !pendingLegacy);
@@ -244,18 +324,7 @@ function render() {
     ? "浏览器中有一份手动保存的对话。刷新后仍从空白开始，点击“恢复已存对话”才会使用它。"
     : pendingLegacy
       ? "旧版记录已从本地存储移除，仅在本页暂存；需要继续时请手动恢复。"
-      : "默认不保存或继承对话；刷新后从空白开始。";
-}
-
-async function checkHealth() {
-  try {
-    const response = await fetch("/api/health");
-    if (!response.ok) throw new Error();
-    const health = await response.json();
-    connectionEl.textContent = `${health.llmConfigured ? "模型已配置" : "模型未配置"} · ${health.jevConfigured ? "Jev 已配置" : "Jev 未配置"}`;
-  } catch {
-    connectionEl.textContent = "本地服务未连接";
-  }
+      : "默认不保存对话，刷新后从空白开始。";
 }
 
 document.getElementById("chat-form").addEventListener("submit", async (event) => {
@@ -273,6 +342,9 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   let stage = "request";
   let httpStatus = null;
   let serverDiagnostic = null;
+  const user = addUserMessage(session.messages, message);
+  inputEl.value = "";
+  inputEl.dispatchEvent(new Event("input"));
   busy = true;
   showError("");
   render();
@@ -294,9 +366,9 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     session.confirmed = payload.confirmed === true;
     session.lastQuestion = payload.question || payload.confirmationQuestion || "";
     session.jev = payload.jev;
-    session.messages.push({ role: "user", content: message });
+    user.delivery = "sent";
     const assistantMessage = payload.confirmed
-      ? `需求已确认：\n${payload.summary}\n\n当前测试版到需求层为止。`
+      ? `需求已确认：\n${payload.summary}\n\n独立对话入口已加入左侧“我的智能体”。当前可以预览交互，任务执行能力尚未接入。`
       : payload.status === "ready"
         ? `我整理出的需求是：\n${payload.summary}\n\n${payload.confirmationQuestion}`
         : `${payload.summary}\n\n${payload.question}`;
@@ -314,18 +386,19 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
       activeAgentId = updated.activeId;
     }
     pendingLegacy = null;
-    inputEl.value = "";
   } catch (error) {
-    const message = error instanceof Error ? error.message : "请求失败，请重试";
-    showError(message);
+    user.delivery = "failed";
+    if (!inputEl.value.trim()) { inputEl.value = message; inputEl.dispatchEvent(new Event("input")); }
+    const errorMessage = error instanceof Error ? error.message : "请求失败，请重试";
+    showError(errorMessage);
     diagnosticTurn.result = { outcome: "error", stage, httpStatus,
-      message, diagnostic: serverDiagnostic };
+      message: errorMessage, diagnostic: serverDiagnostic };
   } finally {
     diagnosticTurn.durationMs = Math.round(performance.now() - startedAt);
     diagnosticTurns = [...diagnosticTurns, diagnosticTurn].slice(-40);
     busy = false;
     render();
-    inputEl.focus();
+    if (!document.getElementById("page-chat").hidden) inputEl.focus({ preventScroll: true });
   }
 });
 
@@ -430,6 +503,21 @@ resetEl.addEventListener("click", () => {
   inputEl.focus();
 });
 
+document.getElementById("agents-create").addEventListener("click", () => {
+  navigate({ page: "chat" });
+  if (session.draft || session.messages.length) resetEl.click();
+});
+
+document.addEventListener("neuma:agents-request", renderAgents);
+document.addEventListener("neuma:agent-action", (event) => {
+  const { action, id } = event.detail ?? {};
+  if (action === "edit") openAgent(id);
+  if (action === "save") saveAgent(id);
+  if (action === "create") document.getElementById("agents-create").click();
+});
+document.getElementById("iteration-back").addEventListener("click", () => {
+  if (activeAgentId) navigate({ page: "agent", agentId: activeAgentId });
+});
+
 render();
 if (!initial.legacyCleared) showError("无法清除旧版自动保存记录，请在浏览器中清除本站数据");
-void checkHealth();

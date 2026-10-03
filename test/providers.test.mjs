@@ -145,6 +145,10 @@ test("小米 MiMo 使用 JSON 模式并关闭需求提取时的深度思考", as
   assert.deepEqual(body.thinking, { type: "disabled" });
   assert.match(body.messages[0].content, /scenario/);
   assert.match(body.messages[0].content, /routingCondition/);
+  assert.match(body.messages[0].content, /左侧独立入口.*标准对话框/);
+  assert.match(body.messages[0].content, /首期交付目标是完成用户已确认的基本任务/);
+  assert.match(body.messages[0].content, /不生成运行提示词或设计执行架构/);
+  assert.match(body.messages[0].content, /不把“对话框”当成任务结果/);
 });
 
 test("其他兼容接口保持通用请求格式", async () => {
