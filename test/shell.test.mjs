@@ -331,3 +331,15 @@ test("输入法确认和 Shift+Enter 不提交，普通 Enter 提交一次", () 
   input.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {} });
   assert.equal(input.submissions, 1);
 });
+
+test("智能体说明不再跟随主需求面板展开，进入智能体仍聚焦对话输入", () => {
+  const { get, document, navigate } = setup();
+  get("agent-panel").hidden = true;
+  navigate({ page: "agent", agentId: "paper" });
+  assert.equal(document.activeElement.id, "agent-message");
+  assert.equal(get("agent-panel").hidden, true);
+  assert.equal(get("agent-panel").open, false);
+  assert.equal(get("agent-workspace").classes.has("panel-collapsed"), false);
+  document.dispatchEvent({ type: "keydown", key: "Escape" });
+  assert.equal(get("agent-panel").open, false);
+});

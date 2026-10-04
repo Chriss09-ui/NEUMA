@@ -16,6 +16,8 @@ const PUBLIC = new Map([
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/agents.js", ["agents.js", "text/javascript; charset=utf-8"]],
   ["/agent-runtime.js", ["agent-runtime.js", "text/javascript; charset=utf-8"]],
+  ["/agent-details.js", ["agent-details.js", "text/javascript; charset=utf-8"]],
+  ["/agent-details-view.js", ["agent-details-view.js", "text/javascript; charset=utf-8"]],
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
   ["/shell.js", ["shell.js", "text/javascript; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
@@ -248,8 +250,18 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (request.method === "POST" && path === "/api/agents/cancel") {
         return sendJson(response, 200, await prototypeAgents.cancel((await readJson(request)).sessionId));
       }
+      if (request.method === "GET" && path === "/api/agent-profiles") return sendJson(response, 200, await prototypeAgents.getProfiles());
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
       if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]) });
+      const agentProfile = path.match(/^\/api\/agents\/([\w-]+)\/profile$/);
+      if (request.method === "POST" && agentProfile) return sendJson(response, 200, await prototypeAgents.setProfile(agentProfile[1], await readJson(request)));
+      const agentMemory = path.match(/^\/api\/agents\/([\w-]+)\/memory$/);
+      if (request.method === "GET" && agentMemory) return sendJson(response, 200, await prototypeAgents.getMemory(agentMemory[1]));
+      if (request.method === "POST" && agentMemory) return sendJson(response, 200, await prototypeAgents.setMemory(agentMemory[1], (await readJson(request)).memory));
+      const agentFiles = path.match(/^\/api\/agents\/([\w-]+)\/files$/);
+      if (request.method === "GET" && agentFiles) return sendJson(response, 200, await prototypeAgents.files(agentFiles[1]));
+      const agentFile = path.match(/^\/api\/agents\/([\w-]+)\/file$/);
+      if (request.method === "GET" && agentFile) return sendJson(response, 200, await prototypeAgents.file(agentFile[1], new URL(request.url, "http://localhost").searchParams.get("path")));
       const agentRemoval = path.match(/^\/api\/agents\/([\w-]+)\/remove$/);
       if (request.method === "POST" && agentRemoval) {
         await readJson(request);

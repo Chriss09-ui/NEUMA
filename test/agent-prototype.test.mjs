@@ -90,13 +90,13 @@ test("运行会话隔离，成功历史仅首次恢复，流式进度不暴露�
   assert.equal(first.reply, "这是周报。"); assert.equal(first.status, "complete");
   const runtime = records[2];
   assert.match(runtime.prompts[0], /之前的材料.*之前的周报/s);
-  assert.doesNotMatch(runtime.prompts[0], /失败材料|已停止材料|偷偷替换|旧版本/);
+  assert.doesNotMatch(runtime.prompts[0], /失败材料|已停止材料|偷偷替换|旧版本材料|旧版本指令/);
   assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), ["list_workspace_files", "read_workspace_file", "write_workspace_file"]);
   assert.equal(runtime.options.manager, undefined); assert.match(runtime.options.cwd, /agent-workspaces\/weekly$/);
   assert.equal(progress.some((event) => event.type === "text-delta" && event.delta === "这是周报。"), true);
   assert.doesNotMatch(JSON.stringify(progress), /private-/);
   await agents.prompt({ ...turn(), history });
-  assert.equal(runtime.prompts.length, 2); assert.equal(runtime.prompts[1], "整理本周进展");
+  assert.equal(runtime.prompts.length, 2); assert.match(runtime.prompts[1], /用户本轮任务：整理本周进展$/);
   await assert.rejects(agents.prompt(turn("another")), /属于其他 Agent/);
   await agents.prompt(turn("another", "another-session-12345"));
   assert.notEqual(records[3].session, runtime.session); assert.notEqual(records[3].options.cwd, runtime.options.cwd);
@@ -130,7 +130,7 @@ test("并发轮次拒绝，停止只影响指定会话；清理后可以重新�
   let started;
   const waiting = new Promise((done) => { started = done; }), records = [];
   const { agents } = await fixture(t, factory(records, async (record) => {
-    if (!record.builder && record.prompts[0] === "等待取消") { started(); await new Promise((done) => { record.release = done; }); }
+    if (!record.builder && record.prompts[0].endsWith("用户本轮任务：等待取消")) { started(); await new Promise((done) => { record.release = done; }); }
   }));
   await agents.build(input());
   const pending = agents.prompt(turn("weekly", "stopping-session-12345", "等待取消"));
@@ -166,7 +166,7 @@ test("迭代不打断旧任务，下一轮使用新版本指令和会话", async
   let started;
   const waiting = new Promise((done) => { started = done; }), records = [];
   const { agents } = await fixture(t, factory(records, async (record) => {
-    if (!record.builder && record.prompts[0] === "等待迭代") { started(); await new Promise((done) => { record.release = done; }); }
+    if (!record.builder && record.prompts[0].endsWith("用户本轮任务：等待迭代")) { started(); await new Promise((done) => { record.release = done; }); }
   }));
   await agents.build(input());
   const pending = agents.prompt(turn("weekly", "revision-session-12345", "等待迭代")); await waiting;
@@ -175,6 +175,90 @@ test("迭代不打断旧任务，下一轮使用新版本指令和会话", async
   records[1].release(); assert.equal((await pending).status, "complete");
   await agents.prompt(turn("weekly", "revision-session-12345"));
   assert.equal(records[1].disposed, true); assert.equal(agents.sessions.get("revision-session-12345").revision, 2);
+});
+
+test("独立记忆持久化，编辑与清空在已有会话下一轮生效", async (t) => {
+  const records = [], { agents, options } = await fixture(t, factory(records));
+  await agents.build(input()); await agents.build(input("another"));
+  assert.deepEqual(await agents.getMemory("weekly"), { memory: "" });
+  const revision = (await agents.get("weekly")).revision;
+  assert.deepEqual(await agents.setMemory("weekly", "偏好简短中文"), { memory: "偏好简短中文" });
+  assert.equal((await agents.get("weekly")).revision, revision); assert.equal((await agents.getMemory("another")).memory, "");
+  await agents.prompt(turn());
+  const runtime = records[2]; assert.match(runtime.prompts[0], /偏好简短中文/);
+  await agents.setMemory("weekly", "这轮详细列出结论"); await agents.prompt(turn());
+  assert.equal(records.length, 3); assert.match(runtime.prompts[1], /这轮详细列出结论/); assert.doesNotMatch(runtime.prompts[1], /偏好简短中文/);
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.equal((await restored.getMemory("weekly")).memory, "这轮详细列出结论");
+  await assert.rejects(agents.setMemory("weekly", "a".repeat(12_001)), InputError);
+  await assert.rejects(agents.setMemory("weekly", null), InputError);
+  await assert.rejects(agents.setMemory("unknown", "内容"), /先创建/);
+  assert.doesNotMatch((await agents.setMemory("weekly", 'api_key="private-fixture"')).memory, /private-fixture/);
+  await agents.setMemory("weekly", ""); await agents.prompt(turn());
+  assert.equal(records.length, 3); assert.match(runtime.prompts[2], /Agent 记忆（替代旧版本）：""/);
+});
+
+test("展示资料独立于已确认需求，持久化后恢复侧栏且下一轮采用新称呼", async (t) => {
+  const records = [], { agents, options } = await fixture(t, factory(records));
+  await agents.build(input());
+  assert.deepEqual((await agents.get("weekly")).profile, { name: "周报助手", description: "整理周报", icon: "" });
+  await agents.prompt(turn());
+  const before = await agents.get("weekly"), runtime = records[1], profile = { name: "我的周报", description: "只展示给我的简介", icon: "📝" };
+  const saved = await agents.setProfile("weekly", profile); assert.deepEqual(saved, { profile });
+  saved.profile.name = "不能篡改内部资料";
+  const after = await agents.get("weekly");
+  assert.equal(after.name, before.name); assert.deepEqual(after.draft, before.draft); assert.equal(after.instructions, before.instructions); assert.equal(after.revision, before.revision);
+  assert.equal((await agents.build(input())).agent.revision, before.revision); assert.equal(records.length, 2);
+  assert.deepEqual(await agents.getProfiles(), { profiles: [{ id: "weekly", ...profile }] });
+  await agents.prompt(turn()); assert.equal(records.length, 2); assert.match(runtime.prompts[1], /当前显示名称（仅用于称呼）："我的周报"/);
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.deepEqual((await restored.get("weekly")).profile, profile); assert.deepEqual(await restored.getProfiles(), { profiles: [{ id: "weekly", ...profile }] });
+  for (const value of [null, { ...profile, name: " " }, { ...profile, name: "a".repeat(121) }, { ...profile, description: "a".repeat(241) }, { ...profile, icon: "a".repeat(17) }]) await assert.rejects(agents.setProfile("weekly", value), InputError);
+  await assert.rejects(agents.setProfile("unknown", profile), /先创建/);
+  await agents.setProfile("weekly", { name: "清空可选资料", description: "", icon: "" });
+  assert.deepEqual((await agents.get("weekly")).profile, { name: "清空可选资料", description: "", icon: "" });
+  const longName = "长".repeat(120);
+  const longAgent = (await agents.build({ ...input("long-name"), name: longName })).agent;
+  const iconOnly = await agents.setProfile("long-name", { ...longAgent.profile, icon: "✨" });
+  assert.equal(iconOnly.profile.name, longName); assert.equal(iconOnly.profile.icon, "✨");
+});
+
+test("构建期间编辑记忆和展示资料，提交新定义不会覆盖最新内容", async (t) => {
+  let started;
+  const waiting = new Promise((done) => { started = done; }), records = [];
+  const { agents } = await fixture(t, factory(records, async (record) => {
+    if (record.builder && record.prompts[0].includes("等待新定义")) { started(); await new Promise((done) => { record.release = done; }); }
+  }));
+  await agents.build(input()); await agents.setMemory("weekly", "旧记忆");
+  const pending = agents.build(input("weekly", "等待新定义")); await waiting;
+  const profile = { name: "新显示名", description: "新简介", icon: "✨" };
+  await Promise.all([agents.setMemory("weekly", "刚保存的新记忆"), agents.setProfile("weekly", profile)]);
+  records[1].release(); await pending;
+  assert.equal((await agents.getMemory("weekly")).memory, "刚保存的新记忆"); assert.deepEqual((await agents.get("weekly")).profile, profile);
+  assert.equal((await agents.get("weekly")).revision, 2);
+  await agents.build(input("weekly", "第三版需求"));
+  assert.deepEqual((await agents.get("weekly")).profile, profile); assert.equal((await agents.getMemory("weekly")).memory, "刚保存的新记忆");
+});
+
+test("产物只列出自己的文本，内容隐藏凭据，拒绝越界和符号链接", async (t) => {
+  const records = [], { agents, root } = await fixture(t, factory(records));
+  await agents.build(input()); await agents.build(input("another")); await agents.prompt(turn());
+  const workspace = records[2].options.cwd, writer = records[2].options.customTools.find((tool) => tool.name === "write_workspace_file");
+  await writer.execute("html", { file: "pages/result.html", content: "<main>产物</main><script>fetch('/api/settings')</script>" });
+  await writeFile(join(workspace, "notes.txt"), 'api_key="private-fixture"\n文本产物');
+  await writeFile(join(workspace, "binary.dat"), Buffer.from([0, 1, 255]));
+  await writeFile(join(workspace, ".env"), "不应读取"); await writeFile(join(workspace, "api-key.txt"), "不应读取");
+  await writeFile(join(root, "outside.txt"), "外部材料"); await symlink(join(root, "outside.txt"), join(workspace, "linked.txt"));
+  const listed = await agents.files("weekly"); assert.deepEqual(listed.files.map((file) => file.path), ["notes.txt", "pages/result.html"]);
+  assert.equal(listed.truncated, false); assert.ok(listed.files.every((file) => file.size > 0 && !Number.isNaN(Date.parse(file.updatedAt))));
+  assert.deepEqual((await agents.files("another")).files, []);
+  const html = await agents.file("weekly", "pages/result.html"); assert.equal(html.path, "pages/result.html"); assert.match(html.content, /<script>/); assert.equal(html.truncated, false);
+  assert.doesNotMatch((await agents.file("weekly", "notes.txt")).content, /private-fixture/);
+  for (const path of ["../outside.txt", "/tmp/outside.txt", ".env", "api-key.txt", "linked.txt", "binary.dat"]) await assert.rejects(agents.file("weekly", path), InputError);
+  await writeFile(join(workspace, "long.txt"), "a".repeat(120_010));
+  const long = await agents.file("weekly", "long.txt"); assert.equal(long.content.length, 120_000); assert.equal(long.truncated, true);
+  await Promise.all(Array.from({ length: 125 }, (_value, index) => writeFile(join(workspace, `report-${index}.txt`), "文本")));
+  const capped = await agents.files("weekly"); assert.equal(capped.files.length, 120); assert.equal(capped.truncated, true);
 });
 
 test("真实 Pi SDK 构建后调用专属文件工具，回复可以连续运行", async (t) => {
