@@ -100,6 +100,41 @@ test("构建流先交付状态，构建结束才发送完成定义", async (t) =
   assert.equal(response.listenerCount("close"), 0);
 });
 
+test("资料、记忆和产物 API 使用独立 Agent 身份，只交付 JSON 数据", async () => {
+  const seen = [], profile = { name: "我的周报", description: "显示简介", icon: "📝" }, files = [{ path: "pages/result.html", size: 42, updatedAt: "2026-10-04T00:00:00.000Z" }];
+  const handler = makeHandler({
+    getProfiles: async () => ({ profiles: [{ id: agent.id, ...profile }] }),
+    setProfile: async (id, value) => { seen.push(["profile", id, value]); return { profile: value }; },
+    getMemory: async (id) => { seen.push(["memory", id]); return { memory: "优先简短中文" }; },
+    setMemory: async (id, memory) => { seen.push(["save-memory", id, memory]); return { memory }; },
+    files: async (id) => { seen.push(["files", id]); return { files, truncated: false }; },
+    file: async (id, path) => { seen.push(["file", id, path]); return { path, content: "<script>window.parent.example()</script>", truncated: false }; },
+  });
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", "/api/agent-profiles")).text), { profiles: [{ id: agent.id, ...profile }] });
+  assert.deepEqual(JSON.parse((await invoke(handler, "POST", `/api/agents/${agent.id}/profile`, profile)).text), { profile });
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `/api/agents/${agent.id}/memory`)).text), { memory: "优先简短中文" });
+  assert.deepEqual(JSON.parse((await invoke(handler, "POST", `/api/agents/${agent.id}/memory`, { memory: "保存后的偏好" })).text), { memory: "保存后的偏好" });
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `/api/agents/${agent.id}/files`)).text), { files, truncated: false });
+  const file = await invoke(handler, "GET", `/api/agents/${agent.id}/file?path=pages%2Fresult.html`);
+  assert.match(file.headers["content-type"], /^application\/json/);
+  assert.deepEqual(JSON.parse(file.text), { path: "pages/result.html", content: "<script>window.parent.example()</script>", truncated: false });
+  assert.equal((await invoke(handler, "GET", `/api/agents/${agent.id}/files/pages/result.html`)).status, 404);
+  assert.deepEqual(seen, [["profile", agent.id, profile], ["memory", agent.id], ["save-memory", agent.id, "保存后的偏好"], ["files", agent.id], ["file", agent.id, "pages/result.html"]]);
+});
+
+test("辅助接口输入错误沿用安全错误响应，缺少产物路径不产生执行路由", async () => {
+  const handler = makeHandler({
+    setProfile: async () => { throw new InputError("名称不能为空"); },
+    setMemory: async (_id, value) => { assert.equal(value, undefined); throw new InputError("记忆需为文本"); },
+    file: async (_id, path) => { assert.equal(path, null); throw new InputError("请提供文件路径"); },
+  });
+  assert.equal((await invoke(handler, "POST", `/api/agents/${agent.id}/profile`, {})).status, 400);
+  const memory = await invoke(handler, "POST", `/api/agents/${agent.id}/memory`, {});
+  assert.equal(memory.status, 400); assert.equal(JSON.parse(memory.text).error, "记忆需为文本");
+  const file = await invoke(handler, "GET", `/api/agents/${agent.id}/file`);
+  assert.equal(file.status, 400); assert.equal(JSON.parse(file.text).error, "请提供文件路径");
+});
+
 test("JSON 与流式构建断线都中止构建且不回传迟到成功", async () => {
   for (const streaming of [false, true]) {
     const ready = deferred();
@@ -192,9 +227,13 @@ test("构建与执行错误使用安全错误格式，不发送成功事件或�
 test("Agent 接口拒绝跨站/外部 Host 及无效 JSON，删除不能由 GET 触发", async () => {
   let calls = 0;
   const unexpected = async () => { calls++; assert.fail("不合法请求不能进入 Agent 后端"); };
-  const handler = makeHandler({ get: unexpected, build: unexpected, prompt: unexpected, cancel: unexpected, remove: unexpected });
+  const handler = makeHandler({ get: unexpected, build: unexpected, prompt: unexpected, cancel: unexpected, remove: unexpected,
+    getProfiles: unexpected, setProfile: unexpected, getMemory: unexpected, setMemory: unexpected, files: unexpected, file: unexpected });
   const routes = [["GET", `/api/agents/${agent.id}`], ["POST", "/api/agents/build"],
-    ["POST", "/api/agents/turn"], ["POST", "/api/agents/cancel"], ["POST", `/api/agents/${agent.id}/remove`]];
+    ["POST", "/api/agents/turn"], ["POST", "/api/agents/cancel"], ["POST", `/api/agents/${agent.id}/remove`],
+    ["GET", "/api/agent-profiles"], ["POST", `/api/agents/${agent.id}/profile`],
+    ["GET", `/api/agents/${agent.id}/memory`], ["POST", `/api/agents/${agent.id}/memory`],
+    ["GET", `/api/agents/${agent.id}/files`], ["GET", `/api/agents/${agent.id}/file?path=example.html`]];
   for (const [method, path] of routes) {
     for (const headers of [
       { host: "127.0.0.1:3000", origin: "https://unrelated.example" },

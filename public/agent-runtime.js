@@ -22,11 +22,14 @@ export function agentHistory(messages, revision) {
 }
 
 export function createAgentRuntime(request = fetch) {
-  async function json(path, body) {
-    const response = await request(path, body === undefined ? {} : {
+  async function json(path, body, { signal } = {}) {
+    const options = body === undefined ? {} : {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-    });
+    };
+    if (signal) options.signal = signal;
+    const response = await request(path, options);
     const result = await response.json();
+    signal?.throwIfAborted();
     if (!response.ok) throw new Error(result.error || "智能体请求失败，请重试。");
     return result;
   }
@@ -45,6 +48,12 @@ export function createAgentRuntime(request = fetch) {
 
   return {
     inspect: (id) => json(`/api/agents/${encodeURIComponent(id)}`),
+    listProfiles: (options) => json("/api/agent-profiles", undefined, options),
+    saveProfile: (id, profile, options) => json(`/api/agents/${encodeURIComponent(id)}/profile`, profile, options),
+    getMemory: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, undefined, options),
+    saveMemory: (id, memory, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, { memory }, options),
+    listFiles: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/files`, undefined, options),
+    readFile: (id, path, options) => json(`/api/agents/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`, undefined, options),
     build: (agent, options) => stream("/api/agents/build", { id: agent.id, name: agent.name, draft: agent.draft }, options, {
       isComplete: (result) => result?.agent?.id === agent.id && result.agent.status === "ready",
       incompleteMessage: "生成连接中断，智能体尚未确认完成，请重新生成。",

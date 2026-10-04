@@ -48,14 +48,14 @@ byId("sidebar-toggle").addEventListener("click", () => setSidebarCollapsed(!side
 setSidebarCollapsed(sidebarCollapsed, false);
 
 function updatePanels() {
-  for (const [layoutId, panelId] of [["chat-requirements", "requirements-panel"], ["agent-workspace", "agent-panel"]]) {
+  for (const [layoutId, panelId] of [["chat-requirements", "requirements-panel"]]) {
     byId(layoutId).classList.toggle("panel-collapsed", !panelsOpen);
     byId(panelId).hidden = !panelsOpen;
   }
-  for (const id of ["chat-panel-toggle", "agent-panel-toggle"]) byId(id).setAttribute("aria-expanded", String(panelsOpen));
+  byId("chat-panel-toggle").setAttribute("aria-expanded", String(panelsOpen));
 }
 
-for (const id of ["chat-panel-toggle", "agent-panel-toggle"]) {
+for (const id of ["chat-panel-toggle"]) {
   byId(id).addEventListener("click", () => {
     panelsOpen = !panelsOpen;
     updatePanels();
@@ -63,7 +63,7 @@ for (const id of ["chat-panel-toggle", "agent-panel-toggle"]) {
   });
 }
 document.addEventListener("keydown", (event) => {
-  const activeToggle = route.page === "chat" ? "chat-panel-toggle" : route.page === "agent" ? "agent-panel-toggle" : null;
+  const activeToggle = route.page === "chat" ? "chat-panel-toggle" : null;
   if (event.key !== "Escape" || !panelsOpen || !activeToggle) return;
   const toggle = byId(activeToggle);
   panelsOpen = false;

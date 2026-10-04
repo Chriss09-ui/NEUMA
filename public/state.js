@@ -4,6 +4,21 @@ const REQUIREMENTS_KEY = "neuma.requirements.saved-list.v1";
 const AGENT_PREVIEW_PREFIX = "neuma.agent.preview.v1.";
 const AGENT_CONVERSATION_PREFIX = "neuma.agent.conversation.v2.";
 
+export function agentDisplayName(agent) {
+  const name = typeof agent?.profile?.name === "string" && agent.profile.name.trim() ? agent.profile.name : agent?.name;
+  return typeof name === "string" && name.trim() ? name.trim() : "未命名 Agent";
+}
+
+export function agentDisplayDescription(agent) {
+  if (typeof agent?.profile?.description === "string") return agent.profile.description;
+  return typeof agent?.draft?.goal?.value === "string" ? agent.draft.goal.value : "";
+}
+
+export function agentDisplayIcon(agent) {
+  return typeof agent?.profile?.icon === "string" && agent.profile.icon.trim()
+    ? agent.profile.icon.trim() : Array.from(agentDisplayName(agent))[0] || "A";
+}
+
 export function blankSession() {
   return { messages: [], draft: null, status: "idle", confirmed: false, lastQuestion: "", jev: null };
 }
@@ -125,7 +140,8 @@ export function upsertConfirmedRequirement(items, activeId, draft, newId) {
   const name = typeof draft.name?.value === "string" && draft.name.value.trim()
     ? draft.name.value.trim() : "未命名 Agent";
   const item = { id, name, draft: structuredClone(draft), updatedAt: new Date().toISOString(),
-    persisted: previous?.persisted ?? false, dirty: true };
+    persisted: previous?.persisted ?? false, dirty: true,
+    ...(previous?.profile ? { profile: structuredClone(previous.profile) } : {}) };
   return { items: [item, ...items.filter((entry) => entry.id !== id)], activeId: id };
 }
 

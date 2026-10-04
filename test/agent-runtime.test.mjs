@@ -81,3 +81,32 @@ test("历史按完整问答裁剪字符和请求字节，长回复仍显示但�
   assert.equal(chinese[0].role, "user");
   assert.equal(chinese.at(-1).role, "assistant");
 });
+
+test("名称、记忆与历史成果使用独立接口，展示修改不进入构建请求", async () => {
+  const requests = [], controller = new AbortController();
+  const profile = { name: "阅读伙伴", description: "", icon: "📚" };
+  const api = createAgentRuntime(async (path, options) => {
+    requests.push({ path, ...options });
+    if (path === "/api/agent-profiles") return Response.json({ profiles: [{ id: "one", ...profile }] });
+    if (path.endsWith("/profile")) return Response.json({ profile: JSON.parse(options.body) });
+    if (path.endsWith("/memory")) return Response.json({ memory: options.body ? JSON.parse(options.body).memory : "我的偏好" });
+    if (path.endsWith("/files")) return Response.json({ files: [{ path: "报告/本周.md", size: 20 }] });
+    if (path.includes("/file?")) return Response.json({ path: "报告/本周.md", content: "正文", truncated: true });
+    return Response.json({ agent });
+  });
+  assert.equal((await api.listProfiles()).profiles[0].name, "阅读伙伴");
+  assert.deepEqual((await api.saveProfile("one/two", profile)).profile, profile);
+  assert.equal((await api.getMemory("one/two", { signal: controller.signal })).memory, "我的偏好");
+  assert.equal((await api.saveMemory("one/two", "新偏好")).memory, "新偏好");
+  assert.equal((await api.listFiles("one/two")).files[0].size, 20);
+  assert.equal((await api.readFile("one/two", "报告/本周.md")).truncated, true);
+  assert.equal(requests[1].path, "/api/agents/one%2Ftwo/profile");
+  assert.deepEqual(JSON.parse(requests[1].body), profile);
+  assert.equal(requests[2].signal, controller.signal);
+  assert.equal(requests[5].path, `/api/agents/one%2Ftwo/file?path=${encodeURIComponent("报告/本周.md")}`);
+  await api.build({ ...agent, profile });
+  assert.deepEqual(JSON.parse(requests[6].body), { id: agent.id, name: agent.name, draft: agent.draft });
+  assert.equal(agentSourceKey({ ...agent, profile }), agentSourceKey(agent));
+  controller.abort();
+  await assert.rejects(api.listProfiles({ signal: controller.signal }), { name: "AbortError" });
+});

@@ -197,3 +197,27 @@ test("旧版 JSON 仍按原有确认语义显示，确认完成才创建智能�
   assert.equal(ui.session().messages.length, 0);
   assert.equal(ui.get("messages").children[0].className, "welcome");
 });
+
+test("修改展示信息同步管理卡、交付卡与迭代名称，原始需求及ID保持独立", async () => {
+  let turns = 0;
+  const ui = setup(async () => Response.json(result({ status: "ready", confirmed: true,
+    ...(++turns > 1 ? { draft: { name: { value: "新的需求名称" }, goal: { value: "新的目标" } } } : {}) })));
+  await ui.submit("确认需求");
+  const profile = { name: "我的会议伙伴", description: "", icon: "📝" };
+  await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "test-agent", profile } });
+  const card = ui.get("agents-list").children[0];
+  assert.equal(card.children[1].textContent, "我的会议伙伴");
+  assert.equal(card.children[2].textContent, "");
+  assert.equal(card.children[0].children[0].textContent, "📝");
+  assert.equal(ui.get("iteration-agent-name").textContent, "我的会议伙伴");
+  assert.equal(ui.get("messages").children.at(-1).children[2].textContent, "我的会议伙伴");
+  assert.equal(ui.agents()[0].name, "会议助手");
+  assert.equal(ui.agents()[0].draft.name.value, "会议助手");
+  await ui.document.dispatchEvent({ type: "neuma:agent-profiles-loaded", detail: { profiles: [{ id: "test-agent", name: "迟到旧名字", description: "旧简介", icon: "旧" }] } });
+  assert.equal(ui.get("agents-list").children[0].children[1].textContent, "我的会议伙伴");
+  await ui.submit("迭代需求");
+  assert.equal(ui.agents()[0].id, "test-agent");
+  assert.equal(ui.agents()[0].name, "新的需求名称");
+  assert.equal(ui.agents()[0].profile.name, "我的会议伙伴");
+  assert.equal(ui.get("iteration-agent-name").textContent, "我的会议伙伴");
+});

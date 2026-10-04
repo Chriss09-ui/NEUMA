@@ -24,7 +24,7 @@ function stream() {
   };
 }
 
-async function setup({ turn, build, inspect, stored = new Map() } = {}) {
+async function setup({ turn, build, inspect, profiles, stored = new Map() } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -43,13 +43,16 @@ async function setup({ turn, build, inspect, stored = new Map() } = {}) {
     focus() { document.activeElement = this; }
     click() { return this.dispatchEvent({ type: "click" }); }
   }
-  const nodes = new Map(), requests = [];
+  const nodes = new Map(), requests = [], runtimeEvents = [], profileEvents = [];
   const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   document.getElementById = get;
   document.createElement = () => new Element();
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
+  document.addEventListener("neuma:agent-runtime-change", (event) => runtimeEvents.push(event.detail));
+  document.addEventListener("neuma:agent-profile-changed", (event) => profileEvents.push(event.detail));
+  document.addEventListener("neuma:agent-profiles-loaded", (event) => profileEvents.push(event.detail));
   let ids = 0;
-  const context = vm.createContext({ ...state, document, AbortController, TextDecoder, TextEncoder, Event, CustomEvent: Event,
+  const context = vm.createContext({ ...state, document, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
     window: { confirm: () => true, localStorage: {
       getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key),
     } },
@@ -58,6 +61,7 @@ async function setup({ turn, build, inspect, stored = new Map() } = {}) {
     fetch: async (path, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : undefined;
       requests.push({ path, body, signal: options.signal, headers: options.headers });
+      if (path === "/api/agent-profiles") return profiles?.() ?? Response.json({ profiles: [] });
       if (path === "/api/agents/turn") return turn?.(body, options) ?? Response.json(completed(body));
       if (path === "/api/agents/build") return build?.(body, options) ?? Response.json({ agent: { ...body, status: "ready", revision: 2 } });
       if (path === "/api/agents/cancel") return Response.json({ cancelled: true });
@@ -69,7 +73,7 @@ async function setup({ turn, build, inspect, stored = new Map() } = {}) {
   await emit("neuma:agents-changed", { items: requirements, busy: false });
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route("one");
-  return { get, requests, stored, emit, route,
+  return { get, requests, stored, emit, route, document, runtimeEvents, profileEvents,
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context),
     runtime: (id = "one") => vm.runInContext(`runtimes.get(${JSON.stringify(id)})`, context),
     submit: (text) => { get("agent-message").value = text; return get("agent-chat-form").dispatchEvent({ type: "submit", preventDefault() {} }); },
@@ -135,6 +139,17 @@ test("停止发送取消请求并保留部分回复，迟到完成不会把任�
   const recovery = ui.get("agent-messages").children[0].children.at(-1).children[1];
   ui.get("agent-message").value = "下一条草稿"; await recovery.click();
   assert.equal(ui.get("agent-message").value, "下一条草稿\n\n当前任务");
+});
+
+test("任务结束保留产物栏的操作焦点，发送按钮上的焦点才恢复到输入框", async () => {
+  for (const focusedId of ["agent-artifacts-toggle", "agent-send"]) {
+    const partial = stream(), ui = await setup({ turn: () => partial.response });
+    const pending = ui.submit("当前任务"); await settle();
+    ui.get(focusedId).focus();
+    partial.send({ type: "done", result: completed(ui.requests.find((request) => request.path.endsWith("/turn")).body) });
+    partial.close(); await pending;
+    assert.equal(ui.document.activeElement, ui.get(focusedId === "agent-send" ? "agent-message" : focusedId));
+  }
 });
 
 test("断流保留部分内容与失败标记，恢复输入后重试不复制失败消息和上下文", async () => {
@@ -257,4 +272,81 @@ test("被新需求中断的构建先收尾再生成最新版本，迟到旧产�
   assert.equal(ui.runtime().definition.draft.goal.value, "构建中的新需求");
   assert.equal(ui.runtime().status, "ready");
   assert.equal(ui.runtime().rebuildRequested, false);
+});
+
+test("展示 overlay 同步标题、简介、emoji和消息标签，不改变构建来源或运行版本", async () => {
+  const ui = await setup();
+  const profile = { name: "我的会议伙伴", description: "", icon: "📝" };
+  await ui.emit("neuma:agents-changed", { items: requirements.map((item) => item.id === "one" ? { ...item, profile } : item), busy: false });
+  assert.equal(ui.get("agent-title").textContent, "我的会议伙伴");
+  assert.equal(ui.get("agent-subtitle").textContent, "");
+  assert.equal(ui.get("agent-icon").textContent, "📝");
+  assert.equal(ui.get("sidebar-agent-list").children[0].children[0].textContent, "📝");
+  assert.equal(ui.get("sidebar-agent-list").children[0].children[1].children[0].textContent, "我的会议伙伴");
+  assert.equal(ui.get("agent-messages").children[0].children[1].textContent, "这里是「我的会议伙伴」的对话");
+  assert.equal(ui.runtime().status, "ready");
+  assert.equal(ui.runtime().definition.revision, 1);
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/build")), false);
+  await ui.submit("整理会议");
+  assert.equal(ui.get("agent-messages").children.at(-1).attributes.get("aria-label"), "我的会议伙伴的回复");
+  assert.equal(ui.requests.find((request) => request.path.endsWith("/turn")).body.agentId, "one");
+});
+
+test("面板可以主动请求简洁状态快照，快照独立且递归请求不会重复广播", async () => {
+  const ui = await setup();
+  await ui.emit("neuma:agent-runtime-request", {});
+  const snapshot = ui.runtimeEvents.at(-1);
+  assert.equal(snapshot.agentId, "one");
+  assert.equal(snapshot.ready, true);
+  assert.equal(snapshot.busy, false);
+  assert.equal(snapshot.messages, undefined);
+  snapshot.agent.draft.goal.value = "外部修改";
+  snapshot.definition.revision = 99;
+  assert.equal(ui.runtime().definition.revision, 1);
+  let calls = 0;
+  ui.document.addEventListener("neuma:agent-runtime-change", () => {
+    calls++;
+    ui.emit("neuma:agent-runtime-request", { agentId: "one" });
+  });
+  await ui.emit("neuma:agent-runtime-request", {});
+  assert.equal(calls, 1);
+});
+
+test("查询与重新生成返回展示信息时向管理模块同步，迟到列表不覆盖已修改资料", async () => {
+  let release;
+  const list = new Promise((done) => { release = done; });
+  const ui = await setup({ profiles: () => list,
+    inspect: () => Response.json({ agent: definition(), profile: { name: "服务端名字", description: "服务端简介", icon: "📚" } }),
+    build: (body) => Response.json({ agent: { ...body, status: "ready", revision: 2, profile: { name: "生成后的名字", description: "", icon: "🧠" } } }),
+  });
+  assert.equal(ui.profileEvents.find((detail) => detail.id === "one").profile.name, "服务端名字");
+  await ui.emit("neuma:agent-profile-changed", { id: "one", profile: { name: "刚编辑的名字", description: "", icon: "新" } });
+  release(Response.json({ profiles: [{ id: "one", name: "迟到旧名字", description: "旧", icon: "旧" }] })); await settle();
+  assert.equal(ui.profileEvents.find((detail) => Array.isArray(detail.profiles)).profiles.length, 0);
+  await ui.get("agent-build").click();
+  assert.equal(ui.profileEvents.filter((detail) => detail.id === "one").at(-1).profile.name, "生成后的名字");
+});
+
+test("展示列表读取失败只显示轻提示，不阻止对话或移除已有资料", async () => {
+  const ui = await setup({ profiles: () => Response.json({ error: "列表暂时无法读取" }, { status: 503 }) });
+  await settle();
+  await ui.emit("neuma:agents-changed", { items: requirements.map((item) => item.id === "one"
+    ? { ...item, profile: { name: "已有名字", description: "已有简介", icon: "📝" } } : item), busy: false });
+  assert.equal(ui.get("agent-title").textContent, "已有名字");
+  assert.equal(ui.get("agent-icon").textContent, "📝");
+  assert.equal(ui.get("agent-send").disabled, false);
+  assert.equal(ui.get("agent-error").hidden, true);
+  assert.match(ui.get("agent-runtime-status").textContent, /名称与图标暂时未加载/);
+  assert.equal(ui.profileEvents.filter((detail) => Array.isArray(detail.profiles)).length, 0);
+});
+
+test("资料保存后才返回的旧查询不会发送覆盖事件", async () => {
+  let release;
+  const ui = await setup({ inspect: (path) => path.endsWith("/two")
+    ? new Promise((done) => { release = done; }) : Response.json({ agent: definition() }) });
+  const pending = ui.route("two"); await settle();
+  await ui.emit("neuma:agent-profile-changed", { id: "two", profile: { name: "新的日报名字", description: "", icon: "新" } });
+  release(Response.json({ agent: definition("two"), profile: { name: "旧日报名字", description: "旧", icon: "旧" } })); await pending;
+  assert.equal(ui.profileEvents.filter((detail) => detail.id === "two").length, 1);
+  assert.equal(ui.profileEvents.filter((detail) => detail.id === "two")[0].profile.name, "新的日报名字");
 });

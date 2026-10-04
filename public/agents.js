@@ -1,4 +1,4 @@
-import { deleteAgentPreview, loadAgentPreview, saveAgentPreview } from "./state.js";
+import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, deleteAgentPreview, loadAgentPreview, saveAgentPreview } from "./state.js";
 import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js";
 import { agentHistory, agentSourceKey, createAgentRuntime } from "./agent-runtime.js";
 
@@ -8,6 +8,8 @@ let agents = [];
 let mainBusy = false;
 let route = { page: "chat", agentId: null };
 const conversations = new Map(), runtimes = new Map(), inputs = new Map();
+const profileVersions = new Map(), broadcasting = new Set();
+let profilesError = "";
 const api = createAgentRuntime();
 const byId = (id) => document.getElementById(id);
 const input = byId("agent-message");
@@ -55,13 +57,14 @@ function renderSidebar() {
   for (const agent of agents) {
     const link = element("a", "sidebar-agent", "");
     link.href = `#agent/${encodeURIComponent(agent.id)}`;
-    link.setAttribute("aria-label", `进入 ${agent.name} 的对话`);
+    const name = agentDisplayName(agent);
+    link.setAttribute("aria-label", `进入 ${name} 的对话`);
     if (visible(agent.id)) link.setAttribute("aria-current", "page");
-    const mark = element("span", "agent-avatar", Array.from(agent.name)[0] || "A");
+    const mark = element("span", "agent-avatar", agentDisplayIcon(agent));
     mark.setAttribute("aria-hidden", "true");
     const state = runtime(agent);
     const label = element("span", "sidebar-agent-label", "");
-    label.append(element("strong", "", agent.name), element("small", "", state.status === "ready" ? "可以运行"
+    label.append(element("strong", "", name), element("small", "", state.status === "ready" ? "可以运行"
       : state.status === "building" ? "正在生成" : state.status === "stale" ? "需求已更新 · 待生成" : "待生成"));
     link.append(mark, label);
     list.append(link);
@@ -75,9 +78,9 @@ function renderMessages(agent) {
   item.userRows = new Map();
   if (!item.messages.length) {
     const welcome = element("div", "welcome", "");
-    welcome.append(element("span", "welcome-mark", Array.from(agent.name)[0] || "A"),
-      element("strong", "", `这里是「${agent.name}」的对话`),
-      element("p", "", agent.draft.goal?.value || "根据已确认的需求处理你的任务。"),
+    welcome.append(element("span", "welcome-mark", agentDisplayIcon(agent)),
+      element("strong", "", `这里是「${agentDisplayName(agent)}」的对话`),
+      element("p", "", agentDisplayDescription(agent)),
       element("p", "muted-note", runtime(agent).status === "ready"
         ? "输入一项任务，让这个智能体开始处理。" : "智能体生成完成后，就可以在这里执行任务。"));
     container.append(welcome);
@@ -89,7 +92,7 @@ function renderMessages(agent) {
       container.append(row);
     }
     else {
-      const view = createReplyView(agent.name);
+      const view = createReplyView(agentDisplayName(agent));
       view.update(message);
       container.append(view.row);
       if (message === item.turn?.reply) item.replyView = view;
@@ -105,6 +108,7 @@ function renderControls(agent) {
       : state.status === "stale" ? "需求已更新，请重新生成后继续任务。"
         : state.status === "checking" || state.status === "unchecked" ? "正在读取智能体…"
           : state.status === "error" ? "生成未完成，可以重试。" : "需求已确认，点击生成智能体。";
+  if (profilesError) byId("agent-runtime-status").textContent += " · 名称与图标暂时未加载";
   byId("agent-build").disabled = Boolean(operation) || state.status === "checking";
   byId("agent-build").textContent = state.status === "building" ? "正在生成…" : state.definition ? "重新生成智能体" : "生成智能体";
   byId("agent-send").hidden = Boolean(operation);
@@ -114,6 +118,42 @@ function renderControls(agent) {
   byId("agent-chat-form").setAttribute("aria-busy", String(Boolean(operation)));
   byId("agent-save-chat").disabled = Boolean(item.turn);
   showError(item.error || state.error);
+  broadcastRuntime(agent);
+}
+
+function broadcastRuntime(agent = current()) {
+  if (!agent || broadcasting.has(agent.id)) return;
+  agent = agents.find((entry) => entry.id === agent.id);
+  if (!agent) return;
+  const state = runtime(agent), item = conversation(agent.id), busy = Boolean(state.operation || item.turn);
+  broadcasting.add(agent.id);
+  try {
+    document.dispatchEvent(new CustomEvent("neuma:agent-runtime-change", { detail: {
+      agentId: agent.id, agent: structuredClone(agent), definition: state.definition ? structuredClone(state.definition) : null,
+      status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || state.error,
+    } }));
+  } finally { broadcasting.delete(agent.id); }
+}
+
+function syncProfile(id, profile, version) {
+  const agent = agents.find((entry) => entry.id === id);
+  if (!agent || !profile || typeof profile !== "object" || version !== (profileVersions.get(id) || 0)) return;
+  const normalized = { ...profile, id };
+  if (JSON.stringify(agent.profile) === JSON.stringify(normalized)) return;
+  document.dispatchEvent(new CustomEvent("neuma:agent-profile-changed", { detail: { id, profile: normalized } }));
+}
+
+async function loadProfiles() {
+  const versions = new Map(profileVersions);
+  try {
+    const result = await api.listProfiles();
+    if (!Array.isArray(result.profiles)) throw new Error("名称与图标暂时无法读取");
+    const profiles = result.profiles.filter((profile) => profile && typeof profile.id === "string"
+      && (versions.get(profile.id) || 0) === (profileVersions.get(profile.id) || 0));
+    document.dispatchEvent(new CustomEvent("neuma:agent-profiles-loaded", { detail: { profiles } }));
+    profilesError = "";
+  } catch { profilesError = "名称与图标暂时未加载"; }
+  if (route.page === "agent" && current()) renderControls(current());
 }
 
 function renderWorkspace() {
@@ -122,11 +162,12 @@ function renderWorkspace() {
   byId("agent-missing").hidden = Boolean(agent);
   byId("agent-workspace").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
-  byId("agent-title").textContent = agent?.name ?? "找不到智能体";
-  byId("agent-subtitle").textContent = agent?.draft.goal?.value ?? "请回到 NUEMA 创建或确认需求。";
+  byId("agent-title").textContent = agent ? agentDisplayName(agent) : "找不到智能体";
+  byId("agent-icon").textContent = agent ? agentDisplayIcon(agent) : "";
+  byId("agent-subtitle").textContent = agent ? agentDisplayDescription(agent) : "请回到 NUEMA 创建或确认需求。";
   if (!agent) return;
-  byId("agent-conversation-title").textContent = agent.name;
-  byId("agent-message-label").textContent = `给 ${agent.name} 的任务`;
+  byId("agent-conversation-title").textContent = agentDisplayName(agent);
+  byId("agent-message-label").textContent = `给 ${agentDisplayName(agent)} 的任务`;
   byId("agent-iterate").disabled = mainBusy;
   byId("agent-save-entry").disabled = mainBusy || (agent.persisted && !agent.dirty);
   byId("agent-save-entry").textContent = agent.persisted && !agent.dirty ? "需求已保存" : "保存智能体需求";
@@ -149,6 +190,7 @@ async function inspectAgent(agent) {
   const state = runtime(agent);
   if (state.status !== "unchecked") return;
   const sequence = ++state.sequence;
+  const profileVersion = profileVersions.get(agent.id) || 0;
   state.status = "checking";
   if (visible(agent.id)) renderControls(agent);
   try {
@@ -156,6 +198,7 @@ async function inspectAgent(agent) {
     if (state.sequence !== sequence || !agents.some((item) => item.id === agent.id)) return;
     state.definition = result.agent;
     state.status = !result.agent ? "missing" : agentSourceKey(result.agent) === state.sourceKey ? "ready" : "stale";
+    syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
   } catch (error) {
     if (state.sequence !== sequence) return;
     state.status = "error";
@@ -176,6 +219,7 @@ async function buildAgent(id, queueIfBusy = false) {
   }
   state.rebuildRequested = false;
   const operation = { controller: new AbortController(), sourceKey: agentSourceKey(agent) };
+  const profileVersion = profileVersions.get(id) || 0;
   state.sequence++;
   state.operation = operation;
   state.status = "building";
@@ -194,6 +238,7 @@ async function buildAgent(id, queueIfBusy = false) {
     state.definition = result.agent;
     state.status = "ready";
     item.sessionId = crypto.randomUUID();
+    syncProfile(id, result.profile || result.agent.profile, profileVersion);
   } catch (error) {
     if (state.sourceKey !== operation.sourceKey) return;
     state.status = "error";
@@ -285,7 +330,11 @@ async function sendMessage() {
       if (user.delivery !== "sent") item.userRows.get(user)?.replaceWith(renderUserMessage(user, input));
     }
     item.turn = item.replyView = null;
-    if (visible(agent.id, item)) { renderControls(agent); input.focus(); }
+    if (visible(agent.id, item)) {
+      const restoreInput = [input, byId("agent-send"), byId("agent-cancel-reply")].includes(document.activeElement);
+      renderControls(agent);
+      if (restoreInput) input.focus();
+    }
     await rebuildIfRequested(agent.id, state);
   }
 }
@@ -322,6 +371,14 @@ document.addEventListener("neuma:route", (event) => {
   }
 });
 document.addEventListener("neuma:agent-build", (event) => buildAgent(event.detail.id, true));
+document.addEventListener("neuma:agent-runtime-request", (event) => {
+  const agent = agents.find((item) => item.id === (event.detail?.agentId ?? route.agentId));
+  if (agent) broadcastRuntime(agent);
+});
+document.addEventListener("neuma:agent-profile-changed", (event) => {
+  const { id } = event.detail ?? {};
+  if (typeof id === "string") profileVersions.set(id, (profileVersions.get(id) || 0) + 1);
+});
 document.addEventListener("neuma:agent-removed", (event) => {
   const id = event.detail.id, item = conversations.get(id);
   runtimes.get(id)?.operation?.controller.abort();
@@ -329,6 +386,7 @@ document.addEventListener("neuma:agent-removed", (event) => {
   conversations.delete(id);
   runtimes.delete(id);
   inputs.delete(id);
+  profileVersions.delete(id);
   if (!deleteAgentPreview(storage, id)) showError("入口已移除，但浏览器未能删除保存的对话。");
 });
 document.addEventListener("neuma:agent-saved", (event) => {
@@ -366,3 +424,4 @@ byId("agent-new-chat").addEventListener("click", () => {
 byId("agent-chat-form").addEventListener("submit", (event) => { event.preventDefault(); return sendMessage(); });
 
 document.dispatchEvent(new CustomEvent("neuma:agents-request"));
+void loadProfiles();

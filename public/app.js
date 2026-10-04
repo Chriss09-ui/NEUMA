@@ -1,4 +1,4 @@
-import { blankSession, clearSession, deleteRequirement, initializeSession, loadSavedRequirements,
+import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, blankSession, clearSession, deleteRequirement, initializeSession, loadSavedRequirements,
   loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement } from "./state.js";
 import { addUserMessage, createReplyView, mountWelcome, readReply, renderUserMessage } from "./chat-ui.js";
@@ -11,6 +11,7 @@ let hasSavedCopy = initial.hasSavedCopy;
 let pendingLegacy = initial.legacySession.messages.length || initial.legacySession.draft
   ? initial.legacySession : null;
 let agents = loadSavedRequirements(browserStorage);
+const profileMap = new Map();
 let activeAgentId = null;
 let busy = false;
 let pendingReply = null, replyView = null, activeController = null;
@@ -116,7 +117,9 @@ function renderMessages(scrollToEnd = true) {
   if (delivered) {
     const needsSave = delivered.dirty || !delivered.persisted;
     const card = element("div", "delivery-card");
-    card.append(element("span", "agent-type", "独立对话入口"), element("strong", "", delivered.name),
+    card.append(element("span", "agent-avatar", agentDisplayIcon(delivered)),
+      element("span", "agent-type", "独立对话入口"), element("strong", "", agentDisplayName(delivered)),
+      element("p", "", agentDisplayDescription(delivered)),
       element("p", "muted-note", "需求已确认。进入助手可查看生成状态、重试，并在生成后直接对话。"));
     card.append(button("primary", needsSave ? "保存需求并进入助手" : "进入助手", () => {
       if (needsSave && !saveAgent(delivered.id)) return;
@@ -214,27 +217,29 @@ function renderAgents() {
     agentsEl.append(empty);
   }
   for (const agent of agents) {
+    const name = agentDisplayName(agent);
     const card = element("article", `card agent-card${agent.id === activeAgentId ? " active" : ""}`);
     const top = element("div", "agent-card-top");
-    top.append(element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "Agent"));
+    top.append(element("span", "agent-avatar", agentDisplayIcon(agent)),
+      element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "Agent"));
     const state = agent.dirty && agent.persisted ? ["warn", "修改未保存"]
       : agent.persisted ? ["ok", "已保存"] : ["", "仅当前页"];
     top.append(element("span", `status ${state[0]}`, state[1]));
-    card.append(top, element("h3", "", agent.name));
-    card.append(element("p", "", agent.draft.goal?.value || "需求已确认"));
+    card.append(top, element("h3", "", name));
+    card.append(element("p", "", agentDisplayDescription(agent)));
     const time = formatTime(agent.updatedAt);
     if (time) card.append(element("span", "agent-meta", `更新于 ${time}${agent.id === activeAgentId ? " · 正在对话中编辑" : ""}`));
     const actions = element("div", "agent-actions");
     actions.append(button("secondary", "进入对话", () => navigate({ page: "agent", agentId: agent.id }),
-      `进入 ${agent.name} 的对话`));
-    actions.append(button("ghost-button", "让 NUEMA 迭代", () => openAgent(agent.id), `让 NUEMA 迭代 ${agent.name}`));
+      `进入 ${name} 的对话`));
+    actions.append(button("ghost-button", "让 NUEMA 迭代", () => openAgent(agent.id), `让 NUEMA 迭代 ${name}`));
     if (agent.dirty || !agent.persisted) {
       actions.append(button("secondary", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
-        `保存 ${agent.name} 的需求`));
+        `保存 ${name} 的需求`));
     }
-    actions.append(button("ghost-button", "导出", () => downloadJson(`${agent.name}.json`,
+    actions.append(button("ghost-button", "导出", () => downloadJson(`${name}.json`,
       { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt, exportedAt: new Date().toISOString() })));
-    actions.append(button("ghost-button danger", "删除", () => removeAgent(agent.id), `删除 ${agent.name} 的需求`));
+    actions.append(button("ghost-button danger", "删除", () => removeAgent(agent.id), `删除 ${name} 的需求`));
     card.append(actions);
     agentsEl.append(card);
   }
@@ -246,7 +251,7 @@ function openAgent(id) {
   const agent = agents.find((item) => item.id === id);
   if (!agent) return;
   if (agent.id !== activeAgentId && (session.draft || session.messages.length)
-    && !window.confirm(`打开“${agent.name}”会替换当前对话和草稿。继续吗？`)) return;
+    && !window.confirm(`打开“${agentDisplayName(agent)}”会替换当前对话和草稿。继续吗？`)) return;
   if (agent.id !== activeAgentId) {
     session = blankSession();
     diagnosticTurns = [];
@@ -254,7 +259,7 @@ function openAgent(id) {
     session.status = "ready";
     session.confirmed = true;
     session.messages.push({ role: "assistant",
-      content: `我们继续迭代“${agent.name}”。右侧是当前确认的需求，你可以告诉我希望调整什么；确认修改后会更新同一个智能体入口。` });
+      content: `我们继续迭代“${agentDisplayName(agent)}”。右侧是当前确认的需求，你可以告诉我希望调整什么；确认修改后会更新同一个智能体入口。` });
     activeAgentId = id;
     pendingLegacy = null;
     inputEl.value = "";
@@ -285,7 +290,7 @@ function saveAgent(id) {
 async function removeAgent(id) {
   if (busy) return;
   const agent = agents.find((item) => item.id === id);
-  if (!agent || !window.confirm(`删除“${agent.name}”及其需求？会停止它的任务，保留专属目录中的文件。${agent.persisted ? "浏览器中保存的版本也会删除。" : ""}${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
+  if (!agent || !window.confirm(`删除“${agentDisplayName(agent)}”及其需求？会停止它的任务，保留专属目录中的文件。${agent.persisted ? "浏览器中保存的版本也会删除。" : ""}${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
   try {
     const response = await fetch(`/api/agents/${encodeURIComponent(id)}/remove`, {
       method: "POST", headers: { "content-type": "application/json" }, body: "{}",
@@ -301,6 +306,7 @@ async function removeAgent(id) {
     return;
   }
   agents = agents.filter((item) => item.id !== id);
+  profileMap.delete(id);
   document.dispatchEvent(new CustomEvent("neuma:agent-removed", { detail: { id } }));
   if (activeAgentId === id) {
     session = blankSession();
@@ -319,7 +325,7 @@ function render(scrollToEnd = true) {
   renderAgents();
   const editingAgent = agents.find((item) => item.id === activeAgentId);
   document.getElementById("iteration-context").hidden = !editingAgent;
-  document.getElementById("iteration-agent-name").textContent = editingAgent?.name ?? "";
+  document.getElementById("iteration-agent-name").textContent = editingAgent ? agentDisplayName(editingAgent) : "";
   sendEl.disabled = busy;
   sendEl.hidden = busy;
   cancelEl.hidden = !busy;
@@ -554,6 +560,26 @@ document.getElementById("agents-create").addEventListener("click", () => {
   if (session.draft || session.messages.length) resetEl.click();
 });
 
+function mergeProfiles(profiles, onlyMissing = false) {
+  if (!Array.isArray(profiles)) return;
+  let changed = false;
+  for (const profile of profiles) {
+    if (!profile || typeof profile.id !== "string" || typeof profile.name !== "string" || !profile.name.trim()
+      || (onlyMissing && profileMap.has(profile.id))) continue;
+    if (JSON.stringify(profileMap.get(profile.id)) === JSON.stringify(profile)) continue;
+    profileMap.set(profile.id, structuredClone(profile));
+    if (agents.some((agent) => agent.id === profile.id)) changed = true;
+  }
+  if (!changed) return;
+  agents = agents.map((agent) => profileMap.has(agent.id) ? { ...agent, profile: profileMap.get(agent.id) } : agent);
+  render(false);
+}
+
+document.addEventListener("neuma:agent-profile-changed", (event) => {
+  const { id, profile } = event.detail ?? {};
+  if (typeof id === "string" && profile && typeof profile === "object") mergeProfiles([{ ...profile, id }]);
+});
+document.addEventListener("neuma:agent-profiles-loaded", (event) => mergeProfiles(event.detail?.profiles, true));
 document.addEventListener("neuma:agents-request", renderAgents);
 document.addEventListener("neuma:agent-action", (event) => {
   const { action, id } = event.detail ?? {};

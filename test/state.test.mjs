@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { agentDisplayDescription, agentDisplayIcon, agentDisplayName } from "../public/state.js";
 import { blankSession, clearSession, deleteRequirement, hasSavedSession, initializeSession,
   loadSavedRequirements, loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement, appendAgentPreview, deleteAgentPreview, loadAgentPreview,
@@ -190,4 +191,38 @@ test("真实对话保存角色、版本和结果状态，刷新后将未结束�
   assert.equal(loadAgentPreview(local, "meeting").length, 0);
   assert.equal(deleteAgentPreview(local, "weekly"), true);
   assert.deepEqual(loadAgentPreview(local, "weekly"), []);
+});
+
+test("展示信息独立于原始需求，简介空串与图标回退具有明确语义", () => {
+  const raw = { id: "one", name: "原始名称", draft: { goal: { value: "原始目标" } } };
+  assert.equal(agentDisplayName(raw), "原始名称");
+  assert.equal(agentDisplayDescription(raw), "原始目标");
+  assert.equal(agentDisplayIcon(raw), "原");
+  const overlay = { ...raw, profile: { name: "新名称", description: "", icon: "🧠" } };
+  assert.equal(agentDisplayName(overlay), "新名称");
+  assert.equal(agentDisplayDescription(overlay), "");
+  assert.equal(agentDisplayIcon(overlay), "🧠");
+  assert.equal(agentDisplayIcon({ ...overlay, profile: { ...overlay.profile, icon: "" } }), "新");
+  assert.equal(agentDisplayName({ ...raw, profile: { name: " " } }), "原始名称");
+  assert.equal(agentDisplayName(null), "未命名 Agent");
+  assert.equal(raw.name, "原始名称");
+});
+
+test("需求迭代保留展示 overlay，保存需求只写原始字段", () => {
+  const previous = { id: "one", name: "原始名称", draft: { name: { value: "原始名称" }, goal: { value: "原始目标" } },
+    profile: { id: "one", name: "展示名称", description: "展示简介", icon: "📚" }, persisted: true };
+  const next = upsertConfirmedRequirement([previous], "one", { name: { value: "新需求名称" }, goal: { value: "新目标" } }, "unused").items[0];
+  assert.equal(next.id, "one");
+  assert.equal(next.name, "新需求名称");
+  assert.equal(agentDisplayName(next), "展示名称");
+  assert.deepEqual(next.profile, previous.profile);
+  assert.notEqual(next.profile, previous.profile);
+  const values = new Map(), storage = {
+    getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value),
+  };
+  assert.equal(saveRequirement(storage, next), true);
+  const saved = loadSavedRequirements(storage)[0];
+  assert.equal(saved.name, "新需求名称");
+  assert.equal(saved.profile, undefined);
+  assert.equal(saved.draft.goal.value, "新目标");
 });
