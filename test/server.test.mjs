@@ -37,10 +37,13 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   });
   const page = await invoke(handler, "GET", "/");
   assert.equal(page.status, 200);
-  assert.match(page.text, /需求层测试版/);
+  assert.match(page.text, /Agent 运行测试版/);
   assert.match(page.text, /id="agents-list"/);
   assert.match(page.text, /id="sidebar-agent-list"/);
   assert.match(page.text, /id="page-agent"/);
+  assert.match(page.text, /id="agent-runtime-status"[^>]*>智能体界面尚未加载/);
+  assert.match(page.text, /id="agent-send"[^>]*disabled/);
+  assert.match(page.text, /id="agent-build"[^>]*disabled/);
   assert.match(page.text, /让 NUEMA 帮我迭代/);
   assert.match(page.text, /<h1 id="chat-title">NUEMA<\/h1>/);
   assert.doesNotMatch(page.text, /主\s*Agent|NEUMA/);
@@ -332,7 +335,7 @@ test("确认清单与明确确认保持原文，无需额外调用模型", async
   await approved.pending;
   const approvedResult = approved.events().at(-1).result;
   assert.equal(approvedResult.confirmed, true);
-  assert.match(approvedResult.reply, /当前可以预览交互，任务执行能力尚未接入/);
+  assert.match(approvedResult.reply, /正在生成可对话的助手/);
   assert.equal(draftCalls, 1);
   assert.equal(replyCalls, 0);
 });

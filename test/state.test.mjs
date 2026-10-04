@@ -171,3 +171,23 @@ test("预览记录限制输入体积，损坏或执行回复不能被当成预�
   assert.equal(saveAgentPreview(unavailable, "a", old), false);
   assert.equal(deleteAgentPreview(unavailable, "a"), false);
 });
+
+test("真实对话保存角色、版本和结果状态，刷新后将未结束任务标为停止", () => {
+  const local = storage();
+  const messages = [
+    { role: "user", content: "写周报", delivery: "sent", revision: "1" },
+    { role: "assistant", content: "本周完成…", status: "complete", revision: "1" },
+    { role: "user", content: "再短一点", delivery: "pending", revision: "1" },
+    { role: "assistant", content: "本周", status: "writing", revision: "1" },
+  ];
+  assert.equal(saveAgentPreview(local, "weekly", messages), true);
+  const saved = loadAgentPreview(local, "weekly");
+  assert.equal(saved[0].delivery, "sent");
+  assert.equal(saved[1].status, "complete");
+  assert.equal(saved[1].revision, "1");
+  assert.equal(saved[2].delivery, "stopped");
+  assert.equal(saved[3].status, "stopped");
+  assert.equal(loadAgentPreview(local, "meeting").length, 0);
+  assert.equal(deleteAgentPreview(local, "weekly"), true);
+  assert.deepEqual(loadAgentPreview(local, "weekly"), []);
+});

@@ -140,16 +140,21 @@ export class ProjectManager {
 
   async load() {
     if (this.records) return;
-    try {
-      const file = join(this.dataDir, "projects.json");
-      if ((await stat(file)).size > 2_000_000) throw new Error();
-      const data = JSON.parse(await readFile(file, "utf8"));
-      if (data.version !== 1 || !Array.isArray(data.projects) || data.projects.some((item) => !item.id || !isAbsolute(item.root))) throw new Error();
-      this.records = data.projects;
-    } catch (error) {
-      if (error.code === "ENOENT") this.records = [];
-      else throw new InputError("项目记录无法读取，请保留原文件并检查 .neuma/projects.json");
-    }
+    this.loading ??= (async () => {
+      try {
+        const file = join(this.dataDir, "projects.json");
+        if ((await stat(file)).size > 2_000_000) throw new Error();
+        const data = JSON.parse(await readFile(file, "utf8"));
+        if (data.version !== 1 || !Array.isArray(data.projects) || data.projects.some((item) => !item.id || !isAbsolute(item.root))) throw new Error();
+        this.records = data.projects;
+      } catch (error) {
+        if (error.code === "ENOENT") this.records = [];
+        else throw new InputError("项目记录无法读取，请保留原文件并检查 .neuma/projects.json");
+      }
+    })();
+    const loading = this.loading;
+    try { await loading; }
+    finally { if (this.loading === loading) this.loading = null; }
   }
 
   change(action, { signal } = {}) {

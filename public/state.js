@@ -2,6 +2,7 @@ const STORAGE_KEY = "neuma.requirements.session.optin.v1";
 const LEGACY_STORAGE_KEY = "neuma.requirements.session.v1";
 const REQUIREMENTS_KEY = "neuma.requirements.saved-list.v1";
 const AGENT_PREVIEW_PREFIX = "neuma.agent.preview.v1.";
+const AGENT_CONVERSATION_PREFIX = "neuma.agent.conversation.v2.";
 
 export function blankSession() {
   return { messages: [], draft: null, status: "idle", confirmed: false, lastQuestion: "", jev: null };
@@ -162,8 +163,28 @@ function previewMessages(messages) {
     .slice(-80).map((item) => ({ role: "user", content: item.content }));
 }
 
+function conversationMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.filter((item) => item && ["user", "assistant"].includes(item.role)
+    && typeof item.content === "string" && item.content.length <= (item.role === "user" ? 4000 : 32_000)
+    && (item.content.trim() || item.role === "assistant")).slice(-80).map((item) => {
+    const result = { role: item.role, content: item.content };
+    if (typeof item.revision === "string" && item.revision.length <= 120) result.revision = item.revision;
+    if (item.role === "user" && ["sent", "failed", "stopped", "pending"].includes(item.delivery)) {
+      result.delivery = item.delivery === "pending" ? "stopped" : item.delivery;
+    }
+    if (item.role === "assistant") {
+      result.status = ["complete", "error", "stopped"].includes(item.status) ? item.status : "stopped";
+      if (typeof item.error === "string") result.error = item.error.slice(0, 2000);
+    }
+    return result;
+  });
+}
+
 export function loadAgentPreview(storage, id) {
   try {
+    const current = JSON.parse(storage.getItem(AGENT_CONVERSATION_PREFIX + id) ?? "null");
+    if (current?.schemaVersion === 2) return conversationMessages(current.messages);
     return previewMessages(JSON.parse(storage.getItem(AGENT_PREVIEW_PREFIX + id) ?? "[]"));
   } catch {
     return [];
@@ -172,14 +193,14 @@ export function loadAgentPreview(storage, id) {
 
 export function appendAgentPreview(messages, content) {
   if (typeof content !== "string" || !content.trim() || content.length > 4000) {
-    throw new Error("预览输入需为 1～4000 字");
+    throw new Error("任务输入需为 1～4000 字");
   }
-  return [...previewMessages(messages), { role: "user", content: content.trim() }].slice(-80);
+  return [...conversationMessages(messages), { role: "user", content: content.trim() }].slice(-80);
 }
 
 export function saveAgentPreview(storage, id, messages) {
   try {
-    storage.setItem(AGENT_PREVIEW_PREFIX + id, JSON.stringify(previewMessages(messages)));
+    storage.setItem(AGENT_CONVERSATION_PREFIX + id, JSON.stringify({ schemaVersion: 2, messages: conversationMessages(messages) }));
     return true;
   } catch {
     return false;
@@ -189,6 +210,7 @@ export function saveAgentPreview(storage, id, messages) {
 export function deleteAgentPreview(storage, id) {
   try {
     storage.removeItem(AGENT_PREVIEW_PREFIX + id);
+    storage.removeItem(AGENT_CONVERSATION_PREFIX + id);
     return true;
   } catch {
     return false;

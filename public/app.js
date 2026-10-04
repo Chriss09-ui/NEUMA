@@ -117,8 +117,8 @@ function renderMessages(scrollToEnd = true) {
     const needsSave = delivered.dirty || !delivered.persisted;
     const card = element("div", "delivery-card");
     card.append(element("span", "agent-type", "独立对话入口"), element("strong", "", delivered.name),
-      element("p", "muted-note", "已加入左侧“我的智能体”。先预览对话方式，后续可以随时让 NUEMA 协助迭代。"));
-    card.append(button("primary", needsSave ? "保存需求并进入预览" : "进入对话预览", () => {
+      element("p", "muted-note", "需求已确认。进入助手可查看生成状态、重试，并在生成后直接对话。"));
+    card.append(button("primary", needsSave ? "保存需求并进入助手" : "进入助手", () => {
       if (needsSave && !saveAgent(delivered.id)) return;
       navigate({ page: "agent", agentId: delivered.id });
     }));
@@ -179,7 +179,7 @@ function renderDraft() {
     : action?.mode === "possible" ? "是否执行对外动作仍需明确"
       : [action?.operation, action?.target, action?.scope, action?.trigger].filter(Boolean).join("；");
   appendField("对外动作", actionText, action?.source);
-  appendField("能力连接状态", "尚未接通；本阶段仅整理需求");
+  appendField("能力连接状态", "运行原型支持文字任务和专属目录文件读写；其他外部能力需后续连接");
   appendField("能力依赖", draft.capabilityDependencies?.join("；"), "", "暂无已知依赖");
   appendField("未解决事项", draft.unresolved?.join("；"), "", "暂无");
 }
@@ -226,7 +226,7 @@ function renderAgents() {
     if (time) card.append(element("span", "agent-meta", `更新于 ${time}${agent.id === activeAgentId ? " · 正在对话中编辑" : ""}`));
     const actions = element("div", "agent-actions");
     actions.append(button("secondary", "进入对话", () => navigate({ page: "agent", agentId: agent.id }),
-      `进入 ${agent.name} 的对话预览`));
+      `进入 ${agent.name} 的对话`));
     actions.append(button("ghost-button", "让 NUEMA 迭代", () => openAgent(agent.id), `让 NUEMA 迭代 ${agent.name}`));
     if (agent.dirty || !agent.persisted) {
       actions.append(button("secondary", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
@@ -282,10 +282,20 @@ function saveAgent(id) {
   return true;
 }
 
-function removeAgent(id) {
+async function removeAgent(id) {
   if (busy) return;
   const agent = agents.find((item) => item.id === id);
-  if (!agent || !window.confirm(`删除“${agent.name}”的需求？${agent.persisted ? "浏览器中保存的版本也会删除。" : ""}${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
+  if (!agent || !window.confirm(`删除“${agent.name}”及其需求？会停止它的任务，保留专属目录中的文件。${agent.persisted ? "浏览器中保存的版本也会删除。" : ""}${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
+  try {
+    const response = await fetch(`/api/agents/${encodeURIComponent(id)}/remove`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "智能体未能删除，请重试");
+  } catch (error) {
+    showAgentsError(error.message || "智能体未能删除，请重试");
+    return;
+  }
   if (agent.persisted && !deleteRequirement(browserStorage, id)) {
     showAgentsError("浏览器无法删除这份 Agent 需求");
     return;
@@ -343,6 +353,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   let stage = "request";
   let httpStatus = null;
   let serverDiagnostic = null;
+  let buildId = null;
   const user = addUserMessage(session.messages, message);
   const reply = { role: "assistant", content: "", status: "thinking", label: "正在整理需求…" };
   const controller = new AbortController();
@@ -386,7 +397,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     session.jev = payload.jev;
     user.delivery = "sent";
     const assistantMessage = typeof payload.reply === "string" ? payload.reply : payload.confirmed
-      ? `需求已确认：\n${payload.summary}\n\n独立对话入口已加入左侧“我的智能体”。当前可以预览交互，任务执行能力尚未接入。`
+      ? `需求已确认：\n${payload.summary}\n\n已加入左侧“我的智能体”，正在生成可对话的助手。生成完成后即可使用，失败时可以重试。`
       : payload.status === "ready"
         ? `我整理出的需求是：\n${payload.summary}\n\n${payload.confirmationQuestion}`
         : `${payload.summary}\n\n${payload.question}`;
@@ -402,6 +413,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
       const updated = upsertConfirmedRequirement(agents, activeAgentId, session.draft, crypto.randomUUID());
       agents = updated.items;
       activeAgentId = updated.activeId;
+      buildId = activeAgentId;
     }
     pendingLegacy = null;
   } catch (error) {
@@ -420,6 +432,10 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     busy = false;
     pendingReply = replyView = activeController = null;
     render(false);
+    if (buildId) {
+      saveAgent(buildId);
+      document.dispatchEvent(new CustomEvent("neuma:agent-build", { detail: { id: buildId } }));
+    }
     if (!document.getElementById("page-chat").hidden) inputEl.focus({ preventScroll: true });
   }
 });
