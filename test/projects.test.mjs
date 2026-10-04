@@ -123,7 +123,7 @@ test("其他项目可以登记，启动配置拒绝远端地址和目录外可�
   const project = await manager.add({ path: app });
   assert.equal(project.kind, "other");
   await assert.rejects(manager.configure(project.id, { command: "node", args: [], url: "https://example.com", allowLaunch: true }), /本机/);
-  await assert.rejects(manager.configure(project.id, { command: "/bin/sh", args: [], allowLaunch: true }), /项目目录/);
+  await assert.rejects(manager.configure(project.id, { command: process.execPath, args: [], allowLaunch: true }), /项目目录/);
   await assert.rejects(manager.add({ path: "relative/path" }), /完整路径/);
 });
 

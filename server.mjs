@@ -7,6 +7,7 @@ import { getProviderConfig, makeProviders } from "./providers.mjs";
 import { ProjectManager } from "./projects.mjs";
 import { createProjectFolderPicker } from "./project-folder-picker.mjs";
 import { PiProjectAgent, createProjectAnalyzer } from "./pi-runtime.mjs";
+import { PrototypeAgents } from "./agent-prototype.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -14,6 +15,7 @@ const PUBLIC = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/agents.js", ["agents.js", "text/javascript; charset=utf-8"]],
+  ["/agent-runtime.js", ["agent-runtime.js", "text/javascript; charset=utf-8"]],
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
   ["/shell.js", ["shell.js", "text/javascript; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
@@ -80,9 +82,39 @@ async function streamProjectSetup(response, action, config) {
 }
 
 function requirementReply(result) {
-  if (result.confirmed) return `需求已确认：\n${result.summary}\n\n独立对话入口已加入左侧“我的智能体”。当前可以预览交互，任务执行能力尚未接入。`;
+  if (result.confirmed) return `需求已确认：\n${result.summary}\n\n已加入左侧“我的智能体”，正在生成可对话的助手。生成完成后即可使用，失败时可以重试。`;
   if (result.status === "ready") return `我整理出的需求是：\n${result.summary}\n\n${result.confirmationQuestion}`;
   return `${result.summary}\n\n${result.question}`;
+}
+
+async function buildAgentReply(request, response, agents, body, config) {
+  const controller = new AbortController();
+  const streaming = request.headers.accept?.includes("application/x-ndjson");
+  const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+  response.on?.("close", disconnected);
+  const write = (event) => {
+    if (!controller.signal.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+  };
+  try {
+    if (streaming) {
+      response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
+      response.flushHeaders?.();
+    }
+    const result = await agents.build(body, { signal: controller.signal, onProgress: streaming ? write : () => {} });
+    if (!controller.signal.aborted && !response.destroyed) {
+      if (streaming) write({ type: "done", result });
+      else sendJson(response, 200, result);
+    }
+  } catch (error) {
+    if (!controller.signal.aborted && !response.destroyed) {
+      const failure = safeFailure(error, config);
+      if (streaming) write({ type: "error", ...failure.payload });
+      else sendJson(response, failure.status, failure.payload);
+    }
+  } finally {
+    response.removeListener?.("close", disconnected);
+    if (streaming) response.end();
+  }
 }
 
 async function streamRequirementReply(response, providers, body, config) {
@@ -167,7 +199,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   pickProjectFolder = createProjectFolderPicker(),
   projects = new ProjectManager({ dataDir, blockedPort: Number(process.env.PORT || 3000),
     analyzeProject: createProjectAnalyzer({ config, dataDir }) }),
-  projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }) } = {}) {
+  projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
+  prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }) } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
   const handler = async (request, response) => {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -201,7 +234,26 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         if (!injectedProviders) providers = makeProviders(config);
         // Pi sessions hold the old key and endpoint; new turns will create fresh sessions.
         await projectAgent.dispose?.();
+        await prototypeAgents.close();
         return sendJson(response, 200, settingsView(config));
+      }
+      if (request.method === "POST" && path === "/api/agents/build") {
+        return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config);
+      }
+      if (request.method === "POST" && path === "/api/agents/turn") {
+        const body = await readJson(request);
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, prototypeAgents, body, config);
+        return sendJson(response, 200, await prototypeAgents.prompt(body));
+      }
+      if (request.method === "POST" && path === "/api/agents/cancel") {
+        return sendJson(response, 200, await prototypeAgents.cancel((await readJson(request)).sessionId));
+      }
+      const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
+      if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]) });
+      const agentRemoval = path.match(/^\/api\/agents\/([\w-]+)\/remove$/);
+      if (request.method === "POST" && agentRemoval) {
+        await readJson(request);
+        return sendJson(response, 200, await prototypeAgents.remove(agentRemoval[1]));
       }
       if (request.method === "GET" && path === "/api/projects") {
         return sendJson(response, 200, { projects: await projects.list(), pendingAdditions: projects.pendingAdds?.size ?? 0 });
@@ -281,7 +333,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       return sendJson(response, status, payload);
     }
   };
-  handler.dispose = async () => { await projectAgent.dispose(); await projects.dispose(); };
+  handler.dispose = async () => { await prototypeAgents.close(); await projectAgent.dispose(); await projects.dispose(); };
   return handler;
 }
 
@@ -298,7 +350,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const config = getProviderConfig();
   const server = createApp({ config });
   server.listen(port, "127.0.0.1", () => {
-    process.stdout.write(`NUEMA 需求层测试版：http://127.0.0.1:${port}\n`);
+    process.stdout.write(`NUEMA Agent 运行测试版：http://127.0.0.1:${port}\n`);
     process.stdout.write(`兼容模型：${config.llmConfigured ? "已配置" : "未配置"}；Jev：${config.jevConfigured ? "已配置" : "未配置"}\n`);
   });
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {

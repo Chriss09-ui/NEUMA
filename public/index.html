@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>NUEMA · 需求层测试版</title>
+    <title>NUEMA · Agent 运行测试版</title>
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
@@ -11,7 +11,7 @@
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">N</span>
-          <span class="brand-text"><strong>NUEMA</strong><small>需求层测试版</small></span>
+          <span class="brand-text"><strong>NUEMA</strong><small>Agent 运行测试版</small></span>
           <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="收起主导航" title="收起主导航" aria-expanded="true" aria-controls="sidebar-details">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="sidebar-toggle-arrow" d="m16 9-3 3 3 3"/></svg>
           </button>
@@ -112,7 +112,7 @@
               <ol class="brief-steps" aria-label="创建进度">
                 <li id="brief-step-describe" aria-current="step"><span>1</span>描述想法</li>
                 <li id="brief-step-confirm"><span>2</span>确认需求</li>
-                <li id="brief-step-preview"><span>3</span>对话预览</li>
+                <li id="brief-step-preview"><span>3</span>生成并使用</li>
               </ol>
               <div id="draft-content" class="draft-content"></div>
               <details class="panel-disclosure" id="conversation-tools">
@@ -138,14 +138,14 @@
                   <div id="jev-status" class="jev-status" aria-live="polite">Jev 尚未参与判断</div>
                 </div>
               </details>
-              <p class="panel-footnote">当前为需求预览阶段<br>任务执行能力将在后续接入</p>
+              <p class="panel-footnote">确认后生成可对话的助手<br>先试用，再逐步完善</p>
             </aside>
           </div>
 
 
         </section>
 
-        <!-- 用户智能体：需求层的交互预览 -->
+        <!-- 用户智能体：可替换原型的真实运行入口 -->
         <section id="page-agent" class="page page-chat" data-page="agent" aria-labelledby="agent-title" hidden>
           <header class="page-header">
             <div>
@@ -167,15 +167,16 @@
                 <span id="agent-conversation-title" class="conversation-title"></span>
                 <button id="agent-new-chat" class="new-chat-button" type="button">＋ 新对话</button>
               </div>
-              <p class="preview-note">交互预览 · 可体验独立对话和输入。当前仍在需求层，任务执行将在后续接入。</p>
+              <p id="agent-runtime-status" class="preview-note" role="status" aria-live="polite">智能体界面尚未加载。若此提示持续显示，请刷新页面；更新代码后需重启本机服务。</p>
               <div id="agent-messages" class="messages" aria-live="polite"></div>
               <div id="agent-error" class="error" role="alert" hidden></div>
               <form id="agent-chat-form" class="composer" autocomplete="off">
-                <label id="agent-message-label" class="sr-only" for="agent-message">给当前智能体的预览输入</label>
-                <textarea id="agent-message" rows="3" maxlength="4000" placeholder="在这里输入任务，预览与这个智能体的对话方式…" required></textarea>
+                <label id="agent-message-label" class="sr-only" for="agent-message">给当前智能体的任务</label>
+                <textarea id="agent-message" rows="3" maxlength="4000" placeholder="把任务和材料发给这个智能体…" required></textarea>
                 <div class="composer-footer">
-                  <span>预览输入不会执行任务</span>
-                  <button class="primary" type="submit">发送预览</button>
+                  <span>可处理文字，并在专属目录保存文件</span>
+                  <button id="agent-send" class="primary" type="submit" disabled>发送</button>
+                  <button id="agent-cancel-reply" class="cancel-reply" type="button" aria-label="停止当前操作" title="停止当前操作" hidden>■</button>
                 </div>
               </form>
             </section>
@@ -185,11 +186,12 @@
               <div class="delivery-spec">
                 <strong>交付约定</strong>
                 <p>在本项目中直接对话，沿用统一的输入与消息样式。</p>
-                <p>首期应完成已确认的基本任务；后续由 NUEMA 协助迭代。</p>
+                <p>先试用基本任务；外部服务需后续连接。可让 NUEMA 迭代需求，再重新生成。</p>
               </div>
               <div class="panel-actions">
                 <button id="agent-save-entry" class="secondary" type="button">保存智能体需求</button>
-                <button id="agent-save-chat" class="secondary" type="button">保存预览对话</button>
+                <button id="agent-build" class="primary" type="button" disabled>生成智能体</button>
+                <button id="agent-save-chat" class="secondary" type="button">保存对话</button>
               </div>
               <p id="agent-storage-note" class="muted-note small" aria-live="polite"></p>
             </aside>
@@ -354,7 +356,7 @@
             </div>
             <button id="agents-create" class="primary" type="button">＋ 创建智能体</button>
           </header>
-          <p class="agents-preview-note muted-note">当前可预览交互、保存需求；任务执行能力将在后续接入。</p>
+          <p class="agents-preview-note muted-note">确认需求后生成助手，在独立对话中试用；已有需求也可进入后生成。</p>
           <div id="manage-agents">
             <div id="agents-error" class="error" role="alert" hidden></div>
             <div id="agents-list" class="agent-grid" aria-live="polite"></div>
