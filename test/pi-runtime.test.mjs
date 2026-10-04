@@ -17,7 +17,7 @@ test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", 
     assert.equal(request.url, "/v1/chat/completions");
     assert.equal(request.headers.authorization, "Bearer fixture-only");
     assert.equal(body.messages[0].role, "system");
-    assert.deepEqual(body.tools.map((item) => item.function.name).sort(), ["add_project", "inspect_project", "list_projects", "start_project", "stop_project"]);
+    assert.deepEqual(body.tools.map((item) => item.function.name).sort(), ["add_project", "get_runtime_status", "inspect_project", "list_ports", "list_project_failures", "list_projects", "remove_project", "start_project", "stop_project"]);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
       model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
@@ -36,6 +36,10 @@ test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", 
   t.after(async () => { await agent.dispose(); await manager.dispose(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
   const progress = [];
   const first = await agent.prompt({ message: `添加 ${app}`, sessionId: "fixture-session-12345" }, (event) => progress.push(event));
+  const settings = agent.sessions.get("fixture-session-12345").session.settingsManager;
+  assert.equal(settings.getRetrySettings().enabled, true);
+  assert.equal(settings.getRetrySettings().maxRetries, 5);
+  assert.equal(settings.getHttpIdleTimeoutMs(), 0);
   assert.equal(first.engine, "pi"); assert.equal(first.projects.length, 1);
   assert.equal(first.actions[0].tool, "add_project"); assert.match(first.reply, /已添加/);
   const second = await agent.prompt({ message: "看看刚才的项目", sessionId: "fixture-session-12345" });
@@ -74,6 +78,94 @@ test("模型不能借项目文字登记用户本轮没有提供的路径", async
   const tools = createProjectTools({ add: async () => { added = true; } }, turn);
   await assert.rejects(tools.find((item) => item.name === "add_project").execute("call", { path: "/tmp/unrequested" }), /本轮明确提供/);
   assert.equal(added, false);
+});
+
+test("新项目添加失败不会报告已登记或生成成功操作，也不会自行再试", async () => {
+  let listener, calls = 0;
+  const manager = { list: async () => [], add: async () => {
+    calls++;
+    throw Object.assign(new Error("private-api-payload"), { code: "PROJECT_ADD_FAILED", reason: "api_error" });
+  } };
+  const agent = new PiProjectAgent({ config: { llmConfigured: true }, manager,
+    sessionFactory: async ({ turn }) => {
+      const add = createProjectTools(manager, turn).find((tool) => tool.name === "add_project");
+      return { messages: [{ role: "assistant", stopReason: "aborted" }], subscribe(fn) { listener = fn; return () => {}; },
+        dispose() {}, async abort() {},
+        async prompt() {
+          const result = JSON.parse((await add.execute("add", { path: "/new/project" })).content[0].text);
+          assert.equal(result.added, false); assert.equal(result.id, undefined);
+          listener({ type: "tool_execution_end" });
+          await assert.rejects(add.execute("repeat", { path: "/new/project" }), /等待用户/);
+        },
+      };
+    },
+  });
+  const result = await agent.prompt({ message: "添加 /new/project", sessionId: "failed-new-project-session" });
+  assert.equal(calls, 1); assert.equal(result.projects.length, 0); assert.equal(result.actions.length, 0);
+  assert.match(result.reply, /添加失败.*稍后再试/); assert.doesNotMatch(result.reply, /private-api-payload|已经添加|已登记/);
+  assert.equal(agent.sessions.size, 0);
+});
+
+test("项目助手删除要求明确确认与有效目标，返回已删除记录和文件保留结果", async () => {
+  const removed = [], turn = { message: "删除会议纪要", actions: [] };
+  const tool = createProjectTools({ list: async () => [{ id: "one", name: "会议纪要" }],
+    remove: async (id) => { removed.push(id); return { removed: true }; } }, turn).find((tool) => tool.name === "remove_project");
+  await assert.rejects(tool.execute("call", { id: "one", confirm: false }), /先确认/);
+  await assert.rejects(tool.execute("call", { id: "missing", confirm: true }), /没有找到/);
+  assert.deepEqual(removed, []);
+  const result = JSON.parse((await tool.execute("call", { id: "one", confirm: true })).content[0].text);
+  assert.deepEqual(removed, ["one"]);
+  assert.deepEqual(result, { removed: true, id: "one", name: "会议纪要", filesKept: true });
+  assert.equal(turn.actions[0].tool, "remove_project");
+});
+
+test("项目助手可以只读查询失败原因，不重新添加项目", async () => {
+  const records = [{ name: "示例项目", message: "添加失败：缺少启动入口。项目未加入列表。" }];
+  const turn = { actions: [] };
+  const tool = createProjectTools({ failures: async ({ limit }) => { assert.equal(limit, 3); return records; } }, turn)
+    .find((item) => item.name === "list_project_failures");
+  const result = JSON.parse((await tool.execute("failures", { limit: 3 })).content[0].text);
+  assert.deepEqual(result.failures, records); assert.deepEqual(turn.actions, []);
+});
+
+test("运行查询按快照筛选外部运行与未运行项目，保留不确定性且不记录为操作", async () => {
+  const controller = new AbortController();
+  const snapshot = { checkedAt: "2026-10-04T00:00:00.000Z", summary: { total: 3, running: 1, stopped: 1, unknown: 1 },
+    warnings: ["部分进程不可见"], projects: [
+      { id: "outside", status: "stopped", runtime: { state: "running", source: "external" } },
+      { id: "idle", runtime: { state: "stopped", source: "none" } },
+      { id: "hidden", runtime: { state: "unknown", source: "none" } },
+    ] };
+  const turn = { actions: [] };
+  const tool = createProjectTools({ runtime: async ({ signal }) => {
+    assert.equal(signal, controller.signal); return snapshot;
+  } }, turn).find((tool) => tool.name === "get_runtime_status");
+  const result = JSON.parse((await tool.execute("query", { state: "running" }, controller.signal)).content[0].text);
+  assert.deepEqual(result.projects.map((item) => item.id), ["outside"]);
+  assert.equal(result.projects[0].runtime.source, "external");
+  assert.deepEqual(result.warnings, snapshot.warnings);
+  assert.deepEqual(result.summary, snapshot.summary);
+  assert.deepEqual(turn.actions, []);
+  await assert.rejects(tool.execute("invalid", { state: "invented" }), /有效的项目状态/);
+});
+
+test("端口查询可组合端口和名称条件，空结果保留范围与警告，不执行项目操作", async () => {
+  let reads = 0;
+  const turn = { actions: [] };
+  const tool = createProjectTools({ runtime: async () => {
+    reads++;
+    return { checkedAt: "2026-10-04T00:00:00.000Z", warnings: ["仅当前用户可见"], ports: [
+      { port: 3000, pid: 12, processName: "node", projects: [{ id: "a", name: "网站" }] },
+      { port: 5173, pid: 13, processName: "node", projects: [] },
+    ] };
+  } }, turn).find((tool) => tool.name === "list_ports");
+  const matching = JSON.parse((await tool.execute("ports", { port: 3000, query: "网站" })).content[0].text);
+  assert.deepEqual(matching.ports.map((item) => item.pid), [12]);
+  const empty = JSON.parse((await tool.execute("ports", { port: 3001 })).content[0].text);
+  assert.deepEqual(empty.ports, []); assert.match(empty.scope, /TCP 监听/);
+  assert.deepEqual(empty.warnings, ["仅当前用户可见"]);
+  await assert.rejects(tool.execute("invalid", { port: 65536 }), /端口号/);
+  assert.equal(reads, 2); assert.deepEqual(turn.actions, []);
 });
 
 test("Pi 不输出 SDK 原始错误或凭据，未配置时返回明确缺口", async () => {
@@ -167,9 +259,9 @@ test("外层项目对话不再受聊天超时、模型轮数或工具次数上�
   await agent.dispose();
 });
 
-test("内部检查暂停后结束本轮项目对话，不能自动重新调用工具绕过暂停", async () => {
+test("内部检查连接失败后结束本轮对话，不能自动重复检查绕过重试次数", async () => {
   let listener, aborts = 0;
-  const project = { id: "large", name: "大项目", setup: { status: "paused" } };
+  const project = { id: "large", name: "大项目", setup: { status: "failed", reason: "api_error", summary: "模型接口已重连 5 次仍未恢复。" } };
   const manager = { add: async () => project, list: async () => [project] };
   const agent = new PiProjectAgent({ config: { llmConfigured: true }, manager,
     sessionFactory: async ({ turn }) => {
@@ -184,7 +276,8 @@ test("内部检查暂停后结束本轮项目对话，不能自动重新调用�
       };
     },
   });
-  const result = await agent.prompt({ message: "添加 /large/project", sessionId: "paused-project-session" });
-  assert.match(result.reply, /5 分钟.*暂停/); assert.equal(result.projects[0].setup.status, "paused"); assert.equal(aborts, 1);
+  const result = await agent.prompt({ message: "添加 /large/project", sessionId: "failed-project-session" });
+  assert.match(result.reply, /重连 5 次/); assert.equal(result.projects[0].setup.status, "failed"); assert.equal(aborts, 1);
+  assert.equal(agent.sessions.size, 0);
   await agent.dispose();
 });

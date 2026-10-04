@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { createRequestHandler } from "../server.mjs";
-import { emptyDraft, ProviderError, CONFIRMATION_QUESTION } from "../core.mjs";
+import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../core.mjs";
+import { createProjectAddError } from "../project-diagnostics.mjs";
 
 function request(method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
@@ -74,6 +75,39 @@ class StreamingResponse extends EventEmitter {
   end(content = "") { this.text += content; this.writableEnded = true; }
 }
 
+test("运行概览只读返回快照，拒绝跨站访问并提供界面资源", async () => {
+  let calls = 0;
+  const snapshot = { checkedAt: "2026-10-04T00:00:00.000Z", projects: [], ports: [], summary: { total: 0 }, warnings: [] };
+  const handler = createRequestHandler({ config: {}, projects: { runtime: async ({ signal }) => {
+    calls++; assert.equal(signal.aborted, false); return snapshot;
+  } } });
+  const response = new StreamingResponse();
+  await handler(request("GET", "/api/projects/runtime"), response);
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.text), snapshot);
+  assert.equal(response.listenerCount("close"), 0);
+  const foreign = request("GET", "/api/projects/runtime");
+  foreign.headers.host = "127.0.0.1:3000"; foreign.headers.origin = "https://unrelated.example";
+  const rejected = new StreamingResponse(); await handler(foreign, rejected);
+  assert.equal(rejected.status, 403); assert.equal(calls, 1);
+  for (const path of ["/runtime.js", "/runtime-view.js"]) assert.equal((await invoke(handler, "GET", path)).status, 200);
+});
+
+test("离开运行概览时取消本机查询，不返回迟到的结果", async () => {
+  let entered, signal;
+  const ready = new Promise((done) => { entered = done; });
+  const handler = createRequestHandler({ config: {}, projects: { runtime: async (options) => {
+    signal = options.signal; entered();
+    await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+    signal.throwIfAborted();
+  } } });
+  const response = new StreamingResponse();
+  const pending = handler(request("GET", "/api/projects/runtime"), response); await ready;
+  response.destroyed = true; response.emit("close"); await pending;
+  assert.equal(signal.aborted, true); assert.equal(response.text, "");
+  assert.equal(response.listenerCount("close"), 0);
+});
+
 test("添加和重新识别共用项目检查流程，流式发送进度和最终配置", async () => {
   for (const path of ["/api/projects", "/api/projects/fixture/inspect"]) {
     let seen;
@@ -91,6 +125,38 @@ test("添加和重新识别共用项目检查流程，流式发送进度和最�
     assert.deepEqual(seen, path.endsWith("inspect") ? "fixture" : { path: "/demo/project" });
     assert.equal(response.listenerCount("close"), 0);
   }
+});
+
+test("新项目添加失败返回明确错误，流式接口不发送已添加结果", async () => {
+  const handler = createRequestHandler({ config: {}, projects: {
+    pendingAdds: new Map([["/checking", {}]]), list: async () => [],
+    add: async () => { throw createProjectAddError({ stage: "validation", reason: "unsupported_launcher", message: "未能确认启动脚本", retries: 5 }); },
+  } });
+  const normal = await invoke(handler, "POST", "/api/projects", { path: "/demo/new" });
+  assert.equal(normal.status, 400); assert.match(JSON.parse(normal.text).error, /添加失败/);
+  assert.match(JSON.parse(normal.text).error, /未能确认启动脚本/);
+  assert.deepEqual(JSON.parse(normal.text).diagnostic, { stage: "validation", reason: "unsupported_launcher", retries: 5, providerModel: null });
+  const input = request("POST", "/api/projects", { path: "/demo/new" }); input.headers.accept = "application/x-ndjson";
+  const response = new StreamingResponse(); await handler(input, response);
+  const events = response.text.trim().split("\n").map(JSON.parse);
+  assert.equal(events.at(-1).type, "error"); assert.equal(events.some((event) => event.type === "done"), false);
+  assert.equal(events.at(-1).diagnostic.reason, "unsupported_launcher");
+  const list = JSON.parse((await invoke(handler, "GET", "/api/projects")).text);
+  assert.deepEqual(list.projects, []); assert.equal(list.pendingAdditions, 1);
+});
+
+test("失败记录提供独立只读接口且拒绝跨站访问", async () => {
+  let calls = 0;
+  const records = [{ id: "failure-1", name: "测试项目", message: "添加失败：未能确认启动入口。项目未加入列表。" }];
+  const handler = createRequestHandler({ config: {}, projects: { failures: async (options) => {
+    calls++; assert.deepEqual(options, { limit: 10 }); return records;
+  } } });
+  const result = await invoke(handler, "GET", "/api/projects/failures");
+  assert.equal(result.status, 200); assert.deepEqual(JSON.parse(result.text), { failures: records });
+  const foreign = request("GET", "/api/projects/failures");
+  foreign.headers = { host: "127.0.0.1:3000", origin: "https://unrelated.example" };
+  const response = new StreamingResponse(); await handler(foreign, response);
+  assert.equal(response.status, 403); assert.equal(calls, 1);
 });
 
 test("断开添加检查会传递取消信号，不发送迟到的成功事件", async () => {
@@ -387,4 +453,19 @@ test("项目变更要求 JSON 和明确移除确认，项目对话使用独立�
   assert.equal((await invoke(handler, "POST", "/api/projects/test/start")).status, 400);
   const result = await invoke(handler, "POST", "/api/projects/turn", { message: "查看项目", sessionId: "fixture-session-12345" });
   assert.equal(result.status, 200); assert.equal(JSON.parse(result.text).engine, "pi");
+});
+
+test("删除失败透出恢复代码，仅移除记录仍要求确认并明确传给管理器", async () => {
+  const calls = [];
+  const handler = createRequestHandler({ config: {}, projects: { remove: async (id, options) => {
+    calls.push({ id, ...options });
+    if (!options.removeOnly) throw Object.assign(new InputError("停止脚本不存在"), { code: "PROJECT_REMOVE_STOP_FAILED" });
+    return { removed: true, servicesMayBeRunning: true };
+  } } });
+  const failed = await invoke(handler, "POST", "/api/projects/test/remove", { confirm: true });
+  assert.equal(failed.status, 400); assert.equal(JSON.parse(failed.text).code, "PROJECT_REMOVE_STOP_FAILED");
+  assert.equal((await invoke(handler, "POST", "/api/projects/test/remove", { removeOnly: true })).status, 400);
+  const result = await invoke(handler, "POST", "/api/projects/test/remove", { confirm: true, removeOnly: true });
+  assert.equal(result.status, 200); assert.equal(JSON.parse(result.text).project.servicesMayBeRunning, true);
+  assert.deepEqual(calls, [{ id: "test", removeOnly: false }, { id: "test", removeOnly: true }]);
 });

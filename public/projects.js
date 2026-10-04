@@ -1,4 +1,4 @@
-import { node, renderProjectDetails, renderProjectList, STATUS_LABELS, updateProjectStatus } from "./project-view.js";
+import { node, nuemaText, renderProjectDetails, renderProjectList, STATUS_LABELS, updateProjectStatus } from "./project-view.js";
 import { addUserMessage, createReplyView, mountWelcome, readReply, renderUserMessage } from "./chat-ui.js";
 
 const byId = (id) => document.getElementById(id);
@@ -10,24 +10,37 @@ let pendingReply = null, replyView = null, activeController = null, cancelling =
 let route = { page: "chat", projectView: "list" };
 let contextId = null, listSignature = "";
 let folderController = null, suggestedProjectName = "";
-let adding = false, renderedConfiguration;
+let adding = false, addFailed = false, renderedConfiguration;
+let listVersion = 0;
+let inspectingId = null;
 
-function showError(target, message = "") { const el = byId(target); el.textContent = message; el.hidden = !message; }
+function showError(target, message = "") { const el = byId(target); el.textContent = nuemaText(message); el.hidden = !message; }
 function clearErrors() { for (const id of ["project-error", "add-error", "manage-error"]) showError(id); }
 function navigate(detail) { document.dispatchEvent(new CustomEvent("neuma:navigate", { detail })); }
-function feedback(message = "") { const el = byId("project-feedback"); el.textContent = message; el.hidden = !message; }
+function feedback(message = "") { const el = byId("project-feedback"); el.textContent = nuemaText(message); el.hidden = !message; }
+function displayedReply(reply) { return { ...reply, content: nuemaText(reply.content), label: nuemaText(reply.label), error: nuemaText(reply.error) }; }
+
+function addFailureMessage(failure) {
+  if (failure?.diagnostic && typeof failure.message === "string") {
+    return /^添加失败/.test(failure.message) ? failure.message : `添加失败：${failure.message.replace(/[。.!！\s]+$/, "")}。项目未加入列表。`;
+  }
+  if (/failed to fetch|fetch failed|load failed|network|连接中断/i.test(failure?.message ?? "")) {
+    return "添加失败：与本机服务的连接中断，请确认 NUEMA 正在运行后重试。";
+  }
+  return "添加失败：项目检查未完成，请稍后重试。项目未加入列表。";
+}
 
 async function api(path, body) {
   const setup = body !== undefined && (path === "/api/projects" || path.endsWith("/inspect"));
   const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json", ...(setup ? { accept: "application/x-ndjson" } : {}) }, body: JSON.stringify(body) });
   if (setup) return readReply(response, (event) => {
     if (event.type !== "status" || !event.label) return;
-    if (adding) byId("project-folder-status").textContent = event.label;
+    if (adding) byId("project-folder-status").textContent = nuemaText(event.label);
     else feedback(event.label);
-  }, { incompleteMessage: "项目检查连接中断，记录会保留，可以在详情中重新识别。",
+  }, { incompleteMessage: path === "/api/projects" ? "添加连接中断，请稍后重试。" : "项目检查连接中断，可以在详情中重新识别。",
     isComplete: (result) => typeof result?.project?.id === "string" });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "项目操作失败，请重试");
+  if (!response.ok) throw Object.assign(new Error(result.error || "项目操作失败，请重试"), { code: result.code });
   return result;
 }
 
@@ -35,6 +48,16 @@ function openProject(id) {
   selectedId = id; showError("manage-error");
   navigate({ page: "projects", projectView: "list" });
   render();
+}
+
+function removeFromView(id) {
+  listVersion++;
+  projects = projects.filter((project) => project.id !== id);
+  if (contextId === id) contextId = null;
+  if (selectedId === id) {
+    selectedId = null; renderedId = undefined;
+    if (route.page === "projects" && route.projectView === "list") navigate({ page: "projects", projectView: "assistant" });
+  }
 }
 
 function renderMessages(scrollToEnd = true) {
@@ -55,11 +78,7 @@ function renderMessages(scrollToEnd = true) {
         document.dispatchEvent(new CustomEvent("neuma:project-library-open"));
         byId("project-search").focus({ preventScroll: true });
       }, "report"],
-      ["了解使用方式", "看看助手可以帮你做什么", () => {
-        const text = "你能帮我做些什么？应该从哪里开始？";
-        input.value = input.value.trim() ? `${input.value}\n${text}` : text;
-        input.dispatchEvent(new Event("input")); input.focus();
-      }, "reply"],
+      ["运行与端口", "查看已启动项目与端口占用", () => byId("project-runtime-open").click(), "reply"],
     ];
     for (const [label, description, onClick, icon] of suggestions) {
       const chip = node("button", "suggestion"); chip.type = "button";
@@ -74,7 +93,7 @@ function renderMessages(scrollToEnd = true) {
   for (const message of messages) {
     if (message.role === "user") { container.append(renderUserMessage(message, input)); continue; }
     if (message.status) {
-      const view = createReplyView("项目助手"); view.update(message); container.append(view.row);
+      const view = createReplyView("项目助手"); view.update(displayedReply(message)); container.append(view.row);
       if (message.projectId && projects.some((item) => item.id === message.projectId)) {
         const action = node("button", "secondary reply-project-link", "查看项目 →"); action.type = "button";
         action.addEventListener("click", () => openProject(message.projectId)); view.row.append(action);
@@ -85,7 +104,7 @@ function renderMessages(scrollToEnd = true) {
     const wrapper = node("div", `message ${message.role}`);
     wrapper.setAttribute("role", "group");
     wrapper.setAttribute("aria-label", "项目助手的回复");
-    wrapper.append(node("div", "bubble", message.content));
+    wrapper.append(node("div", "bubble", nuemaText(message.content)));
     container.append(wrapper);
   }
   container.scrollTop = follow ? container.scrollHeight : previousTop;
@@ -93,18 +112,20 @@ function renderMessages(scrollToEnd = true) {
 
 function render() {
   const query = byId("project-search").value.trim().toLowerCase();
-  const shown = projects.filter((item) => `${item.name} ${item.description ?? ""}`.toLowerCase().includes(query));
+  const presented = projects.map((item) => item.id === inspectingId
+    ? { ...item, canLaunch: false, setup: { status: "checking", summary: "NUEMA 正在检查最新的项目说明和启动入口…" } } : item);
+  const shown = presented.filter((item) => `${item.name} ${item.description ?? ""}`.toLowerCase().includes(query));
   const activeId = route.projectView === "list" || (route.projectView === "add" && !byId("manage-projects").hidden) ? selectedId : null;
-  const signature = JSON.stringify([shown, activeId, query, projects.length]);
+  const signature = JSON.stringify([shown, activeId, query, projects.length, busy]);
   if (signature !== listSignature) {
     listSignature = signature;
     renderProjectList({ container: byId("projects-list"), selectedId: activeId, busy: false, projects: shown,
       emptyText: projects.length ? "没有匹配的项目" : "还没有项目",
       onClearSearch: query ? () => { byId("project-search").value = ""; render(); byId("project-search").focus(); } : null,
-      onSelect: openProject });
+      onSelect: openProject, onInspect: (id) => runAction("inspect", {}, id), removeDisabled: busy, onRemove: (id) => runAction("remove", {}, id) });
   }
   byId("project-count").textContent = projects.length;
-  const project = projects.find((item) => item.id === selectedId);
+  const project = presented.find((item) => item.id === selectedId);
   const configuration = JSON.stringify([project?.setup, project?.launch, project?.allowLaunch, project?.root]);
   if (renderedId !== selectedId || renderedConfiguration !== configuration) {
     renderedId = selectedId;
@@ -125,7 +146,7 @@ function render() {
   byId("project-choose-folder").textContent = folderController ? "选择中…" : byId("project-path").value ? "重新选择" : "选择文件夹";
   byId("project-path").disabled = busy || Boolean(folderController);
   byId("project-add-submit").disabled = busy || Boolean(folderController);
-  byId("project-add-submit").textContent = adding ? "正在识别…" : "添加并自动配置";
+  byId("project-add-submit").textContent = adding ? "正在识别…" : addFailed ? "重试添加" : "添加并自动配置";
   byId("project-add-form").setAttribute("aria-busy", String(adding));
   byId("project-send").disabled = byId("project-new-chat").disabled = busy;
   input.disabled = busy && !chatting;
@@ -138,28 +159,53 @@ function render() {
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
+  const version = listVersion;
   try {
-    projects = (await api("/api/projects")).projects;
+    const result = await api("/api/projects");
+    if (version !== listVersion) return;
+    projects = result.projects;
     if (!projects.some((item) => item.id === selectedId)) selectedId = projects[0]?.id ?? null;
     render();
   } catch (failure) { showError(route.projectView === "assistant" ? "project-error" : route.projectView === "add" ? "add-error" : "manage-error", failure.message); }
   finally { refreshing = false; }
 }
 
-async function runAction(action, body = {}) {
-  if (busy || !selectedId) return;
-  if (action === "remove" && !window.confirm("移除这条项目记录？原项目文件会保留。")) return;
-  const actionId = selectedId;
-  busy = true; showError("manage-error"); feedback(); render();
+async function runAction(action, body = {}, actionId = selectedId) {
+  if (busy || !actionId) return;
+  const target = projects.find((project) => project.id === actionId);
+  if (action === "remove" && (!target || !window.confirm(`删除项目“${target.name}”？\n\n只从 NUEMA 中移除，电脑上的项目文件不会删除。${target.canStop ? "\n由 NUEMA 启动的这个项目也会停止运行。" : ""}${target.setup?.status === "checking" ? "\n当前项目检查也会停止。" : ""}`))) return;
+  if (action === "inspect") {
+    if (!target || target.canStop || target.setup?.status === "checking") return;
+    openProject(actionId); inspectingId = actionId;
+  }
+  busy = true; clearErrors(); feedback(); render();
   try {
-    const result = await api(`/api/projects/${actionId}/${action}`, action === "remove" ? { confirm: true } : body);
+    let result;
+    try { result = await api(`/api/projects/${actionId}/${action}`, action === "remove" ? { confirm: true } : body); }
+    catch (failure) {
+      if (action !== "remove" || failure.code !== "PROJECT_REMOVE_STOP_FAILED") throw failure;
+      const message = `无法停止“${target.name}”。\n\n${nuemaText(failure.message)}\n\n是否仅从 NUEMA 中移除这个项目？本地文件不会删除。`;
+      if (!window.confirm(message)) {
+        showError("manage-error", "已保留项目记录。停止未完成，可以修复停止脚本后重试，或再次删除并选择仅移除记录。");
+        await refresh(); return;
+      }
+      result = await api(`/api/projects/${actionId}/remove`, { confirm: true, removeOnly: true });
+    }
+    if (action === "remove") removeFromView(actionId);
+    if (action === "inspect") {
+      listVersion++;
+      projects = projects.map((project) => project.id === actionId ? result.project : project);
+    }
     if (["configure", "inspect", "remove"].includes(action)) renderedId = undefined;
     await refresh();
-    feedback(action === "inspect" ? result.project.canLaunch ? "启动方式已配好，可以直接打开。"
+    feedback(action === "inspect" ? result.project.canLaunch ? "NUEMA 已更新启动方式，可以打开项目了。"
       : result.project.setup?.status === "paused" ? "检查已暂停，可以稍后继续。" : "项目检查已结束，请查看下方结果。"
-      : { configure: "启动方式已保存", start: "", stop: "项目已停止", remove: "项目记录已移除，原文件已保留" }[action]);
-  } catch (failure) { showError("manage-error", failure.message); }
-  finally { busy = false; render(); }
+      : { configure: "启动方式已保存", start: "", stop: "项目已停止", remove: result.project?.servicesMayBeRunning
+        ? `已移除“${target?.name}”，本地文件已保留。未能停止的服务可能仍在运行，可在“运行与端口”中查看。`
+        : `已删除“${target?.name}”，本地项目文件已保留。` }[action]);
+    if (action === "remove") byId("project-assistant-home").focus({ preventScroll: true });
+  } catch (failure) { showError(route.projectView === "assistant" ? "project-error" : "manage-error", failure.message); }
+  finally { inspectingId = null; busy = false; render(); }
 }
 
 async function chooseProjectFolder() {
@@ -183,10 +229,11 @@ async function chooseProjectFolder() {
     }
     if (typeof result.path !== "string" || !result.path) throw new Error("没有取得文件夹路径，请重新选择。");
     byId("project-path").value = result.path;
+    addFailed = false;
     const name = byId("project-name");
     if (!name.value.trim() || name.value === suggestedProjectName) name.value = result.name || "";
     suggestedProjectName = result.name || "";
-    byId("project-folder-status").textContent = "文件夹已选好，PI 会自动检查项目并配置启动方式。";
+    byId("project-folder-status").textContent = "文件夹已选好，NUEMA 会自动检查项目并配置启动方式。";
     focusId = "project-add-submit";
   } catch (error) {
     if (controller.signal.aborted || folderController !== controller) return;
@@ -200,18 +247,23 @@ async function chooseProjectFolder() {
 }
 byId("project-choose-folder").addEventListener("click", chooseProjectFolder);
 byId("project-path").addEventListener("input", () => {
-  byId("project-folder-status").textContent = "只需提供路径，PI 会检查项目说明和入口，自动配置启动方式。";
+  addFailed = false; showError("add-error");
+  byId("project-folder-status").textContent = "只需提供路径，NUEMA 会检查项目说明和入口，自动配置启动方式。";
   render();
 });
 
 byId("project-add-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (busy || folderController) return;
-  busy = adding = true; showError("add-error");
+  busy = adding = true; addFailed = false; showError("add-error"); feedback();
   byId("project-folder-status").textContent = "正在添加并检查项目…"; render();
   try {
     const name = byId("project-name").value.trim(), description = byId("project-description").value.trim();
     const result = await api("/api/projects", { path: byId("project-path").value.trim(),
       ...(name ? { name } : {}), ...(description ? { description } : {}) });
+    if (!result.project?.id || result.project.canLaunch !== true) throw new Error("添加未完成");
+    listVersion++;
+    projects = projects.some((project) => project.id === result.project.id)
+      ? projects.map((project) => project.id === result.project.id ? result.project : project) : [...projects, result.project];
     for (const id of ["project-path", "project-name", "project-description"]) byId(id).value = "";
     suggestedProjectName = "";
     byId("project-folder-status").textContent = "选择项目所在的文件夹，也可以直接填写本机路径。";
@@ -220,9 +272,14 @@ byId("project-add-form").addEventListener("submit", async (event) => {
       byId("project-search").value = ""; renderedId = undefined;
       openProject(result.project.id);
     }
-    feedback(result.project.canLaunch ? "项目已添加，启动方式已配好。点击“打开项目”即可使用。"
-      : result.project.setup?.summary || "项目已添加，可以在详情中自动识别启动方式。");
-  } catch (failure) { showError("add-error", failure.message); }
+    feedback("项目已添加，启动方式已配好。点击“打开项目”即可使用。");
+  } catch (failure) {
+    addFailed = true;
+    const message = addFailureMessage(failure);
+    showError("add-error", message);
+    byId("project-folder-status").textContent = "输入已保留，可以稍后直接重试。";
+    if (route.page === "projects" && route.projectView !== "add") feedback(message);
+  }
   finally { busy = adding = false; render(); }
 });
 
@@ -249,13 +306,14 @@ byId("project-chat-form").addEventListener("submit", async (event) => {
       if (progress.type === "text-start") { reply.content = ""; reply.status = "thinking"; reply.label = ""; }
       if (progress.type === "text-delta" && typeof progress.delta === "string") { reply.content += progress.delta; reply.status = "writing"; }
       if (progress.type === "status") { reply.status = progress.phase === "tool" ? "tool" : "thinking"; reply.label = progress.label || ""; }
-      replyView?.update(reply);
+      replyView?.update(displayedReply(reply));
       if (atBottom) container.scrollTop = container.scrollHeight;
     });
     if (requestSession !== sessionId) return;
     user.delivery = "sent";
     Object.assign(reply, { content: result.reply, status: "complete" });
-    messages = messages.slice(-80); projects = result.projects;
+    messages = messages.slice(-80); projects = result.projects; listVersion++;
+    for (const action of result.actions) if (action.tool === "remove_project" && action.project.removed) removeFromView(action.project.id);
     const added = result.actions.findLast((item) => item.tool === "add_project");
     if (added) reply.projectId = added.project.id;
   } catch (failure) {
@@ -277,10 +335,10 @@ byId("project-chat-form").addEventListener("submit", async (event) => {
 byId("project-cancel").addEventListener("click", async () => {
   if (!chatting || cancelling) return;
   const requestSession = sessionId, reply = pendingReply, previous = reply.status, controller = activeController;
-  cancelling = true; reply.cancelRequested = true; reply.status = "stopping"; replyView?.update(reply); render();
+  cancelling = true; reply.cancelRequested = true; reply.status = "stopping"; replyView?.update(displayedReply(reply)); render();
   try { await api("/api/projects/cancel", { sessionId: requestSession }); controller?.abort(); }
   catch (failure) {
-    if (sessionId === requestSession && chatting) { reply.cancelRequested = false; reply.status = previous; replyView?.update(reply); showError("project-error", failure.message); }
+    if (sessionId === requestSession && chatting) { reply.cancelRequested = false; reply.status = previous; replyView?.update(displayedReply(reply)); showError("project-error", failure.message); }
   } finally { if (sessionId === requestSession) { cancelling = false; render(); } }
 });
 byId("project-new-chat").addEventListener("click", () => {
@@ -292,6 +350,9 @@ byId("project-ask").addEventListener("click", () => {
 });
 byId("project-context-open").addEventListener("click", () => { if (contextId) openProject(contextId); });
 byId("project-context-clear").addEventListener("click", () => { contextId = null; render(); input.focus(); });
+document.addEventListener("neuma:project-select", (event) => {
+  if (projects.some((project) => project.id === event.detail?.id)) openProject(event.detail.id);
+});
 byId("project-search").addEventListener("input", render);
 byId("project-refresh").addEventListener("click", () => { showError("manage-error"); void refresh(); });
 

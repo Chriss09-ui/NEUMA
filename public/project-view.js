@@ -1,6 +1,11 @@
 export const STATUS_LABELS = { stopped: "未运行", starting: "正在启动", running: "运行中", failed: "启动失败", completed: "运行结束", external: "已在外部打开" };
-export const KIND_LABELS = { web: "本地网页", node: "Node 项目", python: "Python 工具", desktop: "桌面应用", other: "其他项目" };
+export const KIND_LABELS = { web: "本地网页", node: "Node 项目", python: "Python 工具", script: "脚本项目", desktop: "桌面应用", other: "其他项目" };
 const STATUS_TONE = { running: "ok", external: "ok", starting: "warn", failed: "off" };
+
+// Older saved summaries and running servers can still use the internal engine name.
+export function nuemaText(value = "") {
+  return value.replace(/\bPI(?:[\s-]*agent)?\b/gi, "NUEMA");
+}
 
 export function node(tag, className = "", text = "") {
   const el = document.createElement(tag);
@@ -13,8 +18,10 @@ export function statusDot(status) {
   return node("i", `dot ${STATUS_TONE[status] ?? ""}`);
 }
 
-export function renderProjectList({ container, projects, selectedId, busy, onSelect, emptyText, onClearSearch }) {
+export function renderProjectList({ container, projects, selectedId, busy, onSelect, onInspect, onRemove, removeDisabled = false, emptyText, onClearSearch }) {
   const focusedId = container.contains(document.activeElement) ? document.activeElement.dataset.projectId : null;
+  const focusedRemoveId = container.contains(document.activeElement) ? document.activeElement.dataset.projectRemoveId : null;
+  const focusedInspectId = container.contains(document.activeElement) ? document.activeElement.dataset.projectInspectId : null;
   container.replaceChildren();
   if (!projects.length) {
     const empty = node("div", "library-empty");
@@ -38,8 +45,31 @@ export function renderProjectList({ container, projects, selectedId, busy, onSel
     top.append(statusDot(project.status), node("strong", "", project.name), node("em", "", STATUS_LABELS[project.status]));
     button.append(top, node("span", "item-desc", project.description || KIND_LABELS[project.kind]));
     button.addEventListener("click", () => onSelect(project.id));
-    container.append(button);
+    const row = node("div", "project-list-entry"); row.append(button);
+    if (onInspect) {
+      const checking = project.setup?.status === "checking";
+      const inspect = node("button", "project-list-inspect", checking ? "识别中…" : "重新识别");
+      inspect.type = "button"; inspect.disabled = busy || removeDisabled || checking || project.canStop;
+      inspect.dataset.projectInspectId = project.id;
+      inspect.title = project.canStop ? "请先停止项目，再重新识别启动方式" : "让 NUEMA 重新读取项目并更新启动方式";
+      inspect.setAttribute("aria-label", `重新识别项目 ${project.name}`);
+      inspect.setAttribute("aria-busy", String(checking));
+      inspect.addEventListener("click", () => { void onInspect(project.id); });
+      row.append(inspect);
+    }
+    if (onRemove) {
+      const remove = node("button", "project-list-delete", "删除");
+      remove.type = "button"; remove.disabled = busy || removeDisabled;
+      remove.dataset.projectRemoveId = project.id;
+      remove.title = `删除项目“${project.name}”`;
+      remove.setAttribute("aria-label", `删除项目 ${project.name}`);
+      remove.addEventListener("click", () => { void onRemove(project.id); });
+      row.append(remove);
+      container.append(row);
+      if (project.id === focusedRemoveId) remove.focus({ preventScroll: true });
+    } else container.append(row);
     if (project.id === focusedId) button.focus({ preventScroll: true });
+    if (project.id === focusedInspectId) row.querySelector(".project-list-inspect").focus({ preventScroll: true });
   }
 }
 
@@ -92,17 +122,22 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
 
   const actions = node("div", "project-actions");
   for (const [action, label, className] of [["start", "打开项目", "primary"],
-    ["inspect", project.setup?.status === "paused" ? "继续检查" : project.canLaunch ? "重新识别" : "自动识别启动方式", "secondary"], ["stop", "停止", "secondary"], ["remove", "移除记录", "ghost-button"]]) {
+    ["stop", "停止", "secondary"], ["remove", "删除项目", "secondary danger project-delete"]]) {
     const button = node("button", className, label);
     button.type = "button"; button.dataset.projectAction = action;
     button.addEventListener("click", () => { void onAction(action); }); actions.append(button);
   }
-  const setup = node("div", "project-setup"); setup.setAttribute("role", "status");
+  const setup = node("div", "project-setup"); setup.setAttribute("aria-busy", String(project.setup?.status === "checking"));
   setup.append(node("span", "project-setup-mark", project.setup?.status === "checking" ? "◌" : project.canLaunch ? "✓" : "·"));
-  const setupText = node("div");
-  setupText.append(node("strong", "", project.setup?.status === "checking" ? "正在识别项目" : project.setup?.status === "paused" ? "检查已暂停" : project.canLaunch ? "启动方式已配好" : "让 PI 帮你配置"),
-    node("p", "", project.setup?.summary || "自动检查项目说明和入口，识别后即可一键打开，无需填写启动参数。"));
-  setup.append(setupText);
+  const setupText = node("div", "project-setup-text"); setupText.setAttribute("role", "status");
+  setupText.append(node("strong", "", project.setup?.status === "checking" ? "NUEMA 正在重新识别" : project.setup?.status === "paused" ? "检查已暂停" : project.canLaunch ? "启动方式已配好" : "让 NUEMA 帮你配置"),
+    node("p", "", nuemaText(project.setup?.summary || "自动检查项目说明和入口，识别后即可一键打开，无需填写启动参数。")));
+  const help = node("p", "project-inspect-hint"); help.id = "project-inspect-hint"; setupText.append(help);
+  const inspect = node("button", "secondary project-reinspect", "重新识别"); inspect.type = "button";
+  inspect.dataset.projectAction = "inspect";
+  inspect.setAttribute("aria-describedby", help.id);
+  inspect.addEventListener("click", () => { void onAction("inspect"); });
+  setup.append(setupText, inspect);
   const note = node("p", "project-action-note"); note.id = "project-runtime-note";
   container.append(meta, setup, actions, note, launch);
 }
@@ -115,11 +150,19 @@ export function updateProjectStatus(container, project, busy) {
       : action === "inspect" ? project.canStop
       : action === "stop" ? !project.canStop : !action && project.canStop);
     if (action === "start") el.textContent = project.openingPage || project.status === "starting" ? "正在打开…" : "打开项目";
+    if (action === "inspect") {
+      el.textContent = project.setup?.status === "checking" ? "识别中…" : "重新识别";
+      el.setAttribute("aria-busy", String(project.setup?.status === "checking"));
+      el.title = project.canStop ? "请先停止项目，再重新识别启动方式" : "让 NUEMA 重新读取项目并更新启动方式";
+    }
   }
+  container.querySelector("#project-inspect-hint").textContent = project.setup?.status === "checking"
+    ? "正在读取最新文件，完成后会更新启动配置。"
+    : project.canStop ? "请先停止项目，再重新识别启动方式。" : "启动方式有变化？让 NUEMA 重新识别，一键更新配置。";
   const note = container.querySelector("#project-runtime-note");
-  note.textContent = project.error || project.openError || (project.openingPage || project.status === "starting"
+  note.textContent = nuemaText(project.error || project.openError || (project.openingPage || project.status === "starting"
     ? "正在准备项目，完成后会自动打开窗口。"
     : project.canStop ? project.pageOpened ? "项目已打开，保持运行即可使用。" : "项目正在运行。"
       : project.status === "external" ? "项目已在独立窗口打开。"
-        : !project.canLaunch ? "识别遇到问题时，可以点“问问助手”继续说明，或重新识别。" : "点击后会自动启动并打开项目。原项目文件会保留。");
+        : !project.canLaunch ? "识别遇到问题时，可以点“问问助手”继续说明，或重新识别。" : "点击后会自动启动并打开项目。原项目文件会保留。"));
 }
