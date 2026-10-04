@@ -203,7 +203,12 @@
               <h1 id="projects-title">管理项目</h1>
               <p class="page-subtitle">常用的项目放在手边，想做的事交给助手。</p>
             </div>
-            <a id="project-add-link" class="primary" href="#projects/add">＋ 添加项目</a>
+            <div class="project-header-actions">
+              <button id="project-runtime-open" class="secondary runtime-open" type="button" aria-haspopup="dialog" aria-controls="project-runtime-panel">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>运行与端口
+              </button>
+              <a id="project-add-link" class="primary" href="#projects/add">＋ 添加项目</a>
+            </div>
           </header>
           <div id="project-workspace" class="project-workspace">
             <aside id="project-library" class="project-library" aria-label="项目列表">
@@ -274,7 +279,7 @@
           <dialog id="project-add-panel" class="project-add-dialog" aria-labelledby="project-add-title">
             <button id="project-add-close" class="dialog-close ghost-button" type="button" aria-label="关闭添加项目">×</button>
           <form id="project-add-form" class="card form-card">
-            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">给一个路径，剩下的交给 PI。</p></div></div>
+            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">给一个路径，剩下的交给 NUEMA。</p></div></div>
             <div class="field">
               <label class="field-name" for="project-path">项目文件夹 <b>必填</b></label>
               <div class="project-path-control">
@@ -294,13 +299,49 @@
               </label>
             </div></details>
             <div id="add-error" class="error" role="alert" hidden></div>
-            <p class="muted-note">PI 会阅读项目说明和启动入口，自动保存配置。原文件保留在原处，准备好后由你点击启动。</p>
+            <p class="muted-note">NUEMA 会阅读项目说明和启动入口，自动保存配置。原文件保留在原处，准备好后由你点击启动。</p>
             <div class="form-actions">
               <button id="project-add-cancel" class="secondary" type="button">取消</button>
               <button id="project-add-submit" class="primary" type="submit">添加并自动配置</button>
             </div>
           </form>
 
+          </dialog>
+          <dialog id="project-runtime-panel" class="runtime-dialog" aria-labelledby="runtime-title" aria-describedby="runtime-description">
+            <header class="runtime-heading">
+              <div><h2 id="runtime-title">运行与端口</h2><p id="runtime-description">查看已添加项目的运行情况，以及电脑上正在监听的端口。</p></div>
+              <button id="runtime-close" class="ghost-button runtime-close" type="button" aria-label="关闭运行与端口" autofocus>×</button>
+            </header>
+            <div class="runtime-navigation">
+              <div class="runtime-tabs" role="tablist" aria-label="运行概览内容">
+                <button id="runtime-tab-projects" type="button" role="tab" aria-selected="true" aria-controls="runtime-projects-panel">项目运行</button>
+                <button id="runtime-tab-ports" type="button" role="tab" aria-selected="false" aria-controls="runtime-ports-panel" tabindex="-1">端口占用</button>
+              </div>
+              <button id="runtime-refresh" class="secondary" type="button">刷新状态</button>
+            </div>
+            <div class="runtime-feedback">
+              <p id="runtime-check-status" role="status" aria-live="polite">正在读取运行情况…</p>
+              <div id="runtime-error" class="error" role="alert" hidden></div>
+              <div id="runtime-warnings" class="runtime-warnings" hidden></div>
+            </div>
+            <section id="runtime-projects-panel" class="runtime-tab-panel" role="tabpanel" aria-labelledby="runtime-tab-projects" tabindex="0">
+              <div class="runtime-filters" role="group" aria-label="筛选项目运行状态">
+                <button type="button" data-runtime-filter="all" aria-pressed="true">全部 <span data-runtime-count="total">—</span></button>
+                <button type="button" data-runtime-filter="running" aria-pressed="false">运行中 <span data-runtime-count="running">—</span></button>
+                <button type="button" data-runtime-filter="stopped" aria-pressed="false">未发现运行 <span data-runtime-count="stopped">—</span></button>
+                <button type="button" data-runtime-filter="unknown" aria-pressed="false">待确认 <span data-runtime-count="unknown">—</span></button>
+              </div>
+              <div id="runtime-projects-content" class="runtime-table-scroll"></div>
+            </section>
+            <section id="runtime-ports-panel" class="runtime-tab-panel" role="tabpanel" aria-labelledby="runtime-tab-ports" tabindex="0" hidden>
+              <div class="runtime-port-toolbar">
+                <label class="sr-only" for="runtime-port-search">搜索端口、进程或项目</label>
+                <input id="runtime-port-search" type="search" placeholder="搜索端口、进程或项目" spellcheck="false">
+                <span id="runtime-port-count" class="muted-note"></span>
+              </div>
+              <div id="runtime-ports-content" class="runtime-table-scroll"></div>
+            </section>
+            <footer class="runtime-footnote">端口仅统计 TCP 监听；运行情况以本次检查为准。外部启动的项目会尽可能匹配，无法确认的单独标记。</footer>
           </dialog>
         </section>
 
@@ -394,6 +435,7 @@
     <script type="module" src="/app.js"></script>
     <script type="module" src="/agents.js"></script>
     <script type="module" src="/projects.js"></script>
+    <script type="module" src="/runtime.js"></script>
     <script type="module" src="/settings.js"></script>
   </body>
 </html>

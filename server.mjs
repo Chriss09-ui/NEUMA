@@ -19,6 +19,8 @@ const PUBLIC = new Map([
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
   ["/projects.js", ["projects.js", "text/javascript; charset=utf-8"]],
   ["/project-view.js", ["project-view.js", "text/javascript; charset=utf-8"]],
+  ["/runtime.js", ["runtime.js", "text/javascript; charset=utf-8"]],
+  ["/runtime-view.js", ["runtime-view.js", "text/javascript; charset=utf-8"]],
   ["/chat-ui.js", ["chat-ui.js", "text/javascript; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
@@ -31,9 +33,10 @@ function sendJson(response, status, value) {
 function safeFailure(error, config) {
   const status = error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";
-  const diagnostic = error instanceof ProviderError ? error.diagnostic : error instanceof InputError
+  const diagnostic = error instanceof ProviderError || (error instanceof InputError && error.code === "PROJECT_ADD_FAILED" && error.diagnostic) ? error.diagnostic : error instanceof InputError
     ? { stage: "input", reason: "invalid_request" } : { stage: "server", reason: "internal_error" };
-  return { status, payload: { error: message, diagnostic: { ...diagnostic, providerModel: config.model || null } } };
+  return { status, payload: { error: message, diagnostic: { ...diagnostic, providerModel: config.model || null },
+    ...(error instanceof InputError && error.code === "PROJECT_REMOVE_STOP_FAILED" ? { code: error.code } : {}) } };
 }
 
 async function streamProjectReply(response, agent, body, config) {
@@ -201,7 +204,23 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         return sendJson(response, 200, settingsView(config));
       }
       if (request.method === "GET" && path === "/api/projects") {
-        return sendJson(response, 200, { projects: await projects.list() });
+        return sendJson(response, 200, { projects: await projects.list(), pendingAdditions: projects.pendingAdds?.size ?? 0 });
+      }
+      if (request.method === "GET" && path === "/api/projects/failures") {
+        return sendJson(response, 200, { failures: await projects.failures({ limit: 10 }) });
+      }
+      if (request.method === "GET" && path === "/api/projects/runtime") {
+        const controller = new AbortController();
+        const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+        response.on("close", disconnected);
+        try {
+          if (response.destroyed) return;
+          const snapshot = await projects.runtime({ signal: controller.signal });
+          if (!controller.signal.aborted) sendJson(response, 200, snapshot);
+        } catch (error) {
+          if (!controller.signal.aborted) throw error;
+        } finally { response.removeListener("close", disconnected); }
+        return;
       }
       if (request.method === "POST" && path === "/api/projects/pick-folder") {
         await readJson(request);
@@ -238,7 +257,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         const body = await readJson(request), [, id, action] = operation;
         if (action === "remove" && body.confirm !== true) throw new InputError("请确认移除项目记录");
         if (action === "inspect" && request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.inspect(id, options), config);
-        const project = action === "configure" ? await projects.configure(id, body) : await projects[action](id);
+        const project = action === "configure" ? await projects.configure(id, body)
+          : action === "remove" ? await projects.remove(id, { removeOnly: body.removeOnly ?? false }) : await projects[action](id);
         return sendJson(response, 200, { project });
       }
       if (request.method === "POST" && path === "/api/requirements/turn") {

@@ -4,7 +4,16 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { InputError } from "./core.mjs";
 
 const excluded = /^(?:\..*|node_modules|venv|__pycache__|vendor|dist|build|coverage|.*(?:secret|credential|token|password).*|.*\.(?:pem|key|p12|pfx))$/i;
-const textTypes = new Set([".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".html", ".htm"]);
+const scriptTypes = new Set([".sh", ".bash", ".zsh", ".command"]);
+const scriptPrograms = new Map([...["bash", "sh", "zsh"].map((name) => [name, `/bin/${name}`]), ...["bash", "sh", "zsh"].map((name) => [`/bin/${name}`, `/bin/${name}`])]);
+const textTypes = new Set([".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".html", ".htm", ...scriptTypes]);
+
+function redactProjectText(source) {
+  return source
+    .replace(/((?:[\w-]*(?:api[_-]?key|access[_-]?pass|token|secret|password|passwd|authorization)[\w-]*)["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|[^\r\n,;]+)/gi, "$1[已隐藏]")
+    .replace(/Bearer\s+[\w.+\/-]+/gi, "Bearer [已隐藏]")
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[已隐藏私钥]");
+}
 
 function inside(root, path) {
   const suffix = relative(root, path);
@@ -64,16 +73,35 @@ export function createProjectReader(root) {
       const source = await readFile(path, { encoding: "utf8", signal });
       if (source.includes("\0")) throw new InputError("不能读取二进制文件");
       // Redact before paging so a credential split across pages cannot escape redaction.
-      const safeText = source
-        .replace(/((?:api[_-]?key|access[_-]?token|secret|password|authorization)[\w-]*["']?\s*[:=]\s*)[^\r\n,]+/gi, "$1[已隐藏]")
-        .replace(/Bearer\s+[\w.+\/-]+/gi, "Bearer [已隐藏]")
-        .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[已隐藏私钥]");
+      const safeText = redactProjectText(source);
       let end = Math.min(offset + 24_000, safeText.length);
       if (end < safeText.length && /[\uD800-\uDBFF]/.test(safeText[end - 1])) end--;
       readFiles.add(relative(root, path));
       return { file, text: safeText.slice(offset, end), truncated: end < safeText.length, nextOffset: end < safeText.length ? end : null };
     },
   };
+}
+
+export async function validateScriptCommand(root, launch) {
+  const command = scriptPrograms.get(launch?.command), args = launch?.args;
+  if (!command || !Array.isArray(args) || args.length < 1 || args.length > 30
+    || args.some((arg) => typeof arg !== "string" || arg.includes("\0") || arg.length > 1000)
+    || args[0].startsWith("-")) throw new InputError("脚本启动必须使用 bash、sh 或 zsh 和项目内已有的脚本文件，不能使用内联命令");
+  const file = await projectPath(root, args[0]);
+  if (!readable(root, file) || !scriptTypes.has(extname(file).toLowerCase())) throw new InputError("启动或停止脚本必须是项目内可读取的 Shell 脚本");
+  try { await access(file, constants.R_OK); await access(command, constants.X_OK); }
+  catch { throw new InputError("无法读取项目脚本，或电脑未安装对应的 Shell 程序"); }
+  return { command, args: [file, ...args.slice(1)] };
+}
+
+function localPlanUrl(value) {
+  try {
+    if (typeof value !== "string") throw new Error();
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)
+      || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error();
+    return parsed.href;
+  } catch { throw new InputError("自动识别的页面或健康检查地址必须是不含凭据的本机 HTTP 地址"); }
 }
 
 export async function validateProjectPlan(project, plan) {
@@ -89,6 +117,17 @@ export async function validateProjectPlan(project, plan) {
     return { root, kind: "web", entry: relative(root, file), launch: null, setup };
   }
   if (plan.kind === "desktop" && project.kind === "desktop") return { root, kind: "desktop", launch: project.launch, setup };
+  if (plan.kind === "script" || scriptPrograms.has(plan.command)) {
+    const launch = await validateScriptCommand(root, plan);
+    if (plan.background !== undefined && typeof plan.background !== "boolean") throw new InputError("脚本后台运行标记必须是布尔值");
+    const background = plan.background === true;
+    const url = plan.url ? localPlanUrl(plan.url) : null;
+    const stop = plan.stop ? await validateScriptCommand(root, plan.stop) : null;
+    if (plan.healthUrls !== undefined && !Array.isArray(plan.healthUrls)) throw new InputError("服务健康检查地址必须是数组");
+    const healthUrls = [...new Set((plan.healthUrls || []).map(localPlanUrl))];
+    if (background && (!url || !stop || !healthUrls.length)) throw new InputError("后台启动脚本需要页面地址、各服务健康检查地址和项目内的停止脚本");
+    return { root, kind: "script", entry: null, launch: { ...launch, url, background, stop, healthUrls }, setup };
+  }
   const { command, args } = plan;
   if (typeof command !== "string" || !Array.isArray(args) || args.length < 1 || args.length > 30
     || args.some((arg) => typeof arg !== "string" || arg.includes("\0") || arg.length > 1000)) throw new InputError("启动程序或参数无效");
@@ -120,14 +159,6 @@ export async function validateProjectPlan(project, plan) {
     }
     kind = "python";
   } else throw new InputError("无法自动确认这个启动程序，请说明具体缺口");
-  let url = null;
-  if (plan.url) {
-    try {
-      const parsed = new URL(plan.url);
-      if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)
-        || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error();
-      url = parsed.href;
-    } catch { throw new InputError("自动识别的页面地址必须是不含凭据的本机 HTTP 地址"); }
-  }
+  const url = plan.url ? localPlanUrl(plan.url) : null;
   return { root, kind, entry: null, launch: { command: program, args, url }, setup };
 }
