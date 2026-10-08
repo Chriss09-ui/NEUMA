@@ -49,7 +49,8 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
     focus() { document.activeElement = this; }
     click() { return this.dispatchEvent({ type: "click" }); }
   }
-  const nodes = new Map(), requests = [], runtimeEvents = [], profileEvents = [];
+  const nodes = new Map(), requests = [], runtimeEvents = [], profileEvents = [], timers = new Map();
+  let timerId = 0;
   const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   document.getElementById = get;
   document.createElement = () => new Element();
@@ -59,6 +60,8 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   document.addEventListener("neuma:agent-profiles-loaded", (event) => profileEvents.push(event.detail));
   let ids = 0;
   const context = vm.createContext({ ...state, document, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
+    setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
+    clearTimeout: (id) => timers.delete(id),
     window: { confirm: () => true, localStorage: {
       getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key),
     } },
@@ -82,6 +85,7 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route("one");
   return { get, requests, stored, emit, route, document, runtimeEvents, profileEvents,
+    timers, poll: async () => { const pending = [...timers.values()]; timers.clear(); await Promise.all(pending.map((callback) => callback())); await settle(); },
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context),
     runtime: (id = "one") => vm.runInContext(`runtimes.get(${JSON.stringify(id)})`, context),
     submit: (text) => { get("agent-message").value = text; return get("agent-chat-form").dispatchEvent({ type: "submit", preventDefault() {} }); },
@@ -96,6 +100,104 @@ const developmentResult = (record, overrides = {}) => ({ agent: null, architectu
   development: record, ...overrides });
 const treeText = (node) => [node.textContent, ...node.children.map(treeText)].join(" ");
 const developmentButton = (ui) => ui.get("agent-development").children[0].children.at(-1).children[0];
+
+test("另一个页面的后台研发完成后自动核对，离开页面停轮询并在返回时重新检查", async () => {
+  let saved = developmentResult(developmentRecord());
+  const ui = await setup({ inspect: (path) => Response.json(path.endsWith("/one") ? saved : readyResult(definition("two"))) });
+  assert.equal(ui.runtime().status, "developing");
+  assert.equal(ui.timers.size, 1);
+  await ui.route("two");
+  assert.equal(ui.timers.size, 0);
+  saved = developmentResult(developmentRecord({ status: "cancelled" }));
+  await ui.route("one");
+  assert.equal(ui.runtime().development.status, "cancelled");
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+
+  saved = developmentResult(developmentRecord());
+  const second = await setup({ inspect: () => Response.json(saved) });
+  assert.equal(second.timers.size, 1);
+  saved = developmentResult(developmentRecord({ status: "completed", delivery: "ready" }),
+    { agent: { ...designedDefinition(), developmentRef: { id: "dev-one", codeHash: "code-2", planHash: "plan-2" } }, architecture: architecture() });
+  await second.poll();
+  assert.equal(second.runtime().status, "ready");
+  assert.equal(second.get("agent-send").disabled, false);
+  assert.equal(second.get("agent-build").disabled, false);
+  assert.equal(second.timers.size, 0);
+  assert.equal(second.requests.some((request) => request.path.endsWith("/development/stream")), false);
+});
+
+test("后台架构轮询不能覆盖本地构建或更新后的需求，也不把迟到响应画到别的智能体", async () => {
+  for (const change of ["build", "source", "route", "remove"]) {
+    let release, reads = 0;
+    const building = stream();
+    const ui = await setup({ inspect: (path) => path.endsWith("/two") ? Response.json(readyResult(definition("two")))
+      : ++reads === 1 ? Response.json({ agent: null, architecture: architecture({ status: "designing", delivery: "blocked" }) })
+        : new Promise((done) => { release = done; }), build: () => building.response });
+    const polling = ui.poll(); await settle();
+    assert.equal(typeof release, "function");
+    let pending;
+    if (change === "build") pending = ui.get("agent-build").click();
+    else if (change === "source") await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one"
+      ? { ...agent, draft: { goal: { value: "新的需求" } } } : agent), busy: false });
+    else if (change === "route") await ui.route("two");
+    else {
+      await ui.emit("neuma:agent-removed", { id: "one" });
+      await ui.emit("neuma:agents-changed", { items: requirements.filter((agent) => agent.id !== "one"), busy: false });
+    }
+    release(Response.json(readyResult(designedDefinition()))); await polling;
+    if (change === "build") {
+      assert.equal(ui.runtime().status, "building");
+      assert.equal(ui.runtime().definition, null);
+      assert.equal(ui.timers.size, 0);
+      building.send({ type: "done", result: readyResult(designedDefinition()) }); building.close(); await pending;
+    } else if (change === "source") {
+      assert.equal(ui.runtime().status, "stale");
+      assert.equal(ui.runtime().definition, null);
+      assert.equal(ui.timers.size, 0);
+    } else if (change === "route") {
+      assert.equal(ui.get("agent-title").textContent, requirements[1].name);
+      assert.equal(ui.runtime("two").status, "ready");
+      assert.equal(ui.timers.size, 0);
+    } else {
+      assert.equal(ui.runtime(), undefined);
+      assert.equal(ui.get("agent-missing").hidden, false);
+      assert.equal(ui.timers.size, 0);
+    }
+  }
+});
+
+test("后台状态轮询保留聊天气泡和用户阅读位置，完成后停止定时读取", async () => {
+  let saved = developmentResult(developmentRecord());
+  const ui = await setup({ inspect: () => Response.json(saved) });
+  ui.item().messages.push({ role: "user", content: "上次任务", delivery: "sent" },
+    { role: "assistant", content: "保留阅读中的结果", status: "complete" });
+  await ui.emit("neuma:agents-changed", { items: requirements, busy: false });
+  const container = ui.get("agent-messages"), rows = container.children;
+  container.scrollHeight = 1000; container.clientHeight = 200; container.scrollTop = 17;
+  saved = developmentResult(developmentRecord({ status: "completed", delivery: "ready" }),
+    { agent: { ...designedDefinition(), developmentRef: { id: "dev-one", codeHash: "code-2", planHash: "plan-2" } }, architecture: architecture() });
+  await ui.poll();
+  assert.equal(container.children, rows);
+  assert.equal(container.scrollTop, 17);
+  assert.equal(ui.get("agent-send").disabled, false);
+  assert.equal(ui.timers.size, 0);
+});
+
+test("停止后台研发后，之前发出的迟到轮询不能恢复运行中状态", async () => {
+  let saved = developmentResult(developmentRecord()), release, reads = 0;
+  const ui = await setup({ inspect: () => ++reads === 2 ? new Promise((done) => { release = done; }) : Response.json(saved),
+    cancelDevelopment: () => {
+      saved = developmentResult(developmentRecord({ status: "cancelled" }));
+      return Response.json({ cancelled: true, development: saved.development });
+    } });
+  const polling = ui.poll(); await settle();
+  await developmentButton(ui).click();
+  assert.equal(ui.runtime().development.status, "cancelled");
+  release(Response.json(developmentResult(developmentRecord()))); await polling;
+  assert.equal(ui.runtime().development.status, "cancelled");
+  assert.equal(ui.timers.size, 0);
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+});
 
 test("生成智能体自动贯穿研发五阶段，停止后续接且旧研发结果不能覆盖新需求", async () => {
   const building = stream(), resumed = stream(); let saved = null;

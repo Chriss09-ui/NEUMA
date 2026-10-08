@@ -384,8 +384,10 @@ export class PiProjectAgent {
       if (item.cancelled) throw new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
       if (item.turn.failedOperation) {
         failed = true;
+        const projects = await this.manager.list();
+        if (item.cancelled) throw new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
         return { reply: item.turn.failedOperation.setup.summary,
-          sessionId, engine: "pi", actions: item.turn.actions, projects: await this.manager.list() };
+          sessionId, engine: "pi", actions: item.turn.actions, projects };
       }
       const last = item.session.messages?.findLast((entry) => entry.role === "assistant");
       if (retry.failed || last?.stopReason === "error" || last?.stopReason === "aborted") {
@@ -394,7 +396,9 @@ export class PiProjectAgent {
       }
       const reply = item.session.getLastAssistantText();
       if (!reply?.trim()) throw new Error("pi_empty_response");
-      return { reply, sessionId, engine: "pi", actions: item.turn.actions, projects: await this.manager.list() };
+      const projects = await this.manager.list();
+      if (item.cancelled) throw new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
+      return { reply, sessionId, engine: "pi", actions: item.turn.actions, projects };
     } catch (error) {
       failed = true;
       if (item.cancelled) throw new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
@@ -404,14 +408,23 @@ export class PiProjectAgent {
       unsubscribe(); item.busy = false; item.usedAt = Date.now(); item.turn.onProgress = null;
       // Error messages can include provider payloads. Keep them out of the next model request.
       if (failed) {
-        item.session?.dispose(); this.sessions.delete(sessionId);
+        item.session?.dispose(); item.session = null;
+        if (this.sessions.get(sessionId) === item) this.sessions.delete(sessionId);
       }
     }
   }
 
   async dispose() {
-    for (const item of this.sessions.values()) { await item.session?.abort(); item.session?.dispose(); }
+    const sessions = [...this.sessions.values()];
     this.sessions.clear();
+    for (const item of sessions) item.cancelled = true;
+    await Promise.all(sessions.map(async (item) => {
+      const session = item.session;
+      try { await session?.abort(); }
+      finally {
+        if (item.session === session) { session?.dispose(); item.session = null; }
+      }
+    }));
   }
 
   async cancel(sessionId) {

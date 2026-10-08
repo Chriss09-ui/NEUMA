@@ -12,6 +12,7 @@ const conversations = new Map(), runtimes = new Map(), inputs = new Map();
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
 let developmentView = null;
+let inspectionTimer = null;
 const api = createAgentRuntime();
 const byId = (id) => document.getElementById(id);
 const input = byId("agent-message");
@@ -40,7 +41,7 @@ function conversation(id) {
 
 function runtime(agent) {
   if (!runtimes.has(agent.id)) runtimes.set(agent.id, {
-    status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, architecture: null, development: null, operation: null, sequence: 0,
+    status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, architecture: null, development: null, operation: null, inspection: null, sequence: 0,
     error: "", label: "", rebuildRequested: false,
   });
   return runtimes.get(agent.id);
@@ -128,6 +129,31 @@ function renderControls(agent) {
   showError(item.error || state.error);
   renderDevelopment(agent, development);
   broadcastRuntime(agent);
+  scheduleInspection(agent);
+}
+
+function clearInspectionTimer() {
+  if (inspectionTimer !== null) clearTimeout(inspectionTimer);
+  inspectionTimer = null;
+}
+
+function serverOperationPending(agent, state = runtime(agent)) {
+  const architecture = state.architecture;
+  return architecture?.agentId === agent.id && agentSourceKey(architecture) === state.sourceKey
+    && (["designing", "evaluating"].includes(architecture.status) || agentDevelopmentState(agent, state).active);
+}
+
+function scheduleInspection(agent) {
+  if (!agent || !visible(agent.id)) return;
+  clearInspectionTimer();
+  const state = runtime(agent);
+  if (state.operation || conversations.get(agent.id)?.turn || state.inspection
+    || !serverOperationPending(agent, state)) return;
+  inspectionTimer = setTimeout(() => {
+    inspectionTimer = null;
+    const latest = current();
+    if (visible(agent.id) && latest) return inspectAgent(latest, true);
+  }, 3000);
 }
 
 function renderDevelopment(agent, development = agentDevelopmentState(agent, runtime(agent))) {
@@ -213,7 +239,7 @@ function renderArchitecture(agent, brief) {
   }
 }
 
-function renderWorkspace() {
+function renderWorkspace({ renderConversation = true } = {}) {
   if (route.page !== "agent") return;
   const agent = current();
   byId("agent-missing").hidden = Boolean(agent);
@@ -238,34 +264,43 @@ function renderWorkspace() {
     brief.append(field);
   }
   renderArchitecture(agent, brief);
-  renderMessages(agent);
+  if (renderConversation || !conversation(agent.id).messages.length) renderMessages(agent);
   renderControls(agent);
   byId("agent-storage-note").textContent = `${agent.persisted ? "需求已保存在此浏览器。" : "入口仅在当前页面存在，请保存需求以便下次打开。"}${conversation(agent.id).saved
     ? "这份对话已手动保存；新消息需再次保存。" : "对话仅在本页保留，点击保存后刷新可恢复。"}`;
 }
 
-async function inspectAgent(agent) {
+async function inspectAgent(agent, refresh = false) {
   const state = runtime(agent);
-  if (state.status !== "unchecked") return;
+  if (state.inspection || state.operation || conversations.get(agent.id)?.turn || (!refresh && state.status !== "unchecked")) return;
   const sequence = ++state.sequence;
+  const sourceKey = state.sourceKey, inspection = { sequence };
+  const valid = () => state.sequence === sequence && runtimes.get(agent.id) === state && state.sourceKey === sourceKey
+    && !state.operation && !conversations.get(agent.id)?.turn && agents.some((item) => item.id === agent.id);
+  state.inspection = inspection;
   const profileVersion = profileVersions.get(agent.id) || 0;
-  state.status = "checking";
+  if (!refresh || state.status === "unchecked") state.status = "checking";
   if (visible(agent.id)) renderControls(agent);
   try {
     const result = await api.inspect(agent.id);
-    if (state.sequence !== sequence || !agents.some((item) => item.id === agent.id)) return;
+    if (!valid()) return;
     state.definition = result.agent ?? null;
     state.architecture = result.architecture ?? null;
     state.development = result.development ?? null;
+    state.error = "";
     Object.assign(state, agentBuildState(agent, result));
     syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
   } catch (error) {
-    if (state.sequence !== sequence) return;
+    if (!valid()) return;
     state.status = "error";
     state.error = error.message || "无法读取智能体，请重新生成。";
+  } finally {
+    if (state.inspection === inspection) state.inspection = null;
+    if (valid()) {
+      renderSidebar();
+      if (visible(agent.id)) renderWorkspace({ renderConversation: !refresh });
+    } else if (visible(agent.id)) scheduleInspection(current());
   }
-  renderSidebar();
-  if (visible(agent.id)) renderWorkspace();
 }
 
 async function buildAgent(id, queueIfBusy = false) {
@@ -396,7 +431,7 @@ async function stopDevelopment(id) {
   const state = runtime(agent), local = state.operation?.kind === "development";
   if (state.operation?.stopping || (!local && (state.operation || !agentDevelopmentState(agent, state).active))) return;
   const operation = local ? state.operation : { kind: "development-stop", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
-  operation.stopping = true; state.operation = operation;
+  operation.stopping = true; state.sequence++; state.operation = operation;
   operation.cancelPromise = api.cancelDevelopment(id);
   operation.controller.abort();
   if (visible(id)) renderControls(agent);
@@ -525,6 +560,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
   if (route.page === "agent" && current()) return inspectAgent(current());
 });
 document.addEventListener("neuma:route", (event) => {
+  clearInspectionTimer();
   if (route.page === "agent") inputs.set(route.agentId, input.value);
   const previousPage = route.page, previousId = route.agentId;
   route = event.detail;
@@ -536,7 +572,7 @@ document.addEventListener("neuma:route", (event) => {
   renderWorkspace();
   if (route.page === "agent" && current()) {
     if (previousPage !== "agent" || previousId !== route.agentId) input.focus();
-    return inspectAgent(current());
+    return inspectAgent(current(), serverOperationPending(current()));
   }
 });
 document.addEventListener("neuma:agent-build", (event) => buildAgent(event.detail.id, true));
@@ -552,6 +588,7 @@ document.addEventListener("neuma:agent-profile-changed", (event) => {
 });
 document.addEventListener("neuma:agent-removed", (event) => {
   const id = event.detail.id, item = conversations.get(id);
+  if (id === route.agentId) clearInspectionTimer();
   runtimes.get(id)?.operation?.controller.abort();
   if (item?.turn) { item.turn.controller.abort(); api.cancel(item.sessionId).catch(() => {}); }
   conversations.delete(id);

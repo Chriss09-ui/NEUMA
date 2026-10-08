@@ -1,4 +1,7 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { parseEnv } from "node:util";
 import { InputError } from "./core.mjs";
 
 const FIELDS = {
@@ -10,6 +13,7 @@ const FIELDS = {
 };
 const SECRET_FIELDS = new Set(["apiKey", "jevApiKey"]);
 const CLEARABLE = new Set(["apiKey", "jevApiKey"]);
+const fileWrites = new Map();
 
 function secretHint(value) {
   if (!value) return { set: false, hint: "" };
@@ -75,21 +79,71 @@ export function settingsUpdates(body) {
   return updates;
 }
 
-export async function writeEnvFile(path, updates) {
+function* envEntries(content) {
+  let start = 0;
+  while (start < content.length) {
+    const newline = content.indexOf("\n", start);
+    let end = newline < 0 ? content.length : newline + 1;
+    const line = content.slice(start, end), name = Object.keys(parseEnv(line))[0];
+    let comment = "";
+    if (name !== undefined) {
+      let valueStart = start + line.indexOf("=") + 1;
+      while ([" ", "\t", "\r"].includes(content[valueStart])) valueStart++;
+      let commentStart = valueStart;
+      if (["\"", "'", "`"].includes(content[valueStart])) {
+        const closing = content.indexOf(content[valueStart], valueStart + 1);
+        // Native dotenv treats an unclosed quote as a single-line literal value.
+        if (closing >= 0) {
+          const followingNewline = content.indexOf("\n", closing + 1);
+          end = followingNewline < 0 ? content.length : followingNewline + 1;
+          commentStart = closing + 1;
+        }
+      }
+      const marker = content.indexOf("#", commentStart);
+      if (marker >= 0 && marker < end) {
+        let suffix = marker;
+        while (suffix > commentStart && [" ", "\t"].includes(content[suffix - 1])) suffix--;
+        comment = content.slice(suffix, end);
+      }
+    }
+    const raw = content.slice(start, end), ending = raw.endsWith("\r\n") ? "\r\n" : raw.endsWith("\n") ? "\n" : "";
+    yield { name, raw, comment, suffix: comment || ending };
+    start = end;
+  }
+}
+
+async function replaceEnvFile(path, updates) {
   let content = "";
   try { content = await readFile(path, "utf8"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
   const pending = new Map(Object.entries(updates));
-  const lines = content ? content.replace(/\n$/, "").split("\n") : [];
-  const next = lines.map((line) => {
-    const name = line.match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=/)?.[1];
-    if (!name || !pending.has(name)) return line;
-    const value = pending.get(name);
-    pending.delete(name);
-    return `${name}=${value}`;
-  });
-  for (const [name, value] of pending) next.push(`${name}=${value}`);
-  const temp = `${path}.${process.pid}.tmp`;
-  await writeFile(temp, `${next.join("\n")}\n`, { mode: 0o600 });
-  await rename(temp, path);
+  const next = [];
+  for (const { name, raw, comment, suffix } of envEntries(content)) {
+    if (name === undefined || !Object.hasOwn(updates, name)) next.push(raw);
+    else if (pending.has(name)) {
+      next.push(`${name}=${pending.get(name)}${suffix}`);
+      pending.delete(name);
+    } else if (comment) next.push(comment);
+  }
+  let updated = next.join("");
+  for (const [name, value] of pending) {
+    if (updated && !updated.endsWith("\n")) updated += "\n";
+    updated += `${name}=${value}\n`;
+  }
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, updated, { mode: 0o600, flag: "wx" });
+    await rename(temp, path);
+  } finally {
+    await rm(temp, { force: true }).catch(() => {});
+  }
+}
+
+export async function writeEnvFile(path, updates) {
+  const file = resolve(path), values = { ...updates };
+  const result = (fileWrites.get(file) ?? Promise.resolve()).then(() => replaceEnvFile(file, values));
+  const queued = result.catch(() => {});
+  fileWrites.set(file, queued);
+  try { await result; }
+  finally { if (fileWrites.get(file) === queued) fileWrites.delete(file); }
 }
