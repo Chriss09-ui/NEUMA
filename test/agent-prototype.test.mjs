@@ -6,21 +6,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../agent-prototype.mjs";
 import { InputError, ProviderError } from "../core.mjs";
+import { CAPABILITIES, designHash } from "../architecture-contract.mjs";
+import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 
-const draft = (goal = "整理周报") => ({ name: { value: "周报助手", source: "user" }, goal: { value: goal, source: "user" },
-  task: { value: "总结用户提供的进展", source: "user" }, deliverable: { value: "中文周报", source: "user" } });
+const draft = validDraft;
 const input = (id = "weekly", goal) => ({ id, name: "周报助手", draft: draft(goal) });
 const turn = (agentId = "weekly", sessionId = "prototype-session-12345", message = "整理本周进展") => ({ agentId, sessionId, message });
+const fileCapabilities = () => CAPABILITIES.map(({ id, scope }) => ({ id, status: "available", reason: scope }));
 
 function factory(records, onPrompt = async () => {}) {
+  records.reviews = [];
   return async (options) => {
-    const builder = options.customTools.find((tool) => tool.name === "submit_agent_definition");
-    const record = { options, builder, prompts: [], disposed: false, aborted: false };
+    const builder = options.customTools.find((tool) => tool.name === "submit_architecture");
+    const reviewer = options.customTools.find((tool) => tool.name === "submit_architecture_review");
+    const record = { options, builder, reviewer, prompts: [], disposed: false, aborted: false };
     let listener;
     const session = { messages: [], subscribe(fn) { listener = fn; return () => { listener = null; }; },
       async prompt(message) {
         record.prompts.push(message);
-        if (builder) await builder.execute("definition", { instructions: "根据用户提供的材料整理周报。缺少外部能力时明确说明。" });
+        if (builder) await builder.execute("design", validDesign(JSON.parse(message).requirements, { capabilities: fileCapabilities() }));
+        else if (reviewer) await reviewer.execute("review", passingReview(JSON.parse(message).candidateHash));
         else {
           listener?.({ type: "message_start", message: { role: "assistant" } });
           listener?.({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "private-thought" } });
@@ -32,7 +37,10 @@ function factory(records, onPrompt = async () => {}) {
       getLastAssistantText: () => "这是周报。", async abort() { record.aborted = true; record.release?.(); },
       dispose() { record.disposed = true; },
     };
-    record.session = session; records.push(record); return session;
+    record.session = session;
+    // Keep independent review sessions separate from the execution records used below.
+    (reviewer ? records.reviews : records).push(record);
+    return session;
   };
 }
 
@@ -48,13 +56,17 @@ test("构建保留原始需求、原子持久化，等价需求复用定义，�
   const records = [], { agents, options } = await fixture(t, factory(records));
   assert.equal(await agents.get("weekly"), null);
   const first = await agents.build(input());
-  assert.equal(first.agent.mode, "prototype"); assert.equal(first.agent.status, "ready"); assert.equal(first.agent.revision, 1);
+  assert.equal(first.agent.mode, "designed"); assert.equal(first.agent.status, "ready"); assert.equal(first.agent.revision, 1);
   assert.deepEqual(first.agent.draft, draft()); assert.equal(first.agent.fingerprint, undefined);
-  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["submit_agent_definition"]);
+  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "submit_architecture"]);
+  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["submit_architecture_review"]);
+  assert.equal(first.architecture.status, "passed"); assert.equal(first.architecture.delivery, "ready");
+  assert.deepEqual(first.agent.architectureRef, { version: first.architecture.version, candidateHash: designHash(first.architecture.design) });
+  assert.notEqual(records[0].session, records.reviews[0].session);
   first.agent.draft.goal.value = "不能篡改内部定义";
   assert.equal((await agents.get("weekly")).draft.goal.value, "整理周报");
   const reordered = { ...input(), draft: Object.fromEntries(Object.entries(draft()).reverse()) };
-  assert.equal((await agents.build(reordered)).agent.revision, 1); assert.equal(records.length, 1);
+  assert.equal((await agents.build(reordered)).agent.revision, 1); assert.equal(records.length, 1); assert.equal(records.reviews.length, 1);
   const restored = new PrototypeAgents({ ...options, config: { llmConfigured: false } }); t.after(() => restored.close());
   assert.equal((await restored.get("weekly")).instructions, (await agents.get("weekly")).instructions);
   assert.equal((await restored.build(input())).agent.revision, 1);
@@ -261,30 +273,45 @@ test("产物只列出自己的文本，内容隐藏凭据，拒绝越界和符�
   const capped = await agents.files("weekly"); assert.equal(capped.files.length, 120); assert.equal(capped.truncated, true);
 });
 
-test("真实 Pi SDK 构建后调用专属文件工具，回复可以连续运行", async (t) => {
+test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可以连续运行", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-agent-sdk-")), requests = [];
   const model = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
-    const names = body.tools.map((tool) => tool.function.name), builder = names.includes("submit_agent_definition");
-    assert.deepEqual(names.sort(), builder ? ["submit_agent_definition"] : ["list_workspace_files", "read_workspace_file", "write_workspace_file"]);
+    const names = body.tools.map((tool) => tool.function.name), builder = names.includes("submit_architecture"), reviewer = names.includes("submit_architecture_review");
+    const expectedTools = builder ? ["delegate_module", "search_technical_sources", "submit_architecture"]
+      : reviewer ? ["submit_architecture_review"] : ["list_workspace_files", "read_workspace_file", "write_workspace_file"];
+    assert.deepEqual(names.sort(), expectedTools);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",
       choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-    if (requests.length === 1 || requests.length === 3) {
-      const name = builder ? "submit_agent_definition" : "write_workspace_file";
-      const arguments_ = builder ? { instructions: "将用户材料保存为周报，回复文件名。" } : { file: "weekly.md", content: "真实工具产物" };
+    if (body.messages.at(-1).role === "user") {
+      const userContent = body.messages.at(-1).content;
+      const message = typeof userContent === "string" ? userContent : userContent.map((item) => item.text ?? "").join("");
+      const payload = builder || reviewer ? JSON.parse(message) : null;
+      const name = builder ? "submit_architecture" : reviewer ? "submit_architecture_review" : "write_workspace_file";
+      const arguments_ = builder ? validDesign(payload.requirements, { capabilities: fileCapabilities(), instructions: "将用户材料保存为周报，回复文件名。" })
+        : reviewer ? passingReview(payload.candidateHash) : { file: "weekly.md", content: "真实工具产物" };
+      if (builder) assert.deepEqual(payload.requirement.draft, draft());
+      if (reviewer) {
+        assert.deepEqual(payload.requirement, draft());
+        assert.equal(payload.candidateHash, designHash(payload.design));
+      }
       chunk({ role: "assistant", tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(arguments_) } }] }); chunk({}, "tool_calls");
-    } else { chunk({ role: "assistant", content: builder ? "定义已提交。" : "周报已保存。" }); chunk({}, "stop"); }
+    } else { chunk({ role: "assistant", content: builder ? "方案已提交。" : reviewer ? "评估已提交。" : "周报已保存。" }); chunk({}, "stop"); }
     response.end("data: [DONE]\n\n");
   });
   await new Promise((done) => model.listen(0, "127.0.0.1", done));
   const agents = new PrototypeAgents({ config: { llmConfigured: true, chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" },
     cwd: root, dataDir: join(root, "data") });
   t.after(async () => { await agents.close(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
-  assert.equal((await agents.build(input())).agent.status, "ready");
+  const built = await agents.build(input());
+  assert.equal(built.agent.status, "ready"); assert.equal(built.agent.mode, "designed");
+  assert.equal(built.architecture.review.verdict, "pass");
   assert.equal((await agents.prompt(turn())).reply, "周报已保存。");
   assert.equal(await readFile(join(root, "data/agent-workspaces/weekly/weekly.md"), "utf8"), "真实工具产物");
   assert.equal((await agents.prompt(turn())).status, "complete");
-  assert.equal(requests.length, 5);
+  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture")).length, 2);
+  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture_review")).length, 2);
+  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "write_workspace_file")).length, 4);
 });

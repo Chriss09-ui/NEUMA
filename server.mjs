@@ -84,14 +84,14 @@ async function streamProjectSetup(response, action, config) {
 }
 
 function requirementReply(result) {
-  if (result.confirmed) return `需求已确认：\n${result.summary}\n\n已加入左侧“我的智能体”，正在生成可对话的助手。生成完成后即可使用，失败时可以重试。`;
+  if (result.confirmed) return `需求已确认：\n${result.summary}\n\n已加入左侧“我的智能体”，正在设计与检查方案。通过检查并生成执行定义后即可使用；缺少能力时会说明下一步。`;
   if (result.status === "ready") return `我整理出的需求是：\n${result.summary}\n\n${result.confirmationQuestion}`;
   return `${result.summary}\n\n${result.question}`;
 }
 
-async function buildAgentReply(request, response, agents, body, config) {
+async function buildAgentReply(request, response, agents, body, config, forceStreaming = false) {
   const controller = new AbortController();
-  const streaming = request.headers.accept?.includes("application/x-ndjson");
+  const streaming = forceStreaming || request.headers.accept?.includes("application/x-ndjson");
   const disconnected = () => { if (!response.writableEnded) controller.abort(); };
   response.on?.("close", disconnected);
   const write = (event) => {
@@ -251,8 +251,23 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         return sendJson(response, 200, await prototypeAgents.cancel((await readJson(request)).sessionId));
       }
       if (request.method === "GET" && path === "/api/agent-profiles") return sendJson(response, 200, await prototypeAgents.getProfiles());
+      const developmentQuery = path.match(/^\/api\/agents\/([\w-]+)\/development(?:\/(stream|cancel))?$/);
+      if (developmentQuery) {
+        const [, id, action] = developmentQuery;
+        if (request.method === "GET" && !action) return sendJson(response, 200, { development: await prototypeAgents.getDevelopment(id) });
+        if (request.method === "POST") {
+          const body = await readJson(request);
+          if (Object.keys(body).some((key) => key !== "resume") || (body.resume !== undefined && typeof body.resume !== "boolean"))
+            throw new InputError("研发请求只接受布尔类型的 resume 参数");
+          if (action === "cancel") return sendJson(response, 200, await prototypeAgents.cancelDevelopment(id));
+          return await buildAgentReply(request, response, { build: (_body, options) => prototypeAgents.develop(id, { resume: body.resume ?? false, ...options }) },
+            body, config, action === "stream");
+        }
+      }
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
-      if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]) });
+      if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]),
+        architecture: await prototypeAgents.getArchitecture?.(agentQuery[1]) ?? null,
+        ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment(agentQuery[1]) } : {}) });
       const agentProfile = path.match(/^\/api\/agents\/([\w-]+)\/profile$/);
       if (request.method === "POST" && agentProfile) return sendJson(response, 200, await prototypeAgents.setProfile(agentProfile[1], await readJson(request)));
       const agentMemory = path.match(/^\/api\/agents\/([\w-]+)\/memory$/);

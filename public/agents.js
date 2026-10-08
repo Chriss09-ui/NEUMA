@@ -1,6 +1,7 @@
 import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, deleteAgentPreview, loadAgentPreview, saveAgentPreview } from "./state.js";
 import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js";
-import { agentHistory, agentSourceKey, createAgentRuntime } from "./agent-runtime.js";
+import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime, developmentPhases } from "./agent-runtime.js";
+import { createDevelopmentView } from "./agent-details-view.js";
 
 let storage;
 try { storage = window.localStorage; } catch { storage = null; }
@@ -10,6 +11,7 @@ let route = { page: "chat", agentId: null };
 const conversations = new Map(), runtimes = new Map(), inputs = new Map();
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
+let developmentView = null;
 const api = createAgentRuntime();
 const byId = (id) => document.getElementById(id);
 const input = byId("agent-message");
@@ -38,7 +40,7 @@ function conversation(id) {
 
 function runtime(agent) {
   if (!runtimes.has(agent.id)) runtimes.set(agent.id, {
-    status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, operation: null, sequence: 0,
+    status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, architecture: null, development: null, operation: null, sequence: 0,
     error: "", label: "", rebuildRequested: false,
   });
   return runtimes.get(agent.id);
@@ -64,8 +66,12 @@ function renderSidebar() {
     mark.setAttribute("aria-hidden", "true");
     const state = runtime(agent);
     const label = element("span", "sidebar-agent-label", "");
-    label.append(element("strong", "", name), element("small", "", state.status === "ready" ? "可以运行"
-      : state.status === "building" ? "正在生成" : state.status === "stale" ? "需求已更新 · 待生成" : "待生成"));
+    const statusLabel = { building: "正在设计与检查", designing: "正在设计", evaluating: "正在评估", developing: "研发进行中",
+      needs_changes: "方案待调整", needs_evidence: "待补充依据", needs_connection: "待连接能力",
+      needs_development: "需要研发", infeasible: "方案不可行", failed: "处理失败", cancelled: "已停止",
+      blocked: "尚未就绪", stale: "需求已更新 · 待生成" };
+    label.append(element("strong", "", name), element("small", "", state.status === "ready"
+      ? "可以运行" : statusLabel[state.status] || "待生成"));
     link.append(mark, label);
     list.append(link);
   }
@@ -82,7 +88,7 @@ function renderMessages(agent) {
       element("strong", "", `这里是「${agentDisplayName(agent)}」的对话`),
       element("p", "", agentDisplayDescription(agent)),
       element("p", "muted-note", runtime(agent).status === "ready"
-        ? "输入一项任务，让这个智能体开始处理。" : "智能体生成完成后，就可以在这里执行任务。"));
+        ? "输入一项任务，让这个智能体开始处理。" : "设计与检查通过，并生成可用的智能体后，就可以在这里执行任务。"));
     container.append(welcome);
   }
   for (const message of item.messages) {
@@ -103,33 +109,56 @@ function renderMessages(agent) {
 
 function renderControls(agent) {
   const state = runtime(agent), item = conversation(agent.id), operation = state.operation || item.turn;
-  byId("agent-runtime-status").textContent = state.status === "building" ? state.label || "正在生成智能体…"
-    : state.status === "ready" ? item.turn ? "正在处理任务…" : "智能体已生成，可以开始任务。"
+  const development = agentDevelopmentState(agent, state);
+  const busy = Boolean(operation || development.active);
+  byId("agent-runtime-status").textContent = state.status === "building" ? state.label || "正在设计与检查…"
+    : state.status === "ready" && item.turn ? "正在处理任务…"
       : state.status === "stale" ? "需求已更新，请重新生成后继续任务。"
         : state.status === "checking" || state.status === "unchecked" ? "正在读取智能体…"
-          : state.status === "error" ? "生成未完成，可以重试。" : "需求已确认，点击生成智能体。";
+          : state.status === "error" ? "生成未完成，可以重试。" : state.label || "需求已确认，点击生成智能体开始设计与检查。";
   if (profilesError) byId("agent-runtime-status").textContent += " · 名称与图标暂时未加载";
-  byId("agent-build").disabled = Boolean(operation) || state.status === "checking";
+  byId("agent-build").disabled = busy || state.status === "checking";
   byId("agent-build").textContent = state.status === "building" ? "正在生成…" : state.definition ? "重新生成智能体" : "生成智能体";
   byId("agent-send").hidden = Boolean(operation);
-  byId("agent-send").disabled = state.status !== "ready" || Boolean(operation);
-  byId("agent-cancel-reply").hidden = !operation;
+  byId("agent-send").disabled = state.status !== "ready" || busy;
+  byId("agent-cancel-reply").hidden = !operation || Boolean(operation.kind?.startsWith("development") || operation.development);
   byId("agent-cancel-reply").disabled = Boolean(operation?.controller.signal.aborted);
-  byId("agent-chat-form").setAttribute("aria-busy", String(Boolean(operation)));
+  byId("agent-chat-form").setAttribute("aria-busy", String(busy));
   byId("agent-save-chat").disabled = Boolean(item.turn);
   showError(item.error || state.error);
+  renderDevelopment(agent, development);
   broadcastRuntime(agent);
+}
+
+function renderDevelopment(agent, development = agentDevelopmentState(agent, runtime(agent))) {
+  const container = byId("agent-development");
+  if (!container) return;
+  const state = runtime(agent), operation = state.operation?.kind?.startsWith("development") || state.operation?.development ? state.operation : null;
+  container.hidden = !development.visible && !operation;
+  if (container.hidden) { container.replaceChildren(); developmentView = null; return; }
+  const focusedAction = developmentView?.agentId === agent.id
+    ? document.activeElement === developmentView.start ? "start" : document.activeElement === developmentView.stop ? "stop" : null : null;
+  const tasksOpen = developmentView?.agentId === agent.id ? developmentView.taskDetails?.open : undefined;
+  developmentView = { ...createDevelopmentView(development, { phase: operation?.phase, label: operation?.label, tasksOpen,
+    busy: Boolean(operation), stopping: Boolean(operation?.stopping || operation?.controller.signal.aborted),
+    onStart: () => developAgent(agent.id), onStop: () => operation?.kind === "build" ? stopAgent(agent.id) : stopDevelopment(agent.id) }), agentId: agent.id };
+  container.replaceChildren(developmentView.root);
+  if (focusedAction) (developmentView[focusedAction] || developmentView.start || developmentView.stop || developmentView.root).focus({ preventScroll: true });
 }
 
 function broadcastRuntime(agent = current()) {
   if (!agent || broadcasting.has(agent.id)) return;
   agent = agents.find((entry) => entry.id === agent.id);
   if (!agent) return;
-  const state = runtime(agent), item = conversation(agent.id), busy = Boolean(state.operation || item.turn);
+  const state = runtime(agent), item = conversation(agent.id), development = agentDevelopmentState(agent, state);
+  const busy = Boolean(state.operation || item.turn || development.active);
   broadcasting.add(agent.id);
   try {
     document.dispatchEvent(new CustomEvent("neuma:agent-runtime-change", { detail: {
       agentId: agent.id, agent: structuredClone(agent), definition: state.definition ? structuredClone(state.definition) : null,
+      architecture: state.architecture ? structuredClone(state.architecture) : null,
+      development: state.development ? structuredClone(state.development) : null,
+      developmentAction: development.canStart || development.canResume ? development.actionLabel : null,
       status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || state.error,
     } }));
   } finally { broadcasting.delete(agent.id); }
@@ -156,6 +185,34 @@ async function loadProfiles() {
   if (route.page === "agent" && current()) renderControls(current());
 }
 
+function renderArchitecture(agent, brief) {
+  const record = runtime(agent).architecture;
+  if (!record || record.agentId !== agent.id || agentSourceKey(record) !== agentSourceKey(agent)) return;
+  const details = element("details", "agent-requirements-details", "");
+  details.append(element("summary", "", "方案与检查结果"));
+  const profiles = { light: "轻量助手", workflow: "流程助手", custom: "专用程序" };
+  const capabilities = (Array.isArray(record.design?.capabilities) ? record.design.capabilities : [])
+    .filter((item) => item?.status !== "available").map((item) => item?.reason)
+    .filter((text) => typeof text === "string").join("；");
+  const issues = (Array.isArray(record.issues) ? record.issues : []).map((issue) => [issue?.description, issue?.remedy]
+    .filter((text) => typeof text === "string" && text.trim()).join(" ")).filter(Boolean).join("；");
+  for (const [label, value] of [["方案类型", profiles[record.design?.profile]], ["方案说明", record.summary],
+    ["选择理由", record.design?.rationale], ["检查结论", record.review?.summary],
+    ["待处理问题", issues], ["待接入能力", capabilities]]) {
+    if (typeof value !== "string" || !value.trim()) continue;
+    const row = element("div", "draft-field", "");
+    row.append(element("div", "field-label", label), element("div", "field-value", value));
+    details.append(row);
+  }
+  brief.append(details);
+  const development = agentDevelopmentState(agent, runtime(agent));
+  if (development.record) {
+    const row = element("div", "draft-field", "");
+    row.append(element("div", "field-label", development.label), element("div", "field-value", development.summary));
+    details.append(row);
+  }
+}
+
 function renderWorkspace() {
   if (route.page !== "agent") return;
   const agent = current();
@@ -180,6 +237,7 @@ function renderWorkspace() {
     field.append(element("div", "field-label", label), element("div", "field-value", value || "暂无额外说明"));
     brief.append(field);
   }
+  renderArchitecture(agent, brief);
   renderMessages(agent);
   renderControls(agent);
   byId("agent-storage-note").textContent = `${agent.persisted ? "需求已保存在此浏览器。" : "入口仅在当前页面存在，请保存需求以便下次打开。"}${conversation(agent.id).saved
@@ -196,8 +254,10 @@ async function inspectAgent(agent) {
   try {
     const result = await api.inspect(agent.id);
     if (state.sequence !== sequence || !agents.some((item) => item.id === agent.id)) return;
-    state.definition = result.agent;
-    state.status = !result.agent ? "missing" : agentSourceKey(result.agent) === state.sourceKey ? "ready" : "stale";
+    state.definition = result.agent ?? null;
+    state.architecture = result.architecture ?? null;
+    state.development = result.development ?? null;
+    Object.assign(state, agentBuildState(agent, result));
     syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
   } catch (error) {
     if (state.sequence !== sequence) return;
@@ -212,42 +272,149 @@ async function buildAgent(id, queueIfBusy = false) {
   const agent = agents.find((item) => item.id === id);
   if (!agent) return;
   const state = runtime(agent), item = conversation(id);
-  if (state.operation || item.turn) {
-    if (queueIfBusy && (item.turn || state.operation.sourceKey !== agentSourceKey(agent)
-      || state.operation.controller.signal.aborted)) state.rebuildRequested = true;
+  if (state.operation || item.turn || agentDevelopmentState(agent, state).active) {
+    if (queueIfBusy && (item.turn || state.operation?.sourceKey !== agentSourceKey(agent)
+      || state.operation?.controller.signal.aborted)) state.rebuildRequested = true;
     return;
   }
   state.rebuildRequested = false;
-  const operation = { controller: new AbortController(), sourceKey: agentSourceKey(agent) };
+  const operation = { kind: "build", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
   const profileVersion = profileVersions.get(id) || 0;
   state.sequence++;
   state.operation = operation;
   state.status = "building";
+  state.architecture = null;
+  state.development = null;
   state.error = item.error = "";
-  state.label = "正在生成智能体…";
+  state.label = "正在设计与检查…";
   renderSidebar();
   if (visible(id)) renderWorkspace();
   try {
     const result = await api.build(agent, { signal: operation.controller.signal, onProgress(progress) {
       if (operation.controller.signal.aborted || state.operation !== operation) return;
-      if (progress.type === "status") state.label = progress.label || "正在生成智能体…";
+      if (progress.type === "status") state.label = progress.label || "正在设计与检查…";
+      if (progress.architecture?.agentId === id && agentSourceKey(progress.architecture) === operation.sourceKey) state.architecture = progress.architecture;
+      if (agentDevelopmentState(agent, { architecture: state.architecture, development: progress.development }).record) {
+        state.development = progress.development; operation.development = true;
+        operation.phase = progress.phase; operation.label = progress.label;
+      }
       if (visible(id)) renderControls(agent);
     } });
     operation.controller.signal.throwIfAborted();
     if (state.sourceKey !== operation.sourceKey) return;
-    state.definition = result.agent;
-    state.status = "ready";
-    item.sessionId = crypto.randomUUID();
-    syncProfile(id, result.profile || result.agent.profile, profileVersion);
+    state.definition = result.agent ?? null;
+    state.architecture = result.architecture ?? null;
+    state.development = result.development ?? null;
+    Object.assign(state, agentBuildState(agent, result));
+    if (state.status === "ready") item.sessionId = crypto.randomUUID();
+    syncProfile(id, result.profile || result.agent?.profile, profileVersion);
   } catch (error) {
     if (state.sourceKey !== operation.sourceKey) return;
     state.status = "error";
     state.error = operation.controller.signal.aborted || error.reason === "cancelled" ? "生成已停止，可以重新生成。" : error.message || "生成失败，请重试。";
+    if (operation.development) {
+      try {
+        if (operation.controller.signal.aborted) await api.cancelDevelopment(id);
+        const snapshot = await api.inspect(id);
+        if (state.operation === operation && state.sourceKey === operation.sourceKey) {
+          applyDevelopmentResult(agent, state, snapshot);
+          if (snapshot.development?.status !== "completed") state.error = "研发进度已保存，可以继续。";
+        }
+      } catch { state.error = "研发连接已结束，进度尚未确认，请刷新后核实。"; }
+    }
   } finally {
     if (state.operation === operation) state.operation = null;
     renderSidebar();
     if (visible(id)) renderWorkspace();
     await rebuildIfRequested(id, state);
+  }
+}
+
+function currentDevelopmentOperation(id, state, operation) {
+  return runtimes.get(id) === state && state.operation === operation && state.sourceKey === operation.sourceKey
+    && agents.some((agent) => agent.id === id);
+}
+
+function applyDevelopmentResult(agent, state, result) {
+  state.definition = result.agent ?? null;
+  state.architecture = result.architecture ?? null;
+  state.development = result.development ?? null;
+  Object.assign(state, agentBuildState(agent, result));
+}
+
+async function developAgent(id) {
+  const agent = agents.find((entry) => entry.id === id);
+  if (!agent) return;
+  const state = runtime(agent), item = conversation(id), development = agentDevelopmentState(agent, state);
+  if (state.operation || item.turn || (!development.canStart && !development.canResume)) return;
+  const operation = { kind: "development", controller: new AbortController(), sourceKey: agentSourceKey(agent),
+    phase: development.record?.phase || "intake", label: development.canResume ? "正在核实已保存的研发进度…" : "正在接收已通过的设计…" };
+  const profileVersion = profileVersions.get(id) || 0;
+  state.sequence++; state.operation = operation; state.status = "developing"; state.error = item.error = "";
+  state.label = operation.label;
+  renderSidebar(); if (visible(id)) renderControls(agent);
+  try {
+    const result = await api.develop(id, { resume: development.canResume, signal: operation.controller.signal, onProgress(progress) {
+      if (!currentDevelopmentOperation(id, state, operation) || operation.controller.signal.aborted || progress.type !== "status") return;
+      if (developmentPhases.some(([phase]) => phase === progress.phase)) operation.phase = progress.phase;
+      if (typeof progress.label === "string") state.label = operation.label = progress.label;
+      if (agentDevelopmentState(agent, { architecture: state.architecture, development: progress.development }).record)
+        state.development = progress.development;
+      if (visible(id)) renderControls(agent);
+    } });
+    operation.controller.signal.throwIfAborted();
+    if (!currentDevelopmentOperation(id, state, operation)) return;
+    applyDevelopmentResult(agent, state, result);
+    if (state.status === "ready") item.sessionId = crypto.randomUUID();
+    syncProfile(id, result.profile || result.agent?.profile, profileVersion);
+  } catch (error) {
+    if (!currentDevelopmentOperation(id, state, operation)) return;
+    state.error = operation.stopping ? "" : error.message || "研发未完成，正在核实已保存的进度。";
+    try {
+      // Reconcile from durable server state after the stream ends; a lost response is not a successful build.
+      if (operation.cancelPromise) await operation.cancelPromise;
+      const result = await api.inspect(id);
+      if (!currentDevelopmentOperation(id, state, operation)) return;
+      if (operation.stopping && result.development?.status === "completed") {
+        state.status = "needs_development"; state.error = "停止请求后的结果尚未确认，请刷新页面核实研发状态。";
+      } else applyDevelopmentResult(agent, state, result);
+    } catch (recoveryError) {
+      if (!currentDevelopmentOperation(id, state, operation)) return;
+      state.status = "needs_development";
+      state.error = recoveryError.message || "研发状态暂时无法确认，请刷新页面读取已保存的进度。";
+    }
+  } finally {
+    if (state.operation === operation) state.operation = null;
+    renderSidebar(); if (visible(id)) renderWorkspace();
+    await rebuildIfRequested(id, state);
+  }
+}
+
+async function stopDevelopment(id) {
+  const agent = agents.find((entry) => entry.id === id);
+  if (!agent) return;
+  const state = runtime(agent), local = state.operation?.kind === "development";
+  if (state.operation?.stopping || (!local && (state.operation || !agentDevelopmentState(agent, state).active))) return;
+  const operation = local ? state.operation : { kind: "development-stop", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
+  operation.stopping = true; state.operation = operation;
+  operation.cancelPromise = api.cancelDevelopment(id);
+  operation.controller.abort();
+  if (visible(id)) renderControls(agent);
+  try {
+    const result = await operation.cancelPromise;
+    if (!currentDevelopmentOperation(id, state, operation)) return;
+    if (result.development?.agentId === id && result.development.status !== "completed") state.development = result.development;
+    if (!local) {
+      const snapshot = await api.inspect(id);
+      if (!currentDevelopmentOperation(id, state, operation)) return;
+      if (snapshot.development?.status !== "completed") applyDevelopmentResult(agent, state, snapshot);
+      else { state.status = "needs_development"; state.error = "停止请求后的结果尚未确认，请刷新页面核实研发状态。"; }
+    }
+  } catch (error) {
+    if (currentDevelopmentOperation(id, state, operation)) state.error = error.message || "停止研发尚未确认，请稍后重试。";
+  } finally {
+    if (!local && state.operation === operation) state.operation = null;
+    if (visible(id)) renderControls(agent);
   }
 }
 
@@ -270,6 +437,7 @@ async function stopAgent(id) {
   const agent = agents.find((entry) => entry.id === id);
   if (!agent) return;
   const state = runtime(agent), item = conversation(id), operation = state.operation || item.turn;
+  if (operation?.kind?.startsWith("development")) return stopDevelopment(id);
   if (!operation || operation.controller.signal.aborted) return;
   if (item.turn) { item.turn.reply.status = "stopping"; updateReply(id, item); }
   operation.controller.abort();
@@ -349,6 +517,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
     state.sequence++;
     state.operation?.controller.abort();
     state.status = "stale";
+    state.label = "";
     state.error = "";
   }
   renderSidebar();
@@ -371,6 +540,8 @@ document.addEventListener("neuma:route", (event) => {
   }
 });
 document.addEventListener("neuma:agent-build", (event) => buildAgent(event.detail.id, true));
+document.addEventListener("neuma:agent-develop", (event) => developAgent(event.detail.id));
+document.addEventListener("neuma:agent-development-stop", (event) => stopDevelopment(event.detail.id));
 document.addEventListener("neuma:agent-runtime-request", (event) => {
   const agent = agents.find((item) => item.id === (event.detail?.agentId ?? route.agentId));
   if (agent) broadcastRuntime(agent);

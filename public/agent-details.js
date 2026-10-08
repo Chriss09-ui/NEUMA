@@ -58,7 +58,7 @@ function refreshAvailability() {
   byId("agent-files-refresh").disabled = !ready;
   if (runtime) {
     byId("agent-build-shortcut").hidden = runtime.ready || runtime.busy || ["checking", "unchecked"].includes(runtime.status);
-    byId("agent-build-shortcut").textContent = runtime.definition ? "重新生成" : "生成智能体";
+    byId("agent-build-shortcut").textContent = runtime.developmentAction || (runtime.definition ? "重新生成" : "生成智能体");
   }
 }
 
@@ -288,7 +288,8 @@ fileDialog.addEventListener("close", () => {
     ? [...byId("agent-file-list").children].find((node) => node.dataset.path === fileFocus.path) : null;
   (button || byId("agent-artifacts-toggle")).focus({ preventScroll: true });
 });
-byId("agent-build-shortcut").addEventListener("click", () => byId("agent-build").click());
+byId("agent-build-shortcut").addEventListener("click", () => runtime?.developmentAction
+  ? emit("neuma:agent-develop", { id: currentId() }) : byId("agent-build").click());
 byId("agent-files-refresh").addEventListener("click", () => { if (runtime?.definition) void loadFiles(currentId()); });
 byId("agent-file-download").addEventListener("click", () => {
   const file = state(currentId()).file;
