@@ -4,7 +4,7 @@ import { agentDisplayDescription, agentDisplayIcon, agentDisplayName } from "../
 import { blankSession, clearSession, deleteRequirement, hasSavedSession, initializeSession,
   loadSavedRequirements, loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement, appendAgentPreview, deleteAgentPreview, loadAgentPreview,
-  saveAgentPreview } from "../public/state.js";
+  saveAgentPreview, agentConversationSnapshot, loadSavedAgentConversation, normalizeAgentRequirement } from "../public/state.js";
 
 const SAVED_KEY = "neuma.requirements.session.optin.v1";
 const LEGACY_KEY = "neuma.requirements.session.v1";
@@ -225,4 +225,42 @@ test("需求迭代保留展示 overlay，保存需求只写原始字段", () => 
   assert.equal(saved.name, "新需求名称");
   assert.equal(saved.profile, undefined);
   assert.equal(saved.draft.goal.value, "新目标");
+});
+
+test("迁移区分没有保存的对话与显式保存的空对话，快照保留失败状态且移除运行字段", () => {
+  const local = storage();
+  assert.equal(loadSavedAgentConversation(local, "one"), null);
+  assert.equal(saveAgentPreview(local, "one", []), true);
+  assert.deepEqual(loadSavedAgentConversation(local, "one"), { schemaVersion: 2, messages: [] });
+  const snapshot = agentConversationSnapshot([
+    { role: "user", content: "任务", delivery: "pending", revision: "2", secretRuntimeField: "不可持久化" },
+    { role: "assistant", content: "部分内容", status: "writing", revision: "2", label: "进度" },
+  ]);
+  assert.deepEqual(snapshot.messages, [
+    { role: "user", content: "任务", revision: "2", delivery: "stopped" },
+    { role: "assistant", content: "部分内容", revision: "2", status: "stopped" },
+  ]);
+  const requirement = normalizeAgentRequirement({ id: "one", name: "助手", draft: { goal: { value: "目标" } },
+    profile: { name: "展示名" }, messages: [{ content: "主会话不要写入需求" }] });
+  assert.equal(requirement.persisted, true);
+  assert.equal(requirement.dirty, false);
+  assert.equal(requirement.profile.name, "展示名");
+  assert.equal(requirement.messages, undefined);
+  assert.equal(normalizeAgentRequirement({ id: "one", name: "助手", draft: [] }), null);
+});
+
+test("浏览器待同步标记独立保留，保存和删除其他 Agent 不会清除最新失败备份", () => {
+  const local = storage(), item = (id) => ({ id, name: id, draft: { goal: { value: id } } });
+  saveRequirement(local, { ...item("pending"), pendingSync: true });
+  saveRequirement(local, item("other"));
+  assert.equal(loadSavedRequirements(local).find((entry) => entry.id === "pending").pendingSync, true);
+  deleteRequirement(local, "other");
+  assert.equal(loadSavedRequirements(local)[0].dirty, true);
+  assert.equal(loadSavedRequirements(local)[0].pendingSync, true);
+  saveAgentPreview(local, "pending", [{ role: "user", content: "失败保存" }], { pendingSync: true });
+  assert.equal(loadSavedAgentConversation(local, "pending").pendingSync, true);
+  saveRequirement(local, item("pending"));
+  saveAgentPreview(local, "pending", [{ role: "user", content: "失败保存" }]);
+  assert.equal(loadSavedRequirements(local)[0].pendingSync, undefined);
+  assert.equal(loadSavedAgentConversation(local, "pending").pendingSync, undefined);
 });

@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
-import { createRequestHandler } from "../server.mjs";
+import { createRequestHandler as createHandler } from "../server.mjs";
 import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../core.mjs";
 import { createProjectAddError } from "../project-diagnostics.mjs";
+
+const createRequestHandler = (options) => createHandler({ projects: {}, projectAgent: {}, prototypeAgents: {}, ...options });
 
 function request(method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);

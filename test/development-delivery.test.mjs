@@ -161,8 +161,8 @@ test("真实交付闭环：架构评估→研发隔离验收→激活→运行�
   assert.deepEqual(record.reports.at(-1).results[0].actual, { normalized: "HELLO NEUMA", length: 11 });
   assert.ok(record.reports.at(-1).results.every((item) => item.status === "passed" && item.exitCode === 0));
   assert.equal((await agents.development.workspace.validateSnapshot(record.package.snapshot)).hash, record.package.codeHash);
-  const persisted = JSON.parse(await readFile(join(dataDir, "agents.json"), "utf8"));
-  assert.equal(persisted.agents[0].execution.codeHash, record.package.codeHash);
+  const persisted = JSON.parse(await readFile(join(dataDir, "agents", "normalizer", "definition.json"), "utf8"));
+  assert.equal(persisted.agent.execution.codeHash, record.package.codeHash);
   const roleSessions = sessions.filter((item) => item.role !== "runtime");
   assert.equal(new Set(roleSessions.map((item) => item.session)).size, roleSessions.length);
   assert.ok(roleSessions.every((item) => item.disposed));
@@ -256,7 +256,9 @@ test("最终完成记录写入期间取消：新版不成功，旧定义、用�
   } finally { release.resolve(); await pending.catch(() => {}); store.save = originalSave; }
   assert.equal(result.development.status, "cancelled"); assert.equal(result.development.delivery, "blocked");
   assert.deepEqual(await agents.get("normalizer"), previous);
-  const saved = JSON.parse(await readFile(join(dataDir, "agents.json"), "utf8")).agents[0];
+  const saved = await agents.get("normalizer");
+  const persisted = JSON.parse(await readFile(join(dataDir, "agents", "normalizer", "definition.json"), "utf8")).agent;
+  assert.deepEqual(persisted.developmentRef, previous.developmentRef);
   assert.deepEqual(saved.developmentRef, previous.developmentRef); assert.equal(saved.revision, previous.revision);
   assert.equal(saved.memory, "保留这段用户记忆"); assert.deepEqual(saved.profile, previous.profile);
   assert.equal(await readFile(join(userDirectory, "keep.txt"), "utf8"), "用户已有文件");

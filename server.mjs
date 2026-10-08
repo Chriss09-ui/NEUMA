@@ -176,7 +176,7 @@ async function streamRequirementReply(response, providers, body, config) {
   }
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = 128_000) {
   if (!request.headers["content-type"]?.startsWith("application/json")) {
     throw new InputError("请求必须使用 JSON 格式");
   }
@@ -184,7 +184,7 @@ async function readJson(request) {
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > 128_000) throw new InputError("请求内容过长");
+    if (bytes > maxBytes) throw new InputError("请求内容过长");
     chunks.push(chunk);
   }
   try {
@@ -250,6 +250,15 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         const updates = settingsUpdates(await readJson(request));
         return sendJson(response, 200, await saveSettings(updates));
       }
+      if (request.method === "GET" && path === "/api/agent-requirements") return sendJson(response, 200, await prototypeAgents.getRequirements());
+      const agentRequirement = path.match(/^\/api\/agents\/([\w-]+)\/requirements$/);
+      if (request.method === "POST" && agentRequirement)
+        return sendJson(response, 200, await prototypeAgents.saveRequirements(agentRequirement[1], await readJson(request, 512_000)));
+      const agentConversation = path.match(/^\/api\/agents\/([\w-]+)\/conversation$/);
+      if (agentConversation && request.method === "GET")
+        return sendJson(response, 200, await prototypeAgents.getConversation(agentConversation[1]));
+      if (agentConversation && request.method === "POST")
+        return sendJson(response, 200, await prototypeAgents.saveConversation(agentConversation[1], await readJson(request, 20_000_000)));
       if (request.method === "POST" && path === "/api/agents/build") {
         return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config);
       }

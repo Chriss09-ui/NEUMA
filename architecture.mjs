@@ -1,12 +1,10 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { InputError, ProviderError } from "./core.mjs";
 import { createPiSession } from "./pi-runtime.mjs";
 import { ARCHITECTURE_VERSION, CAPABILITIES, DESIGN_SCHEMA, REVIEW_SCHEMA,
   requirementItems, validateDesign, validateReview, checkDesign, designHash } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, REVIEW_PROMPT, SPECIALIST_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
+import { AgentStorage, agentId } from "./agent-storage.mjs";
 
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const text = (maxLength = 2000) => ({ type: "string", minLength: 1, maxLength });
@@ -36,28 +34,34 @@ function checkedModule(value) {
 
 /** Two isolated model roles, optional research/delegation, and a deterministic handoff gate. */
 export class ArchitectureDesigner {
-  constructor({ config, cwd, dataDir, sessionFactory = createPiSession, research = createTechnicalResearch() }) {
+  constructor({ config, cwd, dataDir, sessionFactory = createPiSession, research = createTechnicalResearch(), storage = new AgentStorage({ dataDir }) }) {
     Object.assign(this, { config, cwd, dataDir, sessionFactory, research });
     this.records = new Map();
+    this.storage = storage;
     this.persistence = Promise.resolve();
     this.ready = this.load();
     this.ready.catch(() => {});
   }
 
   async load() {
-    let source;
-    try { source = JSON.parse(await readFile(join(this.dataDir, "architectures.json"), "utf8")); }
-    catch (error) { if (error.code === "ENOENT") return; throw new InputError("架构记录无法读取，请保留文件并检查后重试"); }
-    if (source?.version !== 1 || !Array.isArray(source.records)) throw new InputError("架构记录格式无效，请保留原文件");
-    for (const record of source.records) {
-      if (!record || !/^[\w-]{1,80}$/.test(record.agentId) || !Number.isSafeInteger(record.version) || record.version < 1)
-        throw new InputError("架构记录格式无效，请保留原文件");
-      if (["designing", "evaluating"].includes(record.status)) {
-        record.status = "failed"; record.delivery = "blocked";
-        record.summary = "上次设计在完成前中断，请重新设计；已有定义和文件保留。";
+    const records = new Map();
+    for (const id of await this.storage.agentIds()) {
+      if (await this.storage.readJson(id, "deleted.json")) continue;
+      const source = await this.storage.readJson(id, "architecture.json");
+      if (!source) continue;
+      if (source.version !== 1 || !Array.isArray(source.records)) throw new InputError("架构记录格式无效，请保留原文件");
+      for (const record of source.records) {
+        if (!record || !/^[\w-]{1,80}$/.test(record.agentId) || !Number.isSafeInteger(record.version) || record.version < 1)
+          throw new InputError("架构记录格式无效，请保留原文件");
+        if (record.agentId !== id || records.has(id + ":" + record.version)) throw new InputError("架构记录身份或版本无效");
+        if (["designing", "evaluating"].includes(record.status)) {
+          record.status = "failed"; record.delivery = "blocked";
+          record.summary = "上次设计在完成前中断，请重新设计；已有定义和文件保留。";
+        }
+        records.set(record.agentId + ":" + record.version, record);
       }
-      this.records.set(record.agentId + ":" + record.version, record);
     }
+    this.records = records;
   }
 
   async get(id) {
@@ -66,37 +70,31 @@ export class ArchitectureDesigner {
   }
 
   save(record) {
+    agentId(record.agentId);
     const snapshot = structuredClone({ ...record, updatedAt: new Date().toISOString() });
     const task = this.persistence.then(async () => {
+      await this.ready;
       const next = new Map(this.records);
       next.set(snapshot.agentId + ":" + snapshot.version, snapshot);
-      await mkdir(this.dataDir, { recursive: true });
-      const temporary = join(this.dataDir, "architectures." + randomUUID() + ".tmp");
-      try {
-        await writeFile(temporary, JSON.stringify({ version: 1, records: [...next.values()] }, null, 2), { mode: 0o600 });
-        await rename(temporary, join(this.dataDir, "architectures.json"));
-        this.records = next;
-      } finally { await rm(temporary, { force: true }); }
+      await this.storage.writeJson(snapshot.agentId, "architecture.json", { version: 1,
+        records: [...next.values()].filter((value) => value.agentId === snapshot.agentId) });
+      this.records = next;
     });
     this.persistence = task.catch(() => {});
     return task;
   }
 
   async remove(id) {
+    agentId(id);
     await this.ready;
     const task = this.persistence.then(async () => {
       const next = new Map([...this.records].filter(([, record]) => record.agentId !== id));
-      await mkdir(this.dataDir, { recursive: true });
-      const temporary = join(this.dataDir, "architectures." + randomUUID() + ".tmp");
-      try {
-        await writeFile(temporary, JSON.stringify({ version: 1, records: [...next.values()] }, null, 2), { mode: 0o600 });
-        await rename(temporary, join(this.dataDir, "architectures.json")); this.records = next;
-      } finally { await rm(temporary, { force: true }); }
+      await this.storage.removeFile(id, "architecture.json"); this.records = next;
     });
     this.persistence = task.catch(() => {}); return task;
   }
 
-  async role({ role, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress }) {
+  async role({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress }) {
     let result, session, unsubscribe = () => {}, failed = false, turns = 0;
     const abort = () => { void session?.abort().catch(() => {}); };
     const submit = { name: submitName, label: "提交检查结果", description: "提交本阶段的结构化结果；提交不代表整体通过。",
@@ -109,7 +107,8 @@ export class ArchitectureDesigner {
     try {
       signal?.throwIfAborted();
       signal?.addEventListener("abort", abort, { once: true });
-      session = await this.sessionFactory({ config: this.config, cwd: this.cwd, dataDir: this.dataDir,
+      session = await this.sessionFactory({ config: this.config, cwd: this.cwd,
+        dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
         systemPrompt, customTools: [...tools, submit] });
       signal?.throwIfAborted();
       unsubscribe = session.subscribe?.((event) => {
@@ -163,7 +162,7 @@ export class ArchitectureDesigner {
         delegates += modules.length;
         onProgress({ type: "status", phase: "designing", label: "正在检查局部设计…" });
         const settled = await Promise.allSettled(modules.map(async (assignment) => {
-          const result = await this.role({ role: "specialist", systemPrompt: SPECIALIST_PROMPT,
+          const result = await this.role({ role: "specialist", agentId: definition.id, systemPrompt: SPECIALIST_PROMPT,
             payload: { assignment, requirements, capabilities: CAPABILITIES, evidence: record.evidence },
             submitName: "submit_module_design", parameters: moduleResultSchema, validate: (value) => {
               const checked = checkedModule(value);
@@ -184,7 +183,7 @@ export class ArchitectureDesigner {
         await this.save(record);
         onProgress({ type: "status", phase: "designing", label: record.summary + "…" });
         const context = () => ({ requirements, capabilities: CAPABILITIES, evidence: record.evidence });
-        const design = await this.role({ role: "designer", systemPrompt: DESIGN_PROMPT,
+        const design = await this.role({ role: "designer", agentId: definition.id, systemPrompt: DESIGN_PROMPT,
           payload: { requirement: { name: definition.name, draft: definition.draft }, ...context(),
             previousDesign: record.design, issues: record.issues, modules: record.modules,
             researchGaps: record.researchGaps, remaining: { revisions: 1 - attempt, searches: 3 - searches, modules: 2 - delegates } },
@@ -202,7 +201,7 @@ export class ArchitectureDesigner {
         record.status = "evaluating"; record.summary = "正在独立检查方案";
         await this.save(record);
         onProgress({ type: "status", phase: "evaluating", label: "正在独立检查方案…" });
-        const review = await this.role({ role: "reviewer", systemPrompt: REVIEW_PROMPT,
+        const review = await this.role({ role: "reviewer", agentId: definition.id, systemPrompt: REVIEW_PROMPT,
           payload: { requirement: definition.draft, ...context(), candidateHash: record.candidateHash,
             design, deterministicIssues: checks.issues, researchGaps: record.researchGaps },
           submitName: "submit_architecture_review", parameters: REVIEW_SCHEMA,

@@ -111,7 +111,7 @@ test("独立评估未通过或存在关键未知时，不保存新的 Agent 执�
       assert.equal(result.architecture.delivery, "blocked");
       assert.equal(await agents.get("weekly"), null);
       assert.equal((await agents.getArchitecture("weekly")).status, expectedStatus);
-      await assert.rejects(readFile(join(options.dataDir, "agents.json")), { code: "ENOENT" });
+      await assert.rejects(readFile(join(options.dataDir, "agents/weekly/definition.json")), { code: "ENOENT" });
       await assert.rejects(agents.prompt(turn()), /先创建/);
     });
   }
@@ -204,10 +204,10 @@ test("持久化与重启保持需求、Agent ID、候选哈希和评估绑定，
   assert.equal(result.architecture.review.candidateHash, result.architecture.candidateHash);
   assert.equal(result.agent.architectureRef.candidateHash, result.architecture.candidateHash);
   assert.equal(result.agent.architectureRef.version, result.architecture.version);
-  const definitions = JSON.parse(await readFile(join(options.dataDir, "agents.json"), "utf8"));
-  const architectures = JSON.parse(await readFile(join(options.dataDir, "architectures.json"), "utf8"));
-  assert.equal(definitions.agents[0].id, architectures.records[0].agentId);
-  assert.equal(definitions.agents[0].fingerprint, architectures.records[0].sourceFingerprint);
+  const definitions = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/definition.json"), "utf8"));
+  const architectures = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/architecture.json"), "utf8"));
+  assert.equal(definitions.agent.id, architectures.records[0].agentId);
+  assert.equal(definitions.agent.fingerprint, architectures.records[0].sourceFingerprint);
   const restored = new PrototypeAgents(options);
   t.after(() => restored.close());
   const reply = await restored.prompt(turn());
@@ -323,6 +323,66 @@ test("同时构建同一 Agent ID 只接受一次，第二次不能越过异步�
   assert.equal((await agents.getArchitecture("weekly")).version, 1);
 });
 
+test("并发构建在保存需求前互斥，被拒绝的不同版本不能覆盖已接受需求", async (t) => {
+  const saving = deferred(), release = deferred();
+  const { agents, options } = await fixture(t);
+  t.after(() => release.resolve());
+  const save = agents.library.saveRequirement.bind(agents.library);
+  let calls = 0;
+  agents.library.saveRequirement = async (...args) => {
+    calls++; saving.resolve(); await release.promise;
+    return save(...args);
+  };
+  const accepted = input("weekly", "已接受目标");
+  const pending = agents.build(accepted);
+  await saving.promise;
+  await assert.rejects(agents.build(input("weekly", "被拒绝目标")), /正在创建/);
+  assert.equal(calls, 1);
+  release.resolve();
+  await pending;
+  const persisted = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/requirements.json"), "utf8"));
+  assert.deepEqual(persisted.draft, accepted.draft);
+});
+
+test("删除会取消尚在读取架构的构建，不能在删除结束后重新生成定义", async (t) => {
+  const reading = deferred(), release = deferred();
+  const { agents, records, options } = await fixture(t);
+  t.after(() => release.resolve());
+  const get = agents.getArchitecture.bind(agents);
+  agents.getArchitecture = async (...args) => {
+    const value = await get(...args); reading.resolve(); await release.promise;
+    return value;
+  };
+  const pending = agents.build(input());
+  const cancelled = assert.rejects(pending, (error) => error instanceof ProviderError && error.diagnostic.reason === "cancelled");
+  await reading.promise;
+  const removing = agents.remove("weekly");
+  await new Promise(setImmediate);
+  assert.equal(agents.builds.get("weekly").controller.signal.aborted, true);
+  release.resolve();
+  await Promise.all([cancelled, removing]);
+  assert.equal(await agents.get("weekly"), null);
+  assert.equal(await agents.architecture.get("weekly"), null);
+  assert.equal(records.length, 0);
+  assert.deepEqual(await agents.getRequirements(), { requirements: [] });
+  await assert.rejects(readFile(join(options.dataDir, "agents/weekly/definition.json")), { code: "ENOENT" });
+});
+
+test("需求保存失败或未配置模型时释放构建锁，修正后可重试", async (t) => {
+  const { agents } = await fixture(t);
+  const save = agents.library.saveRequirement.bind(agents.library);
+  agents.library.saveRequirement = async () => { throw new InputError("模拟保存失败"); };
+  await assert.rejects(agents.build(input()), /保存失败/);
+  assert.equal(agents.builds.size, 0);
+  agents.library.saveRequirement = save;
+  agents.config.llmConfigured = false;
+  await assert.rejects(agents.build(input()), (error) => error instanceof ProviderError && error.diagnostic.reason === "not_configured");
+  assert.equal(agents.builds.size, 0);
+  agents.config.llmConfigured = true;
+  assert.equal((await agents.build(input())).agent.status, "ready");
+  assert.equal(agents.builds.size, 0);
+});
+
 test("定义先保存但激活失败或取消时恢复旧定义，保留期间更新的记忆和展示资料", async (t) => {
   for (const stop of ["error", "cancel"]) {
     await t.test(stop, async (subtest) => {
@@ -373,9 +433,9 @@ test("新定义落盘到激活之间重启，架构仍是 blocked 而不会提�
   const pending = agents.build(input());
   try {
     await reachedActivation.promise;
-    const definitions = JSON.parse(await readFile(join(options.dataDir, "agents.json"), "utf8"));
-    const architectures = JSON.parse(await readFile(join(options.dataDir, "architectures.json"), "utf8"));
-    assert.equal(definitions.agents[0].id, "weekly");
+    const definitions = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/definition.json"), "utf8"));
+    const architectures = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/architecture.json"), "utf8"));
+    assert.equal(definitions.agent.id, "weekly");
     assert.equal(architectures.records[0].delivery, "blocked");
     const restarted = new PrototypeAgents(options); t.after(() => restarted.close());
     await assert.rejects(restarted.prompt(turn()), /尚未生成可运行定义/);

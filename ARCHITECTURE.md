@@ -40,7 +40,7 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 ## 存储与状态
 
-.neuma/architectures.json 保存版本化方案、原始需求快照、能力快照、证据、模块建议、修订候选及评估。每次重设计增加版本；当前查看返回最新版本。采用串行原子文件替换；同一 Agent 的构建互斥。
+`.neuma/agents/<id>/architecture.json` 保存该 Agent 的版本化方案、原始需求快照、能力快照、证据、模块建议、修订候选及评估。每次重设计增加版本；当前查看返回最新版本。采用串行原子文件替换；同一 Agent 的构建互斥。
 
 状态：designing、evaluating、passed、needs_changes、needs_evidence、infeasible、failed、cancelled。
 交付状态：blocked、ready、needs_connection、needs_development。两者分开保存。
@@ -48,6 +48,16 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 服务重启时未完成的 designing/evaluating 显示 failed，不恢复为成功。失败/取消保留旧执行定义、展示设置、记忆和文件；当前新版未就绪时不能借用旧定义表示新版可运行。已开始的任务仍使用启动时版本。删除 Agent 移除其架构记录和定义，保留工作目录文件。
 
 旧 prototype 或缺少正式评估的定义已停用直跑。API 将其标记 needs_architecture；前后端都阻止执行，必须重新设计、独立评估并生成后才能使用。仅保留旧需求、展示资料、记忆与文件供迁移，不删除用户数据。Pi SDK 仍可作为架构角色与经过选型的轻量执行底层，不再存在跳过评估的临时通道。
+
+## 每个 Agent 的独立持久目录
+
+2026-10-08：服务端统一使用 `.neuma/agents/<稳定 Agent ID>/`。`definition.json` 保存定义、指令、记忆和展示设置；`requirements.json` 保存需求入口；`architecture.json` 保存全部架构版本；`development/` 包含记录、代码工作区和只读快照；`conversations/saved.json` 保存用户主动保存的对话；`workspace/` 保存输入材料和执行产物。Agent 的 Pi 辅助目录也绑定到本 Agent 根目录。模型仍只获得评估后的专属工作子目录工具，不因元数据与代码同处一个 Agent 根目录而扩大文件权限。
+
+`agent-storage.mjs` 在各 Store 加载前协调旧格式迁移。先检查旧元数据及文件类型，在临时目录完整复制，重定位受控快照对象中的路径并添加 Agent 身份，再发布每个完整目录和全局迁移标记。旧文件保留但完成迁移后不再作为活动源；部分发布可重试，不覆盖已发布的新数据。拒绝路径穿越、符号链接和硬链接元数据。保存使用原子替换，失败不发布内存状态。
+
+`agent-library.mjs` 管理已保存需求及显式对话快照。旧浏览器数据通过本机接口逐 Agent 补入；已有服务端保存版本优先，旧定义/架构推导需求允许补入更新的浏览器版本。保存失败的浏览器新版使用待同步备份，刷新不丢失，需要用户重试。新对话和普通任务不自动写聊天。清除浏览器数据后可从服务端恢复入口和已保存对话；主需求澄清对话和项目助手会话仍独立。
+
+删除先停止任务并移除定义，再记录删除标记和清理活动元数据，保留代码、快照及工作产物。删除标记阻止重启、旧浏览器导入或残留研发记录恢复已删除 Agent；不删除整个 Agent 文件夹。
 
 ## 当前数据与交互约定
 
@@ -88,7 +98,7 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 首版执行器使用 macOS sandbox-exec，通过真实越界读写、代码只读、网络与子进程禁止探测后才执行生成代码。当前支持 Node 内置模块、argv 字符串输入、单个 JSON 输出；不自动安装依赖或执行任意 Shell。其他平台或隔离不可用时明确阻塞。用户运行目录仅在架构需要文件或持久状态时挂入；只读能力不授予写权限，隐藏/凭据文件和链接会阻断挂载。
 
-`.neuma/development/` 保存研发记录，`.neuma/development-workspaces/` 保存每轮代码工作区，`.neuma/development-snapshots/` 保存内容摘要命名的只读快照。任务、预算、代码和证据引用由控制器原子发布；扣减修复预算与调度修复在同一检查点完成。启动时 running 变为 interrupted，继续时核对实际代码，尝试次数与预算保留。删除 Agent 清理研发元数据但保留文件。
+每个 Agent 的 `.neuma/agents/<id>/development/records/` 保存研发记录，`development/workspaces/` 保存每轮代码工作区，`development/snapshots/` 保存内容摘要命名的只读快照。快照显式绑定 Agent ID，即使内容摘要相同也分别保存并校验所属。任务、预算、代码和证据引用由控制器原子发布；扣减修复预算与调度修复在同一检查点完成。启动时 running 变为 interrupted，继续时核对实际代码，尝试次数与预算保留。删除 Agent 清理研发元数据但保留文件。
 
 研发过程状态与运行交付状态分开。验证后的交付包不可变，缺陷标记和运行检查另存；启动检查发现代码问题会携带原始证据回到有限修复。激活前后核实架构版本、代码摘要与取消状态；最终保存期间取消也不能成为完成，已切换的新定义会回退，旧定义、记忆、展示资料和用户文件保留。
 

@@ -128,10 +128,18 @@ export function loadSavedRequirements(storage) {
     return items.filter((item) => item && typeof item.id === "string"
       && typeof item.name === "string" && item.draft && typeof item.draft === "object")
       .map((item) => ({ id: item.id, name: item.name, draft: item.draft,
-        updatedAt: item.updatedAt, persisted: true, dirty: false }));
+        updatedAt: item.updatedAt, persisted: true, dirty: item.pendingSync === true,
+        ...(item.pendingSync === true ? { pendingSync: true } : {}) }));
   } catch {
     return [];
   }
+}
+
+export function normalizeAgentRequirement(item) {
+  if (!item || typeof item.id !== "string" || typeof item.name !== "string" || !item.draft
+    || typeof item.draft !== "object" || Array.isArray(item.draft)) return null;
+  return { id: item.id, name: item.name, draft: structuredClone(item.draft), updatedAt: item.updatedAt,
+    persisted: true, dirty: false, ...(item.profile ? { profile: structuredClone(item.profile) } : {}) };
 }
 
 export function upsertConfirmedRequirement(items, activeId, draft, newId) {
@@ -141,6 +149,7 @@ export function upsertConfirmedRequirement(items, activeId, draft, newId) {
     ? draft.name.value.trim() : "未命名 Agent";
   const item = { id, name, draft: structuredClone(draft), updatedAt: new Date().toISOString(),
     persisted: previous?.persisted ?? false, dirty: true,
+    ...(previous?.pendingSync ? { pendingSync: true } : {}),
     ...(previous?.profile ? { profile: structuredClone(previous.profile) } : {}) };
   return { items: [item, ...items.filter((entry) => entry.id !== id)], activeId: id };
 }
@@ -150,9 +159,9 @@ export function saveRequirement(storage, item) {
     return false;
   }
   try {
-    const record = { id: item.id, name: item.name, draft: item.draft, updatedAt: item.updatedAt };
+    const record = requirementBackup(item);
     const others = loadSavedRequirements(storage).filter((entry) => entry.id !== item.id)
-      .map(({ id, name, draft, updatedAt }) => ({ id, name, draft, updatedAt }));
+      .map(requirementBackup);
     storage.setItem(REQUIREMENTS_KEY, JSON.stringify([record, ...others]));
     return true;
   } catch {
@@ -160,10 +169,14 @@ export function saveRequirement(storage, item) {
   }
 }
 
+function requirementBackup({ id, name, draft, updatedAt, pendingSync }) {
+  return { id, name, draft, updatedAt, ...(pendingSync === true ? { pendingSync: true } : {}) };
+}
+
 export function deleteRequirement(storage, id) {
   try {
     const remaining = loadSavedRequirements(storage).filter((item) => item.id !== id)
-      .map(({ id: itemId, name, draft, updatedAt }) => ({ id: itemId, name, draft, updatedAt }));
+      .map(requirementBackup);
     if (remaining.length) storage.setItem(REQUIREMENTS_KEY, JSON.stringify(remaining));
     else storage.removeItem(REQUIREMENTS_KEY);
     return true;
@@ -197,14 +210,24 @@ function conversationMessages(messages) {
   });
 }
 
-export function loadAgentPreview(storage, id) {
+export function agentConversationSnapshot(messages) {
+  return { schemaVersion: 2, messages: conversationMessages(messages) };
+}
+
+export function loadSavedAgentConversation(storage, id) {
   try {
     const current = JSON.parse(storage.getItem(AGENT_CONVERSATION_PREFIX + id) ?? "null");
-    if (current?.schemaVersion === 2) return conversationMessages(current.messages);
-    return previewMessages(JSON.parse(storage.getItem(AGENT_PREVIEW_PREFIX + id) ?? "[]"));
+    if (current?.schemaVersion === 2) return { ...agentConversationSnapshot(current.messages),
+      ...(current.pendingSync === true ? { pendingSync: true } : {}) };
+    const previous = storage.getItem(AGENT_PREVIEW_PREFIX + id);
+    return previous === null ? null : agentConversationSnapshot(previewMessages(JSON.parse(previous)));
   } catch {
-    return [];
+    return null;
   }
+}
+
+export function loadAgentPreview(storage, id) {
+  return loadSavedAgentConversation(storage, id)?.messages ?? [];
 }
 
 export function appendAgentPreview(messages, content) {
@@ -214,9 +237,10 @@ export function appendAgentPreview(messages, content) {
   return [...conversationMessages(messages), { role: "user", content: content.trim() }].slice(-80);
 }
 
-export function saveAgentPreview(storage, id, messages) {
+export function saveAgentPreview(storage, id, messages, { pendingSync = false } = {}) {
   try {
-    storage.setItem(AGENT_CONVERSATION_PREFIX + id, JSON.stringify({ schemaVersion: 2, messages: conversationMessages(messages) }));
+    storage.setItem(AGENT_CONVERSATION_PREFIX + id, JSON.stringify({ ...agentConversationSnapshot(messages),
+      ...(pendingSync ? { pendingSync: true } : {}) }));
     return true;
   } catch {
     return false;

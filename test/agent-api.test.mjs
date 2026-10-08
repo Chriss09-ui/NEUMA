@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequestHandler } from "../server.mjs";
 import { InputError, ProviderError } from "../core.mjs";
+import { AgentLibrary } from "../agent-library.mjs";
 
 function request(method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
@@ -52,6 +53,41 @@ function deferred() {
 const agent = { id: "agent-1", name: "周报助手", version: 1, status: "ready" };
 const buildInput = { id: agent.id, name: agent.name, draft: { goal: { value: "整理周报", source: "user" } } };
 const turnInput = { agentId: agent.id, sessionId: "agent-session-1", message: "整理这些记录" };
+
+test("Agent 需求及显式保存对话接口按身份持久化，支持超过旧请求上限的中文对话", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "neuma-agent-library-api-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const library = new AgentLibrary({ dataDir });
+  const handler = makeHandler({ getRequirements: () => library.list(),
+    saveRequirements: (id, body) => library.saveRequirement(id, body),
+    getConversation: (id) => library.getConversation(id), saveConversation: (id, body) => library.saveConversation(id, body),
+    remove: (id) => library.remove(id) });
+  const requirement = { name: "周报助手", draft: buildInput.draft };
+  const saved = await invoke(handler, "POST", `/api/agents/${agent.id}/requirements`, requirement);
+  assert.equal(saved.status, 200);
+  assert.equal(JSON.parse(saved.text).requirement.id, agent.id);
+  const snapshot = { schemaVersion: 2, messages: Array.from({ length: 2 }, () => ({ role: "assistant", content: "文".repeat(32000), status: "complete" })) };
+  const chat = await invoke(handler, "POST", `/api/agents/${agent.id}/conversation`, snapshot);
+  assert.equal(chat.status, 200);
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `/api/agents/${agent.id}/conversation`)).text), JSON.parse(chat.text));
+  assert.equal(JSON.parse((await invoke(handler, "GET", "/api/agent-requirements")).text).requirements.length, 1);
+  assert.equal(JSON.parse(await readFile(join(dataDir, "agents", agent.id, "conversations/saved.json"), "utf8")).messages.length, 2);
+  await invoke(handler, "POST", `/api/agents/${agent.id}/remove`, {});
+  const imported = await invoke(handler, "POST", `/api/agents/${agent.id}/requirements`, { ...requirement, importOnly: true });
+  assert.deepEqual(JSON.parse(imported.text), { requirement: null, deleted: true });
+});
+
+test("新增持久化接口继续拒绝外部来源，无效对话不会写入文件", async () => {
+  let writes = 0;
+  const handler = makeHandler({ saveRequirements: () => { writes++; }, saveConversation: () => { writes++; } });
+  for (const action of ["requirements", "conversation"]) {
+    const input = request("POST", `/api/agents/${agent.id}/${action}`, {});
+    input.headers.host = "127.0.0.1:3000"; input.headers.origin = "https://outside.example";
+    const response = new StreamingResponse(); await handler(input, response);
+    assert.equal(response.status, 403);
+  }
+  assert.equal(writes, 0);
+});
 
 test("用户 Agent JSON 接口使用独立后端，返回定义、实际回复与取消/删除结果", async () => {
   const seen = [];

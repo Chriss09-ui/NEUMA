@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InputError } from "../core.mjs";
@@ -11,7 +11,7 @@ async function fixture(t) {
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const store = new DevelopmentStore({ dataDir });
   await store.ready;
-  return { dataDir, store, directory: join(dataDir, "development") };
+  return { dataDir, store, directory: join(dataDir, "agents", "agent_one", "development", "records") };
 }
 
 const record = (id = "dev_first", overrides = {}) => ({ id, agentId: "agent_one", version: 1,
@@ -102,16 +102,32 @@ test("record filenames must match valid identities and reject symlinks", async (
   await assert.rejects(new DevelopmentStore({ dataDir }).ready, InputError);
 });
 
+test("hardlinked metadata cannot be loaded or replaced and preserves the original checkpoint", async (t) => {
+  const { dataDir, store, directory } = await fixture(t);
+  const initial = await store.create(record());
+  const target = join(directory, `${initial.id}.json`), alias = join(dataDir, "outside-record.json");
+  const original = await readFile(target, "utf8");
+  await link(target, alias);
+  await assert.rejects(new DevelopmentStore({ dataDir }).ready, /研发记录已损坏/);
+  await assert.rejects(store.save({ ...initial, status: "completed" }), /未能保存/);
+  assert.equal((await store.getRun(initial.id)).status, "running");
+  assert.equal(await readFile(target, "utf8"), original);
+  assert.equal(await readFile(alias, "utf8"), original);
+  await rm(alias);
+  assert.equal((await store.save({ ...initial, status: "completed" })).status, "completed");
+});
+
 test("unpublished temporary files do not become checkpoints", async (t) => {
   const { dataDir, store, directory } = await fixture(t);
   await store.create(record("dev_complete", { status: "completed" }));
   await writeFile(join(directory, "dev_partial.abcd.tmp"), "{incomplete}");
+  await writeFile(join(directory, ".pending-8e4a1763-f71d-4690-b612-5dce58b0eae6.json"), "{incomplete}");
   const restored = new DevelopmentStore({ dataDir }); await restored.ready;
   assert.equal((await restored.list("agent_one")).length, 1);
 });
 
 test("remove deletes only that agent metadata and blocks subsequent stale saves", async (t) => {
-  const { store, directory } = await fixture(t);
+  const { dataDir, store, directory } = await fixture(t);
   const initial = await store.create(record());
   await store.create(record("dev_another"));
   await store.create(record("dev_other", { agentId: "agent_two", status: "completed" }));
@@ -121,8 +137,33 @@ test("remove deletes only that agent metadata and blocks subsequent stale saves"
   assert.equal(await store.get("agent_one"), null);
   assert.equal((await store.get("agent_two")).id, "dev_other");
   assert.equal(await readFile(join(directory, "workspaces", "user-file.txt"), "utf8"), "keep");
-  assert.deepEqual((await readdir(directory)).sort(), ["dev_other.json", "workspaces"]);
+  assert.deepEqual((await readdir(directory)).sort(), ["workspaces"]);
+  assert.equal(JSON.parse(await readFile(join(dataDir, "agents", "agent_two", "development", "records", "dev_other.json"), "utf8")).agentId, "agent_two");
   await assert.rejects(store.save(initial), /迟到结果/);
+});
+
+test("records are stored inside their Agent folder and reject a mismatched owner on restart", async (t) => {
+  const { dataDir, store, directory } = await fixture(t);
+  const saved = await store.create(record("dev_one", { status: "completed" }));
+  const other = await store.create(record("dev_two", { agentId: "agent_two", status: "completed" }));
+  assert.equal(JSON.parse(await readFile(join(directory, `${saved.id}.json`), "utf8")).agentId, saved.agentId);
+  const otherDirectory = join(dataDir, "agents", "agent_two", "development", "records");
+  assert.equal(JSON.parse(await readFile(join(otherDirectory, `${other.id}.json`), "utf8")).agentId, other.agentId);
+  await writeFile(join(otherDirectory, `${saved.id}.json`), JSON.stringify(saved));
+  await assert.rejects(new DevelopmentStore({ dataDir }).ready, /研发记录已损坏/);
+  assert.equal((await store.get("agent_one")).id, saved.id);
+});
+
+test("deleted Agents do not regain leftover development metadata on restart", async (t) => {
+  const { dataDir, store, directory } = await fixture(t);
+  const deleted = await store.create(record());
+  const other = await store.create(record("dev_other", { agentId: "agent_two", status: "completed" }));
+  await store.storage.writeJson("agent_one", "deleted.json", { version: 1, deletedAt: new Date().toISOString() });
+  const restarted = new DevelopmentStore({ dataDir }); await restarted.ready;
+  assert.equal(await restarted.get("agent_one"), null);
+  assert.equal(await restarted.getRun(deleted.id), null);
+  assert.equal((await restarted.get("agent_two")).id, other.id);
+  assert.equal(JSON.parse(await readFile(join(directory, `${deleted.id}.json`), "utf8")).status, "running");
 });
 
 test("unsafe IDs and invalid records cannot address arbitrary files", async (t) => {
@@ -146,7 +187,7 @@ test("failed atomic replacement preserves memory and can be retried", async (t) 
   await rm(target); await mkdir(target);
   await assert.rejects(store.save({ ...initial, status: "completed" }), /未能保存/);
   assert.equal((await store.getRun(initial.id)).status, "running");
-  assert.equal((await readdir(directory)).some((name) => name.endsWith(".tmp")), false);
+  assert.equal((await readdir(directory)).some((name) => name.endsWith(".tmp") || name.startsWith(".pending-")), false);
   await rm(target, { recursive: true });
   const saved = await store.save({ ...initial, status: "completed" });
   assert.equal(saved.revision, 2); assert.equal(saved.status, "completed");

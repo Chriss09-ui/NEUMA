@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import * as state from "../public/state.js";
 
-const sources = await Promise.all(["chat-ui.js", "app.js"].map(async (file) =>
+const sources = await Promise.all(["chat-ui.js", "agent-runtime.js", "app.js"].map(async (file) =>
   (await readFile(new URL(`../public/${file}`, import.meta.url), "utf8"))
     .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "")));
 const settle = () => new Promise(setImmediate);
@@ -26,7 +26,7 @@ function stream() {
   };
 }
 
-function setup(turn) {
+function setup(turn, { stored = new Map(), requirements = [], conversations = new Map(), storageRequest } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -52,18 +52,40 @@ function setup(turn) {
   document.getElementById = get;
   document.createElement = () => new Element();
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
-  const stored = new Map(), requests = [];
+  const requests = [], persistenceRequests = [], serverRequirements = new Map(requirements.map((item) => [item.id, item]));
   const context = vm.createContext({
     ...state, document, window: { confirm: () => true, localStorage: {
       getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key),
     } },
-    Event, CustomEvent: Event, AbortController, TextDecoder, structuredClone, performance,
+    Event, CustomEvent: Event, AbortController, TextDecoder, TextEncoder, structuredClone, performance,
     crypto: { randomUUID: () => "test-agent" },
     node: (_tag, className = "", textContent = "") => Object.assign(new Element(), { className, textContent }),
-    fetch: (path, options) => { requests.push({ path, ...options, body: JSON.parse(options.body) }); return turn(options); },
+    fetch: async (path, options = {}) => {
+      const body = options.body ? JSON.parse(options.body) : undefined;
+      if (path === "/api/requirements/turn") { requests.push({ path, ...options, body }); return turn(options); }
+      persistenceRequests.push({ path, ...options, body });
+      if (storageRequest) {
+        const result = await storageRequest(path, body, options);
+        if (result) return result;
+      }
+      if (path === "/api/agent-requirements") return Response.json({ requirements: [...serverRequirements.values()] });
+      const id = decodeURIComponent(path.split("/")[3]);
+      if (path.endsWith("/requirements")) {
+        const requirement = body.importOnly && serverRequirements.has(id) ? serverRequirements.get(id) : { id, name: body.name, draft: body.draft, updatedAt: body.updatedAt };
+        serverRequirements.set(id, requirement);
+        return Response.json({ requirement });
+      }
+      if (path.endsWith("/conversation")) {
+        if (body && (!body.importOnly || !conversations.has(id))) conversations.set(id, { schemaVersion: 2, messages: body.messages });
+        return Response.json({ conversation: conversations.get(id) ?? null });
+      }
+      if (path.endsWith("/remove")) { serverRequirements.delete(id); conversations.delete(id); return Response.json({ removed: true }); }
+      throw new Error(`未配置测试接口：${path}`);
+    },
   });
   vm.runInContext(sources.join("\n"), context);
-  return { get, requests, stored, document,
+  return { get, requests, persistenceRequests, stored, document, serverRequirements, conversations,
+    ready: () => vm.runInContext("libraryReady", context),
     session: () => vm.runInContext("session", context),
     agents: () => vm.runInContext("agents", context),
     submit: (text) => { get("message").value = text; return get("chat-form").dispatchEvent({ type: "submit", preventDefault() {} }); },
@@ -221,4 +243,234 @@ test("修改展示信息同步管理卡、交付卡与迭代名称，原始需�
   assert.equal(ui.agents()[0].name, "新的需求名称");
   assert.equal(ui.agents()[0].profile.name, "我的会议伙伴");
   assert.equal(ui.get("iteration-agent-name").textContent, "我的会议伙伴");
+});
+
+test("没有浏览器入口也能从 Agent 文件夹恢复列表，主需求会话仍为空白", async () => {
+  const requirement = { id: "saved-one", name: "磁盘助手", draft: { goal: { value: "磁盘需求" } },
+    profile: { name: "我的助手", description: "", icon: "📁" }, updatedAt: "2026-10-08T03:00:00Z" };
+  const ui = setup(async () => Response.json(result()), { requirements: [requirement] });
+  await ui.ready();
+  assert.equal(ui.agents().length, 1);
+  assert.equal(ui.agents()[0].id, "saved-one");
+  assert.equal(ui.agents()[0].persisted, true);
+  assert.equal(ui.get("agents-list").children[0].children[1].textContent, "我的助手");
+  assert.equal(ui.session().messages.length, 0);
+  assert.equal(ui.session().draft, null);
+  assert.equal(ui.persistenceRequests.some((request) => request.body), false);
+  assert.equal(ui.stored.has("neuma.requirements.session.optin.v1"), false);
+  assert.equal(JSON.parse(ui.stored.get("neuma.requirements.saved-list.v1"))[0].id, "saved-one");
+});
+
+test("首次接入迁移全部旧需求及手动保存对话，服务器现存版本优先", async () => {
+  const stored = new Map();
+  const backup = (id, name) => ({ id, name, draft: { goal: { value: name } }, updatedAt: "2026-10-07T03:00:00Z" });
+  stored.set("neuma.requirements.saved-list.v1", JSON.stringify([backup("one", "旧浏览器需求"), backup("two", "待迁移需求")]));
+  stored.set("neuma.agent.conversation.v2.one", JSON.stringify({ schemaVersion: 2, messages: [{ role: "user", content: "旧浏览器对话" }] }));
+  stored.set("neuma.agent.preview.v1.two", JSON.stringify([{ role: "user", content: "旧版手动材料" }]));
+  const durable = backup("one", "服务器新需求"), conversations = new Map([["one", { schemaVersion: 2, messages: [{ role: "user", content: "服务器新对话" }] }]]);
+  const ui = setup(async () => Response.json(result()), { stored, requirements: [durable], conversations });
+  await ui.ready();
+  assert.equal(ui.agents().find((item) => item.id === "one").name, "服务器新需求");
+  assert.equal(ui.agents().find((item) => item.id === "two").persisted, true);
+  assert.equal(ui.serverRequirements.get("two").name, "待迁移需求");
+  assert.equal(conversations.get("one").messages[0].content, "服务器新对话");
+  assert.equal(conversations.get("two").messages[0].content, "旧版手动材料");
+  assert.equal(ui.persistenceRequests.filter((request) => request.body).length, 4);
+  assert.equal(ui.persistenceRequests.filter((request) => request.body).every((request) => request.body.importOnly === true), true);
+  assert.equal(ui.session().messages.length, 0);
+  assert.equal(ui.stored.has("neuma.requirements.session.optin.v1"), false);
+});
+
+test("确认后的需求保存失败保留浏览器备份，提示真实失败且不自动开始构建", async () => {
+  const builds = [], ui = setup(async () => Response.json(result({ status: "ready", confirmed: true })), {
+    storageRequest: (path) => path.endsWith("/requirements") ? Response.json({ error: "磁盘写入失败" }, { status: 503 }) : null,
+  });
+  ui.document.addEventListener("neuma:agent-build", (event) => builds.push(event.detail.id));
+  await ui.submit("确认需求");
+  assert.equal(ui.agents().length, 1);
+  assert.equal(ui.agents()[0].persisted, false);
+  assert.equal(ui.agents()[0].dirty, true);
+  assert.equal(ui.agents()[0].localBackup, true);
+  assert.deepEqual(builds, []);
+  assert.match(ui.get("agents-error").textContent, /未保存到文件夹.*磁盘写入失败.*浏览器备份已保留/);
+  assert.equal(JSON.parse(ui.stored.get("neuma.requirements.saved-list.v1"))[0].id, "test-agent");
+});
+
+test("服务未响应时浏览器入口保留但不标为已保存到磁盘", async () => {
+  const stored = new Map([["neuma.requirements.saved-list.v1", JSON.stringify([
+    { id: "one", name: "浏览器助手", draft: { goal: { value: "需求" } } },
+  ])]]);
+  const ui = setup(async () => Response.json(result()), { stored,
+    storageRequest: (path) => path === "/api/agent-requirements" ? Promise.reject(new Error("服务未响应")) : null,
+  });
+  await ui.ready();
+  assert.equal(ui.agents().length, 1);
+  assert.equal(ui.agents()[0].persisted, false);
+  assert.match(ui.get("agents-error").textContent, /文件夹暂时无法读取.*浏览器备份保留.*服务未响应/);
+  assert.equal(ui.stored.has("neuma.requirements.saved-list.v1"), true);
+});
+
+test("已删除 Agent 的旧浏览器备份不会复活，也不会继续导入其对话", async () => {
+  const stored = new Map([["neuma.requirements.saved-list.v1", JSON.stringify([
+    { id: "deleted", name: "已删助手", draft: { goal: { value: "需求" } } },
+  ])], ["neuma.agent.conversation.v2.deleted", JSON.stringify({ schemaVersion: 2, messages: [{ role: "user", content: "旧对话" }] })]]);
+  const ui = setup(async () => Response.json(result()), { stored,
+    storageRequest: (path) => path.endsWith("/requirements") ? Response.json({ requirement: null, deleted: true }) : null,
+  });
+  await ui.ready();
+  assert.equal(ui.agents().length, 0);
+  assert.equal(stored.has("neuma.requirements.saved-list.v1"), false);
+  assert.equal(stored.has("neuma.agent.conversation.v2.deleted"), false);
+  assert.equal(ui.persistenceRequests.some((request) => request.path.endsWith("/conversation")), false);
+});
+
+test("已删除 Agent 的待同步需求也会清理，探测时不上传尚未确认的版本", async () => {
+  const stored = new Map([["neuma.requirements.saved-list.v1", JSON.stringify([
+    { id: "deleted", name: "已删助手", draft: { goal: { value: "新需求" } }, pendingSync: true },
+  ])], ["neuma.agent.conversation.v2.deleted", JSON.stringify({ schemaVersion: 2, messages: [{ role: "user", content: "旧对话" }] })]]);
+  const ui = setup(async () => Response.json(result()), { stored,
+    storageRequest: (path) => path.endsWith("/conversation") ? Response.json({ conversation: null, deleted: true }) : null,
+  });
+  await ui.ready();
+  assert.equal(ui.agents().length, 0);
+  assert.equal(stored.has("neuma.requirements.saved-list.v1"), false);
+  assert.equal(stored.has("neuma.agent.conversation.v2.deleted"), false);
+  assert.equal(ui.persistenceRequests.some((request) => request.body), false);
+});
+
+test("待同步需求的删除状态读取失败时保留新版备份并提示，不能上传或清理", async () => {
+  const pending = { id: "one", name: "未同步需求", draft: { goal: { value: "新目标" } }, pendingSync: true };
+  const stored = new Map([["neuma.requirements.saved-list.v1", JSON.stringify([pending])]]);
+  const ui = setup(async () => Response.json(result()), { stored,
+    storageRequest: (path) => path.endsWith("/conversation") ? Response.json({ error: "删除状态读取失败" }, { status: 503 }) : null,
+  });
+  await ui.ready();
+  assert.equal(ui.agents()[0].name, pending.name);
+  assert.equal(ui.agents()[0].pendingSync, true);
+  assert.deepEqual(JSON.parse(stored.get("neuma.requirements.saved-list.v1")), [pending]);
+  assert.equal(ui.persistenceRequests.some((request) => request.body), false);
+  assert.match(ui.get("agents-error").textContent, /浏览器备份保留.*删除状态读取失败/);
+});
+
+test("同一需求版本的并发保存只提交一次", async () => {
+  const requirement = { id: "one", name: "助手", draft: { goal: { value: "目标" } } };
+  let release, writes = 0;
+  const ui = setup(async () => Response.json(result()), { requirements: [requirement],
+    storageRequest: (path, body) => {
+      if (!path.endsWith("/requirements")) return null;
+      writes++;
+      return new Promise((done) => { release = () => done(Response.json({ requirement: { id: "one", ...body } })); });
+    },
+  });
+  await ui.ready();
+  const save = () => ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "save", id: "one" } });
+  const first = save(); await settle();
+  const second = save(); await settle();
+  assert.equal(writes, 1);
+  release();
+  assert.deepEqual(await first, [true]);
+  assert.deepEqual(await second, [true]);
+  assert.equal(ui.agents()[0].dirty, false);
+});
+
+for (const previousOutcome of ["success", "failure"]) test(`旧需求保存${previousOutcome === "success" ? "成功" : "失败"}后重新保存确认的新需求，不复用旧结果或丢失新版备份`, async () => {
+  const old = { id: "one", name: "旧需求 A", draft: { name: { value: "旧需求 A" }, goal: { value: "目标 A" } } };
+  const latest = { name: { value: "新需求 B" }, goal: { value: "目标 B" } };
+  let release, writes = 0;
+  const builds = [], ui = setup(async () => Response.json(result({ status: "ready", confirmed: true, draft: latest })), {
+    requirements: [old], storageRequest: (path, body) => {
+      if (!path.endsWith("/requirements") || ++writes !== 1) return null;
+      return new Promise((done) => { release = () => done(previousOutcome === "success"
+        ? Response.json({ requirement: { id: "one", ...body } }) : Response.json({ error: "旧保存中断" }, { status: 503 })); });
+    },
+  });
+  await ui.ready();
+  ui.document.addEventListener("neuma:agent-build", (event) => builds.push(event.detail.id));
+  const previous = ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "save", id: "one" } });
+  await settle();
+  await ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "edit", id: "one" } });
+  const current = ui.submit("确认新需求 B"); await settle();
+  const pendingBackup = JSON.parse(ui.stored.get("neuma.requirements.saved-list.v1"))[0];
+  assert.equal(pendingBackup.name, "新需求 B");
+  assert.equal(pendingBackup.pendingSync, true);
+  assert.deepEqual(builds, []);
+  release(); await previous; await current;
+  assert.equal(writes, 2);
+  assert.equal(ui.serverRequirements.get("one").name, "新需求 B");
+  assert.equal(ui.agents()[0].dirty, false);
+  assert.equal(ui.agents()[0].pendingSync, false);
+  const confirmedBackup = JSON.parse(ui.stored.get("neuma.requirements.saved-list.v1"))[0];
+  assert.equal(confirmedBackup.name, "新需求 B");
+  assert.equal(confirmedBackup.pendingSync, undefined);
+  assert.deepEqual(builds, ["one"]);
+});
+
+test("删除等待旧保存时阻止排队的新需求再保存或构建", async () => {
+  const old = { id: "one", name: "旧需求", draft: { goal: { value: "旧目标" } } };
+  let release, writes = 0;
+  const builds = [], ui = setup(async () => Response.json(result({ status: "ready", confirmed: true,
+    draft: { name: { value: "新需求" }, goal: { value: "新目标" } } })), {
+    requirements: [old], storageRequest: (path, body) => {
+      if (!path.endsWith("/requirements")) return null;
+      writes++;
+      return new Promise((done) => { release = () => done(Response.json({ requirement: { id: "one", ...body } })); });
+    },
+  });
+  await ui.ready();
+  ui.document.addEventListener("neuma:agent-build", (event) => builds.push(event.detail.id));
+  const previous = ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "save", id: "one" } });
+  await settle();
+  await ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "edit", id: "one" } });
+  const current = ui.submit("确认新需求"); await settle();
+  const card = ui.get("agents-list").children[0];
+  const removal = card.children.find((node) => node.className === "agent-actions").children.find((node) => node.textContent === "删除").click();
+  await settle();
+  release(); await Promise.all([previous, current, removal]);
+  assert.equal(writes, 1);
+  assert.equal(ui.agents().length, 0);
+  assert.equal(ui.serverRequirements.has("one"), false);
+  assert.equal(ui.stored.has("neuma.requirements.saved-list.v1"), false);
+  assert.deepEqual(builds, []);
+});
+
+test("服务器已有旧需求时，失败保存的新需求刷新后仍可恢复并显式重试", async () => {
+  const old = { id: "one", name: "旧需求 A", draft: { name: { value: "旧需求 A" }, goal: { value: "目标 A" } } };
+  const latest = { name: { value: "新需求 B" }, goal: { value: "目标 B" } };
+  const ui = setup(async () => Response.json(result({ status: "ready", confirmed: true, draft: latest })), {
+    requirements: [old], storageRequest: (path, body) => path.endsWith("/requirements") && !body.importOnly
+      ? Response.json({ error: "保存连接中断" }, { status: 503 }) : null,
+  });
+  await ui.ready();
+  await ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "edit", id: "one" } });
+  await ui.submit("确认新需求 B");
+  assert.equal(ui.serverRequirements.get("one").name, "旧需求 A");
+  assert.equal(JSON.parse(ui.stored.get("neuma.requirements.saved-list.v1"))[0].pendingSync, true);
+  const restored = setup(async () => Response.json(result()), { requirements: [old], stored: ui.stored });
+  await restored.ready();
+  assert.equal(restored.agents()[0].name, "新需求 B");
+  assert.equal(restored.agents()[0].dirty, true);
+  assert.equal(restored.agents()[0].pendingSync, true);
+  assert.equal(restored.agents()[0].persisted, true);
+  assert.equal(JSON.parse(restored.stored.get("neuma.requirements.saved-list.v1"))[0].name, "新需求 B");
+  assert.equal(restored.persistenceRequests.some((request) => request.body), false);
+  assert.match(restored.get("agents-error").textContent, /未同步.*再次点击保存/);
+  await restored.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "save", id: "one" } });
+  assert.equal(restored.serverRequirements.get("one").name, "新需求 B");
+  assert.equal(restored.agents()[0].dirty, false);
+  assert.equal(restored.agents()[0].pendingSync, false);
+  assert.equal(JSON.parse(restored.stored.get("neuma.requirements.saved-list.v1"))[0].pendingSync, undefined);
+});
+
+test("启动迁移不会用磁盘旧对话覆盖尚未同步的浏览器保存", async () => {
+  const old = { id: "one", name: "助手", draft: { goal: { value: "目标" } } };
+  const pending = { schemaVersion: 2, messages: [{ role: "user", content: "未同步对话 B" }], pendingSync: true };
+  const stored = new Map([["neuma.requirements.saved-list.v1", JSON.stringify([old])],
+    ["neuma.agent.conversation.v2.one", JSON.stringify(pending)]]);
+  const conversations = new Map([["one", { schemaVersion: 2, messages: [{ role: "user", content: "磁盘对话 A" }] }]]);
+  const ui = setup(async () => Response.json(result()), { stored, requirements: [old], conversations });
+  await ui.ready();
+  assert.deepEqual(JSON.parse(stored.get("neuma.agent.conversation.v2.one")), pending);
+  assert.equal(conversations.get("one").messages[0].content, "磁盘对话 A");
+  assert.equal(ui.persistenceRequests.some((request) => request.path.endsWith("/conversation")), false);
+  assert.match(ui.get("agents-error").textContent, /未同步.*再次点击保存/);
 });

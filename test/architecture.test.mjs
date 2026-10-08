@@ -218,7 +218,7 @@ test("模型阶段取消会终止会话、保存 cancelled，不返回交付结�
   const result = await designer.get("weekly");
   assert.equal(result.status, "cancelled"); assert.equal(result.delivery, "blocked");
   assert.ok(sessions[0].aborted); assert.ok(sessions[0].disposed);
-  const stored = JSON.parse(await readFile(join(config.dataDir, "architectures.json"), "utf8"));
+  const stored = JSON.parse(await readFile(join(config.dataDir, "agents/weekly/architecture.json"), "utf8"));
   assert.equal(stored.records[0].status, "cancelled");
 });
 
@@ -241,7 +241,7 @@ test("重启时在途设计恢复为失败，保留已通过版本的历史", as
   const passed = await designer.design(definition());
   const interrupted = { ...passed, version: passed.version + 1, status: "evaluating", delivery: "blocked" };
   await mkdir(config.dataDir, { recursive: true });
-  await writeFile(join(config.dataDir, "architectures.json"), JSON.stringify({ version: 1, records: [passed, interrupted] }));
+  await writeFile(join(config.dataDir, "agents/weekly/architecture.json"), JSON.stringify({ version: 1, records: [passed, interrupted] }));
   const restarted = new ArchitectureDesigner(config);
   const result = await restarted.get("weekly");
   assert.equal(result.status, "failed"); assert.equal(result.delivery, "blocked");

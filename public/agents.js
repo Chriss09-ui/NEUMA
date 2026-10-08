@@ -1,4 +1,4 @@
-import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, deleteAgentPreview, loadAgentPreview, saveAgentPreview } from "./state.js";
+import { agentConversationSnapshot, agentDisplayDescription, agentDisplayIcon, agentDisplayName, deleteAgentPreview, loadSavedAgentConversation, saveAgentPreview } from "./state.js";
 import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js";
 import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime, developmentPhases } from "./agent-runtime.js";
 import { createDevelopmentView } from "./agent-details-view.js";
@@ -33,10 +33,54 @@ function action(action, id = route.agentId) {
 
 function conversation(id) {
   if (!conversations.has(id)) {
-    const messages = loadAgentPreview(storage, id);
-    conversations.set(id, { messages, saved: messages.length > 0, sessionId: crypto.randomUUID(), turn: null, error: "" });
+    const backup = loadSavedAgentConversation(storage, id);
+    conversations.set(id, { messages: backup?.messages ?? [], saved: false, localBackup: Boolean(backup),
+      loaded: backup?.pendingSync === true, pendingSync: backup?.pendingSync === true, loading: null, saving: null,
+      storageError: backup?.pendingSync ? "浏览器保留上次未同步的对话，请再次点击保存。Agent 文件夹已有版本暂未更新。" : "",
+      sessionId: crypto.randomUUID(), turn: null, error: "" });
   }
   return conversations.get(id);
+}
+
+async function loadConversation(agent) {
+  const item = conversation(agent.id);
+  if (!agent.persisted || item.loaded || item.loading || item.turn || item.saving) return;
+  const loading = { controller: new AbortController() };
+  item.loading = loading;
+  const valid = () => conversations.get(agent.id) === item && item.loading === loading && !item.turn
+    && !loading.controller.signal.aborted && agents.some((entry) => entry.id === agent.id);
+  if (visible(agent.id, item)) renderControls(agent);
+  try {
+    let result = await api.getConversation(agent.id, { signal: loading.controller.signal });
+    if (!valid()) return;
+    const backup = loadSavedAgentConversation(storage, agent.id);
+    if (backup?.pendingSync) {
+      item.messages = backup.messages;
+      item.saved = false;
+      item.loaded = item.pendingSync = true;
+      item.storageError = "浏览器保留上次未同步的对话，请再次点击保存。Agent 文件夹已有版本暂未更新。";
+      return;
+    }
+    if (result.conversation === null && backup) {
+      result = await api.saveConversation(agent.id, { ...backup, importOnly: true }, { signal: loading.controller.signal });
+    }
+    if (!valid()) return;
+    if (result.deleted) { item.messages = []; item.saved = false; item.loaded = true; return; }
+    if (result.conversation !== null && (result.conversation?.schemaVersion !== 2 || !Array.isArray(result.conversation.messages))) {
+      throw new Error("保存对话尚未确认");
+    }
+    item.messages = result.conversation ? agentConversationSnapshot(result.conversation.messages).messages : [];
+    item.saved = Boolean(result.conversation);
+    item.loaded = true;
+    item.storageError = "";
+    if (result.conversation) item.localBackup = saveAgentPreview(storage, agent.id, item.messages);
+  } catch (error) {
+    if (!valid()) return;
+    item.storageError = `保存对话暂时无法读取：${error.message || "服务未响应"}。${item.localBackup ? "当前显示浏览器备份，请重试保存。" : "请稍后重新进入。"}`;
+  } finally {
+    if (item.loading === loading) item.loading = null;
+    if (visible(agent.id, item)) renderWorkspace();
+  }
 }
 
 function runtime(agent) {
@@ -111,7 +155,7 @@ function renderMessages(agent) {
 function renderControls(agent) {
   const state = runtime(agent), item = conversation(agent.id), operation = state.operation || item.turn;
   const development = agentDevelopmentState(agent, state);
-  const busy = Boolean(operation || development.active);
+  const busy = Boolean(operation || development.active || item.loading || item.saving);
   byId("agent-runtime-status").textContent = state.status === "building" ? state.label || "正在设计与检查…"
     : state.status === "ready" && item.turn ? "正在处理任务…"
       : state.status === "stale" ? "需求已更新，请重新生成后继续任务。"
@@ -125,8 +169,9 @@ function renderControls(agent) {
   byId("agent-cancel-reply").hidden = !operation || Boolean(operation.kind?.startsWith("development") || operation.development);
   byId("agent-cancel-reply").disabled = Boolean(operation?.controller.signal.aborted);
   byId("agent-chat-form").setAttribute("aria-busy", String(busy));
-  byId("agent-save-chat").disabled = Boolean(item.turn);
-  showError(item.error || state.error);
+  byId("agent-save-chat").disabled = Boolean(item.turn || item.loading || item.saving);
+  byId("agent-new-chat").disabled = Boolean(item.saving);
+  showError(item.error || item.storageError || state.error);
   renderDevelopment(agent, development);
   broadcastRuntime(agent);
   scheduleInspection(agent);
@@ -177,7 +222,7 @@ function broadcastRuntime(agent = current()) {
   agent = agents.find((entry) => entry.id === agent.id);
   if (!agent) return;
   const state = runtime(agent), item = conversation(agent.id), development = agentDevelopmentState(agent, state);
-  const busy = Boolean(state.operation || item.turn || development.active);
+  const busy = Boolean(state.operation || item.turn || development.active || item.loading || item.saving);
   broadcasting.add(agent.id);
   try {
     document.dispatchEvent(new CustomEvent("neuma:agent-runtime-change", { detail: {
@@ -185,7 +230,7 @@ function broadcastRuntime(agent = current()) {
       architecture: state.architecture ? structuredClone(state.architecture) : null,
       development: state.development ? structuredClone(state.development) : null,
       developmentAction: development.canStart || development.canResume ? development.actionLabel : null,
-      status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || state.error,
+      status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || item.storageError || state.error,
     } }));
   } finally { broadcasting.delete(agent.id); }
 }
@@ -266,8 +311,10 @@ function renderWorkspace({ renderConversation = true } = {}) {
   renderArchitecture(agent, brief);
   if (renderConversation || !conversation(agent.id).messages.length) renderMessages(agent);
   renderControls(agent);
-  byId("agent-storage-note").textContent = `${agent.persisted ? "需求已保存在此浏览器。" : "入口仅在当前页面存在，请保存需求以便下次打开。"}${conversation(agent.id).saved
-    ? "这份对话已手动保存；新消息需再次保存。" : "对话仅在本页保留，点击保存后刷新可恢复。"}`;
+  const item = conversation(agent.id);
+  byId("agent-storage-note").textContent = `${agent.persisted ? agent.dirty ? "原需求在 Agent 文件夹，当前修改尚未保存。" : "需求已保存在 Agent 文件夹。" : agent.localBackup ? "需求仅有浏览器备份，请重试保存到 Agent 文件夹。" : "入口仅在当前页面存在，请保存需求以便下次打开。"}${item.loading
+    ? "正在读取已保存对话。" : item.saved ? "这份对话已手动保存到 Agent 文件夹；新消息需再次保存。"
+      : item.localBackup ? "当前对话尚未确认保存，浏览器备份保留。" : "对话仅在本页保留，点击保存后刷新可恢复。"}`;
 }
 
 async function inspectAgent(agent, refresh = false) {
@@ -489,7 +536,7 @@ async function sendMessage() {
   const agent = current(), message = input.value.trim();
   if (!agent || !message) return;
   const state = runtime(agent), item = conversation(agent.id);
-  if (state.status !== "ready" || state.operation || item.turn) return;
+  if (state.status !== "ready" || state.operation || item.turn || item.loading || item.saving) return;
   if (message.length > 4000) return showError("任务输入需为 1～4000 字。");
   const history = agentHistory(item.messages, state.definition.revision);
   const user = addUserMessage(item.messages, message);
@@ -497,6 +544,7 @@ async function sendMessage() {
   const reply = { role: "assistant", content: "", status: "thinking", label: "正在处理任务…", revision: user.revision };
   const operation = { controller: new AbortController(), reply };
   item.turn = operation;
+  item.loaded = true;
   item.messages.push(reply);
   item.saved = false;
   item.error = "";
@@ -557,7 +605,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
   }
   renderSidebar();
   renderWorkspace();
-  if (route.page === "agent" && current()) return inspectAgent(current());
+  if (route.page === "agent" && current()) return Promise.all([inspectAgent(current()), loadConversation(current())]);
 });
 document.addEventListener("neuma:route", (event) => {
   clearInspectionTimer();
@@ -572,7 +620,7 @@ document.addEventListener("neuma:route", (event) => {
   renderWorkspace();
   if (route.page === "agent" && current()) {
     if (previousPage !== "agent" || previousId !== route.agentId) input.focus();
-    return inspectAgent(current(), serverOperationPending(current()));
+    return Promise.all([inspectAgent(current(), serverOperationPending(current())), loadConversation(current())]);
   }
 });
 document.addEventListener("neuma:agent-build", (event) => buildAgent(event.detail.id, true));
@@ -590,6 +638,8 @@ document.addEventListener("neuma:agent-removed", (event) => {
   const id = event.detail.id, item = conversations.get(id);
   if (id === route.agentId) clearInspectionTimer();
   runtimes.get(id)?.operation?.controller.abort();
+  item?.loading?.controller.abort();
+  item?.saving?.controller.abort();
   if (item?.turn) { item.turn.controller.abort(); api.cancel(item.sessionId).catch(() => {}); }
   conversations.delete(id);
   runtimes.delete(id);
@@ -598,7 +648,7 @@ document.addEventListener("neuma:agent-removed", (event) => {
   if (!deleteAgentPreview(storage, id)) showError("入口已移除，但浏览器未能删除保存的对话。");
 });
 document.addEventListener("neuma:agent-saved", (event) => {
-  if (event.detail.id === route.agentId) showError(event.detail.ok ? "" : "浏览器无法保存需求，请在管理页导出。");
+  if (event.detail.id === route.agentId) showError(event.detail.ok ? "" : event.detail.message || "Agent 需求尚未保存到文件夹，请重试保存。");
 });
 
 byId("sidebar-create-agent").addEventListener("click", () => action("create"));
@@ -606,23 +656,46 @@ byId("agent-iterate").addEventListener("click", () => action("edit"));
 byId("agent-save-entry").addEventListener("click", () => action("save"));
 byId("agent-build").addEventListener("click", () => buildAgent(route.agentId));
 byId("agent-cancel-reply").addEventListener("click", () => stopAgent(route.agentId));
-byId("agent-save-chat").addEventListener("click", () => {
+byId("agent-save-chat").addEventListener("click", async () => {
   const agent = current();
   if (!agent) return;
   if (!agent.persisted) return showError("请先保存智能体需求，再保存这份对话。");
   const item = conversation(agent.id);
-  if (item.turn) return;
-  if (!saveAgentPreview(storage, agent.id, item.messages)) return showError("浏览器无法保存对话，请复制需要保留的内容。");
-  item.saved = true;
-  item.error = "";
-  renderWorkspace();
+  if (item.turn || item.loading || item.saving) return;
+  const snapshot = agentConversationSnapshot(item.messages), saving = { controller: new AbortController() };
+  item.localBackup = saveAgentPreview(storage, agent.id, snapshot.messages, { pendingSync: true });
+  item.pendingSync = true;
+  item.loaded = true;
+  item.saving = saving;
+  renderControls(agent);
+  try {
+    const result = await api.saveConversation(agent.id, snapshot, { signal: saving.controller.signal });
+    if (conversations.get(agent.id) !== item || item.saving !== saving) return;
+    if (result.conversation?.schemaVersion !== 2 || !Array.isArray(result.conversation.messages)
+      || JSON.stringify(agentConversationSnapshot(result.conversation.messages)) !== JSON.stringify(snapshot)) throw new Error("对话保存尚未确认");
+    item.saved = true;
+    item.pendingSync = false;
+    item.localBackup = saveAgentPreview(storage, agent.id, snapshot.messages);
+    item.loaded = true;
+    item.error = item.storageError = "";
+  } catch (error) {
+    if (conversations.get(agent.id) !== item) return;
+    item.saved = false;
+    item.storageError = `对话未保存到 Agent 文件夹：${error.message || "服务未响应"}。${item.localBackup ? "浏览器备份已保留，请重试保存。" : "浏览器也无法备份，请复制需要保留的内容。"}`;
+  } finally {
+    if (item.saving === saving) item.saving = null;
+    if (visible(agent.id, item)) renderWorkspace();
+  }
 });
 byId("agent-new-chat").addEventListener("click", () => {
   const agent = current();
   if (!agent) return;
+  if (conversation(agent.id).saving) return;
   if (conversation(agent.id).messages.length && !window.confirm("开启空白新对话？本页消息会清空，已保存的版本保留到下次点击保存。")) return;
   stopAgent(agent.id);
-  conversations.set(agent.id, { messages: [], saved: false, sessionId: crypto.randomUUID(), turn: null, error: "" });
+  conversation(agent.id).loading?.controller.abort();
+  conversations.set(agent.id, { messages: [], saved: false, loaded: true, loading: null, saving: null, localBackup: false,
+    storageError: "", sessionId: crypto.randomUUID(), turn: null, error: "" });
   input.value = "";
   inputs.delete(agent.id);
   renderWorkspace();
