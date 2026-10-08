@@ -24,7 +24,7 @@ test("配置接口只返回脱敏信息，保存后写入 .env 并立即生效",
   const config = getProviderConfig({ NEUMA_LLM_CHAT_URL: "https://api.example.com/v1/chat/completions", NEUMA_LLM_MODEL: "old-model" });
   let disposed = 0;
   const handler = createRequestHandler({ config, envPath, projects: { list: async () => [] },
-    projectAgent: { dispose: async () => { disposed++; } } });
+    projectAgent: { dispose: async () => { disposed++; } }, prototypeAgents: { close: async () => {} } });
 
   const before = await invoke(handler, "GET", "/api/settings");
   assert.equal(before.body.llmConfigured, false);

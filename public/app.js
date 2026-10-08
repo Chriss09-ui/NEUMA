@@ -1,7 +1,8 @@
-import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, blankSession, clearSession, deleteRequirement, initializeSession, loadSavedRequirements,
-  loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
+import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, blankSession, clearSession, deleteAgentPreview, deleteRequirement, initializeSession, loadSavedRequirements,
+  loadSavedAgentConversation, loadSession, normalizeAgentRequirement, recentUserMessages, saveAgentPreview, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement } from "./state.js";
 import { addUserMessage, createReplyView, mountWelcome, readReply, renderUserMessage } from "./chat-ui.js";
+import { agentSourceKey, createAgentRuntime } from "./agent-runtime.js";
 
 let browserStorage;
 try { browserStorage = window.localStorage; } catch { browserStorage = null; }
@@ -10,8 +11,12 @@ let session = initial.session;
 let hasSavedCopy = initial.hasSavedCopy;
 let pendingLegacy = initial.legacySession.messages.length || initial.legacySession.draft
   ? initial.legacySession : null;
-let agents = loadSavedRequirements(browserStorage);
+const browserRequirements = loadSavedRequirements(browserStorage);
+let agents = browserRequirements.map((item) => ({ ...item, persisted: false, localBackup: true }));
 const profileMap = new Map();
+const requirementSaves = new Map(), removedAgentIds = new Set(), removingAgentIds = new Set();
+const agentApi = createAgentRuntime();
+let libraryReady;
 let activeAgentId = null;
 let busy = false;
 let pendingReply = null, replyView = null, activeController = null;
@@ -121,8 +126,8 @@ function renderMessages(scrollToEnd = true) {
       element("span", "agent-type", "独立对话入口"), element("strong", "", agentDisplayName(delivered)),
       element("p", "", agentDisplayDescription(delivered)),
       element("p", "muted-note", "需求已确认。进入助手可查看设计与检查结果；通过并生成后即可对话，未通过时会说明原因。"));
-    card.append(button("primary", needsSave ? "保存需求并进入助手" : "进入助手", () => {
-      if (needsSave && !saveAgent(delivered.id)) return;
+    card.append(button("primary", needsSave ? "保存需求并进入助手" : "进入助手", async () => {
+      if (needsSave && !await saveAgent(delivered.id)) return;
       navigate({ page: "agent", agentId: delivered.id });
     }));
     messagesEl.append(card);
@@ -223,7 +228,7 @@ function renderAgents() {
     top.append(element("span", "agent-avatar", agentDisplayIcon(agent)),
       element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "Agent"));
     const state = agent.dirty && agent.persisted ? ["warn", "修改未保存"]
-      : agent.persisted ? ["ok", "已保存"] : ["", "仅当前页"];
+      : agent.persisted ? ["ok", "已保存到 Agent 文件夹"] : agent.localBackup ? ["warn", "仅浏览器备份"] : ["", "仅当前页"];
     top.append(element("span", `status ${state[0]}`, state[1]));
     card.append(top, element("h3", "", name));
     card.append(element("p", "", agentDisplayDescription(agent)));
@@ -270,28 +275,133 @@ function openAgent(id) {
   navigate({ page: "chat" });
 }
 
-function saveAgent(id) {
-  if (busy) return;
-  const agent = agents.find((item) => item.id === id);
-  if (!agent || !saveRequirement(browserStorage, agent)) {
-    showAgentsError("浏览器无法保存 Agent 需求，请先导出");
-    showError("浏览器无法保存 Agent 需求，请先导出");
-    document.dispatchEvent(new CustomEvent("neuma:agent-saved", { detail: { id, ok: false } }));
-    return false;
+async function loadAgentLibrary() {
+  try {
+    const result = await agentApi.listRequirements();
+    if (!Array.isArray(result.requirements)) throw new Error("智能体需求列表尚未确认");
+    const durable = new Map(result.requirements.map(normalizeAgentRequirement).filter(Boolean).map((item) => [item.id, item]));
+    const failures = [], pending = [];
+    for (const backup of browserRequirements) {
+      if (removedAgentIds.has(backup.id)) continue;
+      if (backup.pendingSync) {
+        try {
+          const state = await agentApi.getConversation(backup.id);
+          if (state.deleted) {
+            removedAgentIds.add(backup.id);
+            const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id);
+            if (!requirementRemoved || !conversationRemoved) failures.push("已删除条目的浏览器备份未能清理");
+            continue;
+          }
+        } catch (error) { failures.push(error.message || "未同步条目的删除状态尚未确认"); }
+        pending.push(backup.name);
+        continue;
+      }
+      try {
+        const imported = await agentApi.saveRequirements(backup.id, {
+          name: backup.name, draft: backup.draft, updatedAt: backup.updatedAt, importOnly: true,
+        });
+        if (imported.deleted) {
+          removedAgentIds.add(backup.id);
+          const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id);
+          if (!requirementRemoved || !conversationRemoved) {
+            failures.push("已删除条目的浏览器备份未能清理");
+          }
+          continue;
+        }
+        const requirement = normalizeAgentRequirement(imported.requirement);
+        if (!requirement || requirement.id !== backup.id) throw new Error("旧需求迁移尚未确认");
+        durable.set(backup.id, requirement);
+        const conversation = loadSavedAgentConversation(browserStorage, backup.id);
+        if (conversation?.pendingSync) pending.push(backup.name);
+        else if (conversation) {
+          const saved = await agentApi.saveConversation(backup.id, { ...conversation, importOnly: true });
+          if (saved.deleted) {
+            removedAgentIds.add(backup.id);
+            continue;
+          }
+          if (saved.conversation?.schemaVersion !== 2 || !Array.isArray(saved.conversation.messages)) {
+            throw new Error("旧对话迁移尚未确认");
+          }
+          saveAgentPreview(browserStorage, backup.id, saved.conversation.messages);
+        }
+        saveRequirement(browserStorage, requirement);
+      } catch (error) { failures.push(error.message || "旧记录未迁移"); }
+    }
+    const currentItems = new Map(agents.map((item) => [item.id, item]));
+    for (const [id, requirement] of durable) {
+      if (removedAgentIds.has(id)) continue;
+      const current = currentItems.get(id);
+      if (current?.dirty) currentItems.set(id, { ...current, persisted: true });
+      else {
+        const localBackup = saveRequirement(browserStorage, requirement);
+        currentItems.set(id, { ...requirement, localBackup, ...(profileMap.has(id) ? { profile: profileMap.get(id) } : {}) });
+      }
+    }
+    agents = [...currentItems.values()].filter((item) => !removedAgentIds.has(item.id))
+      .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+    renderAgents();
+    if (failures.length) showAgentsError(`部分旧记录尚未迁移到 Agent 文件夹，浏览器备份保留：${failures[0]}`);
+    else if (pending.length) showAgentsError("浏览器保留上次未同步的需求或对话，请打开对应 Agent，再次点击保存。服务器已有版本暂未更新。");
+  } catch (error) {
+    showAgentsError(`Agent 文件夹暂时无法读取，浏览器备份保留：${error.message || "服务未响应"}`);
   }
-  agents = agents.map((item) => item.id === id ? { ...item, persisted: true, dirty: false } : item);
-  showAgentsError("");
-  showError("");
-  render();
-  document.dispatchEvent(new CustomEvent("neuma:agent-saved", { detail: { id, ok: true } }));
-  return true;
+}
+
+async function saveAgent(id) {
+  if (busy) return false;
+  await libraryReady;
+  const agent = agents.find((item) => item.id === id);
+  if (!agent || removedAgentIds.has(id) || removingAgentIds.has(id)) return false;
+  const sourceKey = agentSourceKey(agent), pending = requirementSaves.get(id);
+  if (pending?.sourceKey === sourceKey) return pending.promise;
+  const backupSaved = saveRequirement(browserStorage, { ...agent, pendingSync: true });
+  agents = agents.map((item) => item.id === id ? { ...item, dirty: true, pendingSync: true, localBackup: backupSaved || item.localBackup } : item);
+  if (pending) {
+    await pending.promise;
+    return saveAgent(id);
+  }
+  const saving = (async () => {
+    try {
+      const result = await agentApi.saveRequirements(id, { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt });
+      const requirement = normalizeAgentRequirement(result.requirement);
+      if (!requirement || requirement.id !== id || agentSourceKey(requirement) !== sourceKey) throw new Error("Agent 需求保存尚未确认");
+      let currentSaved = false;
+      agents = agents.map((item) => {
+        if (item.id !== id) return item;
+        if (agentSourceKey(item) !== sourceKey) return { ...item, persisted: true, dirty: true };
+        const confirmed = { ...item, persisted: true, dirty: false, pendingSync: false };
+        confirmed.localBackup = saveRequirement(browserStorage, confirmed);
+        currentSaved = true;
+        return confirmed;
+      });
+      if (!currentSaved || removingAgentIds.has(id)) { render(); return false; }
+      showAgentsError("");
+      showError("");
+      render();
+      document.dispatchEvent(new CustomEvent("neuma:agent-saved", { detail: { id, ok: true } }));
+      return true;
+    } catch (error) {
+      const message = `Agent 需求未保存到文件夹：${error.message || "服务未响应"}。${backupSaved ? "浏览器备份已保留，请重试保存。" : "浏览器也无法备份，请先导出。"}`;
+      showAgentsError(message);
+      showError(message);
+      render();
+      document.dispatchEvent(new CustomEvent("neuma:agent-saved", { detail: { id, ok: false, message } }));
+      return false;
+    } finally { if (requirementSaves.get(id)?.promise === saving) requirementSaves.delete(id); }
+  })();
+  requirementSaves.set(id, { sourceKey, promise: saving });
+  return saving;
 }
 
 async function removeAgent(id) {
   if (busy) return;
+  await libraryReady;
+  if (removingAgentIds.has(id)) return;
   const agent = agents.find((item) => item.id === id);
-  if (!agent || !window.confirm(`删除“${agentDisplayName(agent)}”及其需求？会停止它的任务，保留专属目录中的文件。${agent.persisted ? "浏览器中保存的版本也会删除。" : ""}${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
+  if (!agent || !window.confirm(`删除“${agentDisplayName(agent)}”及其需求？会停止它的任务，移除保存的对话，保留专属目录中的文件。${activeAgentId === id ? "当前打开的对话也会清空。" : ""}`)) return;
+  removingAgentIds.add(id);
   try {
+    await requirementSaves.get(id)?.promise;
     const response = await fetch(`/api/agents/${encodeURIComponent(id)}/remove`, {
       method: "POST", headers: { "content-type": "application/json" }, body: "{}",
     });
@@ -300,11 +410,9 @@ async function removeAgent(id) {
   } catch (error) {
     showAgentsError(error.message || "智能体未能删除，请重试");
     return;
-  }
-  if (agent.persisted && !deleteRequirement(browserStorage, id)) {
-    showAgentsError("浏览器无法删除这份 Agent 需求");
-    return;
-  }
+  } finally { removingAgentIds.delete(id); }
+  const backupRemoved = deleteRequirement(browserStorage, id);
+  removedAgentIds.add(id);
   agents = agents.filter((item) => item.id !== id);
   profileMap.delete(id);
   document.dispatchEvent(new CustomEvent("neuma:agent-removed", { detail: { id } }));
@@ -314,7 +422,7 @@ async function removeAgent(id) {
     activeAgentId = null;
     inputEl.value = "";
   }
-  showAgentsError("");
+  showAgentsError(backupRemoved ? "" : "Agent 已删除，但浏览器未能清理旧需求备份。");
   render();
 }
 
@@ -439,8 +547,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     pendingReply = replyView = activeController = null;
     render(false);
     if (buildId) {
-      saveAgent(buildId);
-      document.dispatchEvent(new CustomEvent("neuma:agent-build", { detail: { id: buildId } }));
+      if (await saveAgent(buildId)) document.dispatchEvent(new CustomEvent("neuma:agent-build", { detail: { id: buildId } }));
     }
     if (!document.getElementById("page-chat").hidden) inputEl.focus({ preventScroll: true });
   }
@@ -584,7 +691,7 @@ document.addEventListener("neuma:agents-request", renderAgents);
 document.addEventListener("neuma:agent-action", (event) => {
   const { action, id } = event.detail ?? {};
   if (action === "edit") openAgent(id);
-  if (action === "save") saveAgent(id);
+  if (action === "save") return saveAgent(id);
   if (action === "create") document.getElementById("agents-create").click();
 });
 document.getElementById("iteration-back").addEventListener("click", () => {
@@ -592,4 +699,5 @@ document.getElementById("iteration-back").addEventListener("click", () => {
 });
 
 render();
+libraryReady = loadAgentLibrary();
 if (!initial.legacyCleared) showError("无法清除旧版自动保存记录，请在浏览器中清除本站数据");

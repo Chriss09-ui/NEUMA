@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, writeFile } f
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { InputError } from "./core.mjs";
 import { safeRelativePath } from "./development-contract.mjs";
+import { AgentStorage } from "./agent-storage.mjs";
 
 export const DEVELOPMENT_LIMITS = Object.freeze({ fileBytes: 2 * 1024 * 1024, totalBytes: 10 * 1024 * 1024, files: 200 });
 const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -86,38 +87,34 @@ export async function inspectDevelopmentCode(root) {
 }
 
 export class DevelopmentWorkspace {
-  constructor({ dataDir }) {
+  constructor({ dataDir, storage }) {
     if (!dataDir) throw new InputError("缺少研发存储目录");
-    this.dataDir = resolve(dataDir); this.operations = new Map();
+    this.storage = storage ?? new AgentStorage({ dataDir }); this.operations = new Map();
   }
 
-  async base() { return safeDirectory(this.dataDir, true); }
-
-  async workspacePath(runId) {
+  async workspacePath(agentId, runId) {
     if (typeof runId !== "string" || !/^[a-zA-Z0-9][\w-]{0,99}$/.test(runId)) throw new InputError("研发批次标识无效");
-    const base = await this.base();
-    const parent = join(base, "development-workspaces");
-    await safeDirectory(parent, true);
-    const run = join(parent, runId); await safeDirectory(run, true);
+    const run = await this.storage.directory(agentId, `development/workspaces/${runId}`, { create: true });
     const code = join(run, "code");
     try { await safeDirectory(code); } catch (error) { if (error.code !== "ENOENT") throw error; }
     return code;
   }
 
-  async create(runId) { const path = await this.workspacePath(runId); await safeDirectory(path, true); return path; }
+  async create(agentId, runId) { const path = await this.workspacePath(agentId, runId); await safeDirectory(path, true); return path; }
 
-  serial(runId, operation) {
-    const pending = (this.operations.get(runId) ?? Promise.resolve()).then(operation);
-    const settled = pending.catch(() => {}); this.operations.set(runId, settled);
-    settled.finally(() => { if (this.operations.get(runId) === settled) this.operations.delete(runId); });
+  serial(agentId, runId, operation) {
+    const key = `${agentId}/${runId}`;
+    const pending = (this.operations.get(key) ?? Promise.resolve()).then(operation);
+    const settled = pending.catch(() => {}); this.operations.set(key, settled);
+    settled.finally(() => { if (this.operations.get(key) === settled) this.operations.delete(key); });
     return pending;
   }
 
-  async tools(runId, { readOnly = false, allowedFiles = [], signal } = {}) {
-    const root = await this.create(runId);
+  async tools(agentId, runId, { readOnly = false, allowedFiles = [], signal } = {}) {
+    const root = await this.create(agentId, runId);
     if (!Array.isArray(allowedFiles)) throw new InputError("任务文件授权必须是明确文件列表");
     const allowed = new Set(allowedFiles.map(validateCodePath));
-    return this.makeTools(root, { signal, readOnly, allowed, lock: (fn) => this.serial(runId, fn) });
+    return this.makeTools(root, { signal, readOnly, allowed, lock: (fn) => this.serial(agentId, runId, fn) });
   }
 
   makeTools(root, { signal, readOnly = true, allowed = new Set(), lock = (fn) => fn(), check = async () => {} } = {}) {
@@ -160,15 +157,15 @@ export class DevelopmentWorkspace {
     return tools;
   }
 
-  async snapshot(runId) {
-    return this.serial(runId, async () => {
-      const source = await inspectDevelopmentCode(await this.create(runId));
-      const snapshots = join(await this.base(), "development-snapshots"); await safeDirectory(snapshots, true);
+  async snapshot(agentId, runId) {
+    return this.serial(agentId, runId, async () => {
+      const source = await inspectDevelopmentCode(await this.create(agentId, runId));
+      const snapshots = await this.storage.directory(agentId, "development/snapshots", { create: true });
       const destination = join(snapshots, source.hash);
       try {
         const existing = await inspectDevelopmentCode(destination);
         if (existing.hash !== source.hash) throw new InputError("已有代码快照校验失败");
-        return { path: destination, hash: source.hash, files: source.files };
+        return { agentId, path: destination, hash: source.hash, files: source.files };
       } catch (error) { if (error.code !== "ENOENT") throw error; }
       const temporary = join(snapshots, "pending-" + randomUUID()); await mkdir(temporary, { mode: 0o700 });
       try {
@@ -187,24 +184,25 @@ export class DevelopmentWorkspace {
         const unseal = async (path) => { await chmod(path, 0o700); for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) await unseal(join(path, entry.name)); };
         try { await unseal(temporary); await rm(temporary, { recursive: true, force: true }); } catch (error) { if (error.code !== "ENOENT") throw error; }
       }
-      return { path: destination, hash: source.hash, files: source.files };
+      return { agentId, path: destination, hash: source.hash, files: source.files };
     });
   }
 
-  async validateSnapshot(snapshot) {
+  async validateSnapshot(snapshot, agentId = snapshot?.agentId) {
     if (!snapshot || !/^[a-f0-9]{64}$/.test(snapshot.hash) || typeof snapshot.path !== "string" || !Array.isArray(snapshot.files))
       throw new InputError("代码快照标识无效");
-    const snapshots = join(await this.base(), "development-snapshots"); await safeDirectory(snapshots);
+    if (snapshot.agentId !== agentId) throw new InputError("代码快照不属于当前 Agent");
+    const snapshots = await this.storage.directory(agentId, "development/snapshots");
     const root = join(snapshots, snapshot.hash);
     if (relative(root, resolve(snapshot.path)) !== "") throw new InputError("代码快照不属于当前研发存储");
     const actual = await inspectDevelopmentCode(root);
     if (actual.hash !== snapshot.hash || JSON.stringify(actual.files) !== JSON.stringify(snapshot.files))
       throw new InputError("代码快照内容已改变，不能作为评审证据");
-    return { hash: actual.hash, files: actual.files, path: actual.path };
+    return { agentId, hash: actual.hash, files: actual.files, path: actual.path };
   }
 
-  async snapshotTools(snapshot) {
-    const checked = await this.validateSnapshot(snapshot);
-    return this.makeTools(checked.path, { readOnly: true, check: () => this.validateSnapshot(snapshot) });
+  async snapshotTools(snapshot, agentId = snapshot?.agentId) {
+    const checked = await this.validateSnapshot(snapshot, agentId);
+    return this.makeTools(checked.path, { readOnly: true, check: () => this.validateSnapshot(snapshot, agentId) });
   }
 }

@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir } from "node:fs/promises";
 import { InputError } from "./core.mjs";
 import { hashValue } from "./development-contract.mjs";
+import { AgentStorage } from "./agent-storage.mjs";
 
 function safeId(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value)) throw new InputError("研发记录标识无效");
@@ -23,52 +22,48 @@ function checkedRecord(value, { stored = false } = {}) {
 }
 
 export class DevelopmentStore {
-  constructor({ dataDir }) {
+  constructor({ dataDir, storage }) {
     if (typeof dataDir !== "string" || !dataDir || dataDir.includes("\0")) throw new InputError("研发存储目录无效");
-    this.directory = join(dataDir, "development");
+    this.storage = storage ?? new AgentStorage({ dataDir });
     this.records = new Map();
     this.persistence = Promise.resolve();
     this.ready = this.load();
     this.ready.catch(() => {});
   }
 
-  async ensureDirectory() {
-    await mkdir(this.directory, { recursive: true });
-    const info = await lstat(this.directory);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new InputError("研发记录目录必须为真实目录");
-  }
+  async directory(agentId, { create = false } = {}) { return this.storage.directory(agentId, "development/records", { create }); }
 
   async write(record) {
-    await this.ensureDirectory();
-    const temporary = join(this.directory, `${record.id}.${randomUUID()}.tmp`);
     try {
-      await writeFile(temporary, JSON.stringify(record, null, 2), { mode: 0o600, flag: "wx" });
-      await rename(temporary, join(this.directory, `${record.id}.json`));
+      await this.storage.writeJson(record.agentId, `development/records/${record.id}.json`, record);
     } catch {
       throw new InputError("研发记录未能保存，请检查本机存储后重试；已有记录保留");
-    } finally { await rm(temporary, { force: true }).catch(() => {}); }
+    }
   }
 
   async load() {
-    let entries;
-    try {
-      const info = await lstat(this.directory);
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("invalid directory");
-      entries = await readdir(this.directory, { withFileTypes: true });
-    } catch (error) {
-      if (error.code === "ENOENT") return;
-      throw new InputError("研发记录目录无法读取，请保留原文件并检查后重试");
-    }
+    await this.storage.ready;
     const records = new Map();
-    for (const entry of entries.filter((item) => item.name.endsWith(".json"))) {
+    for (const agentId of await this.storage.agentIds()) {
+      if (await this.storage.readJson(agentId, "deleted.json")) continue;
+      let directory, entries;
       try {
-        if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("invalid record file");
-        safeId(entry.name.slice(0, -5));
-        const record = checkedRecord(JSON.parse(await readFile(join(this.directory, entry.name), "utf8")), { stored: true });
-        if (entry.name !== `${record.id}.json` || records.has(record.id)) throw new Error("invalid identity");
-        records.set(record.id, record);
-      } catch {
-        throw new InputError("研发记录已损坏或无法读取，请保留原文件并修复后重试");
+        directory = await this.directory(agentId);
+        entries = await readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw new InputError("研发记录目录无法读取，请保留原文件并检查后重试");
+      }
+      for (const entry of entries.filter((item) => item.name.endsWith(".json") && !item.name.startsWith(".pending-"))) {
+        try {
+          if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("invalid record file");
+          safeId(entry.name.slice(0, -5));
+          const record = checkedRecord(await this.storage.readJson(agentId, `development/records/${entry.name}`), { stored: true });
+          if (entry.name !== `${record.id}.json` || record.agentId !== agentId || records.has(record.id)) throw new Error("invalid identity");
+          records.set(record.id, record);
+        } catch {
+          throw new InputError("研发记录已损坏或无法读取，请保留原文件并修复后重试");
+        }
       }
     }
     for (const record of records.values()) {
@@ -138,7 +133,7 @@ export class DevelopmentStore {
     return this.queue(async () => {
       const records = [...this.records.values()].filter((record) => record.agentId === agentId);
       for (const record of records) {
-        try { await rm(join(this.directory, `${record.id}.json`), { force: true }); }
+        try { await this.storage.removeFile(agentId, `development/records/${record.id}.json`); }
         catch { throw new InputError("研发记录未能移除，已保留尚未移除的记录和工作目录"); }
         this.records.delete(record.id);
       }

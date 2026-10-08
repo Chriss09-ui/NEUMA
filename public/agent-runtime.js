@@ -135,6 +135,10 @@ export function createAgentRuntime(request = fetch) {
 
   return {
     inspect: (id) => json(`/api/agents/${encodeURIComponent(id)}`),
+    listRequirements: (options) => json("/api/agent-requirements", undefined, options),
+    saveRequirements: (id, requirement, options) => json(`/api/agents/${encodeURIComponent(id)}/requirements`, requirement, options),
+    getConversation: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/conversation`, undefined, options),
+    saveConversation: (id, conversation, options) => json(`/api/agents/${encodeURIComponent(id)}/conversation`, conversation, options),
     listProfiles: (options) => json("/api/agent-profiles", undefined, options),
     saveProfile: (id, profile, options) => json(`/api/agents/${encodeURIComponent(id)}/profile`, profile, options),
     getMemory: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, undefined, options),

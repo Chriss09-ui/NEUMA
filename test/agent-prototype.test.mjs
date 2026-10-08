@@ -73,8 +73,8 @@ test("构建保留原始需求、原子持久化，等价需求复用定义，�
   const second = await agents.build(input("weekly", "整理双周报"));
   assert.equal(second.agent.id, "weekly"); assert.equal(second.agent.revision, 2);
   assert.equal(second.agent.createdAt, (await restored.get("weekly")).createdAt);
-  const saved = JSON.parse(await readFile(join(options.dataDir, "agents.json"), "utf8"));
-  assert.equal(saved.version, 1); assert.equal(saved.agents[0].draft.goal.value, "整理双周报");
+  const saved = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/definition.json"), "utf8"));
+  assert.equal(saved.version, 1); assert.equal(saved.agent.draft.goal.value, "整理双周报");
 });
 
 test("构建失败保留已有定义，模型错误不泄露原始载荷", async (t) => {
@@ -104,7 +104,7 @@ test("运行会话隔离，成功历史仅首次恢复，流式进度不暴露�
   assert.match(runtime.prompts[0], /之前的材料.*之前的周报/s);
   assert.doesNotMatch(runtime.prompts[0], /失败材料|已停止材料|偷偷替换|旧版本材料|旧版本指令/);
   assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), ["list_workspace_files", "read_workspace_file", "write_workspace_file"]);
-  assert.equal(runtime.options.manager, undefined); assert.match(runtime.options.cwd, /agent-workspaces\/weekly$/);
+  assert.equal(runtime.options.manager, undefined); assert.match(runtime.options.cwd, /agents\/weekly\/workspace$/);
   assert.equal(progress.some((event) => event.type === "text-delta" && event.delta === "这是周报。"), true);
   assert.doesNotMatch(JSON.stringify(progress), /private-/);
   await agents.prompt({ ...turn(), history });
@@ -309,7 +309,7 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
   assert.equal(built.agent.status, "ready"); assert.equal(built.agent.mode, "designed");
   assert.equal(built.architecture.review.verdict, "pass");
   assert.equal((await agents.prompt(turn())).reply, "周报已保存。");
-  assert.equal(await readFile(join(root, "data/agent-workspaces/weekly/weekly.md"), "utf8"), "真实工具产物");
+  assert.equal(await readFile(join(root, "data/agents/weekly/workspace/weekly.md"), "utf8"), "真实工具产物");
   assert.equal((await agents.prompt(turn())).status, "complete");
   assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture")).length, 2);
   assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture_review")).length, 2);

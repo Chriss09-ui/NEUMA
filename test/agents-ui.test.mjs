@@ -30,7 +30,7 @@ function stream() {
   };
 }
 
-async function setup({ turn, build, develop, cancelDevelopment, inspect, profiles, stored = new Map() } = {}) {
+async function setup({ turn, build, develop, cancelDevelopment, inspect, profiles, conversationRequest, savedConversations = new Map(), stored = new Map() } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -74,6 +74,12 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
       if (path === "/api/agents/turn") return turn?.(body, options) ?? Response.json(completed(body));
       if (path === "/api/agents/build") return build?.(body, options) ?? Response.json(readyResult({ ...definition(body.id, 2), ...body }));
       if (path === "/api/agents/cancel") return Response.json({ cancelled: true });
+      if (path.endsWith("/conversation")) {
+        if (conversationRequest) return conversationRequest(path, body, options);
+        const id = decodeURIComponent(path.split("/")[3]);
+        if (body && (!body.importOnly || !savedConversations.has(id))) savedConversations.set(id, { schemaVersion: 2, messages: body.messages });
+        return Response.json({ conversation: savedConversations.get(id) ?? null });
+      }
       if (path.endsWith("/development/stream")) return develop?.(body, options, path) ?? Response.json({ error: "未配置研发响应" }, { status: 503 });
       if (path.endsWith("/development/cancel")) return cancelDevelopment?.(path) ?? Response.json({ cancelled: true });
       return inspect?.(path) ?? Response.json(readyResult(definition(path.split("/").at(-1))));
@@ -84,7 +90,7 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   await emit("neuma:agents-changed", { items: requirements, busy: false });
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route("one");
-  return { get, requests, stored, emit, route, document, runtimeEvents, profileEvents,
+  return { get, requests, savedConversations, stored, emit, route, document, runtimeEvents, profileEvents,
     timers, poll: async () => { const pending = [...timers.values()]; timers.clear(); await Promise.all(pending.map((callback) => callback())); await settle(); },
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context),
     runtime: (id = "one") => vm.runInContext(`runtimes.get(${JSON.stringify(id)})`, context),
@@ -574,6 +580,100 @@ test("手动保存真实问答，刷新恢复时仅把同版本成功对话带�
     { role: "user", content: "已保存任务", revision: "1" },
     { role: "assistant", content: "任务已完成", revision: "1" },
   ]);
+});
+
+test("Agent 文件夹的手动对话在清除浏览器后可恢复，任务与新对话不自动写入", async () => {
+  const ui = await setup();
+  await ui.submit("磁盘保存任务");
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/conversation") && request.body), false);
+  await ui.get("agent-save-chat").click();
+  assert.equal(ui.item().saved, true);
+  assert.match(ui.get("agent-storage-note").textContent, /已手动保存到 Agent 文件夹/);
+  const restored = await setup({ savedConversations: ui.savedConversations });
+  assert.equal(restored.item().messages[0].content, "磁盘保存任务");
+  assert.equal(restored.item().messages[1].status, "complete");
+  assert.equal(restored.item().saved, true);
+  await restored.get("agent-new-chat").click();
+  assert.equal(restored.item().messages.length, 0);
+  assert.equal(restored.requests.some((request) => request.path.endsWith("/conversation") && request.body), false);
+  assert.equal(restored.savedConversations.get("one").messages[0].content, "磁盘保存任务");
+});
+
+test("磁盘对话优先于浏览器旧备份，读取不会覆盖服务器已有内容", async () => {
+  const stored = new Map([["neuma.agent.conversation.v2.one", JSON.stringify({ schemaVersion: 2,
+    messages: [{ role: "user", content: "浏览器旧消息" }] })]]);
+  const savedConversations = new Map([["one", { schemaVersion: 2, messages: [{ role: "user", content: "服务器新消息" }] }]]);
+  const ui = await setup({ stored, savedConversations });
+  assert.equal(ui.item().messages[0].content, "服务器新消息");
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/conversation") && request.body), false);
+});
+
+test("对话保存失败保留浏览器备份并提示，不能显示已经写入 Agent 文件夹", async () => {
+  const ui = await setup({ conversationRequest: (_path, body) => body
+    ? Response.json({ error: "磁盘不可写" }, { status: 503 }) : Response.json({ conversation: null }) });
+  await ui.submit("需要保留的任务");
+  await ui.get("agent-save-chat").click();
+  assert.equal(ui.item().saved, false);
+  assert.equal(ui.item().localBackup, true);
+  assert.equal(JSON.parse(ui.stored.get("neuma.agent.conversation.v2.one")).messages[0].content, "需要保留的任务");
+  assert.match(ui.get("agent-error").textContent, /未保存到 Agent 文件夹.*磁盘不可写.*浏览器备份已保留/);
+  assert.doesNotMatch(ui.get("agent-storage-note").textContent, /已手动保存到 Agent 文件夹/);
+  assert.equal(ui.get("agent-send").disabled, false);
+});
+
+test("读取失败保留浏览器备份，随后未保存的任务不会被再次进入时的读取覆盖", async () => {
+  const stored = new Map([["neuma.agent.conversation.v2.one", JSON.stringify({ schemaVersion: 2,
+    messages: [{ role: "user", content: "备份消息" }] })]]);
+  const ui = await setup({ stored, conversationRequest: () => Response.json({ error: "服务未响应" }, { status: 503 }) });
+  assert.equal(ui.item().saved, false);
+  assert.equal(ui.item().messages[0].content, "备份消息");
+  assert.match(ui.get("agent-error").textContent, /保存对话暂时无法读取.*服务未响应.*浏览器备份/);
+  await ui.submit("尚未保存的新任务");
+  await ui.route(null); await ui.route("one");
+  assert.equal(ui.item().messages.at(-2).content, "尚未保存的新任务");
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/conversation")).length, 1);
+});
+
+test("迟到的保存对话读取不能覆盖用户开启的新对话", async () => {
+  let release, reads = 0;
+  const ui = await setup({ conversationRequest: () => ++reads === 1 ? Response.json({ conversation: null })
+    : new Promise((done) => { release = done; }) });
+  ui.item().loaded = false;
+  await ui.route(null);
+  const pending = ui.route("one"); await settle();
+  assert.equal(ui.get("agent-send").disabled, true);
+  const previous = ui.item();
+  await ui.get("agent-new-chat").click();
+  release(Response.json({ conversation: { schemaVersion: 2, messages: [{ role: "user", content: "迟到旧消息" }] } }));
+  await pending;
+  assert.notEqual(ui.item(), previous);
+  assert.equal(ui.item().messages.length, 0);
+  assert.equal(ui.item().saved, false);
+  assert.equal(ui.get("agent-send").disabled, false);
+});
+
+test("服务器已有旧对话时，失败保存的新对话刷新后仍可恢复并显式重试", async () => {
+  const old = { schemaVersion: 2, messages: [{ role: "user", content: "旧对话 A" }] };
+  const savedConversations = new Map([["one", old]]);
+  const ui = await setup({ savedConversations, conversationRequest: (_path, body) => body
+    ? Response.json({ error: "保存连接中断" }, { status: 503 }) : Response.json({ conversation: old }) });
+  await ui.get("agent-new-chat").click();
+  await ui.submit("新对话 B");
+  await ui.get("agent-save-chat").click();
+  assert.equal(savedConversations.get("one").messages[0].content, "旧对话 A");
+  assert.equal(JSON.parse(ui.stored.get("neuma.agent.conversation.v2.one")).pendingSync, true);
+  const restored = await setup({ savedConversations, stored: ui.stored });
+  assert.equal(restored.item().messages[0].content, "新对话 B");
+  assert.equal(restored.item().saved, false);
+  assert.equal(restored.item().pendingSync, true);
+  assert.equal(restored.requests.some((request) => request.path.endsWith("/conversation")), false);
+  assert.match(restored.get("agent-error").textContent, /未同步的对话.*再次点击保存/);
+  assert.equal(JSON.parse(restored.stored.get("neuma.agent.conversation.v2.one")).messages[0].content, "新对话 B");
+  await restored.get("agent-save-chat").click();
+  assert.equal(savedConversations.get("one").messages[0].content, "新对话 B");
+  assert.equal(restored.item().saved, true);
+  assert.equal(restored.item().pendingSync, false);
+  assert.equal(JSON.parse(restored.stored.get("neuma.agent.conversation.v2.one")).pendingSync, undefined);
 });
 
 test("重新生成取消后不把迟到结果设为可运行，旧定义仍可见且可重试", async () => {

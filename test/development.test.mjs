@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevelopmentController } from "../development.mjs";
@@ -103,10 +103,16 @@ const failReport = (report, marker = "raw-failure") => ({ ...report, status: "fa
     stdout: JSON.stringify({ error: marker }), stderr: `${marker}-stderr`, reason: "assertion_mismatch" }) });
 
 test("两个任务使用独立会话，交接保留结果，评审均为全新只读会话", async (t) => {
-  const { controller, sessions, architecture, executor } = await fixture(t);
+  const { controller, sessions, architecture, executor, dataDir } = await fixture(t);
   const result = await controller.run(architecture);
+  const dataRoot = await realpath(dataDir);
   assert.equal(result.status, "completed"); assert.equal(result.delivery, "needs_development");
   assert.deepEqual(sessions.map((item) => item.role), ["planner", "reviewer", "developer", "reviewer", "developer", "reviewer", "reviewer"]);
+  assert.ok(sessions.every((session) => session.options.dataDir === join(dataRoot, "agents", architecture.agentId)));
+  assert.ok(sessions.every((session) => session.options.cwd === join(dataRoot, "agents", architecture.agentId, "development", "workspaces", result.id, "code")));
+  assert.equal(result.package.snapshot.agentId, architecture.agentId);
+  assert.equal(result.package.snapshot.path, join(dataRoot, "agents", architecture.agentId, "development", "snapshots", result.package.codeHash));
+  assert.equal(JSON.parse(await readFile(join(dataDir, "agents", architecture.agentId, "development", "records", `${result.id}.json`), "utf8")).id, result.id);
   const developers = sessions.filter((item) => item.role === "developer"), reviews = sessions.filter((item) => item.role === "reviewer");
   assert.notEqual(developers[0].session, developers[1].session);
   assert.equal(developers[0].prompts.length, 1); assert.equal(developers[1].prompts.length, 1);

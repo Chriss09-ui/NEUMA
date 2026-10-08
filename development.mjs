@@ -8,6 +8,7 @@ import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
 import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT } from "./development-prompts.mjs";
 import { compactDevelopmentContext, createContextReadTool } from "./development-context.mjs";
+import { AgentStorage } from "./agent-storage.mjs";
 
 const LABELS = { intake: "正在接收设计与准备工作区…", planning: "正在拆分并检查研发任务…",
   implementing: "正在开发当前任务…", verifying: "正在运行测试与独立验收…", packaging: "正在整理经过验证的交付物…" };
@@ -31,10 +32,11 @@ export function developmentSummary(record) {
 }
 
 export class DevelopmentController {
-  constructor({ config, cwd, dataDir, sessionFactory = createPiSession, store, workspace, executor, getArchitecture, limits = {} }) {
+  constructor({ config, cwd, dataDir, storage, sessionFactory = createPiSession, store, workspace, executor, getArchitecture, limits = {} }) {
     Object.assign(this, { config, cwd, dataDir, sessionFactory, getArchitecture });
-    this.store = store ?? new DevelopmentStore({ dataDir });
-    this.workspace = workspace ?? new DevelopmentWorkspace({ dataDir });
+    this.storage = storage ?? store?.storage ?? workspace?.storage ?? new AgentStorage({ dataDir });
+    this.store = store ?? new DevelopmentStore({ dataDir, storage: this.storage });
+    this.workspace = workspace ?? new DevelopmentWorkspace({ dataDir, storage: this.storage });
     this.executor = executor ?? new DevelopmentExecutor();
     this.limits = { ...DEFAULT_LIMITS, ...limits };
     this.active = new Map();
@@ -123,8 +125,9 @@ export class DevelopmentController {
       const result = await tool.execute(...args);
       this.guard(ctx); return result;
     } }));
-    handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.id),
-      dataDir: this.dataDir, systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind],
+    handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
+      dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
+      systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind],
       customTools: [...guardedTools, submit] });
     if (kind === "developer") handle.session.setAutoCompactionEnabled?.(false);
     ctx.handles.add(handle);
@@ -184,7 +187,7 @@ export class DevelopmentController {
     const subjectHash = hashValue({ mode, architectureRef: ctx.record.architectureRef, ...payload });
     const counter = { turns: 0 };
     const handle = await this.role(ctx, { kind: "reviewer", counter, limit: this.limits.reviewerTurns,
-      tools: snapshot ? await this.workspace.snapshotTools(snapshot) : [], validate: (value) => validateReview(value, { subjectHash }) });
+      tools: snapshot ? await this.workspace.snapshotTools(snapshot, ctx.record.agentId) : [], validate: (value) => validateReview(value, { subjectHash }) });
     try {
       const result = await this.ask(ctx, handle, { ...this.base(ctx), mode, subjectHash, ...payload });
       ctx.record.reviews.push({ ...result, mode, codeHash: snapshot?.hash ?? null, planHash: payload.planHash ?? null });
@@ -197,7 +200,7 @@ export class DevelopmentController {
     const oldPlan = ctx.record.plan;
     const counter = ctx.record.planning;
     const handle = await this.role(ctx, { kind: "planner", counter, limit: this.limits.reviewerTurns,
-      tools: await this.workspace.tools(ctx.record.id, { readOnly: true, signal: ctx.signal }),
+      tools: await this.workspace.tools(ctx.record.agentId, ctx.record.id, { readOnly: true, signal: ctx.signal }),
       validate: (value) => validatePlan(value, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined }) });
     try {
       for (;;) {
@@ -248,11 +251,11 @@ export class DevelopmentController {
   async task(ctx, task) {
     let handle;
     const create = async () => this.role(ctx, { kind: "developer", counter: task, limit: this.limits.developerTurns,
-      tools: [...await this.workspace.tools(ctx.record.id, { allowedFiles: task.files, signal: ctx.signal }),
+      tools: [...await this.workspace.tools(ctx.record.agentId, ctx.record.id, { allowedFiles: task.files, signal: ctx.signal }),
         { name: "run_development_checks", label: "运行开发自测", description: "在隔离环境运行已确认的验收用例，自测不代表独立验收通过。",
           parameters: { type: "object", properties: {}, required: [], additionalProperties: false }, executionMode: "sequential",
           execute: async () => {
-            const snapshot = await this.workspace.snapshot(ctx.record.id);
+            const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
             const report = await this.executor.verify({ snapshot, entrypoint: ctx.record.plan.entrypoint,
               cases: ctx.record.plan.cases, stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
             this.guard(ctx);
@@ -272,14 +275,14 @@ export class DevelopmentController {
           const work = await this.ask(ctx, handle, { ...this.base(ctx), task, feedback: task.feedback ?? null,
             cases: ctx.record.plan.cases, checkpoint: ctx.record.snapshot ? { hash: ctx.record.snapshot.hash, files: ctx.record.snapshot.files } : null });
           if (work.changedFiles.some((file) => !task.files.includes(file))) throw new Stop("开发结果声明了任务授权范围之外的改动，需要修订任务", "blocked");
-          const snapshot = await this.workspace.snapshot(ctx.record.id);
+          const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
           const handoff = { taskId: task.id, ...work, codeHash: snapshot.hash, files: snapshot.files };
           ctx.record.handoffs.push(handoff); ctx.record.snapshot = snapshot;
           task.summary = work.summary; task.nextAction = work.continue ? "implement" : "verify";
           await this.save(ctx);
           if (work.continue) { this.dispose(ctx, handle); handle = null; continue; }
         }
-        const snapshot = await this.workspace.snapshot(ctx.record.id);
+        const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
         ctx.record.snapshot = snapshot;
         const result = await this.verify(ctx, task, snapshot);
         task.feedback = result;
@@ -334,13 +337,13 @@ export class DevelopmentController {
       }
       await this.current(ctx);
       await this.phase(ctx, "intake");
-      await this.workspace.create(ctx.record.id);
+      await this.workspace.create(ctx.record.agentId, ctx.record.id);
       const probe = await this.executor.probe({ signal: ctx.signal });
       this.guard(ctx);
       ctx.record.execution = probe;
       if (!probe.available) throw new Stop(probe.reason || "隔离执行环境尚不可用，已保留研发记录");
       if (resume) {
-        const actual = await this.workspace.snapshot(ctx.record.id);
+        const actual = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
         if (ctx.record.snapshot?.hash !== actual.hash) {
           for (const task of ctx.record.tasks) {
             if (task.status === "active") task.nextAction = "implement";
@@ -356,7 +359,7 @@ export class DevelopmentController {
         const task = pending.find((task) => task.dependsOn.every((id) => ctx.record.tasks.some((item) => item.id === id && item.status === "verified")));
         if (pending.length && !task) throw new Stop("任务依赖尚未满足，不能继续开发");
         if (task) { await this.task(ctx, task); continue; }
-        const snapshot = await this.workspace.snapshot(ctx.record.id);
+        const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
         ctx.record.snapshot = snapshot;
         const result = await this.verify(ctx, null, snapshot);
         if (!result.passed) {

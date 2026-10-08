@@ -154,3 +154,25 @@ test("名称、记忆与历史成果使用独立接口，展示修改不进入�
   controller.abort();
   await assert.rejects(api.listProfiles({ signal: controller.signal }), { name: "AbortError" });
 });
+
+test("Agent 需求与手动保存对话使用独立持久接口，并传递迁移及取消参数", async () => {
+  const requests = [], controller = new AbortController();
+  const requirement = { name: "阅读助手", draft: { goal: { value: "阅读材料" } }, importOnly: true };
+  const conversation = { schemaVersion: 2, messages: [{ role: "user", content: "材料" }], importOnly: true };
+  const api = createAgentRuntime(async (path, options) => {
+    requests.push({ path, ...options });
+    return Response.json(path === "/api/agent-requirements" ? { requirements: [] }
+      : path.endsWith("/requirements") ? { requirement: { id: "one/two", ...requirement } }
+        : { conversation: options.body ? JSON.parse(options.body) : null });
+  });
+  assert.deepEqual(await api.listRequirements(), { requirements: [] });
+  assert.equal((await api.saveRequirements("one/two", requirement)).requirement.id, "one/two");
+  assert.deepEqual(await api.getConversation("one/two", { signal: controller.signal }), { conversation: null });
+  assert.deepEqual((await api.saveConversation("one/two", conversation)).conversation, conversation);
+  assert.deepEqual(requests.map(({ path }) => path), ["/api/agent-requirements", "/api/agents/one%2Ftwo/requirements",
+    "/api/agents/one%2Ftwo/conversation", "/api/agents/one%2Ftwo/conversation"]);
+  assert.deepEqual(JSON.parse(requests[1].body), requirement);
+  assert.equal(requests[2].signal, controller.signal);
+  controller.abort();
+  await assert.rejects(api.getConversation("one/two", { signal: controller.signal }), { name: "AbortError" });
+});
