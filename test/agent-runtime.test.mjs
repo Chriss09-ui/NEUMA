@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { agentHistory, agentSourceKey, createAgentRuntime } from "../public/agent-runtime.js";
+import { agentBuildState, agentHistory, agentSourceKey, createAgentRuntime } from "../public/agent-runtime.js";
 
 const agent = { id: "one", name: "会议助手", draft: { goal: { value: "整理会议", source: "user" } }, status: "ready", revision: 1 };
 const body = { agentId: "one", sessionId: "session-one", message: "整理这份记录", history: [] };
@@ -8,14 +8,17 @@ const turn = { reply: "会议记录已整理", agentId: "one", sessionId: "sessi
 const ndjson = (events) => new Response(events.map((event) => JSON.stringify(event)).join("\n"), {
   headers: { "content-type": "application/x-ndjson" },
 });
+const architecture = (overrides = {}) => ({ agentId: agent.id, name: agent.name, draft: agent.draft,
+  version: 2, candidateHash: "candidate-2", status: "passed", delivery: "ready", summary: "复用现有能力。", issues: [], ...overrides });
+const designed = { ...agent, mode: "designed", architectureRef: { version: 2, candidateHash: "candidate-2" } };
 
 test("生成、独立会话与停止使用自己的运行接口和 NDJSON 协议", async () => {
   const requests = [], progress = [];
   const api = createAgentRuntime(async (path, options) => {
     requests.push({ path, options });
-    if (path === "/api/agents/build") return ndjson([{ type: "status", label: "正在生成" }, { type: "done", result: { agent } }]);
+    if (path === "/api/agents/build") return ndjson([{ type: "status", label: "正在生成" }, { type: "done", result: { agent: designed, architecture: architecture() } }]);
     if (path === "/api/agents/turn") return ndjson([{ type: "text-delta", delta: "会议记录" }, { type: "done", result: turn }]);
-    return Response.json(path === "/api/agents/cancel" ? { cancelled: true } : { agent });
+    return Response.json(path === "/api/agents/cancel" ? { cancelled: true } : { agent: designed, architecture: architecture() });
   });
   assert.equal((await api.inspect("one")).agent.id, "one");
   assert.equal((await api.build(agent, { onProgress: (event) => progress.push(event) })).agent.revision, 1);
@@ -36,6 +39,47 @@ test("没有完成事件、错误结果和错绑会话均不能标为成功", as
   await assert.rejects(wrong.turn(body), /回复尚未完成/);
   const failed = createAgentRuntime(async () => Response.json({ error: "请先配置模型" }, { status: 503 }));
   await assert.rejects(failed.turn(body), /请先配置模型/);
+});
+
+test("架构未就绪也是完整构建结果，不能误报为连接中断", async () => {
+  for (const status of ["needs_changes", "needs_evidence", "infeasible", "failed", "cancelled", "passed"]) {
+    const result = { agent: null, architecture: architecture({ status, delivery: "needs_development" }) };
+    const api = createAgentRuntime(async () => ndjson([{ type: "done", result }]));
+    assert.deepEqual(await api.build(agent), result);
+  }
+  const wrong = createAgentRuntime(async () => Response.json({ agent, architecture: architecture({ agentId: "other" }) }));
+  await assert.rejects(wrong.build(agent), /尚未确认完成/);
+});
+
+test("可运行状态绑定当前需求与通过的架构版本，旧定义不能借用新评估", () => {
+  assert.equal(agentBuildState(agent, { agent: designed, architecture: architecture() }).status, "ready");
+  for (const definition of [null, agent, { ...designed, status: "failed" },
+    { ...designed, architectureRef: { version: 1, candidateHash: "candidate-2" } },
+    { ...designed, architectureRef: { version: 2, candidateHash: "old-candidate" } },
+    { ...designed, draft: { goal: { value: "旧需求" } } }]) {
+    assert.equal(agentBuildState(agent, { agent: definition, architecture: architecture() }).status, "blocked");
+  }
+  for (const status of ["designing", "evaluating", "needs_changes", "needs_evidence", "infeasible", "failed", "cancelled"]) {
+    assert.equal(agentBuildState(agent, { agent: designed, architecture: architecture({ status }) }).status, status);
+  }
+  for (const delivery of ["needs_connection", "needs_development", "blocked"]) {
+    assert.equal(agentBuildState(agent, { agent: designed, architecture: architecture({ delivery }) }).status, delivery);
+  }
+  assert.equal(agentBuildState(agent, { agent: { ...designed, architectureRef: { candidateHash: "candidate-2" } },
+    architecture: architecture({ version: undefined }) }).status, "blocked");
+  const previous = architecture({ draft: { goal: { value: "旧需求" } } });
+  assert.equal(agentBuildState(agent, { agent: designed, architecture: previous }).status, "stale");
+  assert.equal(agentBuildState(agent, { agent: null, architecture: previous }).status, "missing");
+});
+
+test("没有架构记录的定义一律停用，展示信息不能绕过架构检查", () => {
+  for (const definition of [agent, { ...agent, mode: "prototype" }, { ...agent, status: "failed" },
+    designed, { ...agent, draft: { goal: { value: "旧需求" } } }]) {
+    const state = agentBuildState(agent, { agent: definition });
+    assert.equal(state.status, "blocked");
+    assert.match(state.label, /旧原型已停用，请重新设计与检查后运行/);
+  }
+  assert.equal(agentBuildState({ ...agent, profile: { name: "新的展示名" } }, { agent: designed, architecture: architecture() }).status, "ready");
 });
 
 test("已取消的请求忽略迟到的完成结果，详情路径正确编码", async () => {
@@ -92,7 +136,7 @@ test("名称、记忆与历史成果使用独立接口，展示修改不进入�
     if (path.endsWith("/memory")) return Response.json({ memory: options.body ? JSON.parse(options.body).memory : "我的偏好" });
     if (path.endsWith("/files")) return Response.json({ files: [{ path: "报告/本周.md", size: 20 }] });
     if (path.includes("/file?")) return Response.json({ path: "报告/本周.md", content: "正文", truncated: true });
-    return Response.json({ agent });
+    return Response.json({ agent: designed, architecture: architecture() });
   });
   assert.equal((await api.listProfiles()).profiles[0].name, "阅读伙伴");
   assert.deepEqual((await api.saveProfile("one/two", profile)).profile, profile);

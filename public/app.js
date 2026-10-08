@@ -120,7 +120,7 @@ function renderMessages(scrollToEnd = true) {
     card.append(element("span", "agent-avatar", agentDisplayIcon(delivered)),
       element("span", "agent-type", "独立对话入口"), element("strong", "", agentDisplayName(delivered)),
       element("p", "", agentDisplayDescription(delivered)),
-      element("p", "muted-note", "需求已确认。进入助手可查看生成状态、重试，并在生成后直接对话。"));
+      element("p", "muted-note", "需求已确认。进入助手可查看设计与检查结果；通过并生成后即可对话，未通过时会说明原因。"));
     card.append(button("primary", needsSave ? "保存需求并进入助手" : "进入助手", () => {
       if (needsSave && !saveAgent(delivered.id)) return;
       navigate({ page: "agent", agentId: delivered.id });
@@ -403,7 +403,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     session.jev = payload.jev;
     user.delivery = "sent";
     const assistantMessage = typeof payload.reply === "string" ? payload.reply : payload.confirmed
-      ? `需求已确认：\n${payload.summary}\n\n已加入左侧“我的智能体”，正在生成可对话的助手。生成完成后即可使用，失败时可以重试。`
+      ? `需求已确认：\n${payload.summary}\n\n已加入左侧“我的智能体”，正在设计与检查。通过后生成可对话的助手；需要补充信息、连接能力或研发时会明确说明。`
       : payload.status === "ready"
         ? `我整理出的需求是：\n${payload.summary}\n\n${payload.confirmationQuestion}`
         : `${payload.summary}\n\n${payload.question}`;

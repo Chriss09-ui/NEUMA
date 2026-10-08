@@ -189,6 +189,7 @@ test("旧版 JSON 仍按原有确认语义显示，确认完成才创建智能�
   assert.equal(ui.agents().length, 0);
   await ui.submit("确认");
   assert.match(ui.session().messages.at(-1).content, /需求已确认/);
+  assert.match(ui.session().messages.at(-1).content, /正在设计与检查.*通过后生成/s);
   assert.equal(ui.agents().length, 1);
   assert.equal(ui.agents()[0].name, "会议助手");
   assert.deepEqual(builds, ["test-agent"]);

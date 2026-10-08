@@ -335,7 +335,7 @@ test("确认清单与明确确认保持原文，无需额外调用模型", async
   await approved.pending;
   const approvedResult = approved.events().at(-1).result;
   assert.equal(approvedResult.confirmed, true);
-  assert.match(approvedResult.reply, /正在生成可对话的助手/);
+  assert.match(approvedResult.reply, /正在设计与检查方案/);
   assert.equal(draftCalls, 1);
   assert.equal(replyCalls, 0);
 });

@@ -4,13 +4,19 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import * as state from "../public/state.js";
 
-const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agents.js"].map((file) =>
+const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
   text.replace(/^import .*;\n/gm, "").replace(/^export /gm, "")).join("\n");
 const settle = () => new Promise(setImmediate);
 const requirements = ["one", "two"].map((id, index) => ({ id, name: index ? "日报助手" : "会议助手", persisted: true,
   draft: { goal: { value: index ? "生成日报" : "整理会议", source: "user" } } }));
-const definition = (id = "one", revision = 1) => ({ ...requirements.find((item) => item.id === id), status: "ready", revision });
+const definition = (id = "one", revision = 1) => ({ ...requirements.find((item) => item.id === id), status: "ready", revision,
+  mode: "designed", architectureRef: { version: revision, candidateHash: `candidate-${revision}` } });
+const architecture = (overrides = {}) => ({ agentId: "one", name: requirements[0].name, draft: requirements[0].draft,
+  version: 2, candidateHash: "candidate-2", status: "passed", delivery: "ready", summary: "复用现有能力。", issues: [], ...overrides });
+const designedDefinition = () => ({ ...definition("one", 2), mode: "designed", architectureRef: { version: 2, candidateHash: "candidate-2" } });
+const readyResult = (agent = definition()) => ({ agent, architecture: architecture({ agentId: agent.id,
+  name: agent.name, draft: agent.draft, version: agent.architectureRef.version, candidateHash: agent.architectureRef.candidateHash }) });
 const completed = (body, reply = "任务已完成") => ({ ...body, reply, status: "complete" });
 
 function stream() {
@@ -24,7 +30,7 @@ function stream() {
   };
 }
 
-async function setup({ turn, build, inspect, profiles, stored = new Map() } = {}) {
+async function setup({ turn, build, develop, cancelDevelopment, inspect, profiles, stored = new Map() } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -36,7 +42,7 @@ async function setup({ turn, build, inspect, profiles, stored = new Map() } = {}
     scrollTop = 0; scrollHeight = 200; clientHeight = 200; versions = 0;
     classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) };
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
-    replaceChildren() { this.children = []; this.versions++; }
+    replaceChildren(...children) { this.children = []; this.append(...children); this.versions++; }
     replaceWith(next) { this.parent.children[this.parent.children.indexOf(this)] = next; next.parent = this.parent; }
     setAttribute(key, value) { this.attributes.set(key, value); }
     removeAttribute(key) { this.attributes.delete(key); }
@@ -63,9 +69,11 @@ async function setup({ turn, build, inspect, profiles, stored = new Map() } = {}
       requests.push({ path, body, signal: options.signal, headers: options.headers });
       if (path === "/api/agent-profiles") return profiles?.() ?? Response.json({ profiles: [] });
       if (path === "/api/agents/turn") return turn?.(body, options) ?? Response.json(completed(body));
-      if (path === "/api/agents/build") return build?.(body, options) ?? Response.json({ agent: { ...body, status: "ready", revision: 2 } });
+      if (path === "/api/agents/build") return build?.(body, options) ?? Response.json(readyResult({ ...definition(body.id, 2), ...body }));
       if (path === "/api/agents/cancel") return Response.json({ cancelled: true });
-      return inspect?.(path) ?? Response.json({ agent: definition(path.split("/").at(-1)) });
+      if (path.endsWith("/development/stream")) return develop?.(body, options, path) ?? Response.json({ error: "未配置研发响应" }, { status: 503 });
+      if (path.endsWith("/development/cancel")) return cancelDevelopment?.(path) ?? Response.json({ cancelled: true });
+      return inspect?.(path) ?? Response.json(readyResult(definition(path.split("/").at(-1))));
     },
   });
   vm.runInContext(source, context);
@@ -80,6 +88,151 @@ async function setup({ turn, build, inspect, profiles, stored = new Map() } = {}
   };
 }
 
+const developmentRecord = (overrides = {}) => ({ id: "dev-one", agentId: "one", status: "running", phase: "implementing",
+  architectureRef: { version: 2, candidateHash: "candidate-2" }, codeHash: "code-2", planHash: "plan-2",
+  delivery: "needs_development", summary: "正在实现任务。", tasks: [{ id: "task-1", title: "整理资料", status: "active" }],
+  currentTaskId: "task-1", ...overrides });
+const developmentResult = (record, overrides = {}) => ({ agent: null, architecture: architecture({ delivery: "needs_development" }),
+  development: record, ...overrides });
+const treeText = (node) => [node.textContent, ...node.children.map(treeText)].join(" ");
+const developmentButton = (ui) => ui.get("agent-development").children[0].children.at(-1).children[0];
+
+test("生成智能体自动贯穿研发五阶段，停止后续接且旧研发结果不能覆盖新需求", async () => {
+  const building = stream(), resumed = stream(); let saved = null;
+  const ui = await setup({
+    inspect: () => Response.json(saved ? developmentResult(saved) : { agent: null, architecture: null, development: null }),
+    build: () => building.response, develop: () => resumed.response,
+    cancelDevelopment: () => {
+      saved = developmentRecord({ status: "cancelled", summary: "已保存当前任务，可以继续研发。" });
+      return Response.json({ cancelled: true, development: saved });
+    },
+  });
+  const pending = ui.emit("neuma:agent-build", { id: "one" }); await settle();
+  building.send({ type: "status", phase: "planning", label: "架构已通过，正在拆分研发任务。",
+    architecture: architecture({ delivery: "needs_development" }), development: developmentRecord({ phase: "planning" }) });
+  await settle();
+  assert.equal(ui.get("agent-development").hidden, false);
+  assert.match(treeText(ui.get("agent-development")), /接收设计.*拆分任务.*开发任务.*检查验收.*整理交付/s);
+  assert.equal(developmentButton(ui).textContent, "停止研发");
+  assert.equal(ui.get("agent-build").disabled, true);
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.equal(ui.requests.filter((request) => request.path === "/api/agents/build").length, 1);
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/development/stream")), false);
+  building.send({ type: "status", phase: "verifying", label: "正在检查自动研发的任务", development: developmentRecord({ phase: "verifying" }) });
+  await settle();
+  assert.equal(ui.get("agent-development").children[0].children[1].children[3].attributes.get("aria-current"), "step");
+  await developmentButton(ui).click();
+  assert.equal(ui.requests.find((request) => request.path === "/api/agents/build").signal.aborted, true);
+  building.send({ type: "done", result: developmentResult(developmentRecord({ status: "completed", delivery: "ready" }),
+    { agent: designedDefinition(), architecture: architecture() }) }); building.close(); await pending;
+  assert.equal(ui.runtime().development.status, "cancelled");
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+  const continuing = developmentButton(ui).click(); await settle();
+  assert.equal(ui.requests.find((request) => request.path.endsWith("/development/stream")).body.resume, true);
+  await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one"
+    ? { ...agent, draft: { goal: { value: "新需求不接受旧研发结果" } } } : agent), busy: false });
+  resumed.send({ type: "status", phase: "packaging", label: "迟到的旧研发进度", development: developmentRecord() });
+  resumed.send({ type: "done", result: developmentResult(developmentRecord({ status: "completed", delivery: "ready" }),
+    { agent: designedDefinition(), architecture: architecture() }) }); resumed.close(); await continuing;
+  assert.equal(ui.runtime().status, "stale");
+  assert.equal(ui.runtime().definition, null);
+  assert.equal(ui.get("agent-development").hidden, true);
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.doesNotMatch(ui.get("agent-runtime-status").textContent, /迟到/);
+});
+
+test("当前方案可以开始研发并显示五阶段与任务进度，完成但待连接仍禁止运行", async () => {
+  const partial = stream(); let attempts = 0;
+  const delivered = { ...designedDefinition(), developmentRef: { id: "dev-one", codeHash: "code-2", planHash: "plan-2" } };
+  const ui = await setup({ inspect: () => Response.json(developmentResult(null)), develop: () => ++attempts === 1 ? partial.response
+    : Response.json(developmentResult(developmentRecord({ status: "completed", phase: "packaging", delivery: "ready",
+      package: { codeHash: "code-2", planHash: "plan-2" } }), { agent: delivered, architecture: architecture() })) });
+  assert.equal(developmentButton(ui).textContent, "开始研发");
+  const pending = developmentButton(ui).click(); await settle();
+  assert.equal(ui.get("agent-build").disabled, true);
+  await ui.emit("neuma:agent-develop", { id: "one" });
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/development/stream")).length, 1);
+  partial.send({ type: "status", phase: "verifying", label: "正在验收当前任务", development: developmentRecord({ phase: "verifying" }) });
+  await settle();
+  assert.match(treeText(ui.get("agent-development")), /接收设计.*拆分任务.*开发任务.*检查验收.*整理交付.*正在验收当前任务/s);
+  assert.equal(developmentButton(ui).textContent, "停止研发");
+  partial.send({ type: "done", result: developmentResult(developmentRecord({ status: "completed", phase: "packaging", delivery: "needs_connection" })) });
+  partial.close(); await pending;
+  assert.match(treeText(ui.get("agent-development")), /研发已完成.*待连接/);
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.equal(developmentButton(ui).textContent, "重新检查交付");
+  assert.equal(ui.runtimeEvents.at(-1).development.status, "completed");
+  await developmentButton(ui).click();
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/development/stream")).at(-1).body.resume, true);
+  assert.equal(ui.runtime().status, "ready");
+  assert.equal(ui.get("agent-send").disabled, false);
+  assert.equal(developmentButton(ui), undefined);
+});
+
+test("刷新恢复中断记录并明确继续，切换智能体后迟到研发进度不会进入另一会话", async () => {
+  const partial = stream(), saved = developmentRecord({ status: "interrupted" });
+  const ui = await setup({ inspect: (path) => Response.json(path.endsWith("/one") ? developmentResult(saved) : readyResult(definition("two"))),
+    develop: () => partial.response });
+  assert.match(treeText(ui.get("agent-development")), /研发已中断/);
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+  const pending = developmentButton(ui).click(); await settle();
+  assert.equal(ui.requests.find((request) => request.path.endsWith("/development/stream")).body.resume, true);
+  await ui.route("two");
+  partial.send({ type: "status", phase: "verifying", label: "一号正在验收", development: developmentRecord() }); await settle();
+  assert.equal(ui.get("agent-development").hidden, true);
+  assert.doesNotMatch(ui.get("agent-runtime-status").textContent, /一号/);
+  partial.send({ type: "done", result: developmentResult(developmentRecord({ status: "blocked", summary: "缺少开发所需条件。" })) });
+  partial.close(); await pending;
+  assert.equal(ui.runtime("two").status, "ready");
+  await ui.route("one");
+  assert.match(treeText(ui.get("agent-development")), /研发受阻.*缺少开发所需条件/s);
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+});
+
+test("停止研发使用专属取消入口并忽略迟到完成，不重置任务进度", async () => {
+  const partial = stream(); let saved = null;
+  const ui = await setup({ inspect: () => Response.json(developmentResult(saved)), develop: () => partial.response,
+    cancelDevelopment: () => {
+      saved = developmentRecord({ status: "cancelled", summary: "已取消，任务进度保留。" });
+      return Response.json({ cancelled: true, development: saved });
+    } });
+  const pending = developmentButton(ui).click(); await settle();
+  partial.send({ type: "status", phase: "implementing", label: "正在开发", development: developmentRecord() }); await settle();
+  await developmentButton(ui).click();
+  assert.equal(ui.requests.find((request) => request.path.endsWith("/development/stream")).signal.aborted, true);
+  const completed = developmentRecord({ status: "completed", delivery: "ready" });
+  partial.send({ type: "done", result: developmentResult(completed, { agent: designedDefinition(), architecture: architecture() }) });
+  partial.close(); await pending;
+  assert.equal(ui.runtime().development.status, "cancelled");
+  assert.equal(ui.runtime().development.tasks.length, 1);
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/development/cancel")).length, 1);
+  assert.equal(ui.requests.some((request) => request.path === "/api/agents/cancel"), false);
+});
+
+test("研发流断开重新核对后端中断状态，新需求使旧研发响应失效", async () => {
+  const partial = stream(); let saved = null;
+  const ui = await setup({ inspect: () => Response.json(developmentResult(saved)), develop: () => partial.response });
+  const pending = developmentButton(ui).click(); await settle();
+  saved = developmentRecord({ status: "interrupted", summary: "连接中断，已有进度保留。" });
+  partial.close(); await pending;
+  assert.equal(ui.runtime().development.status, "interrupted");
+  assert.match(treeText(ui.get("agent-development")), /研发已中断/);
+  assert.equal(developmentButton(ui).textContent, "继续研发");
+  const old = stream();
+  const second = await setup({ inspect: () => Response.json(developmentResult(null)), develop: () => old.response });
+  const delayed = developmentButton(second).click(); await settle();
+  await second.emit("neuma:agents-changed", { items: requirements.map((item) => item.id === "one"
+    ? { ...item, draft: { goal: { value: "更新后的需求" } } } : item), busy: false });
+  old.send({ type: "done", result: developmentResult(developmentRecord({ status: "completed", delivery: "ready" }),
+    { agent: designedDefinition(), architecture: architecture() }) }); old.close(); await delayed;
+  assert.equal(second.runtime().status, "stale");
+  assert.equal(second.get("agent-send").disabled, true);
+  assert.equal(second.get("agent-development").hidden, true);
+});
+
 test("旧需求先生成后运行，确认事件可以自动生成，并防止重复构建", async () => {
   let release;
   const ui = await setup({ inspect: () => Response.json({ agent: null }), build: () => new Promise((done) => { release = done; }) });
@@ -91,12 +244,106 @@ test("旧需求先生成后运行，确认事件可以自动生成，并防止�
   assert.equal(ui.get("agent-build").disabled, true);
   await ui.get("agent-build").click();
   assert.equal(ui.requests.filter((request) => request.path.endsWith("/build")).length, 1);
-  release(Response.json({ agent: definition() })); await pending;
+  release(Response.json(readyResult())); await pending;
   assert.equal(ui.get("agent-send").disabled, false);
   await ui.submit("整理会议");
   assert.equal(ui.item().messages.at(-1).content, "任务已完成");
   assert.equal(ui.item().messages[0].delivery, "sent");
   assert.match(ui.get("agent-runtime-status").textContent, /可以开始任务/);
+});
+
+test("构建返回待补充或需要研发时保留旧定义、展示原因并阻止运行，刷新不能绕过", async () => {
+  for (const [status, delivery, expected, label] of [
+    ["needs_evidence", "blocked", "needs_evidence", /待补充依据/],
+    ["needs_changes", "blocked", "needs_changes", /架构需要调整/],
+    ["passed", "needs_connection", "needs_connection", /仍需连接/],
+    ["passed", "needs_development", "needs_development", /仍需研发/],
+  ]) {
+    const result = { agent: definition(), architecture: architecture({ status, delivery,
+      summary: "尚不能处理完整任务。", issues: [{ id: "missing", blocking: true, description: "缺少资料来源依据。", remedy: "请补充来源。" }] }) };
+    const ui = await setup({ build: () => Response.json(result) });
+    await ui.get("agent-build").click();
+    assert.equal(ui.runtime().status, expected);
+    assert.equal(ui.runtime().definition.revision, 1);
+    assert.equal(ui.get("agent-send").disabled, true);
+    assert.equal(ui.get("agent-error").hidden, true);
+    assert.match(ui.get("agent-runtime-status").textContent, label);
+    assert.match(ui.get("agent-runtime-status").textContent, /缺少资料来源依据.*请补充来源/);
+    assert.equal(ui.runtimeEvents.at(-1).ready, false);
+    const refreshed = await setup({ inspect: () => Response.json(result) });
+    assert.equal(refreshed.runtime().status, expected);
+    await refreshed.submit("执行任务");
+    assert.equal(refreshed.requests.some((request) => request.path.endsWith("/turn")), false);
+  }
+});
+
+test("同需求旧架构引用不能解锁，新定义绑定通过的版本才可以运行", async () => {
+  const record = architecture();
+  const result = { agent: { ...designedDefinition(), architectureRef: { version: 1, candidateHash: "candidate-1" } }, architecture: record };
+  const ui = await setup({ inspect: () => Response.json(result), build: () => Response.json({ agent: designedDefinition(), architecture: record }) });
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.equal(ui.runtime().status, "blocked");
+  await ui.get("agent-build").click();
+  assert.equal(ui.runtime().status, "ready");
+  assert.equal(ui.get("agent-send").disabled, false);
+  assert.match(ui.get("agent-runtime-status").textContent, /架构评估已通过/);
+  await ui.submit("执行任务");
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/turn")).length, 1);
+  await ui.emit("neuma:agent-runtime-request", {});
+  const snapshot = ui.runtimeEvents.at(-1);
+  snapshot.architecture.status = "failed";
+  assert.equal(ui.runtime().architecture.status, "passed");
+});
+
+test("旧原型和无mode定义不可发送，保留资料快照并允许重新设计后运行", async () => {
+  for (const mode of ["prototype", undefined]) {
+    const old = { ...requirements[0], mode, status: "ready", revision: 1,
+      memory: "已有偏好", profile: { name: "旧助手", description: "旧资料", icon: "📝" } };
+    let builds = 0;
+    const ui = await setup({ inspect: () => Response.json({ agent: old }),
+      build: () => Response.json(++builds === 1 ? { agent: old } : readyResult(designedDefinition())) });
+    assert.equal(ui.runtime().status, "blocked");
+    assert.match(ui.get("agent-runtime-status").textContent, /旧原型已停用，请重新设计与检查后运行/);
+    assert.equal(ui.get("agent-send").disabled, true);
+    assert.equal(ui.get("agent-build").disabled, false);
+    await ui.submit("不能直接运行");
+    assert.equal(ui.requests.some((request) => request.path.endsWith("/turn")), false);
+    await ui.emit("neuma:agent-runtime-request", {});
+    const snapshot = ui.runtimeEvents.at(-1);
+    assert.equal(snapshot.ready, false);
+    assert.equal(snapshot.definition.memory, "已有偏好");
+    assert.equal(snapshot.definition.profile.name, "旧助手");
+    await ui.get("agent-build").click();
+    assert.equal(ui.runtime().status, "blocked");
+    await ui.get("agent-build").click();
+    assert.equal(ui.runtime().status, "ready");
+    assert.equal(ui.get("agent-send").disabled, false);
+  }
+});
+
+test("服务端非ready定义或不匹配的架构记录不能运行", async () => {
+  const unavailable = await setup({ inspect: () => Response.json({ agent: { ...definition(), status: "failed" } }) });
+  assert.equal(unavailable.get("agent-send").disabled, true);
+  const stale = await setup({ inspect: () => Response.json({ agent: designedDefinition(), architecture: architecture({ draft: { goal: { value: "旧需求" } } }) }) });
+  assert.equal(stale.runtime().status, "stale");
+  assert.equal(stale.get("agent-send").disabled, true);
+});
+
+test("现有说明区域展示可展开的方案依据、检查结论和待接入能力", async () => {
+  const record = architecture({ delivery: "needs_connection", summary: "整理指定资料后输出报告。",
+    design: { profile: "workflow", rationale: "需要按顺序读取并整理资料。", capabilities: [
+      { id: "internal_read_tool", status: "needs_connection", reason: "请连接指定资料来源。" },
+      { id: "available_tool", status: "available", reason: "内部能力" },
+    ] }, review: { summary: "结构符合需求，等待连接。", internalPrompt: "不可展示的提示词" },
+    issues: [{ id: "capability", blocking: true, description: "暂时无法读取资料。", remedy: "连接后重新检查。" }],
+  });
+  const ui = await setup({ inspect: () => Response.json({ agent: null, architecture: record }) });
+  const details = ui.get("agent-brief").children.find((node) => node.className === "agent-requirements-details");
+  assert.ok(details);
+  assert.equal(details.children[0].textContent, "方案与检查结果");
+  const text = (node) => [node.textContent, ...node.children.map(text)].join(" ");
+  assert.match(text(details), /流程助手.*需要按顺序读取并整理资料.*结构符合需求，等待连接.*连接后重新检查.*请连接指定资料来源/s);
+  assert.doesNotMatch(text(details), /internal_read_tool|available_tool|不可展示的提示词|内部能力/);
 });
 
 test("逐段显示回复且复用气泡，完成前阻止重复任务并保留下一条输入和阅读位置", async () => {
@@ -231,7 +478,7 @@ test("重新生成取消后不把迟到结果设为可运行，旧定义仍可�
   const partial = stream(), ui = await setup({ build: () => partial.response });
   const pending = ui.get("agent-build").click(); await settle();
   await ui.get("agent-cancel-reply").click();
-  partial.send({ type: "done", result: { agent: definition("one", 2) } }); partial.close(); await pending;
+  partial.send({ type: "done", result: readyResult(definition("one", 2)) }); partial.close(); await pending;
   assert.equal(ui.runtime().definition.revision, 1);
   assert.equal(ui.get("agent-send").disabled, true);
   assert.equal(ui.get("agent-build").disabled, false);
@@ -259,14 +506,14 @@ test("任务期间确认更新先排队，旧任务完成后仅生成一次最�
 
 test("被新需求中断的构建先收尾再生成最新版本，迟到旧产物不会替换新版本", async () => {
   const partial = stream(); let calls = 0;
-  const ui = await setup({ build: (body) => ++calls === 1 ? partial.response : Response.json({ agent: { ...body, status: "ready", revision: 3 } }) });
+  const ui = await setup({ build: (body) => ++calls === 1 ? partial.response : Response.json(readyResult({ ...definition(body.id, 3), ...body })) });
   const pending = ui.get("agent-build").click(); await settle();
   const updated = requirements.map((item) => item.id === "one" ? { ...item, draft: { goal: { value: "构建中的新需求", source: "user" } } } : item);
   await ui.emit("neuma:agents-changed", { items: updated, busy: false });
   await ui.emit("neuma:agent-build", { id: "one" });
   assert.equal(ui.requests.find((item) => item.path.endsWith("/build")).signal.aborted, true);
   assert.equal(calls, 1);
-  partial.send({ type: "done", result: { agent: definition("one", 2) } }); partial.close(); await pending;
+  partial.send({ type: "done", result: readyResult(definition("one", 2)) }); partial.close(); await pending;
   assert.equal(calls, 2);
   assert.equal(ui.runtime().definition.revision, 3);
   assert.equal(ui.runtime().definition.draft.goal.value, "构建中的新需求");
@@ -316,8 +563,8 @@ test("查询与重新生成返回展示信息时向管理模块同步，迟到�
   let release;
   const list = new Promise((done) => { release = done; });
   const ui = await setup({ profiles: () => list,
-    inspect: () => Response.json({ agent: definition(), profile: { name: "服务端名字", description: "服务端简介", icon: "📚" } }),
-    build: (body) => Response.json({ agent: { ...body, status: "ready", revision: 2, profile: { name: "生成后的名字", description: "", icon: "🧠" } } }),
+    inspect: () => Response.json({ ...readyResult(), profile: { name: "服务端名字", description: "服务端简介", icon: "📚" } }),
+    build: (body) => Response.json(readyResult({ ...definition(body.id, 2), ...body, profile: { name: "生成后的名字", description: "", icon: "🧠" } })),
   });
   assert.equal(ui.profileEvents.find((detail) => detail.id === "one").profile.name, "服务端名字");
   await ui.emit("neuma:agent-profile-changed", { id: "one", profile: { name: "刚编辑的名字", description: "", icon: "新" } });
@@ -343,10 +590,10 @@ test("展示列表读取失败只显示轻提示，不阻止对话或移除已�
 test("资料保存后才返回的旧查询不会发送覆盖事件", async () => {
   let release;
   const ui = await setup({ inspect: (path) => path.endsWith("/two")
-    ? new Promise((done) => { release = done; }) : Response.json({ agent: definition() }) });
+    ? new Promise((done) => { release = done; }) : Response.json(readyResult()) });
   const pending = ui.route("two"); await settle();
   await ui.emit("neuma:agent-profile-changed", { id: "two", profile: { name: "新的日报名字", description: "", icon: "新" } });
-  release(Response.json({ agent: definition("two"), profile: { name: "旧日报名字", description: "旧", icon: "旧" } })); await pending;
+  release(Response.json({ ...readyResult(definition("two")), profile: { name: "旧日报名字", description: "旧", icon: "旧" } })); await pending;
   assert.equal(ui.profileEvents.filter((detail) => detail.id === "two").length, 1);
   assert.equal(ui.profileEvents.filter((detail) => detail.id === "two")[0].profile.name, "新的日报名字");
 });

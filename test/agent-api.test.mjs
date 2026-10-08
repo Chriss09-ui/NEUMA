@@ -63,8 +63,8 @@ test("用户 Agent JSON 接口使用独立后端，返回定义、实际回复�
     cancel: async (id) => { seen.push(["cancel", id]); return { cancelled: true }; },
     remove: async (id) => { seen.push(["remove", id]); return { removed: true }; },
   }, { projectAgent: { prompt: async () => assert.fail("工作 Agent 不能调用项目助手") } });
-  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `/api/agents/${agent.id}`)).text), { agent });
-  assert.deepEqual(JSON.parse((await invoke(handler, "GET", "/api/agents/not-built")).text), { agent: null });
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `/api/agents/${agent.id}`)).text), { agent, architecture: null });
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", "/api/agents/not-built")).text), { agent: null, architecture: null });
   const localRequest = request("POST", "/api/agents/build", buildInput);
   Object.assign(localRequest.headers, { host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000" });
   const built = new StreamingResponse(); await handler(localRequest, built);

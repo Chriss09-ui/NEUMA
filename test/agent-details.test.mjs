@@ -113,6 +113,18 @@ test("历史产物排序不改原列表，文件描述与预览限制保持明�
   assert.equal(view.agentIconChoices.length > 0, true);
 });
 
+test("研发快捷入口沿用当前Agent归属，待连接交付可以重新检查且研发中隐藏重复入口", async () => {
+  const ui = await setup({ initialRuntime: { one: { ready: false, status: "needs_development", developmentAction: "开始研发" } } });
+  assert.equal(ui.get("agent-build-shortcut").hidden, false);
+  assert.equal(ui.get("agent-build-shortcut").textContent, "开始研发");
+  await ui.click("agent-build-shortcut");
+  assert.equal(ui.emitted.findLast((event) => event.type === "neuma:agent-develop").detail.id, "one");
+  await ui.broadcast("one", { ready: false, status: "needs_connection", developmentAction: "重新检查交付" });
+  assert.equal(ui.get("agent-build-shortcut").textContent, "重新检查交付");
+  await ui.broadcast("one", { ready: false, busy: true, status: "developing", developmentAction: null });
+  assert.equal(ui.get("agent-build-shortcut").hidden, true);
+});
+
 test("初次路由主动握手并自动读取成果，设置默认关闭且只有资料和记忆", async () => {
   const ui = await setup();
   assert.equal(ui.get("agent-panel").open, false);
