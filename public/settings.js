@@ -4,6 +4,8 @@ const form = byId("settings-form");
 const fields = { chatUrl: byId("settings-chat-url"), model: byId("settings-model"), apiKey: byId("settings-api-key"),
   jevApiKey: byId("settings-jev-key"), jevModel: byId("settings-jev-model") };
 let current = null, saving = false, clearJev = false;
+let loading = null, loadSequence = 0;
+const editedFields = new Set();
 
 function showError(message = "") { byId("settings-error").textContent = message; byId("settings-error").hidden = !message; }
 
@@ -18,29 +20,38 @@ function setStatus(id, configured, optional) {
   el.textContent = configured ? "已配置" : optional ? "未启用" : "未配置";
 }
 
-function fill(settings) {
-  current = settings; clearJev = false;
-  fields.chatUrl.value = settings.chatUrl;
-  fields.model.value = settings.model;
-  fields.jevModel.value = settings.jevModel;
-  fields.apiKey.value = fields.jevApiKey.value = "";
+function fill(settings, preserveEdits = false) {
+  current = settings;
+  if (!preserveEdits) { editedFields.clear(); clearJev = false; }
+  for (const [key, field] of Object.entries(fields)) {
+    if (!editedFields.has(key)) field.value = ["apiKey", "jevApiKey"].includes(key) ? "" : settings[key];
+  }
   fields.apiKey.placeholder = settings.apiKey.set ? "••••••••••••" : "粘贴 API Key";
   fields.jevApiKey.placeholder = settings.jevApiKey.set ? "••••••••••••" : "粘贴 TypeSafe API Key";
   byId("settings-api-key-help").textContent = keyHelp(settings.apiKey, false);
-  byId("settings-jev-key-help").textContent = keyHelp(settings.jevApiKey, true);
+  byId("settings-jev-key-help").textContent = clearJev ? "保存后将清除 Jev Key 并停用 Jev。" : keyHelp(settings.jevApiKey, true);
   byId("settings-clear-jev").hidden = !settings.jevApiKey.set;
+  byId("settings-clear-jev").textContent = clearJev ? "撤销清除" : "清除此 Key";
   setStatus("settings-llm-status", settings.llmConfigured, false);
   setStatus("settings-jev-status", settings.jevConfigured, true);
 }
 
 async function load() {
+  if (loading || saving) return;
+  const request = { sequence: ++loadSequence }; loading = request;
   try {
     const response = await fetch("/api/settings");
     if (!response.ok) throw new Error();
-    fill(await response.json());
+    const result = await response.json();
+    if (request.sequence !== loadSequence || saving) return;
+    fill(result, true);
     showError();
-  } catch { showError("无法读取当前配置，请确认本地服务正在运行。"); }
+  } catch {
+    if (request.sequence === loadSequence && !saving) showError("无法读取当前配置，请确认本地服务正在运行。");
+  } finally { if (loading === request) loading = null; }
 }
+
+for (const [key, field] of Object.entries(fields)) field.addEventListener("input", () => editedFields.add(key));
 
 function setSaving(value) {
   saving = value;
@@ -59,6 +70,7 @@ form.addEventListener("submit", async (event) => {
   }
   if (clearJev && !body.jevApiKey) body.clear = ["jevApiKey"];
   if (!Object.keys(body).length) { byId("settings-note").textContent = "没有需要保存的修改。"; return; }
+  loadSequence++; loading = null;
   setSaving(true); showError();
   try {
     const response = await fetch("/api/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -78,12 +90,13 @@ for (const toggle of form.querySelectorAll("[data-reveal]")) {
     toggle.textContent = target.type === "password" ? "显示" : "隐藏";
   });
 }
-byId("settings-use-mimo").addEventListener("click", () => { fields.chatUrl.value = MIMO_URL; fields.chatUrl.focus(); });
+byId("settings-use-mimo").addEventListener("click", () => { fields.chatUrl.value = MIMO_URL; editedFields.add("chatUrl"); fields.chatUrl.focus(); });
 byId("settings-clear-jev").addEventListener("click", () => {
   clearJev = !clearJev;
+  editedFields.add("jevApiKey");
   fields.jevApiKey.value = "";
   byId("settings-clear-jev").textContent = clearJev ? "撤销清除" : "清除此 Key";
   byId("settings-jev-key-help").textContent = clearJev ? "保存后将清除 Jev Key 并停用 Jev。" : keyHelp(current?.jevApiKey, true);
 });
-document.addEventListener("neuma:route", (event) => { if (event.detail.page === "settings" && !saving) void load(); });
+document.addEventListener("neuma:route", (event) => { if (event.detail.page === "settings" && !saving && !editedFields.size) void load(); });
 void load();

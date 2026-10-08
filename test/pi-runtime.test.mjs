@@ -281,3 +281,55 @@ test("内部检查连接失败后结束本轮对话，不能自动重复检查�
   assert.equal(agent.sessions.size, 0);
   await agent.dispose();
 });
+
+test("更新设置关闭旧会话后，迟到的会话不调用模型并且不删除同标识的新会话", async () => {
+  let entered, release, factories = 0, oldPrompts = 0, oldDisposals = 0, newDisposals = 0;
+  const ready = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const currentSession = { subscribe: () => () => {}, messages: [], async prompt() {},
+    getLastAssistantText: () => "新配置已生效", async abort() {}, dispose() { newDisposals++; } };
+  const agent = new PiProjectAgent({ config: { llmConfigured: true }, manager: { list: async () => [] },
+    sessionFactory: async () => {
+      factories++;
+      if (factories > 1) return currentSession;
+      entered(); await gate;
+      return { subscribe: () => () => {}, messages: [], async prompt() { oldPrompts++; },
+        getLastAssistantText: () => "旧会话", async abort() {}, dispose() { oldDisposals++; } };
+    } });
+  const sessionId = "settings-late-session-12345";
+  const pending = agent.prompt({ message: "查看项目", sessionId });
+  const stopped = assert.rejects(pending, (error) => error.diagnostic?.reason === "cancelled");
+  await ready;
+  await agent.dispose();
+  const fresh = await agent.prompt({ message: "再查看项目", sessionId });
+  assert.equal(fresh.reply, "新配置已生效");
+  release(); await stopped;
+  assert.equal(oldPrompts, 0); assert.equal(oldDisposals, 1);
+  assert.equal(agent.sessions.get(sessionId).session, currentSession);
+  assert.equal(newDisposals, 0);
+  await agent.dispose();
+  assert.equal(newDisposals, 1);
+});
+
+for (const operation of ["dispose", "cancel"]) for (const failedOperation of [false, true]) {
+  test(`获取项目列表期间 ${operation}，${failedOperation ? "操作失败" : "正常回复"}分支不返回迟到成功`, async () => {
+    let entered, release, disposals = 0;
+    const ready = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    const agent = new PiProjectAgent({ config: { llmConfigured: true },
+      manager: { list: async () => { entered(); await gate; return []; } },
+      sessionFactory: async ({ turn }) => ({ subscribe: () => () => {}, messages: [],
+        async prompt() { if (failedOperation) turn.failedOperation = { setup: { summary: "操作未完成" } }; },
+        getLastAssistantText: () => "项目已列出", async abort() {}, dispose() { disposals++; } }),
+    });
+    const sessionId = "late-project-list-session-12345";
+    const pending = agent.prompt({ message: "查看项目", sessionId });
+    const stopped = assert.rejects(pending, (error) => error.diagnostic?.reason === "cancelled");
+    await ready;
+    if (operation === "dispose") await agent.dispose();
+    else assert.equal((await agent.cancel(sessionId)).cancelled, true);
+    release(); await stopped;
+    assert.equal(disposals, 1); assert.equal(agent.sessions.size, 0);
+    await agent.dispose();
+  });
+}

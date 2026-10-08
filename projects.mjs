@@ -128,6 +128,8 @@ export class ProjectManager {
     this.blockedPort = blockedPort;
     this.records = null;
     this.runs = new Map();
+    this.pendingStarts = new Map();
+    this.removing = new Set();
     this.queue = Promise.resolve();
     this.analyzeProject = analyzeProject;
     this.inspections = new Map();
@@ -345,9 +347,21 @@ export class ProjectManager {
     });
   }
 
-  async start(id) {
+  start(id) {
+    if (this.disposed) return Promise.reject(new InputError("项目管理器已关闭"));
+    if (this.removing.has(id)) return Promise.reject(new InputError("项目正在删除，请等待完成"));
+    if (this.pendingStarts.has(id)) return this.pendingStarts.get(id).pending;
+    const item = { cancelled: false };
+    // Stop and remove must see a start even while it is waiting for a previous save.
+    this.pendingStarts.set(id, item);
+    item.pending = this.startProject(id, item).finally(() => this.pendingStarts.delete(id));
+    return item.pending;
+  }
+
+  async startProject(id, item) {
     await this.queue;
     const project = await this.get(id);
+    if (item.cancelled) return this.view(project);
     if (!this.view(project).canLaunch) throw new InputError("启动方式尚未就绪，请先自动识别启动方式");
     if (this.view(project).canStop) {
       const existing = this.runs.get(id);
@@ -361,15 +375,15 @@ export class ProjectManager {
     this.runs.set(id, run);
     try {
       if (await canonicalPath(project.root) !== project.root) throw new InputError("项目位置发生变化，请重新添加");
-      if (run.status === "stopped") return this.view(project);
+      if (item.cancelled || run.status === "stopped") return this.view(project);
       if (project.kind === "web") {
         const preview = await staticPreview(project);
-        if (run.status === "stopped") await new Promise((done) => preview.server.close(done));
+        if (item.cancelled || run.status === "stopped") await new Promise((done) => preview.server.close(done));
         else { Object.assign(run, preview); await this.openPage(run); }
       } else {
         const launch = project.kind === "script" ? (await validateProjectPlan(project, { ...project.launch,
           kind: "script", status: "ready", summary: "核对项目脚本启动方式" })).launch : project.launch;
-        if (run.status === "stopped") return this.view(project);
+        if (item.cancelled || run.status === "stopped") return this.view(project);
         if (launch.background) {
           await startScriptServices({ ...project, launch }, run, { spawnImpl: this.spawnImpl, env: projectEnvironment(),
             blockedPort: this.blockedPort, onReady: () => this.openPage(run) });
@@ -395,6 +409,7 @@ export class ProjectManager {
         });
         child.stderr?.resume();
         await sleep(200);
+        if (item.cancelled || run.status === "stopped") return this.view(project);
         if (run.status === "starting") run.status = "running";
         if (project.kind !== "desktop") {
           run.getPageUrl = () => candidate;
@@ -402,6 +417,7 @@ export class ProjectManager {
         }
       }
     } catch (error) {
+      if (item.cancelled || run.status === "stopped") return this.view(project);
       run.status = "failed"; run.error = error instanceof InputError ? error.message : "项目无法启动，请检查路径和运行环境";
       throw new InputError(run.error);
     }
@@ -442,6 +458,8 @@ export class ProjectManager {
   }
 
   async stop(id) {
+    const starting = this.pendingStarts.get(id);
+    if (starting) starting.cancelled = true;
     const project = await this.get(id), run = this.runs.get(id);
     if (!run || !this.view(project).canStop) return this.view(project);
     if (run.background) {
@@ -464,36 +482,45 @@ export class ProjectManager {
 
   async remove(id, { removeOnly = false } = {}) {
     if (typeof removeOnly !== "boolean") throw new InputError("请选择有效的项目移除方式");
-    const inspection = this.inspections.get(id);
-    if (inspection) { inspection.controller.abort(); await inspection.pending; }
-    const project = await this.get(id), run = this.runs.get(id);
-    this.analyzeProject?.forget?.(project.path);
-    if (removeOnly && !run?.removalStopFailed) throw new InputError("请先尝试正常删除，再确认仅移除记录");
-    if (!removeOnly) {
-      try { await this.stop(id); }
-      catch (error) {
-        if (run) run.removalStopFailed = true;
-        const detail = error instanceof InputError ? error.message : "停止项目时发生错误";
-        throw Object.assign(new InputError(`未能停止项目：${detail}。可以仅移除记录，仍在运行的服务不会被停止。`),
-          { code: "PROJECT_REMOVE_STOP_FAILED" });
+    if (this.removing.has(id)) throw new InputError("项目正在删除，请等待完成");
+    this.removing.add(id);
+    const starting = this.pendingStarts.get(id);
+    if (starting) starting.cancelled = true;
+    try {
+      const inspection = this.inspections.get(id);
+      if (inspection) { inspection.controller.abort(); await inspection.pending; }
+      const project = await this.get(id), run = this.runs.get(id);
+      this.analyzeProject?.forget?.(project.path);
+      if (removeOnly && !run?.removalStopFailed) throw new InputError("请先尝试正常删除，再确认仅移除记录");
+      if (!removeOnly) {
+        try { await this.stop(id); }
+        catch (error) {
+          if (run) run.removalStopFailed = true;
+          const detail = error instanceof InputError ? error.message : "停止项目时发生错误";
+          throw Object.assign(new InputError(`未能停止项目：${detail}。可以仅移除记录，仍在运行的服务不会被停止。`),
+            { code: "PROJECT_REMOVE_STOP_FAILED" });
+        }
       }
-    }
-    const result = await this.change(() => {
-      this.records = this.records.filter((item) => item.id !== id);
-      return { removed: true, ...(removeOnly ? { servicesMayBeRunning: true } : {}) };
-    });
-    // Forgetting a failed run must also stop monitoring it, without killing its remaining services.
-    if (run) { run.monitorController?.abort(); run.status = "detached"; }
-    this.runs.delete(id);
-    return result;
+      await starting?.pending.catch(() => {});
+      const result = await this.change(() => {
+        this.records = this.records.filter((item) => item.id !== id);
+        return { removed: true, ...(removeOnly ? { servicesMayBeRunning: true } : {}) };
+      });
+      // Forgetting a failed run must also stop monitoring it, without killing its remaining services.
+      if (run) { run.monitorController?.abort(); run.status = "detached"; }
+      this.runs.delete(id);
+      return result;
+    } finally { this.removing.delete(id); }
   }
 
   async dispose() {
     this.disposed = true;
+    for (const item of this.pendingStarts.values()) item.cancelled = true;
     for (const item of this.pendingAdds.values()) item.controller.abort();
     for (const item of this.inspections.values()) item.controller.abort();
-    await Promise.allSettled([...this.pendingAdds.values(), ...this.inspections.values()].map((item) => item.pending));
+    const stopping = [...this.runs.keys()].map((id) => this.stop(id));
+    const pending = [...this.pendingAdds.values(), ...this.inspections.values(), ...this.pendingStarts.values()];
+    await Promise.allSettled([...stopping, ...pending.map((item) => item.pending)]);
     this.analyzeProject?.dispose?.();
-    await Promise.allSettled([...this.runs.keys()].map((id) => this.stop(id)));
   }
 }

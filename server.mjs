@@ -204,9 +204,27 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
   prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }) } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
+  let settingsQueue = Promise.resolve();
+  const saveSettings = (updates) => {
+    const result = settingsQueue.then(async () => {
+      try { await writeEnvFile(envPath, updates); }
+      catch { throw new InputError("无法写入本机 .env 文件，请检查文件权限"); }
+      Object.assign(config, getProviderConfig({ ...configEnv(config), ...updates }));
+      if (!injectedProviders) providers = makeProviders(config);
+      // Keep the file, active config and session reset in the same save order.
+      await projectAgent.dispose?.();
+      await prototypeAgents.close();
+      return settingsView(config);
+    });
+    settingsQueue = result.catch(() => {});
+    return result;
+  };
   const handler = async (request, response) => {
-    const path = new URL(request.url ?? "/", "http://localhost").pathname;
     try {
+      let address;
+      try { address = new URL(request.url ?? "/", "http://localhost"); }
+      catch { throw new InputError("请求地址无效"); }
+      const path = address.pathname;
       if (path.startsWith("/api/")) {
         const host = request.headers.host;
         const origin = request.headers.origin;
@@ -230,14 +248,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       if (request.method === "POST" && path === "/api/settings") {
         const updates = settingsUpdates(await readJson(request));
-        try { await writeEnvFile(envPath, updates); }
-        catch { throw new InputError("无法写入本机 .env 文件，请检查文件权限"); }
-        Object.assign(config, getProviderConfig({ ...configEnv(config), ...updates }));
-        if (!injectedProviders) providers = makeProviders(config);
-        // Pi sessions hold the old key and endpoint; new turns will create fresh sessions.
-        await projectAgent.dispose?.();
-        await prototypeAgents.close();
-        return sendJson(response, 200, settingsView(config));
+        return sendJson(response, 200, await saveSettings(updates));
       }
       if (request.method === "POST" && path === "/api/agents/build") {
         return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config);
@@ -276,7 +287,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const agentFiles = path.match(/^\/api\/agents\/([\w-]+)\/files$/);
       if (request.method === "GET" && agentFiles) return sendJson(response, 200, await prototypeAgents.files(agentFiles[1]));
       const agentFile = path.match(/^\/api\/agents\/([\w-]+)\/file$/);
-      if (request.method === "GET" && agentFile) return sendJson(response, 200, await prototypeAgents.file(agentFile[1], new URL(request.url, "http://localhost").searchParams.get("path")));
+      if (request.method === "GET" && agentFile) return sendJson(response, 200, await prototypeAgents.file(agentFile[1], address.searchParams.get("path")));
       const agentRemoval = path.match(/^\/api\/agents\/([\w-]+)\/remove$/);
       if (request.method === "POST" && agentRemoval) {
         await readJson(request);

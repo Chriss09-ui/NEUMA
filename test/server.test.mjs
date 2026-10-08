@@ -24,6 +24,19 @@ async function invoke(handler, method, url, body) {
   return result;
 }
 
+test("非法请求地址返回安全的400，后续健康检查仍可使用", async () => {
+  const handler = createRequestHandler({ config: {}, providers: {}, projects: {}, projectAgent: {}, prototypeAgents: {} });
+  for (const url of ["http://[", "//[::1"]) {
+    const result = await invoke(handler, "GET", url);
+    assert.equal(result.status, 400);
+    assert.equal(JSON.parse(result.text).error, "请求地址无效");
+    assert.doesNotMatch(result.text, /ERR_INVALID_URL|TypeError/);
+  }
+  const health = await invoke(handler, "GET", "/api/health");
+  assert.equal(health.status, 200);
+  assert.equal(JSON.parse(health.text).ok, true);
+});
+
 test("本地服务提供测试页面、配置状态和需求接口", async () => {
   const draft = emptyDraft();
   draft.goal = { value: "整理会议纪要", source: "user" };
