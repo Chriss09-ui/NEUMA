@@ -1,6 +1,6 @@
 # npm 安装改造与发布准备
 
-本轮已经实现命令行安装入口、独立数据目录、启动锁、就绪检查、关闭清理、显式迁移和三平台适配源码。Windows、Linux 辅助程序尚未构建或在真实系统验收；当前不是已经公开发布的三平台完整支持版本。`package.json` 保留 `private: true`，没有上传 npm。
+本轮已经实现命令行安装入口、独立数据目录、启动锁、就绪检查、关闭清理、显式迁移和三平台适配源码。Mac 本机与四个 Ubuntu 云端目标的核心检查通过，Linux 辅助程序已取回。Windows 辅助程序能编译，真实隔离启动仍在验证；当前不是已经公开发布的三平台完整支持版本。`package.json` 保留 `private: true`，没有上传 npm。
 
 ## 用户如何使用
 
@@ -75,7 +75,7 @@ powershell -NoProfile -File native/isolation/build-windows.ps1
 powershell -NoProfile -File native/projects/build-windows.ps1 -Architecture x64
 ```
 
-ARM64 开发者终端把项目辅助程序的 `-Architecture x64` 改为 `-Architecture arm64`。这些是维护者构建命令，不能在 Mac 上证明 Windows/Linux 兼容。构建工具的安装、大体积下载、远程运行、虚拟机和公开发布都需要用户事先批准；本轮未执行。
+ARM64 开发者终端把项目辅助程序的 `-Architecture x64` 改为 `-Architecture arm64`。这些是维护者构建命令，不能在 Mac 上证明 Windows/Linux 兼容。本轮远程构建已经用户批准；本机不下载或启动 Windows/Linux 系统、不安装编译工具链。大体积下载与公开发布仍需用户事先批准。
 
 本机测试采用单文件并发与 256 MiB Node 堆限制：
 
@@ -106,11 +106,11 @@ neuma
 
 ## 本轮本机验证记录
 
-2026-10-08，macOS ARM64，Node.js 26.3.0。全量 `npm test`：571/571 通过，0 失败、0 跳过，单文件并发、Node 堆限制 256 MiB，23.39 秒；`/usr/bin/time -l` 记录最大 RSS 213024768 字节（约 213 MB）、交换次数 0。这个数值是工具记录，不代表设置了整机或所有进程的总内存硬上限。
+2026-10-09，macOS ARM64，Node.js 26.3.0。全量 `npm test`：571/571 通过，0 失败、0 跳过，单文件并发、Node 堆限制 256 MiB，23.38 秒；`/usr/bin/time -l` 记录最大 RSS 213073920 字节（约 213 MB）、交换次数 0。这个数值是工具记录，不代表设置了整机或所有进程的总内存硬上限。
 
-包含真实 Mac 隔离探测、真实 Pi SDK 对接本机模拟模型、实际 CLI 重复启动/退出，以及迁移和取消竞态测试。未调用用户的真实模型服务，未迁移真实用户数据，未安装软件、下载依赖、启动 Windows/Linux 虚拟机或执行远程构建。
+包含真实 Mac 隔离探测、真实 Pi SDK 对接本机模拟模型、实际 CLI 重复启动/退出，以及迁移和取消竞态测试。未调用用户的真实模型服务，未迁移真实用户数据。本机未安装软件、下载 SDK 依赖或启动 Windows/Linux 虚拟机；Windows/Linux 构建与测试在 GitHub 云端进行。
 
-实际 `.tgz` 解包后，在只读程序目录、独立临时数据目录、不同工作目录启动；网页与资源、设置保存、端口保存、重启和 Ctrl+C 通过。没有执行干净 `npm install` 下载 SDK，不把这个启动检查当作完整依赖安装验收。`doctor` 的 Mac 实际隔离探测通过。`release:check` 因缺少八份预编译辅助程序及真实系统记录而阻止发布，符合当前阶段预期。
+实际 `.tgz` 解包后，在只读程序目录、独立临时数据目录、不同工作目录启动；网页与资源、设置保存、端口保存、重启和 Ctrl+C 通过。没有执行干净 `npm install` 下载 SDK，不把这个启动检查当作完整依赖安装验收。`doctor` 的 Mac 实际隔离探测通过。发布检查要求全部八份辅助程序及完整真实系统记录，当前证据不齐，保持阻止发布。
 
 ## 改动文件清单
 
@@ -124,14 +124,18 @@ neuma
 | 新增测试 | `test/installation.test.mjs`、`installation-migration.test.mjs`、`isolation-native.test.mjs`、`project-platform.test.mjs`、`release.test.mjs`、`session-shutdown.test.mjs` |
 | 更新测试 | `test/development-executor.test.mjs`、`project-folder-picker.test.mjs`、`project-runtime.test.mjs`、`server.test.mjs`、`settings.test.mjs` |
 
-改动留在工作区，可审查；没有提交、推送或公开发布。本轮产生的本地 `.tgz` 在 `dist/`，该目录不进入 Git 或再次打包。
+改动已提交并上传到独立分支 [`codex/npm-cli-three-platform`](https://github.com/Chriss09-ui/NEUMA/tree/codex/npm-cli-three-platform)，可审查；`main` 只新增及更新手动测试流程，应用改造未合并。本轮产生的本地 `.tgz` 在 `dist/`，该目录不进入 Git 或再次打包。
 
-## 待批准的远程原生验证
+## 已批准的远程原生验证
 
-新增 `.github/workflows/native-check.yml`，仅支持手动触发。目标为 Ubuntu 24.04/26.04 的 x64/ARM64、Windows Server 2025 x64、Windows 11 ARM64；六个任务依次运行，每个最多 8 分钟，Node 固定最低版本 22.19.0、单文件测试并发、堆限制 256 MiB。使用测试机器预装的编译器和 GIO 开发库，缺失直接停止；不安装工具链或 npm/SDK 依赖。产物先打成保留执行权限的 tar 包，远程保存一天，不生成完整产品验收记录。
+新增 `.github/workflows/native-check.yml`，仅支持手动触发。目标为 Ubuntu 24.04/26.04 的 x64/ARM64、Windows Server 2025 x64、Windows 11 ARM64；任务串行运行，每个最多 8 分钟，Node 固定最低版本 22.19.0、单文件测试并发、堆限制 256 MiB。支持 `target=all` 或 `target=windows`，已通过的 Linux 无需随 Windows 修正重复测试。使用预装编译器；缺 GIO 开发文件时仅在云端按现有 apt 索引补齐 `libglib2.0-dev`，预检官方 Ubuntu 下载源、下载不超过 32 MiB、额外磁盘不超过 128 MiB，不执行 apt update。Linux x64 的实际下载为 2872696 字节。没有 npm/SDK 安装或编译器下载。产物打成保留执行权限的 tar 包，远程保存一天；`.github/scripts/diagnose-isolation.mjs` 只公开固定数字错误，不公开环境或路径，不生成完整产品验收记录。
 
 现有远程仓库是公开的 `Chriss09-ui/NEUMA`。按[GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories)，公开仓库的标准测试机器免费。计算与 Node 下载发生在 GitHub 的机器上，本机不下载或启动 Windows/Linux 系统。
 
-运行前需用户批准上传代码及启动远程任务。具体方式是把源码改动放到独立分支，只给 main 新增手动流程文件，再手动选择源码分支运行。[GitHub 要求手动流程首先位于默认分支](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow#configuring-a-workflow-to-run-manually)。未上传配置或用户数据；本轮仅只读检查仓库元信息，尚未推送或启动任务。
+2026-10-09 用户已经批准上传源码及启动远程任务。源码放在独立分支，只给 main 新增及更新手动流程文件，再选择源码分支运行。[GitHub 要求手动流程首先位于默认分支](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow#configuring-a-workflow-to-run-manually)。未上传配置、依赖目录或用户数据，没有公开 npm 发布。
+
+Linux 四个目标在[第四轮云端任务](https://github.com/Chriss09-ui/NEUMA/actions/runs/37865332609)全部通过；x64 日志明确记录 39/39、0 失败、0 跳过及真实隔离探测通过。Ubuntu 24.04 编译的 x64/ARM64 隔离与项目辅助程序已经取回，分别位于 `native/isolation/bin/linux-*` 和 `native/projects/bin/linux-*`。Ubuntu 26.04 当前验证的是同源代码在各自系统构建的产物，尚未把 Ubuntu 24.04 的发行产物放到 26.04 做完整安装认证。
+
+Windows 两个平台已经能编译两个辅助程序，实际隔离启动仍在修正。[第六轮 Windows 任务](https://github.com/Chriss09-ui/NEUMA/actions/runs/37866798306)仍未通过；不能据此签发完整发布验收记录。
 
 Windows Server x64 测试不能代替 Windows 11 x64 认证，服务器 Ubuntu 不能代替真实桌面门户窗口验证。Mac 13/x64、桌面目录窗口、真实控制台 Ctrl+C、SDK 干净安装及完整产品测试仍需后续补齐；远程辅助程序测试成功也不会自动打开 npm 发布门槛。
