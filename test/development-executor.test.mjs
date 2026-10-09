@@ -9,7 +9,7 @@ import { DevelopmentExecutor } from "../development-executor.mjs";
 import { inspectDevelopmentCode } from "../development-workspace.mjs";
 
 async function fixture(t, source = "console.log(JSON.stringify({ok:true,values:[42]}));") {
-  const root = await mkdtemp(join(tmpdir(), "neuma-executor-test-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "neuma-executor-test-")));
   const codeDir = join(root, "code"); await mkdir(codeDir); await writeFile(join(codeDir, "main.mjs"), source);
   t.after(() => rm(root, { recursive: true, force: true }));
   const { hash, files, path } = await inspectDevelopmentCode(codeDir);

@@ -67,9 +67,9 @@ jobs:
             TASK_APT_PLAN="$RUNNER_TEMP/neuma-glib-apt-plan.txt"
             sudo env LC_ALL=C apt-get --assume-yes --no-install-recommends --print-uris install libglib2.0-dev > "$TASK_APT_PLAN"
             python3 - "$TASK_APT_PLAN" <<'PY'
-          import pathlib, re, shlex, sys
+          import os, pathlib, re, shlex, stat, sys
           from decimal import Decimal
-          from urllib.parse import urlsplit
+          from urllib.parse import unquote, urlsplit
 
           plan_path = pathlib.Path(sys.argv[1])
           if plan_path.stat().st_size > 1024 * 1024:
@@ -77,6 +77,11 @@ jobs:
           plan = plan_path.read_text(encoding="utf-8")
           download = 0
           packages = 0
+          mirror_list = "/etc/apt/apt-mirrors.txt"
+          mirrors_checked = False
+          def official_archive(uri):
+              official = uri.hostname in {"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"} or (uri.hostname or "").endswith(".archive.ubuntu.com")
+              return uri.scheme in {"http", "https"} and official and not (uri.username or uri.password or uri.query or uri.fragment)
           for line in plan.splitlines():
               line = line.strip()
               if not line.startswith("'"):
@@ -85,8 +90,25 @@ jobs:
               if len(fields) != 4 or not fields[2].isdigit():
                   raise SystemExit("APT package size could not be parsed.")
               uri = urlsplit(fields[0])
-              official = uri.hostname in {"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"} or (uri.hostname or "").endswith(".archive.ubuntu.com")
-              if uri.scheme not in {"http", "https"} or not official or uri.username or uri.password or uri.query or uri.fragment:
+              if uri.scheme == "mirror+file":
+                  if uri.netloc or uri.query or uri.fragment or not uri.path.startswith(mirror_list + "/pool/"):
+                      raise SystemExit("APT mirror URI must use the runner's fixed Ubuntu mirror list.")
+                  package_path = unquote(uri.path[len(mirror_list) + 1:])
+                  if not package_path.endswith(".deb") or "\\" in package_path or "\0" in package_path or any(part in {"", ".", ".."} for part in package_path.split("/")):
+                      raise SystemExit("APT mirror package path is invalid.")
+                  if not mirrors_checked:
+                      with os.fdopen(os.open(mirror_list, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+                          info = os.fstat(source.fileno())
+                          if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024:
+                              raise SystemExit("APT mirror list must be a regular file no larger than 64 KiB.")
+                          data = source.read(64 * 1024 + 1)
+                      if len(data) > 64 * 1024:
+                          raise SystemExit("APT mirror list exceeds 64 KiB.")
+                      mirrors = [entry.split()[0] for entry in data.decode("utf-8").splitlines() if entry.strip() and not entry.lstrip().startswith("#")]
+                      if not mirrors or any(not official_archive(urlsplit(value)) for value in mirrors):
+                          raise SystemExit("APT mirror list must contain only public official Ubuntu archives.")
+                      mirrors_checked = True
+              elif not official_archive(uri):
                   raise SystemExit("APT plan must use public official Ubuntu archives.")
               packages += 1
               download += int(fields[2])
