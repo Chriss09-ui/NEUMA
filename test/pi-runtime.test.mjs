@@ -4,8 +4,8 @@ import { createServer } from "node:http";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PiProjectAgent, createProjectTools, createProjectAnalyzer } from "../pi-runtime.mjs";
-import { ProjectManager } from "../projects.mjs";
+import { PiProjectAgent, createProjectTools, createProjectAnalyzer } from "../src/runtime/pi-runtime.mjs";
+import { ProjectManager } from "../src/projects/projects.mjs";
 
 test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-pi-test-"));

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createTechnicalResearch, RESEARCH_PARAMETERS } from "../architecture-research.mjs";
+import { createTechnicalResearch, RESEARCH_PARAMETERS } from "../src/architecture/architecture-research.mjs";
 
 const NOW = "2026-10-04T08:00:00.000Z";
 const now = () => new Date(NOW);

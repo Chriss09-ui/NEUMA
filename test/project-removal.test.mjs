@@ -4,8 +4,8 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { ProjectManager } from "../projects.mjs";
-import { createProjectTools } from "../pi-runtime.mjs";
+import { ProjectManager } from "../src/projects/projects.mjs";
+import { createProjectTools } from "../src/runtime/pi-runtime.mjs";
 
 async function lifecycleFixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "neuma-project-lifecycle-")));
@@ -118,7 +118,7 @@ test("停止脚本丢失不锁死删除：先保留记录，明确仅移除后�
 });
 
 test("助手停止失败后不能在同一轮跳过确认，下一轮仅移除保留真实运行提示", async (t) => {
-  const { InputError } = await import("../core.mjs");
+  const { InputError } = await import("../src/requirements/core.mjs");
   const turn = { actions: [] }, calls = [];
   const manager = { list: async () => [{ id: "fixture", name: "临时项目" }], remove: async (id, options) => {
     calls.push(options);

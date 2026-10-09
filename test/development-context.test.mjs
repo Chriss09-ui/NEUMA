@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { InputError } from "../core.mjs";
-import { compactDevelopmentContext, createContextReadTool } from "../development-context.mjs";
+import { InputError } from "../src/requirements/core.mjs";
+import { compactDevelopmentContext, createContextReadTool } from "../src/development/development-context.mjs";
 
 const call = async (tool, params, signal) => JSON.parse((await tool.execute("context-read", params, signal)).content[0].text);
 

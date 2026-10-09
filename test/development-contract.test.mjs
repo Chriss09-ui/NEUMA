@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { InputError } from "../core.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 import { PLAN_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, hashValue, safeRelativePath,
-  validatePlan, validateReview, validateWork } from "../development-contract.mjs";
+  validatePlan, validateReview, validateWork } from "../src/development/development-contract.mjs";
 
 function architecture() {
   return { requirements: [{ id: "goal", text: "提取记录" }, { id: "input", text: "处理空输入" }],

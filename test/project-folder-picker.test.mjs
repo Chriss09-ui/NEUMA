@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createProjectFolderPicker } from "../project-folder-picker.mjs";
-import { InputError } from "../core.mjs";
+import { createProjectFolderPicker } from "../src/projects/project-folder-picker.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 
 test("系统选择器返回完整文件夹路径，路径不拼接进命令且不继承模型凭据", async () => {
   let inspected;
@@ -42,9 +42,19 @@ test("打开期间拒绝重复请求，取消后释放选择器", async () => {
 
 test("不支持的平台和提前取消不会启动系统程序", async () => {
   const run = async () => assert.fail("不应启动选择器");
-  await assert.rejects(createProjectFolderPicker({ platform: "linux", run })(), /手动填写/);
+  await assert.rejects(createProjectFolderPicker({ platform: "freebsd", run })(), /手动填写/);
   const controller = new AbortController(); controller.abort();
   await assert.rejects(createProjectFolderPicker({ platform: "darwin", run })({ signal: controller.signal }), { name: "AbortError" });
+});
+
+test("Windows 与 Linux 使用预编译系统窗口辅助程序，安全解析结果并支持取消", async () => {
+  for (const [platform, path, name] of [["win32", "C:\\研究 项目", "研究 项目"], ["linux", "/home/user/研究 项目", "研究 项目"]]) {
+    const pick = createProjectFolderPicker({ platform, helper: async () => "/fixture/helper",
+      run: async (file, args, options) => { assert.equal(file, "/fixture/helper"); assert.deepEqual(args, ["pick-folder"]); assert.equal(options.shell, undefined); return { stdout: JSON.stringify({ cancelled: false, path }) }; },
+      inspect: async () => ({ isDirectory: () => true }) });
+    assert.deepEqual(await pick(), { cancelled: false, path, name });
+    assert.deepEqual(await createProjectFolderPicker({ platform, helper: async () => "/fixture/helper", run: async () => ({ stdout: '{"cancelled":true}' }), inspect: async () => assert.fail("取消不读取目录") })(), { cancelled: true });
+  }
 });
 
 test("不可用窗口和非法选取提供安全错误，不泄露系统输出", async () => {

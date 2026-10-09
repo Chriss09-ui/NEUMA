@@ -5,10 +5,10 @@ import { Readable } from "node:stream";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrototypeAgents } from "../agent-prototype.mjs";
-import { designHash } from "../architecture-contract.mjs";
-import { createRequestHandler } from "../server.mjs";
-import { InputError, ProviderError } from "../core.mjs";
+import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
+import { designHash } from "../src/architecture/architecture-contract.mjs";
+import { createRequestHandler } from "../src/server.mjs";
+import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 
 const input = (id = "weekly", goal = "整理周报") => ({ id, name: "周报助手", draft: validDraft(goal) });

@@ -3,11 +3,11 @@ import test from "node:test";
 import { chmod, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DevelopmentController } from "../development.mjs";
-import { DevelopmentStore } from "../development-store.mjs";
-import { DevelopmentWorkspace } from "../development-workspace.mjs";
-import { hashValue } from "../development-contract.mjs";
-import { InputError } from "../core.mjs";
+import { DevelopmentController } from "../src/development/development.mjs";
+import { DevelopmentStore } from "../src/development/development-store.mjs";
+import { DevelopmentWorkspace } from "../src/development/development-workspace.mjs";
+import { hashValue } from "../src/development/development-contract.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 import { developmentArchitecture, developmentPlan, developmentReview, developmentIssue, developmentWork } from "./helpers/development.mjs";
 
 const submissionNames = { planner: "submit_development_plan", developer: "submit_development_work", reviewer: "submit_development_review" };

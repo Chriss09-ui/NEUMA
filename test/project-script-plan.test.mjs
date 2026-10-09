@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createProjectReader, validateProjectPlan, validateScriptCommand } from "../project-inspection.mjs";
+import { createProjectReader, validateProjectPlan, validateScriptCommand } from "../src/projects/project-inspection.mjs";
 
 async function fixture(t) {
   const base = await realpath(await mkdtemp(join(tmpdir(), "nuema-script-plan-")));

@@ -142,6 +142,8 @@ jobs:
           Enter-VsDevShell -VsInstallPath $TaskVsInstall -SkipAutomaticLocation -Arch $env:TASK_ARCH
           & ./native/isolation/build-windows.ps1 -Architecture $env:TASK_ARCH
           & ./native/projects/build-windows.ps1 -Architecture $env:TASK_ARCH
+          & cl.exe /nologo /std:c++17 /W4 /WX /O2 /MT /EHsc /DUNICODE /D_UNICODE .github/scripts/windows-loader.cpp /Fe:.github/scripts/windows-loader.exe "/Fo:$env:RUNNER_TEMP/neuma-windows-loader.obj"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows loader diagnostic compilation failed.' }
       - name: Archive Linux helpers with executable modes
         if: runner.os == 'Linux'
         shell: bash
@@ -155,7 +157,7 @@ jobs:
       - name: Check installed helper capabilities
         if: ${{ !cancelled() }}
         run: node bin/neuma.cjs doctor
-      - name: Diagnose failed isolation with numeric codes only
+      - name: Diagnose failed isolation with bounded canary and DLL fields
         if: ${{ failure() && !cancelled() }}
         run: node .github/scripts/diagnose-isolation.mjs
       - name: Upload helper archive for inspection
