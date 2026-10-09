@@ -1,6 +1,16 @@
 name: Native helper checks (manual)
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Platforms to test
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - windows
 
 permissions:
   contents: read
@@ -18,26 +28,11 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-          - runner: ubuntu-26.04
-            platform: linux
-            arch: x64
-          - runner: ubuntu-26.04-arm
-            platform: linux
-            arch: arm64
-          # Windows Server 2025 is a build/test target, not Windows 11 x64 certification.
-          - runner: windows-2025
-            platform: win32
-            arch: x64
-          - runner: windows-11-arm
-            platform: win32
-            arch: arm64
+        # Windows Server 2025 is a build/test target, not Windows 11 x64 certification.
+        include: >-
+          ${{ fromJSON(inputs.target == 'windows' &&
+          '[{"runner":"windows-2025","platform":"win32","arch":"x64"},{"runner":"windows-11-arm","platform":"win32","arch":"arm64"}]' ||
+          '[{"runner":"ubuntu-24.04","platform":"linux","arch":"x64"},{"runner":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"runner":"ubuntu-26.04","platform":"linux","arch":"x64"},{"runner":"ubuntu-26.04-arm","platform":"linux","arch":"arm64"},{"runner":"windows-2025","platform":"win32","arch":"x64"},{"runner":"windows-11-arm","platform":"win32","arch":"arm64"}]') }}
     env:
       NEUMA_REQUIRE_ISOLATION: '1'
       NODE_OPTIONS: --max-old-space-size=256
@@ -60,9 +55,79 @@ jobs:
         shell: bash
         run: |
           command -v cc
-          command -v pkg-config
-          pkg-config --exists gio-2.0
           sh native/isolation/build-linux.sh
+          command -v pkg-config
+          if ! pkg-config --exists gio-2.0; then
+            command -v python3
+            TASK_APT_PLAN="$RUNNER_TEMP/neuma-glib-apt-plan.txt"
+            sudo env LC_ALL=C apt-get --assume-yes --no-install-recommends --print-uris install libglib2.0-dev > "$TASK_APT_PLAN"
+            python3 - "$TASK_APT_PLAN" <<'PY'
+          import os, pathlib, re, shlex, stat, sys
+          from decimal import Decimal
+          from urllib.parse import unquote, urlsplit
+
+          plan_path = pathlib.Path(sys.argv[1])
+          if plan_path.stat().st_size > 1024 * 1024:
+              raise SystemExit("APT plan exceeds the inspection limit.")
+          plan = plan_path.read_text(encoding="utf-8")
+          download = 0
+          packages = 0
+          mirror_list = "/etc/apt/apt-mirrors.txt"
+          mirrors_checked = False
+          def official_archive(uri):
+              official = uri.hostname in {"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"} or (uri.hostname or "").endswith(".archive.ubuntu.com")
+              return uri.scheme in {"http", "https"} and official and not (uri.username or uri.password or uri.query or uri.fragment)
+          for line in plan.splitlines():
+              line = line.strip()
+              if not line.startswith("'"):
+                  continue
+              fields = shlex.split(line)
+              if len(fields) != 4 or not fields[2].isdigit():
+                  raise SystemExit("APT package size could not be parsed.")
+              uri = urlsplit(fields[0])
+              if uri.scheme == "mirror+file":
+                  if uri.netloc or uri.query or uri.fragment or not uri.path.startswith(mirror_list + "/pool/"):
+                      raise SystemExit("APT mirror URI must use the runner's fixed Ubuntu mirror list.")
+                  package_path = unquote(uri.path[len(mirror_list) + 1:])
+                  if not package_path.endswith(".deb") or "\\" in package_path or "\0" in package_path or any(part in {"", ".", ".."} for part in package_path.split("/")):
+                      raise SystemExit("APT mirror package path is invalid.")
+                  if not mirrors_checked:
+                      with os.fdopen(os.open(mirror_list, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+                          info = os.fstat(source.fileno())
+                          if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024:
+                              raise SystemExit("APT mirror list must be a regular file no larger than 64 KiB.")
+                          data = source.read(64 * 1024 + 1)
+                      if len(data) > 64 * 1024:
+                          raise SystemExit("APT mirror list exceeds 64 KiB.")
+                      mirrors = [entry.split()[0] for entry in data.decode("utf-8").splitlines() if entry.strip() and not entry.lstrip().startswith("#")]
+                      if not mirrors or any(not official_archive(urlsplit(value)) for value in mirrors):
+                          raise SystemExit("APT mirror list must contain only public official Ubuntu archives.")
+                      mirrors_checked = True
+              elif not official_archive(uri):
+                  raise SystemExit("APT plan must use public official Ubuntu archives.")
+              packages += 1
+              download += int(fields[2])
+          if not packages or download > 32 * 1024 * 1024:
+              raise SystemExit("APT download plan is missing or exceeds 32 MiB.")
+          units = {"B": 1, "kB": 1000, "MB": 1000000, "GB": 1000000000, "KiB": 1024, "MiB": 1048576, "GiB": 1073741824}
+          unit_pattern = "|".join(sorted(units, key=len, reverse=True))
+          disk = re.findall(r"After this operation, ([0-9][0-9,]*(?:\.[0-9]+)?) (" + unit_pattern + r") of additional disk space will be used\.", plan)
+          if not disk:
+              disk = re.findall(r"^\s*Space needed: ([0-9][0-9,]*(?:\.[0-9]+)?) (" + unit_pattern + r")(?:\s*/|\s*$)", plan, re.MULTILINE)
+          if len(disk) != 1:
+              raise SystemExit("APT additional disk size could not be parsed.")
+          amount, unit = disk[0]
+          amount = amount.replace(",", "")
+          places = len(amount.split(".")[1]) if "." in amount else 0
+          # Reserve one displayed unit for rounding in apt's human-readable disk estimate.
+          disk_upper_bound = (Decimal(amount) + Decimal(10) ** -places) * units[unit]
+          if disk_upper_bound > 128 * 1024 * 1024:
+              raise SystemExit("APT additional disk plan exceeds 128 MiB.")
+          print(f"Dependency plan within limits: {download} download bytes, at most {disk_upper_bound} additional disk bytes.")
+          PY
+            sudo env LC_ALL=C apt-get --assume-yes --no-install-recommends install libglib2.0-dev
+          fi
+          pkg-config --exists gio-2.0
           sh native/projects/build-linux.sh
       - name: Build Windows helpers with preinstalled Visual Studio
         if: runner.os == 'Windows'
@@ -90,6 +155,9 @@ jobs:
       - name: Check installed helper capabilities
         if: ${{ !cancelled() }}
         run: node bin/neuma.cjs doctor
+      - name: Diagnose failed isolation with numeric codes only
+        if: ${{ failure() && !cancelled() }}
+        run: node .github/scripts/diagnose-isolation.mjs
       - name: Upload helper archive for inspection
         if: ${{ !cancelled() && hashFiles(env.TASK_ARCHIVE) != '' }}
         uses: actions/upload-artifact@v7
