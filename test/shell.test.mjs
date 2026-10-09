@@ -49,7 +49,7 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     return nodes.get(id);
   };
   const inputs = ["message", "project-message", "agent-message"].map(get);
-  const links = ["chat", "projects", "agents", "settings"].map((page) => {
+  const links = ["chat", "projects", "agents", "skills", "settings"].map((page) => {
     const link = get(`nav-${page}`); link.dataset.page = page; return link;
   });
   document.getElementById = get;
@@ -85,6 +85,23 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
   const navigate = (detail) => document.dispatchEvent(new Event("neuma:navigate", { detail }));
   return { get, document, window, location, media, pending, navigate, stored };
 }
+
+test("Skills 支持直接访问、导航焦点和折叠侧栏后的页面切换", () => {
+  const { get, navigate, location, window, document } = setup({ hash: "#skills", sidebarCollapsed: true });
+  assert.equal(get("page-skills").hidden, false);
+  assert.equal(get("nav-skills").getAttribute("aria-current"), "page");
+  assert.equal(get("app-shell").classes.has("sidebar-collapsed"), true);
+  navigate({ page: "chat" });
+  assert.equal(get("page-skills").hidden, true);
+  navigate({ page: "skills" });
+  assert.equal(location.hash, "#skills");
+  assert.equal(document.activeElement, get("skills-search"));
+  location.hash = "#settings"; window.dispatchEvent({ type: "popstate" });
+  assert.equal(get("page-skills").hidden, true);
+  assert.equal(get("nav-skills").getAttribute("aria-current"), null);
+  location.hash = "#skills"; window.dispatchEvent({ type: "hashchange" });
+  assert.equal(get("page-skills").hidden, false);
+});
 
 test("主导航折叠保留页面与草稿，隐藏控件归还焦点，露出智能体图标入口", () => {
   const { get, document, location, stored, navigate } = setup({ hash: "#projects/assistant" });

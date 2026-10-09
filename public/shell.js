@@ -1,4 +1,4 @@
-const PAGES = ["chat", "projects", "agents", "agent", "settings"];
+const PAGES = ["chat", "projects", "agents", "agent", "skills", "settings"];
 const route = { page: "chat", projectView: "assistant", agentId: null };
 const byId = (id) => document.getElementById(id);
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -98,6 +98,7 @@ function focusComposer() {
   if (route.page === "projects" && route.projectView === "assistant") byId("project-message").focus({ preventScroll: true });
   if (route.page === "projects" && route.projectView === "add") byId("project-path").focus({ preventScroll: true });
   if (route.page === "agent") byId("agent-message").focus({ preventScroll: true });
+  if (route.page === "skills") byId("skills-search").focus({ preventScroll: true });
 }
 
 function apply(focusInput = false) {
