@@ -28,14 +28,64 @@ test("端口扫描使用数字 TCP LISTEN 字段，保留进程目录但不读�
 });
 
 test("扫描失败或取消不会伪装成所有端口空闲，系统错误内容不泄漏", async () => {
-  const result = await scanLocalRuntime({ platform: "linux", run: (_file, _args, _options, done) => {
-    done(Object.assign(new Error("private-error"), { code: "ENOENT" }));
-  } });
+  const denied = async () => { throw Object.assign(new Error("private-error"), { code: "EACCES" }); };
+  const result = await scanLocalRuntime({ platform: "linux", procFs: { readFile: denied, readdir: denied, readlink: denied } });
   assert.equal(result.complete, false);
   assert.ok(result.warnings.length);
   assert.equal(JSON.stringify(result).includes("private-error"), false);
   const controller = new AbortController(); controller.abort();
   await assert.rejects(scanLocalRuntime({ signal: controller.signal }), { name: "AbortError" });
+});
+
+test("Linux 只从 proc status、cwd、exe、fd 和监听表读取事实，不依赖 lsof", async () => {
+  const reads = [];
+  const result = await scanLocalRuntime({ platform: "linux", procRoot: "/fixture-proc", run: () => assert.fail("不应启动系统命令"), procFs: {
+    readFile: async (path) => {
+      reads.push(path);
+      if (path.endsWith("/net/tcp")) return "header\n 0: 0100007F:0FA0 00000000:0000 0A 0:0 00:0 00000000 1000 0 404\n";
+      if (path.endsWith("/net/tcp6")) return "header\n";
+      if (path.endsWith("/101/status")) return "Name:\tnode\nPPid:\t1\n";
+      assert.fail(`不允许读取 ${path}`);
+    },
+    readdir: async (path) => path === "/fixture-proc" ? ["101", "net"] : ["7"],
+    readlink: async (path) => { reads.push(path); return path.endsWith("/cwd") ? "/apps/demo" : path.endsWith("/exe") ? "/usr/bin/node" : "socket:[404]"; },
+  } });
+  assert.equal(result.complete, true); assert.deepEqual(result.ports, [{ address: "127.0.0.1", port: 4000, pid: 101, protocol: "TCP", processName: "node", cwd: "/apps/demo" }]);
+  assert.equal(reads.some((path) => /cmdline|environ/.test(path)), false);
+});
+
+test("Windows 的外部全局 Node 无目录证据时保留未知，项目内 exe 可以关联", async () => {
+  const scanned = await scanLocalRuntime({ platform: "win32", helperPath: process.execPath, run: (_file, args, _options, done) => {
+    assert.deepEqual(args, ["scan"]);
+    done(null, JSON.stringify({ complete: true, processes: [{ pid: 41, ppid: 1, name: "node.exe", exe: "C:\\Node\\node.exe" },
+      { pid: 52, ppid: 1, name: "worker.exe", exe: "C:\\Projects\\worker\\worker.exe" }], ports: [{ pid: 52, port: 4500, address: "127.0.0.1" }] }));
+  } });
+  const result = projectRuntimeSnapshot([project("node", "C:\\Projects\\node"), project("worker", "C:\\Projects\\worker")], new Map(), scanned);
+  assert.equal(result.projects[0].runtime.state, "unknown"); assert.equal(result.projects[1].runtime.state, "running");
+  assert.deepEqual(result.projects[1].runtime.ports, [4500]);
+});
+
+test("Linux 达到查询上限返回已有事实并保留未知，取消不会发布成功快照", async () => {
+  const procFs = {
+    readFile: async (path) => path.includes("/net/") ? "header\n" : "Name:\tnode\nPPid:\t1\n",
+    readdir: async () => ["101", "102"],
+    readlink: async () => "/apps/demo",
+  };
+  const result = await scanLocalRuntime({ platform: "linux", procFs, procLimits: { maxProcesses: 1 } });
+  assert.equal(result.processes.length, 1); assert.equal(result.complete, false); assert.match(result.warnings.join(""), /资源上限/);
+  const controller = new AbortController();
+  await assert.rejects(scanLocalRuntime({ platform: "linux", signal: controller.signal, procFs: { ...procFs,
+    readdir: async () => { controller.abort(); return []; },
+  } }), { name: "AbortError" });
+});
+
+test("Windows 后台脚本使用 Job 成员关联端口，不能通过无关父 PID 推断归属", () => {
+  const launcher = { pid: 60, exitCode: null, signalCode: null, jobManaged: true, managedPids: [61] };
+  const runs = new Map([["managed", { status: "running", background: true, ownsService: true, launcher }]]);
+  const result = projectRuntimeSnapshot([project("managed", "C:\\Projects\\managed")], runs, snapshot({
+    processes: [{ pid: 61, name: "node.exe" }, { pid: 62, ppid: 60, name: "node.exe" }], ports: [port(61, 4001), port(62, 4002)],
+  }));
+  assert.deepEqual(result.projects[0].runtime.ports, [4001]); assert.deepEqual(result.ports[1].projects, []);
 });
 
 test("进程目录与运行环境识别外部启动，终端和同端口的其他项目不误报", () => {

@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputError, ProviderError, processTurn } from "./core.mjs";
@@ -9,6 +9,7 @@ import { createProjectFolderPicker } from "./project-folder-picker.mjs";
 import { PiProjectAgent, createProjectAnalyzer } from "./pi-runtime.mjs";
 import { PrototypeAgents } from "./agent-prototype.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
+import { APP_VERSION } from "./app-metadata.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = new Map([
@@ -43,11 +44,11 @@ function safeFailure(error, config) {
     ...(error instanceof InputError && error.code === "PROJECT_REMOVE_STOP_FAILED" ? { code: error.code } : {}) } };
 }
 
-async function streamProjectReply(response, agent, body, config) {
+async function streamProjectReply(response, agent, body, config, signal) {
   response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
   response.flushHeaders?.();
   const write = (event) => {
-    if (!response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+    if (!signal?.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
   };
   const disconnected = () => {
     if (!response.writableEnded) void agent.cancel(body.sessionId).catch(() => {});
@@ -55,7 +56,8 @@ async function streamProjectReply(response, agent, body, config) {
   response.on("close", disconnected);
   try {
     if (response.destroyed) return;
-    const result = await agent.prompt(body, write);
+    signal?.throwIfAborted();
+    const result = await agent.prompt(body, write, { signal });
     write({ type: "done", result });
   } catch (error) {
     write({ type: "error", ...safeFailure(error, config).payload });
@@ -65,8 +67,9 @@ async function streamProjectReply(response, agent, body, config) {
   }
 }
 
-async function streamProjectSetup(response, action, config) {
+async function streamProjectSetup(response, action, config, externalSignal) {
   const controller = new AbortController();
+  const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const disconnected = () => { if (!response.writableEnded) controller.abort(); };
   response.on("close", disconnected);
   response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
@@ -76,8 +79,9 @@ async function streamProjectSetup(response, action, config) {
   };
   try {
     if (response.destroyed) return;
+    signal.throwIfAborted();
     write({ type: "status", label: "正在添加并检查项目…" });
-    const project = await action({ signal: controller.signal, onProgress: write });
+    const project = await action({ signal, onProgress: write });
     write({ type: "done", result: { project } });
   } catch (error) { write({ type: "error", ...safeFailure(error, config).payload }); }
   finally { response.removeListener("close", disconnected); response.end(); }
@@ -89,26 +93,28 @@ function requirementReply(result) {
   return `${result.summary}\n\n${result.question}`;
 }
 
-async function buildAgentReply(request, response, agents, body, config, forceStreaming = false) {
+async function buildAgentReply(request, response, agents, body, config, forceStreaming = false, externalSignal) {
   const controller = new AbortController();
+  const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const streaming = forceStreaming || request.headers.accept?.includes("application/x-ndjson");
   const disconnected = () => { if (!response.writableEnded) controller.abort(); };
   response.on?.("close", disconnected);
   const write = (event) => {
-    if (!controller.signal.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+    if (!signal.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
   };
   try {
+    signal.throwIfAborted();
     if (streaming) {
       response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
       response.flushHeaders?.();
     }
-    const result = await agents.build(body, { signal: controller.signal, onProgress: streaming ? write : () => {} });
-    if (!controller.signal.aborted && !response.destroyed) {
+    const result = await agents.build(body, { signal, onProgress: streaming ? write : () => {} });
+    if (!signal.aborted && !response.destroyed) {
       if (streaming) write({ type: "done", result });
       else sendJson(response, 200, result);
     }
   } catch (error) {
-    if (!controller.signal.aborted && !response.destroyed) {
+    if (!signal.aborted && !response.destroyed) {
       const failure = safeFailure(error, config);
       if (streaming) write({ type: "error", ...failure.payload });
       else sendJson(response, failure.status, failure.payload);
@@ -119,9 +125,9 @@ async function buildAgentReply(request, response, agents, body, config, forceStr
   }
 }
 
-async function streamRequirementReply(response, providers, body, config) {
+async function streamRequirementReply(response, providers, body, config, externalSignal) {
   const controller = new AbortController();
-  const { signal } = controller;
+  const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const disconnected = () => {
     if (!response.writableEnded) controller.abort();
   };
@@ -198,13 +204,22 @@ async function readJson(request, maxBytes = 128_000) {
 
 export function createRequestHandler({ config = getProviderConfig(), providers: injectedProviders,
   dataDir = resolve(ROOT, ".neuma"), envPath = resolve(ROOT, ".env"),
+  port = Number(process.env.PORT || 3000), instanceId = null,
   pickProjectFolder = createProjectFolderPicker(),
-  projects = new ProjectManager({ dataDir, blockedPort: Number(process.env.PORT || 3000),
+  projects = new ProjectManager({ dataDir, blockedPort: port,
     analyzeProject: createProjectAnalyzer({ config, dataDir }) }),
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
   prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }) } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
   let settingsQueue = Promise.resolve();
+  let state = "starting";
+  const activeRequests = new Map();
+  const beginRequest = () => {
+    const controller = new AbortController();
+    let settled;
+    activeRequests.set(controller, new Promise((done) => { settled = done; }));
+    return { controller, release: () => { activeRequests.delete(controller); settled(); } };
+  };
   const saveSettings = (updates) => {
     const result = settingsQueue.then(async () => {
       try { await writeEnvFile(envPath, updates); }
@@ -220,6 +235,12 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     return result;
   };
   const handler = async (request, response) => {
+    if (["stopping", "stopped"].includes(state)) return sendJson(response, 503, { ok: false, state, version: APP_VERSION, instanceId });
+    const { controller: requestController, release: releaseRequest } = beginRequest();
+    const stopRequest = () => { request.destroy?.(); response.destroy?.(); };
+    const requestDisconnected = () => { if (!response.writableEnded) requestController.abort(); };
+    requestController.signal.addEventListener("abort", stopRequest, { once: true });
+    response.on?.("close", requestDisconnected);
     try {
       let address;
       try { address = new URL(request.url ?? "/", "http://localhost"); }
@@ -234,8 +255,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         }
       }
       if (request.method === "GET" && path === "/api/health") {
-        return sendJson(response, 200, {
-          ok: true,
+        return sendJson(response, state === "ready" ? 200 : 503, {
+          ok: state === "ready", version: APP_VERSION, state, instanceId,
           llmConfigured: config.llmConfigured,
           jevConfigured: config.jevConfigured,
           jevModel: config.jevModel,
@@ -243,6 +264,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
           pi: { engine: "pi", configured: config.llmConfigured },
         });
       }
+      await handler.ready;
       if (request.method === "GET" && path === "/api/settings") {
         return sendJson(response, 200, settingsView(config));
       }
@@ -260,12 +282,14 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (agentConversation && request.method === "POST")
         return sendJson(response, 200, await prototypeAgents.saveConversation(agentConversation[1], await readJson(request, 20_000_000)));
       if (request.method === "POST" && path === "/api/agents/build") {
-        return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config);
+        return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config, false, requestController.signal);
       }
       if (request.method === "POST" && path === "/api/agents/turn") {
         const body = await readJson(request);
-        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, prototypeAgents, body, config);
-        return sendJson(response, 200, await prototypeAgents.prompt(body));
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, prototypeAgents, body, config, requestController.signal);
+        const result = await prototypeAgents.prompt(body, undefined, { signal: requestController.signal });
+        if (!requestController.signal.aborted) return sendJson(response, 200, result);
+        return;
       }
       if (request.method === "POST" && path === "/api/agents/cancel") {
         return sendJson(response, 200, await prototypeAgents.cancel((await readJson(request)).sessionId));
@@ -281,7 +305,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
             throw new InputError("研发请求只接受布尔类型的 resume 参数");
           if (action === "cancel") return sendJson(response, 200, await prototypeAgents.cancelDevelopment(id));
           return await buildAgentReply(request, response, { build: (_body, options) => prototypeAgents.develop(id, { resume: body.resume ?? false, ...options }) },
-            body, config, action === "stream");
+            body, config, action === "stream", requestController.signal);
         }
       }
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
@@ -309,7 +333,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         return sendJson(response, 200, { failures: await projects.failures({ limit: 10 }) });
       }
       if (request.method === "GET" && path === "/api/projects/runtime") {
-        const controller = new AbortController();
+        const { controller, release } = beginRequest();
         const disconnected = () => { if (!response.writableEnded) controller.abort(); };
         response.on("close", disconnected);
         try {
@@ -318,12 +342,12 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
           if (!controller.signal.aborted) sendJson(response, 200, snapshot);
         } catch (error) {
           if (!controller.signal.aborted) throw error;
-        } finally { response.removeListener("close", disconnected); }
+        } finally { response.removeListener("close", disconnected); release(); }
         return;
       }
       if (request.method === "POST" && path === "/api/projects/pick-folder") {
         await readJson(request);
-        const controller = new AbortController();
+        const { controller, release } = beginRequest();
         const disconnected = () => { if (!response.writableEnded) controller.abort(); };
         response.on("close", disconnected);
         try {
@@ -334,13 +358,16 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
           if (!controller.signal.aborted) throw error;
         } finally {
           response.removeListener("close", disconnected);
+          release();
         }
         return;
       }
       if (request.method === "POST" && path === "/api/projects/turn") {
         const body = await readJson(request);
-        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, projectAgent, body, config);
-        return sendJson(response, 200, await projectAgent.prompt(body));
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, projectAgent, body, config, requestController.signal);
+        const result = await projectAgent.prompt(body, undefined, { signal: requestController.signal });
+        if (!requestController.signal.aborted) return sendJson(response, 200, result);
+        return;
       }
       if (request.method === "POST" && path === "/api/projects/cancel") {
         const body = await readJson(request);
@@ -348,24 +375,32 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       if (request.method === "POST" && path === "/api/projects") {
         const body = await readJson(request);
-        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.add(body, options), config);
-        return sendJson(response, 200, { project: await projects.add(body) });
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.add(body, options), config, requestController.signal);
+        return sendJson(response, 200, { project: await projects.add(body, { signal: requestController.signal }) });
       }
       const operation = path.match(/^\/api\/projects\/([\w-]+)\/(configure|inspect|start|stop|remove)$/);
       if (request.method === "POST" && operation) {
         const body = await readJson(request), [, id, action] = operation;
         if (action === "remove" && body.confirm !== true) throw new InputError("请确认移除项目记录");
-        if (action === "inspect" && request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.inspect(id, options), config);
+        if (action === "inspect" && request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.inspect(id, options), config, requestController.signal);
         const project = action === "configure" ? await projects.configure(id, body)
-          : action === "remove" ? await projects.remove(id, { removeOnly: body.removeOnly ?? false }) : await projects[action](id);
+          : action === "remove" ? await projects.remove(id, { removeOnly: body.removeOnly ?? false }) : await projects[action](id, action === "inspect" ? { signal: requestController.signal } : undefined);
         return sendJson(response, 200, { project });
       }
       if (request.method === "POST" && path === "/api/requirements/turn") {
         const body = await readJson(request);
-        if (request.headers.accept?.includes("application/x-ndjson")) return await streamRequirementReply(response, providers, body, config);
-        const result = await processTurn(body, providers);
-        return sendJson(response, 200, { ...result,
-          diagnostic: { ...result.diagnostic, providerModel: config.model || null } });
+        const { controller, release } = beginRequest();
+        const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+        response.on?.("close", disconnected);
+        try {
+          if (request.headers.accept?.includes("application/x-ndjson"))
+            return await streamRequirementReply(response, providers, body, config, controller.signal);
+          const result = await processTurn(body, providers, { signal: controller.signal });
+          if (!controller.signal.aborted) return sendJson(response, 200, { ...result,
+            diagnostic: { ...result.diagnostic, providerModel: config.model || null } });
+        } catch (error) { if (!controller.signal.aborted) throw error; }
+        finally { response.removeListener?.("close", disconnected); release(); }
+        return;
       }
       const asset = request.method === "GET" ? PUBLIC.get(path) : null;
       if (asset) {
@@ -376,31 +411,54 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       return sendJson(response, 404, { error: "页面不存在" });
     } catch (error) {
+      if (requestController.signal.aborted || response.destroyed) return;
       const { status, payload } = safeFailure(error, config);
       return sendJson(response, status, payload);
+    } finally {
+      response.removeListener?.("close", requestDisconnected);
+      requestController.signal.removeEventListener("abort", stopRequest);
+      releaseRequest();
     }
   };
-  handler.dispose = async () => { await prototypeAgents.close(); await projectAgent.dispose(); await projects.dispose(); };
+  const initialization = [prototypeAgents.ready, prototypeAgents.storage?.ready,
+    prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready];
+  if (projects.load) initialization.push(projects.load());
+  if (initialization.every((item) => item === undefined)) state = "ready";
+  handler.ready = Promise.all(initialization).then(() => { if (state === "starting") state = "ready"; });
+  handler.ready.catch(() => { if (state === "starting") state = "failed"; });
+  let disposal;
+  handler.dispose = () => {
+    disposal ??= (async () => {
+      state = "stopping";
+      for (const controller of activeRequests.keys()) controller.abort();
+      await handler.ready.catch(() => {});
+      const failures = [];
+      const cancelled = [() => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.()]
+        .map((close) => { try { return close(); } catch (error) { return Promise.reject(error); } });
+      for (const result of await Promise.allSettled(cancelled)) if (result.status === "rejected") failures.push(result.reason);
+      for (const close of [() => settingsQueue, () => prototypeAgents.persistence,
+        () => prototypeAgents.architecture?.persistence, () => prototypeAgents.development?.store?.persistence,
+        () => Promise.allSettled([...activeRequests.values()])]) {
+        try { await close(); } catch (error) { failures.push(error); }
+      }
+      state = "stopped";
+      if (failures.length) throw new AggregateError(failures, "关闭 NEUMA 时未能完成全部清理");
+    })();
+    return disposal;
+  };
   return handler;
 }
 
 export function createApp(options = {}) {
   const handler = createRequestHandler(options);
   const server = createServer(handler);
-  server.on("close", () => { void handler.dispose(); });
+  server.on("close", () => { void handler.dispose().catch(() => {}); });
+  server.ready = handler.ready;
   server.dispose = handler.dispose;
   return server;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 3000);
-  const config = getProviderConfig();
-  const server = createApp({ config });
-  server.listen(port, "127.0.0.1", () => {
-    process.stdout.write(`NUEMA Agent 运行测试版：http://127.0.0.1:${port}\n`);
-    process.stdout.write(`兼容模型：${config.llmConfigured ? "已配置" : "未配置"}；Jev：${config.jevConfigured ? "已配置" : "未配置"}\n`);
-  });
-  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {
-    await server.dispose(); server.close();
-  });
+if (process.argv[1] && await realpath(resolve(process.argv[1])).catch(() => null) === fileURLToPath(import.meta.url)) {
+  const { runSourceApplication } = await import("./installation-runtime.mjs");
+  await runSourceApplication({ root: ROOT, createHandler: createRequestHandler });
 }

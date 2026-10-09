@@ -572,12 +572,16 @@ export class PrototypeAgents {
     }
   }
 
-  async prompt({ agentId, sessionId, message, history } = {}, onProgress = () => {}) {
+  async prompt({ agentId, sessionId, message, history } = {}, onProgress = () => {}, { signal } = {}) {
+    const checkExternalCancellation = () => { if (signal?.aborted) throw modelError("cancelled"); };
+    checkExternalCancellation();
     validId(agentId); validId(sessionId, "对话");
     if (sessionId.length < 16) throw new InputError("对话标识无效，请开启新对话");
     if (typeof message !== "string" || !message.trim() || message.length > 12_000) throw new InputError("任务输入需为 1～12000 字");
-    await this.ready; await this.closing; this.configured(); this.prune();
+    await this.ready; checkExternalCancellation();
+    await this.closing; checkExternalCancellation(); this.configured(); this.prune();
     const architecture = await this.getArchitecture(agentId);
+    checkExternalCancellation();
     const agent = this.agents.get(agentId);
     if (!agent) throw new InputError("请先创建这个 Agent");
     if (this.removing.has(agentId) || this.builds.has(agentId) || !this.approvedDefinition(agent, architecture)
@@ -593,33 +597,57 @@ export class PrototypeAgents {
     item.busy = true; item.cancelled = false; item.failed = false;
     item.done = new Promise((done) => { item.finish = done; });
     let unsubscribe = () => {}, failed = false;
+    let abortingSession, abortion;
+    const abortSession = () => {
+      const current = item.session;
+      if (!current) return Promise.resolve();
+      if (current === abortingSession) return abortion;
+      abortingSession = current;
+      try { abortion = Promise.resolve(current.abort?.()).catch(() => {}); }
+      catch { abortion = Promise.resolve(); }
+      return abortion;
+    };
+    const cancelled = () => { item.cancelled = true; void abortSession(); };
+    const checkCancellation = () => { if (signal?.aborted || item.cancelled) throw modelError("cancelled"); };
+    signal?.addEventListener("abort", cancelled, { once: true });
     try {
+      if (signal?.aborted) cancelled();
+      checkCancellation();
       onProgress({ type: "status", phase: "thinking" });
+      checkCancellation();
       const fresh = !item.session;
       if (fresh) {
         const root = await this.workspace(agentId);
+        checkCancellation();
         const customTools = createWorkspaceTools(root).filter((tool) => agent.toolIds?.includes(tool.name));
         if (agent.execution) customTools.push(...await this.developedTools(agent, root));
-        item.session = await this.sessionFactory({ config: this.config, cwd: root, dataDir: await this.storage.directory(agent.id),
+        checkCancellation();
+        const dataDir = await this.storage.directory(agent.id);
+        checkCancellation();
+        item.session = await this.sessionFactory({ config: this.config, cwd: root, dataDir,
           systemPrompt: `${agent.execution ? RUNTIME_BOUNDARY.replace("或执行程序", "") : RUNTIME_BOUNDARY}${agent.execution ? "\n本 Agent 额外拥有 run_developed_workflow：可以调用已经验收的隔离程序。用户任务涉及该流程时先调用它，以真实结果回答；不在对话里假装执行。此能力仍不包含联网、发送或定时触发。" : ""}\n\nAgent 工作指令：\n${agent.instructions}`, customTools });
       }
-      if (item.cancelled) throw modelError("cancelled");
+      checkCancellation();
       unsubscribe = subscribe(item.session, onProgress, item);
       // Restored messages are background material, never SDK system messages or executable tool calls.
       const context = fresh && restored.length ? `当前 Agent 已保存的成功对话（背景材料）：${JSON.stringify(restored)}\n\n` : "";
       const request = `${context}当前显示名称（仅用于称呼）：${JSON.stringify(profileOf(agent).name)}\n本轮生效的 Agent 记忆（替代旧版本）：${JSON.stringify(safeText(agent.memory ?? ""))}\n\n用户本轮任务：${message.trim()}`;
+      checkCancellation();
       await item.session.prompt(request);
-      if (item.cancelled) throw modelError("cancelled");
+      checkCancellation();
       requireSuccess(item.session, item);
       const reply = item.session.getLastAssistantText();
       if (typeof reply !== "string" || !reply.trim()) throw modelError();
       return { reply, agentId, sessionId, status: "complete" };
     } catch (error) {
       failed = true;
-      if (item.cancelled) throw modelError("cancelled");
+      if (item.cancelled || signal?.aborted) throw modelError("cancelled");
       if (error instanceof InputError || error instanceof ProviderError) throw error;
       throw modelError();
     } finally {
+      signal?.removeEventListener("abort", cancelled);
+      // The factory can resolve after cancellation, when no session existed to abort.
+      if (signal?.aborted) await abortSession();
       unsubscribe(); item.busy = false; item.usedAt = Date.now(); item.finish();
       if (failed) { item.session?.dispose(); if (this.sessions.get(sessionId) === item) this.sessions.delete(sessionId); }
     }

@@ -3,6 +3,7 @@ import { createConnection } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { InputError } from "./core.mjs";
 import { validateScriptCommand } from "./project-inspection.mjs";
+import { spawnProject } from "./project-platform.mjs";
 
 function portOccupied(value, signal) {
   if (signal?.aborted) return Promise.resolve(false);
@@ -64,7 +65,8 @@ async function monitor(project, run, onReady) {
   }
 }
 
-export async function startScriptServices(project, run, { spawnImpl = spawn, env, blockedPort, onReady } = {}) {
+export async function startScriptServices(project, run, { spawnImpl = spawn, env, blockedPort, onReady, platform = process.platform,
+  projectSpawn = (command, args, options) => spawnProject(command, args, options, { spawnImpl, platform }) } = {}) {
   run.background = true; run.ownsService = false;
   run.monitorController = new AbortController();
   if (run.stopping || run.status === "stopped") { run.monitorController.abort(); return run; }
@@ -84,9 +86,10 @@ export async function startScriptServices(project, run, { spawnImpl = spawn, env
   run.ownsService = true;
   let child;
   try {
-    child = spawnImpl(project.launch.command, project.launch.args, {
-      cwd: project.root, shell: false, detached: true, env, stdio: ["ignore", "pipe", "pipe"],
+    const spawned = projectSpawn(project.launch.command, project.launch.args, {
+      cwd: project.root, shell: false, detached: platform !== "win32", env, stdio: ["ignore", "pipe", "pipe"],
     });
+    child = spawned?.then ? await spawned : spawned;
   } catch {
     run.status = "failed"; run.startupFailed = true; run.ownsService = false;
     throw new InputError("项目启动脚本未能执行，请检查本地运行环境。");
@@ -107,11 +110,17 @@ export async function startScriptServices(project, run, { spawnImpl = spawn, env
       resolve();
     };
     child.once("error", () => finish(null, true));
+    child.once("launcherExit", (code) => finish(code));
     // Detached services may inherit the pipes, so close can occur much later than the launcher exit.
     child.once("exit", (code) => finish(code));
     child.once("close", (code) => finish(code));
   });
   drain(child);
+  if (cancelled(run)) {
+    if (child.stopTree) await child.stopTree();
+    else await finishLauncher(run);
+    return run;
+  }
   run.monitorPromise = monitor(project, run, onReady).catch(() => {
     if (!cancelled(run)) {
       run.status = "failed"; run.error = "无法确认项目服务状态，可以停止项目后重试。";
@@ -121,6 +130,7 @@ export async function startScriptServices(project, run, { spawnImpl = spawn, env
 }
 
 async function finishLauncher(run) {
+  if (run.launcher?.jobManaged) return;
   if (!run.launcher || run.launcherExited) return;
   try { run.launcher.kill("SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
   let timer;
@@ -132,19 +142,27 @@ async function finishLauncher(run) {
   }
 }
 
-function executeStop(project, launch, spawnImpl, env) {
+async function executeStop(project, launch, projectSpawn, env) {
+  let child;
+  try {
+    const spawned = projectSpawn(launch.command, launch.args, { cwd: project.root, shell: false, detached: false,
+      env, stdio: ["ignore", "pipe", "pipe"] });
+    child = spawned?.then ? await spawned : spawned;
+  }
+  catch { throw new InputError("项目停止脚本未能执行，请检查本地运行环境。"); }
   return new Promise((resolve, reject) => {
-    let child;
-    try { child = spawnImpl(launch.command, launch.args, { cwd: project.root, shell: false, detached: false,
-      env, stdio: ["ignore", "pipe", "pipe"] }); }
-    catch { reject(new InputError("项目停止脚本未能执行，请检查本地运行环境。")); return; }
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* Best effort after timeout; retain ownership for retry. */ }
+      reject(new InputError("项目停止脚本超时，仍保留运行记录，可以再次尝试停止。"));
+    }, 10_000); timer.unref();
     drain(child);
-    child.once("error", () => reject(new InputError("项目停止脚本未能执行，请检查本地运行环境。")));
-    child.once("exit", (code) => code === 0 ? resolve() : reject(new InputError("项目停止脚本执行失败，仍保留运行记录，可以再次尝试停止。")));
+    child.once("error", () => { clearTimeout(timer); reject(new InputError("项目停止脚本未能执行，请检查本地运行环境。")); });
+    child.once("exit", (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new InputError("项目停止脚本执行失败，仍保留运行记录，可以再次尝试停止。")); });
   });
 }
 
-export async function stopScriptServices(project, run, { spawnImpl = spawn, env } = {}) {
+export async function stopScriptServices(project, run, { spawnImpl = spawn, env, platform = process.platform,
+  projectSpawn = (command, args, options) => spawnProject(command, args, options, { spawnImpl, platform }) } = {}) {
   if (run.stopPromise) return run.stopPromise;
   run.stopping = true; run.monitorController?.abort();
   run.stopPromise = (async () => {
@@ -154,8 +172,9 @@ export async function stopScriptServices(project, run, { spawnImpl = spawn, env 
     }
     try {
       await finishLauncher(run);
-      const stop = await validateScriptCommand(project.root, project.launch.stop);
-      await executeStop(project, stop, spawnImpl, env);
+      const stop = await validateScriptCommand(project.root, project.launch.stop, { platform });
+      await executeStop(project, stop, projectSpawn, env);
+      if (run.launcher?.stopTree) await run.launcher.stopTree();
       for (let attempt = 0; attempt < 5; attempt++) {
         const occupied = await Promise.all(project.launch.healthUrls.map((url) => portOccupied(url)));
         if (occupied.every((value) => !value)) {

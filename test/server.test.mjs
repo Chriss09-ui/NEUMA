@@ -93,6 +93,22 @@ class StreamingResponse extends EventEmitter {
   end(content = "") { this.text += content; this.writableEnded = true; }
 }
 
+test("服务关闭会取消非流式需求请求并等待其结束", async () => {
+  let entered, seen;
+  const started = new Promise((done) => { entered = done; });
+  const handler = createRequestHandler({ config: {}, providers: {
+    generateDraft: async ({ signal }) => {
+      seen = signal; entered();
+      await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+      signal.throwIfAborted();
+    }, judgeJev: null,
+  } });
+  const response = new StreamingResponse();
+  const pending = handler(request("POST", "/api/requirements/turn", { message: "整理会议纪要" }), response);
+  await started; await handler.dispose(); await pending;
+  assert.equal(seen.aborted, true); assert.equal(response.text, "");
+});
+
 test("运行概览只读返回快照，拒绝跨站访问并提供界面资源", async () => {
   let calls = 0;
   const snapshot = { checkedAt: "2026-10-04T00:00:00.000Z", projects: [], ports: [], summary: { total: 0 }, warnings: [] };
