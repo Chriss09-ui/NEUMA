@@ -96,7 +96,7 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 计划绑定全部需求与架构验收 ID，冻结用例输入及具体值断言。程序执行用例后，评审只读对应代码快照和证据；程序失败、未执行或异常不能被模型改成通过。每个任务验收包含已有功能回归，最后执行整体验收。持久状态架构按冻结用例顺序复用本次验收的临时目录，每次验收重新开始，绝不借用真实用户目录。
 
-执行器保留经实际探测的 macOS sandbox-exec；2026-10-08 增加 Windows LPAC/Job Object、Linux Landlock/seccomp 辅助程序源码与平台分派。Windows/Linux 辅助程序尚未构建并实机验收，缺文件、缺系统能力或探测失败时明确阻塞，不能视为三平台验证完成。支持 Node 内置模块、单个 JSON 输出；任务经 stdin 固定启动层恢复到 process.argv[2]，不自动安装依赖或执行任意 Shell。用户运行目录仅在架构需要文件或持久状态时挂入；只读能力不授予写权限，隐藏/凭据文件和链接会阻断挂载。
+执行器保留经实际探测的 macOS sandbox-exec；2026-10-08 增加 Windows LPAC/Job Object、Linux Landlock/seccomp 辅助程序源码与平台分派。2026-10-09，Linux 在 Ubuntu 24.04/26.04、x64/ARM64 的云端原生检查通过；Windows 已编译，真实隔离启动仍在验证。缺文件、缺系统能力或探测失败时明确阻塞；原生检查不代表三平台完整安装与桌面验收完成。支持 Node 内置模块、单个 JSON 输出；任务经 stdin 固定启动层恢复到 process.argv[2]，不自动安装依赖或执行任意 Shell。用户运行目录仅在架构需要文件或持久状态时挂入；只读能力不授予写权限，隐藏/凭据文件和链接会阻断挂载。
 
 每个 Agent 的 `.neuma/agents/<id>/development/records/` 保存研发记录，`development/workspaces/` 保存每轮代码工作区，`development/snapshots/` 保存内容摘要命名的只读快照。快照显式绑定 Agent ID，即使内容摘要相同也分别保存并校验所属。任务、预算、代码和证据引用由控制器原子发布；扣减修复预算与调度修复在同一检查点完成。启动时 running 变为 interrupted，继续时核对实际代码，尝试次数与预算保留。删除 Agent 清理研发元数据但保留文件。
 
@@ -153,4 +153,4 @@ CLI 默认数据根为用户主目录 `.neuma`，模型配置保存在该目录 
 
 Windows 项目生命周期通过 `native/projects` Job Object 与控制管道管理已创建的树；Linux 进程扫描只读有限 `/proc` 信息。文件夹窗口、解释器与桌面启动集中在平台模块，已有项目仍使用用户明确授予的本机启动权限。生成程序独立使用 `native/isolation`：LPAC/Job 或 Landlock/seccomp，不复用项目管理操作；任何缺能力均阻塞，三平台运行规则通过实际隔离探测核实。
 
-Windows/Linux 原生构建和真实系统验收尚未在本轮 Mac 开发机执行。`scripts/check-release.mjs` 要求全部辅助程序、发布锁文件以及绑定当前版本/摘要的真实系统验收记录；包保持 private，缺证据不公开发布。安装与验收细节见 [npm 安装说明](docs/npm-installation.md)。
+Windows/Linux 的原生构建在经批准的 GitHub 测试机进行，本机未安装其他系统。Linux 四项目标的原生检查已通过，Ubuntu 24.04 构建的 x64/ARM64 辅助程序已取回；Windows 实际隔离启动尚待通过。2026-10-09 本机串行 npm test 为 571/571，通过且无跳过。`scripts/check-release.mjs` 要求全部辅助程序、发布锁文件以及绑定当前版本/摘要的真实系统验收记录；包保持 private，缺证据不公开发布。安装与验收细节见 [npm 安装说明](docs/npm-installation.md)。

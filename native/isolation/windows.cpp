@@ -4,6 +4,7 @@
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <tlhelp32.h>
 #include <userenv.h>
 #include <winternl.h>
@@ -54,6 +55,7 @@ struct Handle {
   bool valid() const { return value && value != INVALID_HANDLE_VALUE; }
 };
 struct LocalMemory { void *value = nullptr; ~LocalMemory() { if (value) LocalFree(value); } };
+struct KnownFolderMemory { PWSTR value = nullptr; ~KnownFolderMemory() { CoTaskMemFree(value); } };
 struct ProfileSid { PSID value = nullptr; ~ProfileSid() { if (value) FreeSid(value); } };
 struct Record { std::wstring path; std::vector<BYTE> label; FILE_ID_INFO identity{}; };
 struct Journal {
@@ -453,9 +455,38 @@ std::wstring system_windows_directory() {
   wchar_t system[MAX_PATH + 1]; UINT count = GetSystemWindowsDirectoryW(system, MAX_PATH + 1); require(count && count < MAX_PATH + 1);
   return std::wstring(system, count);
 }
+std::wstring current_user_profile() {
+  HANDLE raw = nullptr; require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw)); Handle token(raw);
+  DWORD size = 0;
+  require(!GetUserProfileDirectoryW(token.value, nullptr, &size) && GetLastError() == ERROR_INSUFFICIENT_BUFFER && size > 3 && size <= 32761);
+  std::vector<wchar_t> path(size); require(GetUserProfileDirectoryW(token.value, path.data(), &size));
+  size_t length = wcsnlen_s(path.data(), path.size()); require(length < path.size());
+  std::wstring result(path.data(), length); require(is_path(result)); return result;
+}
+std::wstring current_known_folder(REFKNOWNFOLDERID folder) {
+  KnownFolderMemory path;
+  // Current-user lookup needs no impersonation token. Do not verify or create
+  // redirected folders; only retrieve the OS-defined path for the helper.
+  require(SUCCEEDED(SHGetKnownFolderPath(folder, KF_FLAG_DONT_VERIFY, nullptr, &path.value)) && path.value != nullptr);
+  size_t length = wcsnlen_s(path.value, 32761); require(length < 32761);
+  std::wstring result(path.value, length); require(is_path(result)); return result;
+}
+void initialize_helper_profile_environment() {
+  const std::wstring profile = current_user_profile();
+  require(SetEnvironmentVariableW(L"USERPROFILE", profile.c_str()));
+  require(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)));
+  try {
+    const std::wstring roaming = current_known_folder(FOLDERID_RoamingAppData);
+    const std::wstring local = current_known_folder(FOLDERID_LocalAppData);
+    require(SetEnvironmentVariableW(L"APPDATA", roaming.c_str()));
+    require(SetEnvironmentVariableW(L"LOCALAPPDATA", local.c_str()));
+  } catch (...) { CoUninitialize(); throw; }
+  CoUninitialize();
+}
 std::vector<wchar_t> environment(const std::wstring& runtime, const std::wstring& workspace) {
   const std::wstring system = system_windows_directory();
-  std::vector<std::wstring> values{ L"HOME=" + workspace, L"LANG=en_US.UTF-8", L"LC_ALL=en_US.UTF-8", L"OPENSSL_CONF=NUL", L"PATH=" + runtime,
+  std::vector<std::wstring> values{ L"APPDATA=" + workspace, L"HOME=" + workspace, L"LANG=en_US.UTF-8", L"LC_ALL=en_US.UTF-8", L"LOCALAPPDATA=" + workspace,
+    L"OPENSSL_CONF=NUL", L"PATH=" + runtime,
     L"SystemRoot=" + system, L"TEMP=" + workspace, L"TMP=" + workspace, L"TMPDIR=" + workspace, L"USERPROFILE=" + workspace, L"windir=" + system };
   std::sort(values.begin(), values.end(), [](const std::wstring& left, const std::wstring& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
   std::vector<wchar_t> result; for (const auto& value : values) { result.insert(result.end(), value.begin(), value.end()); result.push_back(0); } result.push_back(0); return result;
@@ -528,6 +559,7 @@ int wmain(int argc, wchar_t **argv) {
     const std::wstring system_directory = system_windows_directory();
     require(SetEnvironmentVariableW(L"SystemRoot", system_directory.c_str()));
     require(SetEnvironmentVariableW(L"windir", system_directory.c_str()));
+    initialize_helper_profile_environment();
     Handle parent(OpenProcess(SYNCHRONIZE, FALSE, parent_pid())); require(parent.valid());
     LocalMemory control_descriptor;
     require(ConvertStringSecurityDescriptorToSecurityDescriptorW(owner_sddl().c_str(), SDDL_REVISION_1,
