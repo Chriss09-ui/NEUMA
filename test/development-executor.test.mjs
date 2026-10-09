@@ -63,7 +63,7 @@ test("每次执行使用系统沙箱、精简环境、代码只读与独立临�
     assert.notEqual(call.options.cwd, input.codeDir);
   }
   assert.equal(calls[1].input, "x");
-  assert.ok(calls[1].args.at(-1).endsWith("/code/main.mjs"));
+  assert.ok(calls[1].args.at(-1).endsWith(join("code", "main.mjs")));
   assert.deepEqual(calls[1].options.stdio, ["pipe", "pipe", "pipe"]);
 });
 
