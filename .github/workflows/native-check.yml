@@ -1,6 +1,16 @@
 name: Native helper checks (manual)
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Platforms to test
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - windows
 
 permissions:
   contents: read
@@ -18,26 +28,11 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-          - runner: ubuntu-26.04
-            platform: linux
-            arch: x64
-          - runner: ubuntu-26.04-arm
-            platform: linux
-            arch: arm64
-          # Windows Server 2025 is a build/test target, not Windows 11 x64 certification.
-          - runner: windows-2025
-            platform: win32
-            arch: x64
-          - runner: windows-11-arm
-            platform: win32
-            arch: arm64
+        # Windows Server 2025 is a build/test target, not Windows 11 x64 certification.
+        include: >-
+          ${{ fromJSON(inputs.target == 'windows' &&
+          '[{"runner":"windows-2025","platform":"win32","arch":"x64"},{"runner":"windows-11-arm","platform":"win32","arch":"arm64"}]' ||
+          '[{"runner":"ubuntu-24.04","platform":"linux","arch":"x64"},{"runner":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"runner":"ubuntu-26.04","platform":"linux","arch":"x64"},{"runner":"ubuntu-26.04-arm","platform":"linux","arch":"arm64"},{"runner":"windows-2025","platform":"win32","arch":"x64"},{"runner":"windows-11-arm","platform":"win32","arch":"arm64"}]') }}
     env:
       NEUMA_REQUIRE_ISOLATION: '1'
       NODE_OPTIONS: --max-old-space-size=256

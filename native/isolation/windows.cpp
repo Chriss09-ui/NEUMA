@@ -513,6 +513,12 @@ int wmain(int argc, wchar_t **argv) {
     require(attributes(code) & FILE_ATTRIBUTE_DIRECTORY); require(attributes(writable) & FILE_ATTRIBUTE_DIRECTORY);
     const std::wstring control = parent_path(journal_path);
     require(same_path(parent_path(status_path), control) && !beneath(code, control) && !beneath(writable, control) && (readable.empty() || !beneath(readable, control)));
+    // Windows locks a process' current directory against delete access. The
+    // helper starts in the workspace, so release that lock before opening its
+    // security handles; the generated Node process still receives explicit cwd.
+    const size_t volume_chars = control.rfind(L"\\\\?\\", 0) == 0 ? 7 : 3;
+    require(control.size() >= volume_chars && control[volume_chars - 2] == L':' && control[volume_chars - 1] == L'\\');
+    require(SetCurrentDirectoryW(control.substr(0, volume_chars).c_str()));
     Handle parent(OpenProcess(SYNCHRONIZE, FALSE, parent_pid())); require(parent.valid());
     LocalMemory control_descriptor;
     require(ConvertStringSecurityDescriptorToSecurityDescriptorW(owner_sddl().c_str(), SDDL_REVISION_1,
