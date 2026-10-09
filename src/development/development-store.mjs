@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 import { hashValue } from "./development-contract.mjs";
-import { AgentStorage } from "./agent-storage.mjs";
+import { AgentStorage } from "../agents/agent-storage.mjs";
 
 function safeId(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value)) throw new InputError("研发记录标识无效");

@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { access, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, extname, join, delimiter } from "node:path";
+import { dirname, extname, join, delimiter, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const ENV_KEYS = new Set(["PATH", "HOME", "USER", "LANG", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PATHEXT"]);
 const DESKTOP_KEYS = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CURRENT_DESKTOP"]);
 

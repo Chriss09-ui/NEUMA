@@ -22,7 +22,7 @@
 
 ## 交接与评估
 
-architecture-contract.mjs 是机器契约；architecture-prompts.mjs 是三个角色的工作规程。
+`src/architecture/architecture-contract.mjs` 是机器契约；`src/architecture/architecture-prompts.mjs` 是三个角色的工作规程。
 
 候选包含 profile/rationale/instructions、components、steps、capabilities、state、failureHandling、decisions、coverage、acceptance、unknowns。所有核心字段必填；不适用的内容需说明，不增加空壳组件。每条需求必须有覆盖与验收引用；最低验收包括成功、缺少输入、边界场景，使用工具还需工具失败场景。它们是待实施的验收设计，不能冒充已经执行的测试。
 
@@ -53,9 +53,9 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 2026-10-08：服务端统一使用 `.neuma/agents/<稳定 Agent ID>/`。`definition.json` 保存定义、指令、记忆和展示设置；`requirements.json` 保存需求入口；`architecture.json` 保存全部架构版本；`development/` 包含记录、代码工作区和只读快照；`conversations/saved.json` 保存用户主动保存的对话；`workspace/` 保存输入材料和执行产物。Agent 的 Pi 辅助目录也绑定到本 Agent 根目录。模型仍只获得评估后的专属工作子目录工具，不因元数据与代码同处一个 Agent 根目录而扩大文件权限。
 
-`agent-storage.mjs` 在各 Store 加载前协调旧格式迁移。先检查旧元数据及文件类型，在临时目录完整复制，重定位受控快照对象中的路径并添加 Agent 身份，再发布每个完整目录和全局迁移标记。旧文件保留但完成迁移后不再作为活动源；部分发布可重试，不覆盖已发布的新数据。拒绝路径穿越、符号链接和硬链接元数据。保存使用原子替换，失败不发布内存状态。
+`src/agents/agent-storage.mjs` 在各 Store 加载前协调旧格式迁移。先检查旧元数据及文件类型，在临时目录完整复制，重定位受控快照对象中的路径并添加 Agent 身份，再发布每个完整目录和全局迁移标记。旧文件保留但完成迁移后不再作为活动源；部分发布可重试，不覆盖已发布的新数据。拒绝路径穿越、符号链接和硬链接元数据。保存使用原子替换，失败不发布内存状态。
 
-`agent-library.mjs` 管理已保存需求及显式对话快照。旧浏览器数据通过本机接口逐 Agent 补入；已有服务端保存版本优先，旧定义/架构推导需求允许补入更新的浏览器版本。保存失败的浏览器新版使用待同步备份，刷新不丢失，需要用户重试。新对话和普通任务不自动写聊天。清除浏览器数据后可从服务端恢复入口和已保存对话；主需求澄清对话和项目助手会话仍独立。
+`src/agents/agent-library.mjs` 管理已保存需求及显式对话快照。旧浏览器数据通过本机接口逐 Agent 补入；已有服务端保存版本优先，旧定义/架构推导需求允许补入更新的浏览器版本。保存失败的浏览器新版使用待同步备份，刷新不丢失，需要用户重试。新对话和普通任务不自动写聊天。清除浏览器数据后可从服务端恢复入口和已保存对话；主需求澄清对话和项目助手会话仍独立。
 
 删除先停止任务并移除定义，再记录删除标记和清理活动元数据，保留代码、快照及工作产物。删除标记阻止重启、旧浏览器导入或残留研发记录恢复已删除 Agent；不删除整个 Agent 文件夹。
 
@@ -80,11 +80,13 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 ## 文件与验证
 
-- architecture.mjs：角色会话、检索/委派、修订、评估门槛、方案存储。
-- architecture-contract.mjs：结构及跨引用校验、能力事实、需求清单、候选摘要。
-- architecture-prompts.mjs：设计、独立评估与模块顾问规程。
-- architecture-research.mjs：官方资料检索。
-- agent-prototype.mjs：保留兼容类名，负责评估后的定义生成与原有运行/辅助数据。
+服务端源码集中在 `src/`，模块按架构、研发、智能体、需求、项目、运行时和安装分组；服务入口为 `src/server.mjs`。目录说明见 [README](README.md#文档与开发)。
+
+- `src/architecture/architecture.mjs`：角色会话、检索/委派、修订、评估门槛、方案存储。
+- `src/architecture/architecture-contract.mjs`：结构及跨引用校验、能力事实、需求清单、候选摘要。
+- `src/architecture/architecture-prompts.mjs`：设计、独立评估与模块顾问规程。
+- `src/architecture/architecture-research.mjs`：官方资料检索。
+- `src/agents/agent-prototype.mjs`：保留兼容类名，负责评估后的定义生成与原有运行/辅助数据。
 
 检查使用 Node 测试，外部检索和模型响应使用可控替身；真实 Pi SDK 使用本机模拟模型接口验证协议。先运行架构及受影响测试，再运行 npm test。测试通过不表示真实业务模型质量或外部服务集成已经验收。
 
@@ -106,7 +108,7 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 新增接口：GET `/api/agents/:id/development`；POST `/api/agents/:id/development` 与 `/development/stream` 接收 `{resume:boolean}`；POST `/api/agents/:id/development/cancel` 停止研发。GET Agent 额外返回 development。流沿用 status、done.result、error；断线取消本轮并保存进度。界面显示五阶段、任务完成数和阻塞原因，可继续、停止或重新检查交付；普通工作对话协议保持不变。
 
-核心文件为 development.mjs、development-contract.mjs、development-context.mjs、development-prompts.mjs、development-store.mjs、development-workspace.mjs、development-executor.mjs，构建与运行桥接在 agent-prototype.mjs。研发、架构与激活共用同一 Agent 的构建互斥；没有引入新的编排框架、数据库或遥测。
+核心文件位于 `src/development/`：development.mjs、development-contract.mjs、development-context.mjs、development-prompts.mjs、development-store.mjs、development-workspace.mjs、development-executor.mjs，构建与运行桥接在 `src/agents/agent-prototype.mjs`。研发、架构与激活共用同一 Agent 的构建互斥；没有引入新的编排框架、数据库或遥测。
 
 本轮全量验证 446/446 通过，无跳过；包括真实 Pi SDK 对接本机模拟模型、真实 macOS 隔离执行及交付运行闭环、持久状态连续调用、上下文分页、取消/恢复竞态、交付失败返修和旧数据保留。桌面端使用独立模拟数据预览核实五阶段、长说明、停止和继续。未调用真实模型服务或正式外部连接，不把协议测试当作业务模型质量验收。
 
@@ -147,9 +149,9 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 ## npm 安装、数据与服务生命周期
 
-2026-10-08：`bin/neuma.cjs` 先核实 Node ≥22.19，再加载 CLI。`installation-runtime.mjs` 先取得数据根的系统互斥锁并绑定端口，之后才创建可能恢复研发状态的 Store。初始化完成前健康检查为 503；就绪结果包含版本与实例 ID，重复启动只复用同一数据目录的实际就绪服务。退出先停止接收新操作、取消请求/模型/目录窗口和受管任务，再等待持久化与项目关闭，最后释放端口及数据锁。`createApp` 保留原测试接口；需要并发共享目录的嵌入式调用者使用统一启动模块。
+2026-10-08：`bin/neuma.cjs` 先核实 Node ≥22.19，再加载 CLI。`src/installation/installation-runtime.mjs` 先取得数据根的系统互斥锁并绑定端口，之后才创建可能恢复研发状态的 Store。初始化完成前健康检查为 503；就绪结果包含版本与实例 ID，重复启动只复用同一数据目录的实际就绪服务。退出先停止接收新操作、取消请求/模型/目录窗口和受管任务，再等待持久化与项目关闭，最后释放端口及数据锁。`createApp` 保留原测试接口；需要并发共享目录的嵌入式调用者使用统一启动模块。
 
-CLI 默认数据根为用户主目录 `.neuma`，模型配置保存在该目录 `.env`，源码入口仍用项目下的原位置。安装目录只读取代码与静态资源。`installation-migration.mjs` 是不同数据根间的显式复制迁移，持有来源/目标锁，不对源构造 Store；分块复制、限制总量与单文件、校验元数据和快照，成功后整体 rename 发布。目标非空拒绝覆盖，源文件、业务内容及外部项目路径保留；凭据、模型配置与 SDK 临时数据不复制。
+CLI 默认数据根为用户主目录 `.neuma`，模型配置保存在该目录 `.env`；源码版由 `src/server.mjs` 启动，数据与配置仍在项目根目录的 `.neuma` 和 `.env`。安装目录只读取代码与静态资源。`src/installation/installation-migration.mjs` 是不同数据根间的显式复制迁移，持有来源/目标锁，不对源构造 Store；分块复制、限制总量与单文件、校验元数据和快照，成功后整体 rename 发布。目标非空拒绝覆盖，源文件、业务内容及外部项目路径保留；凭据、模型配置与 SDK 临时数据不复制。
 
 Windows 项目生命周期通过 `native/projects` Job Object 与控制管道管理已创建的树；Linux 进程扫描只读有限 `/proc` 信息。文件夹窗口、解释器与桌面启动集中在平台模块，已有项目仍使用用户明确授予的本机启动权限。生成程序独立使用 `native/isolation`：LPAC/Job 或 Landlock/seccomp，不复用项目管理操作；任何缺能力均阻塞，三平台运行规则通过实际隔离探测核实。
 

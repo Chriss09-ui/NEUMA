@@ -4,9 +4,9 @@ import { createServer } from "node:http";
 import { chmod, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ARCHITECTURE_VERSION, designHash } from "../architecture-contract.mjs";
-import { DevelopmentController } from "../development.mjs";
-import { createPiSession } from "../pi-runtime.mjs";
+import { ARCHITECTURE_VERSION, designHash } from "../src/architecture/architecture-contract.mjs";
+import { DevelopmentController } from "../src/development/development.mjs";
+import { createPiSession } from "../src/runtime/pi-runtime.mjs";
 import { validDesign, passingReview } from "./helpers/architecture.mjs";
 
 const SOURCE = 'const input = process.argv[2] ?? "";\nconsole.log(JSON.stringify(input ? { input } : { error: "missing_input" }));\n';

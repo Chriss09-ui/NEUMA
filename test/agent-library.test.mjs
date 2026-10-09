@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentLibrary } from "../agent-library.mjs";
-import { InputError } from "../core.mjs";
+import { AgentLibrary } from "../src/agents/agent-library.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-agent-library-"));

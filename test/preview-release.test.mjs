@@ -10,6 +10,7 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const manifest = { name: "@fixture/neuma", version: "0.1.0-preview.1", private: false,
     os: ["darwin"], cpu: ["arm64"], bin: { neuma: "bin/neuma.cjs" },
+    files: ["src/", "bin/", "public/"],
     publishConfig: { access: "public", tag: "preview", registry: "https://registry.npmjs.org/" },
     dependencies: { fixture: "1.0.0" } };
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: {
@@ -26,8 +27,8 @@ async function fixture(t) {
       await writeFile(join(root, path), JSON.stringify(value));
   }
   await save();
-  for (const path of ["bin/neuma.cjs", "installation-cli.mjs", "installation-runtime.mjs",
-    "app-metadata.mjs", "server.mjs", "public/index.html"]) {
+  for (const path of ["bin/neuma.cjs", "src/installation/installation-cli.mjs", "src/installation/installation-runtime.mjs",
+    "src/app-metadata.mjs", "src/server.mjs", "public/index.html"]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), "synthetic test entry; not a running application");
   }
@@ -76,9 +77,19 @@ test("错误命令入口、缺入口文件或损坏锁文件会阻止发布", as
   manifest.bin.neuma = "missing.cjs"; await save();
   assert.ok((await checkPreviewRelease(root)).failures.some((value) => value.includes("命令入口")));
   manifest.bin.neuma = "bin/neuma.cjs"; await save();
-  await rm(join(root, "installation-cli.mjs"));
+  await rm(join(root, "src/installation/installation-cli.mjs"));
   await writeFile(join(root, "package-lock.json"), "invalid json");
   const result = await checkPreviewRelease(root);
   assert.ok(result.failures.some((value) => value.includes("installation-cli.mjs")));
   assert.ok(result.failures.some((value) => value.includes("无法读取有效的 package-lock.json")));
+});
+
+test("入口文件存在但发布清单遗漏完整源码目录时必须失败", async (t) => {
+  const { root, manifest, save } = await fixture(t);
+  manifest.files = ["bin/", "public/", "src/server.mjs", "src/installation/installation-cli.mjs",
+    "src/installation/installation-runtime.mjs", "src/app-metadata.mjs"];
+  await save();
+  const result = await checkPreviewRelease(root);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.failures, ["发布文件清单必须包含完整源码目录 src/"]);
 });

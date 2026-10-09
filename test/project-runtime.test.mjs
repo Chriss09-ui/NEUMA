@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { scanLocalRuntime, projectRuntimeSnapshot } from "../project-runtime.mjs";
-import { ProjectManager } from "../projects.mjs";
+import { scanLocalRuntime, projectRuntimeSnapshot } from "../src/projects/project-runtime.mjs";
+import { ProjectManager } from "../src/projects/projects.mjs";
 
 const fields = (...values) => `${values.join("\0")}\0\n`;
 const procPath = (value) => value.replaceAll("\\", "/");

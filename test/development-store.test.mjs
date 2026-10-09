@@ -3,8 +3,8 @@ import test from "node:test";
 import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InputError } from "../core.mjs";
-import { DevelopmentStore } from "../development-store.mjs";
+import { InputError } from "../src/requirements/core.mjs";
+import { DevelopmentStore } from "../src/development/development-store.mjs";
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-development-store-"));

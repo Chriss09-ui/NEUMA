@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DevelopmentExecutor } from "../../development-executor.mjs";
+import { DevelopmentExecutor } from "../../src/development/development-executor.mjs";
 
 let remainingBytes = 16384, printed = 0;
 const loaderWrapper = fileURLToPath(new URL("./windows-loader.exe", import.meta.url));

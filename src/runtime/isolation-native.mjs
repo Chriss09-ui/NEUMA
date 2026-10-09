@@ -4,7 +4,7 @@ import { access, lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const inside = (root, path) => { const part = relative(root, path); return part === "" || (!part.startsWith("..") && !isAbsolute(part)); };
 const REASONS = new Set(["isolation_setup_failed", "timeout", "output_limit", "process_terminated", "cleanup_failed"]);
 

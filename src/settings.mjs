@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { parseEnv } from "node:util";
-import { InputError } from "./core.mjs";
+import { InputError } from "./requirements/core.mjs";
 
 const FIELDS = {
   chatUrl: "NEUMA_LLM_CHAT_URL",

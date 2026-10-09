@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { PrototypeAgents } from "../agent-prototype.mjs";
-import { PiProjectAgent } from "../pi-runtime.mjs";
-import { ProviderError } from "../core.mjs";
+import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
+import { PiProjectAgent } from "../src/runtime/pi-runtime.mjs";
+import { ProviderError } from "../src/requirements/core.mjs";
 
 const turn = { agentId: "alpha", sessionId: "shutdown-session-12345", message: "处理当前任务" };
 const cancelled = (error) => error instanceof ProviderError && error.diagnostic.reason === "cancelled";

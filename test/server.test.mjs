@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
-import { createRequestHandler as createHandler } from "../server.mjs";
-import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../core.mjs";
-import { createProjectAddError } from "../project-diagnostics.mjs";
+import { createRequestHandler as createHandler } from "../src/server.mjs";
+import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../src/requirements/core.mjs";
+import { createProjectAddError } from "../src/projects/project-diagnostics.mjs";
 
 const createRequestHandler = (options) => createHandler({ projects: {}, projectAgent: {}, prototypeAgents: {}, ...options });
 

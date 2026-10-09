@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
+import { copyFile, cp, mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { acquireDataLock, DataDirectoryBusyError } from "../instance-lock.mjs";
-import { parseCliArgs } from "../installation-cli.mjs";
-import { readInstallationSettings, startLocalApplication } from "../installation-runtime.mjs";
+import { acquireDataLock, DataDirectoryBusyError } from "../src/installation/instance-lock.mjs";
+import { parseCliArgs } from "../src/installation/installation-cli.mjs";
+import { readInstallationSettings, startLocalApplication } from "../src/installation/installation-runtime.mjs";
 
 async function temporary(t) {
   const root = await mkdtemp(join(tmpdir(), "neuma-install-test-"));
@@ -123,6 +123,8 @@ test("实际CLI从中文空格目录启动，重复启动复用，Ctrl+C退出",
   });
   const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json();
   assert.equal(health.state, "ready"); assert.equal(health.llmConfigured, false);
+  const page = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(page.status, 200); assert.match(await page.text(), /app\.js/);
   const duplicate = spawn(process.execPath, [cli, "--no-open", "--data-dir", dataDir], childOptions);
   let duplicateOutput = ""; duplicate.stdout.on("data", (chunk) => { duplicateOutput += chunk; });
   assert.equal((await once(duplicate, "exit"))[0], 0); assert.match(duplicateOutput, /已在运行/);
@@ -135,11 +137,10 @@ test("源码入口可以启动，不被循环模块等待卡住", {
 }, async (t) => {
   const root = await temporary(t);
   const source = fileURLToPath(new URL("../", import.meta.url));
-  for (const entry of await readdir(source, { withFileTypes: true })) {
-    if (entry.isFile() && (entry.name.endsWith(".mjs") || entry.name === "package.json"))
-      await copyFile(join(source, entry.name), join(root, entry.name));
-  }
-  const child = spawn(process.execPath, [join(root, "server.mjs")], { cwd: root,
+  await copyFile(join(source, "package.json"), join(root, "package.json"));
+  await cp(join(source, "src"), join(root, "src"), { recursive: true });
+  await cp(join(source, "public"), join(root, "public"), { recursive: true });
+  const child = spawn(process.execPath, [join(root, "src", "server.mjs")], { cwd: root,
     env: { PATH: process.env.PATH, PORT: "0", NODE_OPTIONS: "--max-old-space-size=128" },
     stdio: ["ignore", "pipe", "pipe"] });
   let output = "", error = "";
@@ -156,6 +157,10 @@ test("源码入口可以启动，不被循环模块等待卡住", {
     received();
   });
   assert.equal((await fetch(`${url}api/health`)).status, 200);
+  const page = await fetch(url);
+  assert.equal(page.status, 200); assert.match(await page.text(), /app\.js/);
+  assert.ok((await readdir(root)).includes(".neuma"));
+  assert.ok(!(await readdir(join(root, "src"))).includes(".neuma"));
   const exited = once(child, "exit"); child.kill("SIGINT"); assert.equal((await exited)[0], 0);
 });
 

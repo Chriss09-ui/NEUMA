@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
-import { createRequestHandler } from "../server.mjs";
-import { InputError, ProviderError } from "../core.mjs";
+import { createRequestHandler } from "../src/server.mjs";
+import { InputError, ProviderError } from "../src/requirements/core.mjs";
 
 const development = { id: "dev-one", agentId: "agent-one", status: "completed", phase: "packaging",
   architectureRef: { version: 2, candidateHash: "candidate-2" }, delivery: "needs_connection", summary: "研发已完成，等待连接。", tasks: [] };

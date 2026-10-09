@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 import { validateScriptCommand } from "./project-inspection.mjs";
 import { spawnProject } from "./project-platform.mjs";
 

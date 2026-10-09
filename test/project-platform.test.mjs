@@ -5,9 +5,10 @@ import { PassThrough } from "node:stream";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectEnvironment, projectHelperPath, resolveProjectProgram, spawnProject, stopProjectProcess, validateBatchArguments } from "../project-platform.mjs";
-import { createProjectReader, projectScriptFile, validateProjectPlan, validateScriptCommand } from "../project-inspection.mjs";
-import { ProjectManager } from "../projects.mjs";
+import { fileURLToPath } from "node:url";
+import { projectEnvironment, projectHelperPath, resolveProjectProgram, spawnProject, stopProjectProcess, validateBatchArguments } from "../src/projects/project-platform.mjs";
+import { createProjectReader, projectScriptFile, validateProjectPlan, validateScriptCommand } from "../src/projects/project-inspection.mjs";
+import { ProjectManager } from "../src/projects/projects.mjs";
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "neuma-project-platform-")));
@@ -19,7 +20,8 @@ test("平台环境只继承已允许的系统变量，Windows Path 大小写不�
   assert.deepEqual(projectEnvironment({ Path: "C:\\Node", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp", NEUMA_LLM_API_KEY: "fixture-only", DISPLAY: ":1" }),
     { Path: "C:\\Node", SystemRoot: "C:\\Windows", TEMP: "C:\\Temp" });
   assert.equal(projectEnvironment({ DISPLAY: ":1" }, { desktop: true }).DISPLAY, ":1");
-  assert.match(projectHelperPath({ platform: "win32", arch: "arm64" }), /win32-arm64.*neuma-projects\.exe$/);
+  assert.equal(projectHelperPath({ platform: "win32", arch: "arm64" }),
+    fileURLToPath(new URL("../native/projects/bin/win32-arm64/neuma-projects.exe", import.meta.url)));
   assert.throws(() => projectHelperPath({ platform: "freebsd", arch: "x64" }));
 });
 

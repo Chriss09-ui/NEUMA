@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 
 const FALLBACK = "项目检查未完成，请稍后重试";
 const MAX_RECORDS = 50;

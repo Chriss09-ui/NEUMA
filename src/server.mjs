@@ -2,16 +2,16 @@ import { createServer } from "node:http";
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { InputError, ProviderError, processTurn } from "./core.mjs";
-import { getProviderConfig, makeProviders } from "./providers.mjs";
-import { ProjectManager } from "./projects.mjs";
-import { createProjectFolderPicker } from "./project-folder-picker.mjs";
-import { PiProjectAgent, createProjectAnalyzer } from "./pi-runtime.mjs";
-import { PrototypeAgents } from "./agent-prototype.mjs";
+import { InputError, ProviderError, processTurn } from "./requirements/core.mjs";
+import { getProviderConfig, makeProviders } from "./requirements/providers.mjs";
+import { ProjectManager } from "./projects/projects.mjs";
+import { createProjectFolderPicker } from "./projects/project-folder-picker.mjs";
+import { PiProjectAgent, createProjectAnalyzer } from "./runtime/pi-runtime.mjs";
+import { PrototypeAgents } from "./agents/agent-prototype.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
 import { APP_VERSION } from "./app-metadata.mjs";
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
@@ -459,6 +459,6 @@ export function createApp(options = {}) {
 }
 
 if (process.argv[1] && await realpath(resolve(process.argv[1])).catch(() => null) === fileURLToPath(import.meta.url)) {
-  const { runSourceApplication } = await import("./installation-runtime.mjs");
+  const { runSourceApplication } = await import("./installation/installation-runtime.mjs");
   await runSourceApplication({ root: ROOT, createHandler: createRequestHandler });
 }

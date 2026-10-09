@@ -2,9 +2,9 @@ import { join, relative } from "node:path";
 import { createRequire, findPackageJSON } from "node:module";
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
-import { InputError, ProviderError } from "./core.mjs";
-import { createProjectReader, projectScriptFile, validateProjectPlan } from "./project-inspection.mjs";
-import { safeDiagnosticText } from "./project-diagnostics.mjs";
+import { InputError, ProviderError } from "../requirements/core.mjs";
+import { createProjectReader, projectScriptFile, validateProjectPlan } from "../projects/project-inspection.mjs";
+import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
 
 const SYSTEM_PROMPT = `你是 NUEMA，当前处于“我的项目”工作区。NUEMA 的核心功能是自然语言创建 Agent；这个工作区帮助用户管理已有本地小项目。
 用户提供路径并要求添加时，调用 add_project；需要选择或查询时先调用 list_projects；用户要求打开、启动或停止时调用对应工具。

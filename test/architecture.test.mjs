@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ArchitectureDesigner } from "../architecture.mjs";
-import { designHash } from "../architecture-contract.mjs";
-import { InputError, ProviderError } from "../core.mjs";
+import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
+import { designHash } from "../src/architecture/architecture-contract.mjs";
+import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 
 const definition = (id = "weekly") => ({ id, name: "周报助手", draft: validDraft(), fingerprint: "requirements-v1" });

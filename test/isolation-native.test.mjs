@@ -5,8 +5,9 @@ import { PassThrough } from "node:stream";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, lstat, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { DevelopmentExecutor } from "../development-executor.mjs";
-import { bundledIsolationHelper, checkedIsolationHelper, isolatedNodeArguments, NODE_INPUT_BOOTSTRAP, readIsolationStatus } from "../isolation-native.mjs";
+import { fileURLToPath } from "node:url";
+import { DevelopmentExecutor } from "../src/development/development-executor.mjs";
+import { bundledIsolationHelper, checkedIsolationHelper, isolatedNodeArguments, NODE_INPUT_BOOTSTRAP, readIsolationStatus } from "../src/runtime/isolation-native.mjs";
 
 const CANARY = { readDenied: true, writeDenied: true, codeWriteDenied: true, hardlinkDenied: true, metadataDenied: true,
   symlinkReadDenied: true, scratchWorked: true, networkDenied: true, subprocessDenied: true };
@@ -45,7 +46,8 @@ function nativeMock({ status = true, cleanup = true, journal = false } = {}) {
 }
 
 test("只选择本包支持架构的独立原生程序，缺少时不启动普通Node", async (t) => {
-  assert.match(bundledIsolationHelper({ platform: "linux", arch: "arm64" }), /linux-arm64[/\\]neuma-isolation$/);
+  assert.equal(bundledIsolationHelper({ platform: "linux", arch: "arm64" }),
+    fileURLToPath(new URL("../native/isolation/bin/linux-arm64/neuma-isolation", import.meta.url)));
   assert.match(bundledIsolationHelper({ platform: "win32", arch: "x64" }), /win32-x64[/\\]neuma-isolation\.exe$/);
   assert.equal(bundledIsolationHelper({ platform: "linux", arch: "ia32" }), null);
   const data = await fixture(t);

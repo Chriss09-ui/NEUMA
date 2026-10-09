@@ -100,3 +100,19 @@ neuma
 | [开发约定](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/AGENTS.md) | 修改代码前需要遵循的项目规范。 |
 
 当前 npm 试用版的源码在 [`codex/npm-macos-preview`](https://github.com/Chriss09-ui/NEUMA/tree/codex/npm-macos-preview) 分支。源码安装与测试方式见详细使用指南。
+
+服务端源码统一放在 `src/`，按功能分组；前端资源、测试、开发脚本和说明文档分别在 `public/`、`test/`、`scripts/` 和 `docs/`。
+
+```text
+src/
+├── server.mjs         服务与 API 入口
+├── settings.mjs       模型与本机设置
+├── app-metadata.mjs   应用版本与元数据
+├── installation/      命令行、安装、数据迁移与实例锁
+├── architecture/      方案设计、契约校验与独立评估
+├── development/       研发流程、验收、工作区与交付
+├── agents/            智能体定义、持久化与保存记录
+├── requirements/      需求澄清、模型服务与响应流
+├── projects/          本机项目登记、检查与运行管理
+└── runtime/           Pi 会话与原生隔离适配
+```
