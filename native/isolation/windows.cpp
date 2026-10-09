@@ -9,6 +9,7 @@
 #include <winternl.h>
 #include <algorithm>
 #include <climits>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -19,8 +20,25 @@ namespace {
 constexpr DWORD MAX_JOURNAL = 2 * 1024 * 1024;
 constexpr size_t MAX_OBJECTS = 20000;
 constexpr wchar_t PROFILE_PREFIX[] = L"neuma-isolation-";
-struct Failure {};
-void require(bool ok) { if (!ok) throw Failure{}; }
+struct Failure { int line = 0; DWORD error = 0; bool reported = false; };
+void report_failure(int line, DWORD error) noexcept {
+  char message[96];
+  int size = std::snprintf(message, sizeof(message), "NEUMA_ISOLATION_FAIL line=%d win32=%lu\n", line, static_cast<unsigned long>(error));
+  if (size <= 0 || static_cast<size_t>(size) >= sizeof(message)) return;
+  DWORD written = 0;
+  if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, static_cast<DWORD>(size), &written, nullptr)) return;
+}
+Failure failure_at(int line) { return { line, GetLastError(), false }; }
+void require_impl(bool ok, int line) {
+  if (ok) return;
+  DWORD error = GetLastError(); report_failure(line, error); throw Failure{ line, error, true };
+}
+#define require(value) require_impl(static_cast<bool>(value), __LINE__)
+void report_current_exception(int fallback_line) noexcept {
+  try { throw; }
+  catch (const Failure& failure) { if (!failure.reported) report_failure(failure.line, failure.error); }
+  catch (...) { report_failure(fallback_line, GetLastError()); }
+}
 struct Handle {
   HANDLE value = nullptr;
   Handle() = default;
@@ -79,7 +97,7 @@ Handle checked_object(const std::wstring& original, DWORD access = MAXIMUM_ALLOW
   std::wstring root = path.substr(0, start);
   Handle current(CreateFileW(root.c_str(), path.size() == start ? access : FILE_READ_ATTRIBUTES | SYNCHRONIZE,
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-  if (!current.valid()) throw Failure{};
+  if (!current.valid()) throw failure_at(__LINE__);
   BY_HANDLE_FILE_INFORMATION info{}; require(GetFileInformationByHandle(current.value, &info)
     && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
   static auto open_relative = nt_function<decltype(&NtCreateFile)>("NtCreateFile");
@@ -96,9 +114,9 @@ Handle checked_object(const std::wstring& original, DWORD access = MAXIMUM_ALLOW
     NTSTATUS status = open_relative(&opened, (last ? access : FILE_READ_ATTRIBUTES) | SYNCHRONIZE, &object, &io, nullptr, 0,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
       FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT | (last ? 0 : FILE_DIRECTORY_FILE), nullptr, 0);
-    if (status < 0) { SetLastError(error_code(status)); throw Failure{}; }
+    if (status < 0) { SetLastError(error_code(status)); throw failure_at(__LINE__); }
     Handle child(opened); require(child.valid() && GetFileInformationByHandle(child.value, &info));
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !(last && final_reparse)) { SetLastError(ERROR_REPARSE_TAG_INVALID); throw Failure{}; }
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !(last && final_reparse)) { SetLastError(ERROR_REPARSE_TAG_INVALID); throw failure_at(__LINE__); }
     if (!last) require(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
     current = std::move(child); if (last) break; position = next + 1;
   }
@@ -403,7 +421,7 @@ bool cleanup(Journal& journal, const std::wstring& journal_path) {
     require(SUCCEEDED(deleted) || deleted == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || deleted == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) || deleted == HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
     Handle journal_file = checked_object(journal_path); require(regular_handle(journal_file.value)); delete_opened_object(journal_file.value);
     journal.profile.clear(); return true;
-  } catch (...) { return false; }
+  } catch (...) { report_current_exception(__LINE__); return false; }
 }
 
 std::wstring quoted(const std::wstring& value) {
@@ -420,7 +438,7 @@ DWORD parent_pid() {
   Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)); require(snapshot.valid());
   PROCESSENTRY32W entry{}; entry.dwSize = sizeof(entry); require(Process32FirstW(snapshot.value, &entry));
   do { if (entry.th32ProcessID == GetCurrentProcessId()) return entry.th32ParentProcessID; } while (Process32NextW(snapshot.value, &entry));
-  throw Failure{};
+  throw failure_at(__LINE__);
 }
 std::vector<wchar_t> environment(const std::wstring& runtime, const std::wstring& workspace) {
   wchar_t system[MAX_PATH + 1]; UINT count = GetWindowsDirectoryW(system, MAX_PATH + 1); require(count && count < MAX_PATH + 1);
@@ -462,7 +480,7 @@ int wmain(int argc, wchar_t **argv) {
       if (original.valid() && WaitForSingleObject(original.value, 0) == WAIT_TIMEOUT) return 1;
       if (!original.valid() && GetLastError() != ERROR_INVALID_PARAMETER) return 1;
       return cleanup(journal, argv[2]) ? 0 : 1;
-    } catch (...) { return 1; }
+    } catch (...) { report_current_exception(__LINE__); return 1; }
   }
   std::wstring node, code, writable, readable, cwd, status_path, journal_path;
   DWORD timeout = 0, max_output = 0; int command_index = 0;
@@ -478,7 +496,7 @@ int wmain(int argc, wchar_t **argv) {
       else if (key == L"--timeout" || key == L"--max-output") {
         wchar_t *end = nullptr; unsigned long number = wcstoul(value.c_str(), &end, 10); require(end && !*end && number > 0);
         if (key == L"--timeout") timeout = number; else max_output = number;
-      } else throw Failure{};
+      } else { SetLastError(ERROR_INVALID_PARAMETER); throw failure_at(__LINE__); }
     }
     require(command_index && command_index < argc && timeout && timeout <= 120000 && max_output && max_output <= 1048576
       && is_path(node) && is_path(code) && is_path(writable) && is_path(cwd) && is_path(status_path) && is_path(journal_path)
@@ -558,6 +576,7 @@ int wmain(int argc, wchar_t **argv) {
     forward(output.read.value, GetStdHandle(STD_OUTPUT_HANDLE)); forward(errors.read.value, GetStdHandle(STD_ERROR_HANDLE));
     require(GetExitCodeProcess(process.value, &exit_code)); process.reset(); job.reset();
   } catch (...) {
+    report_current_exception(__LINE__);
     if (job.valid()) TerminateJobObject(job.value, 125);
     if (process.valid()) WaitForSingleObject(process.value, 3000);
     process.reset(); thread.reset(); job.reset(); reason = "isolation_setup_failed";
@@ -565,6 +584,6 @@ int wmain(int argc, wchar_t **argv) {
   bool cleaned = journal.profile.empty() || (!journal_path.empty() && cleanup(journal, journal_path));
   if (!cleaned && !reason) reason = "cleanup_failed";
   const char *status = reason ? "error" : exit_code ? "failed" : "passed";
-  try { require(is_path(status_path)); publish_status(status_path, status, exit_code, reason, cleaned); } catch (...) { return 125; }
+  try { require(is_path(status_path)); publish_status(status_path, status, exit_code, reason, cleaned); } catch (...) { report_current_exception(__LINE__); return 125; }
   return !strcmp(status, "passed") ? 0 : 1;
 }
