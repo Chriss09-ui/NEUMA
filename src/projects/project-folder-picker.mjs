@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, normalize, win32 } from "node:path";
 import { promisify } from "node:util";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 import { projectEnvironment, requireProjectHelper } from "./project-platform.mjs";
 
 const runFile = promisify(execFile);

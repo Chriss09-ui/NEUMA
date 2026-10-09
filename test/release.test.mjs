@@ -9,7 +9,7 @@ import { checkRelease, NATIVE_ARTIFACTS } from "../scripts/check-release.mjs";
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "neuma-release-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const manifest = { name: "@fixture/neuma", version: "0.1.0", dependencies: { fixture: "1.0.0" } };
+  const manifest = { name: "@fixture/neuma", version: "0.1.0", files: ["src/"], dependencies: { fixture: "1.0.0" } };
   const lock = { name: manifest.name, version: manifest.version, packages: { "": manifest } };
   for (const [name, value] of [["package.json", manifest], ["package-lock.json", lock], ["npm-shrinkwrap.json", lock]])
     await writeFile(join(root, name), JSON.stringify(value));
@@ -53,4 +53,12 @@ test("过时的 shrinkwrap 不通过发布检查", async (t) => {
   await writeFile(join(root, "npm-shrinkwrap.json"), JSON.stringify({ ...lock, version: "old" }));
   const result = await checkRelease(root);
   assert.ok(result.failures.some((value) => value.includes("发布锁文件与")));
+});
+
+test("发布清单只包含入口而遗漏完整源码目录时必须失败", async (t) => {
+  const { root, manifest } = await fixture(t);
+  manifest.files = ["bin/", "public/", "src/server.mjs", "src/installation/installation-cli.mjs"];
+  await writeFile(join(root, "package.json"), JSON.stringify(manifest));
+  const result = await checkRelease(root);
+  assert.ok(result.failures.some((value) => value.includes("完整源码目录 src/")));
 });

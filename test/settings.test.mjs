@@ -5,9 +5,9 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
-import { createRequestHandler } from "../server.mjs";
-import { getProviderConfig } from "../providers.mjs";
-import { settingsUpdates, writeEnvFile } from "../settings.mjs";
+import { createRequestHandler } from "../src/server.mjs";
+import { getProviderConfig } from "../src/requirements/providers.mjs";
+import { settingsUpdates, writeEnvFile } from "../src/settings.mjs";
 
 async function invoke(handler, method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);

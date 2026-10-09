@@ -1,4 +1,4 @@
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "./agent-storage.mjs";
 
 function requirement(id, value) {

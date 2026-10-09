@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 
 const text = (maxLength = 4000, minLength = 1) => ({ type: "string", minLength, maxLength });
 const identifier = { ...text(80), pattern: "^[A-Za-z][A-Za-z0-9_-]*$" };

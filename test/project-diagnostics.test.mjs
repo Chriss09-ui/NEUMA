@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { InputError } from "../core.mjs";
-import { createProjectAddError, ProjectFailureStore, safeDiagnosticText } from "../project-diagnostics.mjs";
+import { InputError } from "../src/requirements/core.mjs";
+import { createProjectAddError, ProjectFailureStore, safeDiagnosticText } from "../src/projects/project-diagnostics.mjs";
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-failure-"));

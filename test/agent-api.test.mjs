@@ -5,9 +5,9 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRequestHandler } from "../server.mjs";
-import { InputError, ProviderError } from "../core.mjs";
-import { AgentLibrary } from "../agent-library.mjs";
+import { createRequestHandler } from "../src/server.mjs";
+import { InputError, ProviderError } from "../src/requirements/core.mjs";
+import { AgentLibrary } from "../src/agents/agent-library.mjs";
 
 function request(method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);

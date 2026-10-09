@@ -1,7 +1,7 @@
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 import { validateBatchArguments } from "./project-platform.mjs";
 
 const excluded = /^(?:\..*|node_modules|venv|__pycache__|vendor|dist|build|coverage|.*(?:secret|credential|token|password).*|.*\.(?:pem|key|p12|pfx))$/i;

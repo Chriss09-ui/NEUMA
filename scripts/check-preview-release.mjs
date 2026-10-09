@@ -4,8 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
-const ENTRY_FILES = ["bin/neuma.cjs", "installation-cli.mjs", "installation-runtime.mjs",
-  "app-metadata.mjs", "server.mjs", "public/index.html"];
+const ENTRY_FILES = ["bin/neuma.cjs", "src/installation/installation-cli.mjs", "src/installation/installation-runtime.mjs",
+  "src/app-metadata.mjs", "src/server.mjs", "public/index.html"];
 const PREVIEW_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-preview\.(0|[1-9]\d*)$/;
 const SCOPED_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/;
 
@@ -23,6 +23,8 @@ export async function checkPreviewRelease(root) {
   const lock = await readJson(root, "package-lock.json", failures);
   const shrinkwrap = await readJson(root, "npm-shrinkwrap.json", failures);
   if (manifest) {
+    if (!Array.isArray(manifest.files) || !manifest.files.includes("src/"))
+      failures.push("发布文件清单必须包含完整源码目录 src/");
     if (typeof manifest.name !== "string" || manifest.name.length > 214 || !SCOPED_NAME.test(manifest.name))
       failures.push("试用包需要有效的 scoped npm 包名，例如 @账号/neuma");
     if (typeof manifest.version !== "string" || !PREVIEW_VERSION.test(manifest.version))

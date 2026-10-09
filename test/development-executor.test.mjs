@@ -5,8 +5,8 @@ import { PassThrough } from "node:stream";
 import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, symlink, link, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DevelopmentExecutor } from "../development-executor.mjs";
-import { inspectDevelopmentCode } from "../development-workspace.mjs";
+import { DevelopmentExecutor } from "../src/development/development-executor.mjs";
+import { inspectDevelopmentCode } from "../src/development/development-workspace.mjs";
 
 async function fixture(t, source = "console.log(JSON.stringify({ok:true,values:[42]}));") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "neuma-executor-test-")));

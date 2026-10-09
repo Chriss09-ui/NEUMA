@@ -5,11 +5,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentStorage } from "../agent-storage.mjs";
-import { AgentLibrary } from "../agent-library.mjs";
-import { DevelopmentStore } from "../development-store.mjs";
-import { DevelopmentWorkspace, inspectDevelopmentCode } from "../development-workspace.mjs";
-import { InputError } from "../core.mjs";
+import { AgentStorage } from "../src/agents/agent-storage.mjs";
+import { AgentLibrary } from "../src/agents/agent-library.mjs";
+import { DevelopmentStore } from "../src/development/development-store.mjs";
+import { DevelopmentWorkspace, inspectDevelopmentCode } from "../src/development/development-workspace.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 
 async function fixture(t) {
   const dataDir = await realpath(await mkdtemp(join(tmpdir(), "neuma-agent-storage-")));

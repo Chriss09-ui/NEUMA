@@ -1,4 +1,4 @@
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 
 const forbiddenSections = new Set(["__proto__", "prototype", "constructor"]);
 const sectionPattern = /^[A-Za-z_][A-Za-z0-9_]{0,79}$/;

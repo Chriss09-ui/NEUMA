@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { inspectDevelopmentCode, validateCodePath } from "./development-workspace.mjs";
 import { bundledIsolationHelper, checkedIsolationHelper, cleanupWindowsIsolation, isolatedNodeArguments,
-  nativeIsolationRequest, readIsolationStatus, recoverWindowsIsolation } from "./isolation-native.mjs";
+  nativeIsolationRequest, readIsolationStatus, recoverWindowsIsolation } from "../runtime/isolation-native.mjs";
 
 const inside = (root, path) => { const part = relative(root, path); return part === "" || (!part.startsWith("..") && !isAbsolute(part)); };
 const quoted = (value) => JSON.stringify(value);

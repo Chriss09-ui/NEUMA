@@ -4,9 +4,9 @@ import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { parseEnv } from "node:util";
-import { APP_VERSION } from "./app-metadata.mjs";
+import { APP_VERSION } from "../app-metadata.mjs";
 import { acquireDataLock, DataDirectoryBusyError } from "./instance-lock.mjs";
-import { getProviderConfig } from "./providers.mjs";
+import { getProviderConfig } from "../requirements/providers.mjs";
 
 async function readLocalFile(path, maxBytes = 65536) {
   try {
@@ -113,7 +113,7 @@ export async function startLocalApplication({ dataDir, port, envPath = resolve(d
     const actualPort = server.address().port;
     lock.update({ port: actualPort });
     const activeConfig = config ?? await providerConfig(envPath, env);
-    const handlerFactory = createHandler ?? (await import("./server.mjs")).createRequestHandler;
+    const handlerFactory = createHandler ?? (await import("../server.mjs")).createRequestHandler;
     signal?.throwIfAborted();
     handler = handlerFactory({ dataDir: lock.dataDir, envPath,
       config: activeConfig, port: actualPort, instanceId });

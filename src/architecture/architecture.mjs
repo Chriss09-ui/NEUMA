@@ -1,10 +1,10 @@
-import { InputError, ProviderError } from "./core.mjs";
-import { createPiSession } from "./pi-runtime.mjs";
+import { InputError, ProviderError } from "../requirements/core.mjs";
+import { createPiSession } from "../runtime/pi-runtime.mjs";
 import { ARCHITECTURE_VERSION, CAPABILITIES, DESIGN_SCHEMA, REVIEW_SCHEMA,
   requirementItems, validateDesign, validateReview, checkDesign, designHash } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, REVIEW_PROMPT, SPECIALIST_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
-import { AgentStorage, agentId } from "./agent-storage.mjs";
+import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
 
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const text = (maxLength = 2000) => ({ type: "string", minLength: 1, maxLength });

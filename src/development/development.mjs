@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { InputError } from "./core.mjs";
-import { createPiSession } from "./pi-runtime.mjs";
-import { designHash, ARCHITECTURE_VERSION } from "./architecture-contract.mjs";
+import { InputError } from "../requirements/core.mjs";
+import { createPiSession } from "../runtime/pi-runtime.mjs";
+import { designHash, ARCHITECTURE_VERSION } from "../architecture/architecture-contract.mjs";
 import { PLAN_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
 import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT } from "./development-prompts.mjs";
 import { compactDevelopmentContext, createContextReadTool } from "./development-context.mjs";
-import { AgentStorage } from "./agent-storage.mjs";
+import { AgentStorage } from "../agents/agent-storage.mjs";
 
 const LABELS = { intake: "正在接收设计与准备工作区…", planning: "正在拆分并检查研发任务…",
   implementing: "正在开发当前任务…", verifying: "正在运行测试与独立验收…", packaging: "正在整理经过验证的交付物…" };

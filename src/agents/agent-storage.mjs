@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { InputError } from "./core.mjs";
-import { hashValue } from "./development-contract.mjs";
+import { InputError } from "../requirements/core.mjs";
+import { hashValue } from "../development/development-contract.mjs";
 
 const migrations = new Map();
 const MARKER = "agents-layout.json";

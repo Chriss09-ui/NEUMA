@@ -18,6 +18,8 @@ export async function checkRelease(root) {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const lock = JSON.parse(await readFile(join(root, "package-lock.json"), "utf8"));
   const failures = [];
+  if (!Array.isArray(manifest.files) || !manifest.files.includes("src/"))
+    failures.push("发布文件清单必须包含完整源码目录 src/");
   let shrinkwrap;
   try { shrinkwrap = JSON.parse(await readFile(join(root, "npm-shrinkwrap.json"), "utf8")); }
   catch { failures.push("缺少发布锁文件，请先运行 npm run package:prepare"); }

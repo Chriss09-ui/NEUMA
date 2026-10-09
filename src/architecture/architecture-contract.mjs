@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { InputError, normalizeDraft, decideNext } from "./core.mjs";
+import { InputError, normalizeDraft, decideNext } from "../requirements/core.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
 export const CAPABILITIES = Object.freeze([

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createProjectFolderPicker } from "../project-folder-picker.mjs";
-import { InputError } from "../core.mjs";
+import { createProjectFolderPicker } from "../src/projects/project-folder-picker.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 
 test("系统选择器返回完整文件夹路径，路径不拼接进命令且不继承模型凭据", async () => {
   let inspected;

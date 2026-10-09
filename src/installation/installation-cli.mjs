@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { request } from "node:http";
-import { APP_VERSION } from "./app-metadata.mjs";
+import { APP_VERSION } from "../app-metadata.mjs";
 import { DataDirectoryBusyError } from "./instance-lock.mjs";
 import { installShutdownSignals, startLocalApplication } from "./installation-runtime.mjs";
 
@@ -72,7 +72,7 @@ async function existingInstanceReady(instance) {
 
 async function openPage(url, output) {
   try {
-    const { openProjectPage } = await import("./projects.mjs");
+    const { openProjectPage } = await import("../projects/projects.mjs");
     await openProjectPage(url);
   } catch { output.write(`浏览器未能自动打开，请访问 ${url}\n`); }
 }
@@ -84,7 +84,7 @@ export async function runCli(args = process.argv.slice(2), { stdout = process.st
   if (options.help) { stdout.write(HELP); return; }
   if (options.version) { stdout.write(`${APP_VERSION}\n`); return; }
   if (options.command === "doctor") {
-    const { DevelopmentExecutor } = await import("./development-executor.mjs");
+    const { DevelopmentExecutor } = await import("../development/development-executor.mjs");
     const executor = new DevelopmentExecutor();
     const isolation = await executor.probe();
     stdout.write(`NEUMA ${APP_VERSION}；Node.js ${process.versions.node}；${process.platform}/${process.arch}\n`);
@@ -94,7 +94,7 @@ export async function runCli(args = process.argv.slice(2), { stdout = process.st
     if (!isolation.available) process.exitCode = 1;
     if (["win32", "linux"].includes(process.platform)) {
       try {
-        const { requireProjectHelper } = await import("./project-platform.mjs");
+        const { requireProjectHelper } = await import("../projects/project-platform.mjs");
         await requireProjectHelper(); stdout.write("项目与文件夹辅助程序：已安装\n");
       } catch { stdout.write("项目与文件夹辅助程序：缺失，请使用完整安装包。\n"); process.exitCode = 1; }
     }

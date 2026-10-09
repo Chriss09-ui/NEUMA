@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { migrateInstallation } from "../installation-migration.mjs";
-import { AgentStorage } from "../agent-storage.mjs";
-import { DevelopmentWorkspace, inspectDevelopmentCode } from "../development-workspace.mjs";
-import { InputError } from "../core.mjs";
+import { migrateInstallation } from "../src/installation/installation-migration.mjs";
+import { AgentStorage } from "../src/agents/agent-storage.mjs";
+import { DevelopmentWorkspace, inspectDevelopmentCode } from "../src/development/development-workspace.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 
 const date = "2026-10-04T00:00:00.000Z";
 const definition = (id = "alpha") => ({ id, name: "迁移助手", draft: { goal: { value: "保留需求", source: "user" } },

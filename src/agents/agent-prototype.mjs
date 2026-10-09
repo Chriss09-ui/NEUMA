@@ -2,11 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { InputError, ProviderError } from "./core.mjs";
-import { createPiSession } from "./pi-runtime.mjs";
-import { ArchitectureDesigner } from "./architecture.mjs";
-import { ARCHITECTURE_VERSION, CAPABILITIES, designHash } from "./architecture-contract.mjs";
-import { DevelopmentController, developmentSummary } from "./development.mjs";
+import { InputError, ProviderError } from "../requirements/core.mjs";
+import { createPiSession } from "../runtime/pi-runtime.mjs";
+import { ArchitectureDesigner } from "../architecture/architecture.mjs";
+import { ARCHITECTURE_VERSION, CAPABILITIES, designHash } from "../architecture/architecture-contract.mjs";
+import { DevelopmentController, developmentSummary } from "../development/development.mjs";
 import { AgentStorage } from "./agent-storage.mjs";
 import { AgentLibrary } from "./agent-library.mjs";
 

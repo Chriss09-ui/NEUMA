@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { InputError } from "./core.mjs";
+import { InputError } from "../requirements/core.mjs";
 import { projectRuntimeSnapshot, scanLocalRuntime } from "./project-runtime.mjs";
 import { projectPath, validateProjectPlan, validateScriptCommand } from "./project-inspection.mjs";
 import { startScriptServices, stopScriptServices } from "./project-script-runtime.mjs";

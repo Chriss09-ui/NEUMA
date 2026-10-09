@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, rmdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { InputError } from "./core.mjs";
-import { AgentStorage, agentId } from "./agent-storage.mjs";
-import { AgentLibrary } from "./agent-library.mjs";
-import { hashValue } from "./development-contract.mjs";
-import { inspectDevelopmentCode } from "./development-workspace.mjs";
+import { InputError } from "../requirements/core.mjs";
+import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
+import { AgentLibrary } from "../agents/agent-library.mjs";
+import { hashValue } from "../development/development-contract.mjs";
+import { inspectDevelopmentCode } from "../development/development-workspace.mjs";
 
 export const MIGRATION_LIMITS = Object.freeze({ bytes: 256 * 1024 * 1024, fileBytes: 16 * 1024 * 1024,
   jsonBytes: 8 * 1024 * 1024, entries: 20000 });

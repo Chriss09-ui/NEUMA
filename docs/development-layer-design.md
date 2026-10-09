@@ -209,8 +209,8 @@ Pi 负责单个角色的模型与工具循环；控制器负责五阶段流转�
 本设计吸收参考项目的文件交接、执行与验收分工、失败检查点和有界修复，并补足其反馈传递、上下文续接与证据版本绑定。它没有迁移参考项目的 Claude 会话实现。
 
 - [NEUMA 当前架构基线](/Users/chriss/Desktop/办公智能体/neuma-requirements/ARCHITECTURE.md)
-- [现有 Pi 会话封装](/Users/chriss/Desktop/办公智能体/neuma-requirements/pi-runtime.mjs:176)
-- [现有结构化提交与独立角色机制](/Users/chriss/Desktop/办公智能体/neuma-requirements/architecture.mjs:99)
+- [现有 Pi 会话封装](../src/runtime/pi-runtime.mjs)
+- [现有结构化提交与独立角色机制](../src/architecture/architecture.mjs)
 - [参考项目研发层节点契约](/Users/chriss/Desktop/harness-clean-integration/src/sinan/coding/NODES.md)
 - [参考项目独立验收](/Users/chriss/Desktop/harness-clean-integration/src/sinan/coding/nodes/evaluator_qa.py:65)
 - [Pi SDK 官方说明](https://pi.dev/docs/latest/sdk)
