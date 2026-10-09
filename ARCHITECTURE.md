@@ -153,4 +153,4 @@ CLI 默认数据根为用户主目录 `.neuma`，模型配置保存在该目录 
 
 Windows 项目生命周期通过 `native/projects` Job Object 与控制管道管理已创建的树；Linux 进程扫描只读有限 `/proc` 信息。文件夹窗口、解释器与桌面启动集中在平台模块，已有项目仍使用用户明确授予的本机启动权限。生成程序独立使用 `native/isolation`：LPAC/Job 或 Landlock/seccomp，不复用项目管理操作；任何缺能力均阻塞，三平台运行规则通过实际隔离探测核实。
 
-Windows/Linux 的原生构建在经批准的 GitHub 测试机进行，本机未安装其他系统。Linux 四项目标的原生检查已通过，Ubuntu 24.04 构建的 x64/ARM64 辅助程序已取回；Windows 实际隔离启动尚待通过。2026-10-09 本机串行 npm test 为 571/571，通过且无跳过。`scripts/check-release.mjs` 要求全部辅助程序、发布锁文件以及绑定当前版本/摘要的真实系统验收记录；包保持 private，缺证据不公开发布。安装与验收细节见 [npm 安装说明](docs/npm-installation.md)。
+Windows/Linux 的原生构建在经批准的 GitHub 测试机进行，本机未安装其他系统。Linux 四项目标的原生检查已通过，Ubuntu 24.04 构建的 x64/ARM64 辅助程序已取回；Windows 实际隔离启动尚待通过。2026-10-09 三平台改造分支的本机串行 npm test 为 571/571，通过且无跳过。`scripts/check-release.mjs` 继续要求全部辅助程序、发布锁文件以及绑定当前版本/摘要的真实系统验收记录，缺证据不能发布三平台完整支持版。同日用户明确批准先公开 Apple 芯片 Mac 试用版；试用分支限定 `darwin/arm64`、预发布版本和 `preview` 标签，使用 `scripts/check-preview-release.mjs` 检查清单、锁文件及入口，不伪造或替代完整认证。安装与验收细节见 [npm 安装说明](docs/npm-installation.md)。

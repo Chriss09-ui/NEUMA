@@ -1,19 +1,16 @@
 {
   "name": "@chrissliu/neuma",
-  "version": "0.1.0",
+  "version": "0.1.0-preview.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@chrissliu/neuma",
-      "version": "0.1.0",
+      "version": "0.1.0-preview.1",
       "os": [
-        "darwin",
-        "win32",
-        "linux"
+        "darwin"
       ],
       "cpu": [
-        "x64",
         "arm64"
       ],
       "bin": {

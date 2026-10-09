@@ -1,13 +1,18 @@
 {
   "name": "@chrissliu/neuma",
-  "version": "0.1.0",
-  "description": "NEUMA 本机智能体与项目工作台",
-  "private": true,
+  "version": "0.1.0-preview.1",
+  "description": "NEUMA 本机智能体与项目工作台（Apple 芯片 Mac 试用版）",
+  "private": false,
   "type": "module",
   "bin": { "neuma": "bin/neuma.cjs" },
-  "files": ["*.mjs", "npm-shrinkwrap.json", "bin/", "public/", "native/**/*.c", "native/**/*.cpp", "native/**/*.manifest", "native/**/*.sh", "native/**/*.ps1", "native/isolation/bin/*/neuma-isolation", "native/isolation/bin/*/neuma-isolation.exe", "native/projects/bin/*/neuma-projects", "native/projects/bin/*/neuma-projects.exe", "native/verification.json", "scripts/check-release.mjs", "README.md", "ARCHITECTURE.md", "docs/development-layer-design.md", "docs/npm-installation.md"],
-  "os": ["darwin", "win32", "linux"],
-  "cpu": ["x64", "arm64"],
+  "files": ["*.mjs", "npm-shrinkwrap.json", "bin/", "public/", "scripts/check-release.mjs", "scripts/check-preview-release.mjs", "README.md", "ARCHITECTURE.md", "docs/development-layer-design.md", "docs/npm-installation.md"],
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "publishConfig": {
+    "access": "public",
+    "tag": "preview",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=22.19"
   },
@@ -16,7 +21,8 @@
     "test": "node --test --test-concurrency=1",
     "package:prepare": "node scripts/prepare-package.mjs",
     "release:check": "node scripts/check-release.mjs",
-    "prepublishOnly": "node scripts/check-release.mjs"
+    "release:preview:check": "node scripts/check-preview-release.mjs",
+    "prepublishOnly": "node scripts/check-preview-release.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.0"

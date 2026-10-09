@@ -1,15 +1,15 @@
 # npm 安装改造与发布准备
 
-本轮已经实现命令行安装入口、独立数据目录、启动锁、就绪检查、关闭清理、显式迁移和三平台适配源码。Mac 本机与四个 Ubuntu 云端目标的核心检查通过，Linux 辅助程序已取回。Windows 辅助程序能编译，真实隔离启动仍在验证；当前不是已经公开发布的三平台完整支持版本。`package.json` 保留 `private: true`，没有上传 npm。
+本轮已经实现命令行安装入口、独立数据目录、启动锁、就绪检查、关闭清理、显式迁移和三平台适配源码。Mac 本机与四个 Ubuntu 云端目标的核心检查通过，Linux 辅助程序已取回。Windows 辅助程序能编译，真实隔离启动仍未通过。2026-10-09 用户明确批准先公开 Apple 芯片 Mac 试用版，版本为 `0.1.0-preview.1`，使用 `preview` 标签；清单仅允许 `darwin/arm64`，本次安装包不包含 Windows/Linux 辅助程序，也不代表完整三平台认证。公开上传是否完成，以 npm registry 的实际查询结果为准。
 
 ## 用户如何使用
 
 计划正式支持 macOS 13+、Windows 11、Ubuntu 24.04/26.04 Desktop，x64/ARM64，前提是已经安装 Node.js 22.19 或更新版本。完整安装包携带平台辅助程序，用户无需 Docker、虚拟机或编译工具。Linux 文件夹窗口使用 Ubuntu Desktop 自带的 GIO/桌面门户；服务器环境不在桌面窗口验收范围内。
 
-正式发布后：
+Mac 试用版只支持 Apple 芯片 Mac（M 系列）；本机实际验证使用 Node.js 26.3.0，最低 Node 版本、Intel Mac 和其他系统的完整安装认证仍待完成。试用版发布后：
 
 ```sh
-npm install -g @chrissliu/neuma
+npm install -g @chrissliu/neuma@preview
 neuma
 ```
 
@@ -83,22 +83,23 @@ ARM64 开发者终端把项目辅助程序的 `-Architecture x64` 改为 `-Archi
 NODE_OPTIONS=--max-old-space-size=256 npm test
 npm run package:prepare
 npm pack --ignore-scripts --offline --pack-destination dist
-node scripts/smoke-package.mjs dist/chrissliu-neuma-0.1.0.tgz
+node scripts/smoke-package.mjs dist/chrissliu-neuma-0.1.0-preview.1.tgz
+npm run release:preview:check
 npm run release:check
 ```
 
-本地 `.tgz` 只供审查当前改造，缺少辅助程序时不能当作三平台完整发布包。发布文件使用白名单，不包含用户数据、`.env`、测试或开发日志。Pi SDK 保留正常 ESM 依赖布局；从现有 package-lock 生成 npm-shrinkwrap，不用单文件打包破坏 SDK 资源。真实干净安装可能下载较大的现有 SDK 依赖，需要先批准相应下载，不能用复用本机 node_modules 假装已通过。
+本地 `.tgz` 只供审查和试用，不能当作三平台完整发布包。Mac 试用版使用 `scripts/check-preview-release.mjs`，要求明确的预发布版本、仅 `darwin/arm64`、公开 `preview` 标签和一致的依赖锁文件；它不替代完整认证。`npm run release:check` 继续执行原有三平台门槛，不生成虚假验收记录。发布文件使用白名单，不包含用户数据、`.env`、测试或开发日志。Pi SDK 保留正常 ESM 依赖布局；从现有 package-lock 生成 npm-shrinkwrap，不用单文件打包破坏 SDK 资源。真实干净安装可能下载较大的现有 SDK 依赖，需要先批准相应下载，不能用复用本机 node_modules 假装已通过。
 
 每个认证系统/架构需要从真实 `.tgz` 安装、最低 Node 版本、模拟模型 SDK、隔离越界/网络/子进程、取消/失败产物、项目生命周期、目录选择、迁移和升级保留数据验收。Windows 的 Node `child.kill('SIGINT')` 是强制终止，不能替代真实终端 Ctrl+C 验收。完整验收记录写入 `native/verification.json`，包含当前版本、每个系统的时间和可追溯证据、各项 checks=true、辅助程序 SHA-256；`scripts/check-release.mjs` 定义所需字段并阻止缺证据发布。不能手工把未运行项填为通过。
 
 ## 后续更新
 
-维护者每次发布递增版本、更新锁文件、重新生成 shrinkwrap，并完成受影响的平台验收。验收记录必须绑定当前包版本与实际辅助程序摘要。公开上传作为独立批准步骤，使用 npm 的正常发布流程。
+维护者每次发布递增版本、更新锁文件、重新生成 shrinkwrap，并完成受影响的平台验收。完整认证记录必须绑定当前包版本与实际辅助程序摘要。Mac 试用版只通过 `preview` 标签更新；用户已明确批准本次公开上传，后续支持范围扩大仍需补齐实际验证。正式稳定版使用 `latest` 标签。
 
 用户更新后重启：
 
 ```sh
-npm install -g @chrissliu/neuma@latest
+npm install -g @chrissliu/neuma@preview
 neuma
 ```
 
@@ -110,7 +111,9 @@ neuma
 
 包含真实 Mac 隔离探测、真实 Pi SDK 对接本机模拟模型、实际 CLI 重复启动/退出，以及迁移和取消竞态测试。未调用用户的真实模型服务，未迁移真实用户数据。本机未安装软件、下载 SDK 依赖或启动 Windows/Linux 虚拟机；Windows/Linux 构建与测试在 GitHub 云端进行。
 
-实际 `.tgz` 解包后，在只读程序目录、独立临时数据目录、不同工作目录启动；网页与资源、设置保存、端口保存、重启和 Ctrl+C 通过。没有执行干净 `npm install` 下载 SDK，不把这个启动检查当作完整依赖安装验收。`doctor` 的 Mac 实际隔离探测通过。发布检查要求全部八份辅助程序及完整真实系统记录，当前证据不齐，保持阻止发布。
+实际 `.tgz` 解包后，在只读程序目录、独立临时数据目录、不同工作目录启动；网页与资源、设置保存、端口保存、重启和 Ctrl+C 通过。没有执行干净 `npm install` 下载 SDK，不把这个启动检查当作完整依赖安装验收。`doctor` 的 Mac 实际隔离探测通过。三平台正式发布检查要求全部八份辅助程序及完整真实系统记录，当前证据不齐，继续阻止完整支持版发布。
+
+同日 Mac 试用版增加独立发布范围检查，相关 8 项测试通过；完整串行测试为 576/576，0 失败、0 跳过，23.64 秒，最大 RSS 214188032 字节（约 214 MB），交换次数 0。保持 Node 堆限制 256 MiB，不下载依赖、不调用真实模型、不迁移用户数据；这些结果不能代替 SDK 干净安装或最低 Node 版本认证。
 
 ## 改动文件清单
 
@@ -124,8 +127,9 @@ neuma
 | 新增测试 | `test/installation.test.mjs`、`installation-migration.test.mjs`、`isolation-native.test.mjs`、`project-platform.test.mjs`、`release.test.mjs`、`session-shutdown.test.mjs` |
 | 更新测试 | `test/development-executor.test.mjs`、`project-folder-picker.test.mjs`、`project-runtime.test.mjs`、`server.test.mjs`、`settings.test.mjs` |
 | 云端原生检查 | `.github/workflows/native-check.yml`、`.github/scripts/diagnose-isolation.mjs`、`.github/scripts/windows-loader.cpp` |
+| Mac 试用版发布 | `scripts/check-preview-release.mjs`、`test/preview-release.test.mjs`，以及清单、两个锁文件和安装说明 |
 
-改动已提交并上传到独立分支 [`codex/npm-cli-three-platform`](https://github.com/Chriss09-ui/NEUMA/tree/codex/npm-cli-three-platform)，可审查；`main` 只新增及更新手动测试流程，应用改造未合并。本轮产生的本地 `.tgz` 在 `dist/`，该目录不进入 Git 或再次打包。
+三平台改造已提交并上传到独立分支 [`codex/npm-cli-three-platform`](https://github.com/Chriss09-ui/NEUMA/tree/codex/npm-cli-three-platform)，可审查；Mac 试用版使用独立分支 `codex/npm-macos-preview`。`main` 只新增及更新手动测试流程，应用改造未合并。本轮产生的本地 `.tgz` 在 `dist/`，该目录不进入 Git 或再次打包。
 
 ## 已批准的远程原生验证
 
