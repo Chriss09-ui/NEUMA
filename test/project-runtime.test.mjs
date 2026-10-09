@@ -4,6 +4,7 @@ import { scanLocalRuntime, projectRuntimeSnapshot } from "../project-runtime.mjs
 import { ProjectManager } from "../projects.mjs";
 
 const fields = (...values) => `${values.join("\0")}\0\n`;
+const procPath = (value) => value.replaceAll("\\", "/");
 const snapshot = (overrides = {}) => ({ checkedAt: "2026-10-04T00:00:00.000Z", ports: [], processes: [], complete: true, warnings: [], ...overrides });
 const project = (id, root, kind = "node") => ({ id, name: id, root, kind, status: "stopped", canStop: false });
 const port = (pid, number) => ({ pid, port: number, protocol: "TCP", address: "127.0.0.1", processName: "node" });
@@ -41,14 +42,15 @@ test("Linux 只从 proc status、cwd、exe、fd 和监听表读取事实，不�
   const reads = [];
   const result = await scanLocalRuntime({ platform: "linux", procRoot: "/fixture-proc", run: () => assert.fail("不应启动系统命令"), procFs: {
     readFile: async (path) => {
+      path = procPath(path);
       reads.push(path);
       if (path.endsWith("/net/tcp")) return "header\n 0: 0100007F:0FA0 00000000:0000 0A 0:0 00:0 00000000 1000 0 404\n";
       if (path.endsWith("/net/tcp6")) return "header\n";
       if (path.endsWith("/101/status")) return "Name:\tnode\nPPid:\t1\n";
       assert.fail(`不允许读取 ${path}`);
     },
-    readdir: async (path) => path === "/fixture-proc" ? ["101", "net"] : ["7"],
-    readlink: async (path) => { reads.push(path); return path.endsWith("/cwd") ? "/apps/demo" : path.endsWith("/exe") ? "/usr/bin/node" : "socket:[404]"; },
+    readdir: async (path) => procPath(path) === "/fixture-proc" ? ["101", "net"] : ["7"],
+    readlink: async (path) => { path = procPath(path); reads.push(path); return path.endsWith("/cwd") ? "/apps/demo" : path.endsWith("/exe") ? "/usr/bin/node" : "socket:[404]"; },
   } });
   assert.equal(result.complete, true); assert.deepEqual(result.ports, [{ address: "127.0.0.1", port: 4000, pid: 101, protocol: "TCP", processName: "node", cwd: "/apps/demo" }]);
   assert.equal(reads.some((path) => /cmdline|environ/.test(path)), false);
@@ -67,7 +69,7 @@ test("Windows 的外部全局 Node 无目录证据时保留未知，项目内 ex
 
 test("Linux 达到查询上限返回已有事实并保留未知，取消不会发布成功快照", async () => {
   const procFs = {
-    readFile: async (path) => path.includes("/net/") ? "header\n" : "Name:\tnode\nPPid:\t1\n",
+    readFile: async (path) => procPath(path).includes("/net/") ? "header\n" : "Name:\tnode\nPPid:\t1\n",
     readdir: async () => ["101", "102"],
     readlink: async () => "/apps/demo",
   };
