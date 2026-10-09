@@ -60,9 +60,57 @@ jobs:
         shell: bash
         run: |
           command -v cc
-          command -v pkg-config
-          pkg-config --exists gio-2.0
           sh native/isolation/build-linux.sh
+          command -v pkg-config
+          if ! pkg-config --exists gio-2.0; then
+            command -v python3
+            TASK_APT_PLAN="$RUNNER_TEMP/neuma-glib-apt-plan.txt"
+            sudo env LC_ALL=C apt-get --assume-yes --no-install-recommends --print-uris install libglib2.0-dev > "$TASK_APT_PLAN"
+            python3 - "$TASK_APT_PLAN" <<'PY'
+          import pathlib, re, shlex, sys
+          from decimal import Decimal
+          from urllib.parse import urlsplit
+
+          plan_path = pathlib.Path(sys.argv[1])
+          if plan_path.stat().st_size > 1024 * 1024:
+              raise SystemExit("APT plan exceeds the inspection limit.")
+          plan = plan_path.read_text(encoding="utf-8")
+          download = 0
+          packages = 0
+          for line in plan.splitlines():
+              line = line.strip()
+              if not line.startswith("'"):
+                  continue
+              fields = shlex.split(line)
+              if len(fields) != 4 or not fields[2].isdigit():
+                  raise SystemExit("APT package size could not be parsed.")
+              uri = urlsplit(fields[0])
+              official = uri.hostname in {"archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com"} or (uri.hostname or "").endswith(".archive.ubuntu.com")
+              if uri.scheme not in {"http", "https"} or not official or uri.username or uri.password or uri.query or uri.fragment:
+                  raise SystemExit("APT plan must use public official Ubuntu archives.")
+              packages += 1
+              download += int(fields[2])
+          if not packages or download > 32 * 1024 * 1024:
+              raise SystemExit("APT download plan is missing or exceeds 32 MiB.")
+          units = {"B": 1, "kB": 1000, "MB": 1000000, "GB": 1000000000, "KiB": 1024, "MiB": 1048576, "GiB": 1073741824}
+          unit_pattern = "|".join(sorted(units, key=len, reverse=True))
+          disk = re.findall(r"After this operation, ([0-9][0-9,]*(?:\.[0-9]+)?) (" + unit_pattern + r") of additional disk space will be used\.", plan)
+          if not disk:
+              disk = re.findall(r"^\s*Space needed: ([0-9][0-9,]*(?:\.[0-9]+)?) (" + unit_pattern + r")(?:\s*/|\s*$)", plan, re.MULTILINE)
+          if len(disk) != 1:
+              raise SystemExit("APT additional disk size could not be parsed.")
+          amount, unit = disk[0]
+          amount = amount.replace(",", "")
+          places = len(amount.split(".")[1]) if "." in amount else 0
+          # Reserve one displayed unit for rounding in apt's human-readable disk estimate.
+          disk_upper_bound = (Decimal(amount) + Decimal(10) ** -places) * units[unit]
+          if disk_upper_bound > 128 * 1024 * 1024:
+              raise SystemExit("APT additional disk plan exceeds 128 MiB.")
+          print(f"Dependency plan within limits: {download} download bytes, at most {disk_upper_bound} additional disk bytes.")
+          PY
+            sudo env LC_ALL=C apt-get --assume-yes --no-install-recommends install libglib2.0-dev
+          fi
+          pkg-config --exists gio-2.0
           sh native/projects/build-linux.sh
       - name: Build Windows helpers with preinstalled Visual Studio
         if: runner.os == 'Windows'

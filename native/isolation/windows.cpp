@@ -8,6 +8,7 @@
 #include <userenv.h>
 #include <winternl.h>
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -88,7 +89,7 @@ Handle checked_object(const std::wstring& original, DWORD access = MAXIMUM_ALLOW
     size_t next = path.find(L'\\', position); bool last = next == std::wstring::npos;
     std::wstring component = path.substr(position, last ? std::wstring::npos : next - position);
     require(!component.empty() && component != L"." && component != L".." && component.find(L':') == std::wstring::npos
-      && component.size() * sizeof(wchar_t) <= MAXUSHORT);
+      && component.size() * sizeof(wchar_t) <= USHRT_MAX);
     UNICODE_STRING name{}; name.Buffer = component.data(); name.Length = static_cast<USHORT>(component.size() * sizeof(wchar_t)); name.MaximumLength = name.Length;
     OBJECT_ATTRIBUTES object{}; object.Length = sizeof(object); object.RootDirectory = current.value; object.ObjectName = &name; object.Attributes = OBJ_CASE_INSENSITIVE;
     IO_STATUS_BLOCK io{}; HANDLE opened = nullptr;
