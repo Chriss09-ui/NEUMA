@@ -123,12 +123,13 @@ neuma
 | 包与文档 | `package.json`、`package-lock.json`、`npm-shrinkwrap.json`、`.gitignore`、`scripts/prepare-package.mjs`、`check-release.mjs`、`smoke-package.mjs`、`README.md`、`AGENTS.md`、`ARCHITECTURE.md`、`docs/development-layer-design.md`、本说明 |
 | 新增测试 | `test/installation.test.mjs`、`installation-migration.test.mjs`、`isolation-native.test.mjs`、`project-platform.test.mjs`、`release.test.mjs`、`session-shutdown.test.mjs` |
 | 更新测试 | `test/development-executor.test.mjs`、`project-folder-picker.test.mjs`、`project-runtime.test.mjs`、`server.test.mjs`、`settings.test.mjs` |
+| 云端原生检查 | `.github/workflows/native-check.yml`、`.github/scripts/diagnose-isolation.mjs`、`.github/scripts/windows-loader.cpp` |
 
 改动已提交并上传到独立分支 [`codex/npm-cli-three-platform`](https://github.com/Chriss09-ui/NEUMA/tree/codex/npm-cli-three-platform)，可审查；`main` 只新增及更新手动测试流程，应用改造未合并。本轮产生的本地 `.tgz` 在 `dist/`，该目录不进入 Git 或再次打包。
 
 ## 已批准的远程原生验证
 
-新增 `.github/workflows/native-check.yml`，仅支持手动触发。目标为 Ubuntu 24.04/26.04 的 x64/ARM64、Windows Server 2025 x64、Windows 11 ARM64；任务串行运行，每个最多 8 分钟，Node 固定最低版本 22.19.0、单文件测试并发、堆限制 256 MiB。支持 `target=all` 或 `target=windows`，已通过的 Linux 无需随 Windows 修正重复测试。使用预装编译器；缺 GIO 开发文件时仅在云端按现有 apt 索引补齐 `libglib2.0-dev`，预检官方 Ubuntu 下载源、下载不超过 32 MiB、额外磁盘不超过 128 MiB，不执行 apt update。Linux x64 的实际下载为 2872696 字节。没有 npm/SDK 安装或编译器下载。产物打成保留执行权限的 tar 包，远程保存一天；`.github/scripts/diagnose-isolation.mjs` 只公开固定数字错误，不公开环境或路径，不生成完整产品验收记录。
+新增 `.github/workflows/native-check.yml`，仅支持手动触发。目标为 Ubuntu 24.04/26.04 的 x64/ARM64、Windows Server 2025 x64、Windows 11 ARM64；任务串行运行，每个最多 8 分钟，Node 固定最低版本 22.19.0、单文件测试并发、堆限制 256 MiB。支持 `target=all` 或 `target=windows`，已通过的 Linux 无需随 Windows 修正重复测试。使用预装编译器；缺 GIO 开发文件时仅在云端按现有 apt 索引补齐 `libglib2.0-dev`，预检官方 Ubuntu 下载源、下载不超过 32 MiB、额外磁盘不超过 128 MiB，不执行 apt update。Linux x64 的实际下载为 2872696 字节。没有 npm/SDK 安装或编译器下载。产物打成保留执行权限的 tar 包，远程保存一天；`.github/scripts/diagnose-isolation.mjs` 仅输出固定状态、布尔检查、数字错误及经过白名单过滤的 DLL 文件名，诊断日志限制 16 KiB、128 行，不公开环境或完整路径，不生成完整产品验收记录。
 
 现有远程仓库是公开的 `Chriss09-ui/NEUMA`。按[GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories)，公开仓库的标准测试机器免费。计算与 Node 下载发生在 GitHub 的机器上，本机不下载或启动 Windows/Linux 系统。
 
@@ -136,6 +137,8 @@ neuma
 
 Linux 四个目标在[第四轮云端任务](https://github.com/Chriss09-ui/NEUMA/actions/runs/37865332609)全部通过；x64 日志明确记录 39/39、0 失败、0 跳过及真实隔离探测通过。Ubuntu 24.04 编译的 x64/ARM64 隔离与项目辅助程序已经取回，分别位于 `native/isolation/bin/linux-*` 和 `native/projects/bin/linux-*`。Ubuntu 26.04 当前验证的是同源代码在各自系统构建的产物，尚未把 Ubuntu 24.04 的发行产物放到 26.04 做完整安装认证。
 
-Windows 两个平台已经能编译两个辅助程序，实际隔离启动仍在修正。[第六轮 Windows 任务](https://github.com/Chriss09-ui/NEUMA/actions/runs/37866798306)仍未通过；不能据此签发完整发布验收记录。
+Windows 两个平台已经能编译两个辅助程序，[第八轮 Windows 任务](https://github.com/Chriss09-ui/NEUMA/actions/runs/37868454098)均未通过。x64 诊断记录隔离 Node 的退出码为 3221225794（0xC0000142，DLL 初始化失败），尚未确定具体失败的 DLL；不能据此签发完整发布验收记录。
+
+本轮补充仅用于云端的 `windows-loader.cpp`，通过 Windows 原生调试事件记录有限的 DLL 文件名和数字状态，不进入 npm 包，也不放宽生产隔离权限。DLL 加载记录不等于该 DLL 初始化失败的证据。按用户“本轮改完就停止”的要求，此工具尚未在 Windows 编译或运行，不启动第九轮云端测试，后续验证待用户要求继续。
 
 Windows Server x64 测试不能代替 Windows 11 x64 认证，服务器 Ubuntu 不能代替真实桌面门户窗口验证。Mac 13/x64、桌面目录窗口、真实控制台 Ctrl+C、SDK 干净安装及完整产品测试仍需后续补齐；远程辅助程序测试成功也不会自动打开 npm 发布门槛。
