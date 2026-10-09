@@ -4,9 +4,18 @@
 
 修改创建和运行功能前，先读 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [AGENTS.md](AGENTS.md)。正式架构采用两个固定职责、按需检索/模块委派和程序门槛；研发采用[五阶段设计](docs/development-layer-design.md)，复用 Pi SDK。目前已验证 macOS 隔离环境中的 Node 内置模块程序；Windows/Linux 增加平台适配源码，辅助程序构建与真实系统验收仍待完成。不自动安装依赖或部署外部服务。临时原型已归档，不再作为开发规范。
 
-## npm 命令行安装准备
+## npm 命令行安装（Mac 试用版）
 
-已提供 `neuma` 命令入口、用户主目录 `.neuma` 数据存储、端口保存、重复启动互斥、就绪检查、统一退出及 `neuma migrate --from <源码目录>`。包名为 `@chrissliu/neuma`，版本 `0.1.0`；尚未公开发布，继续保留 `private: true`。三平台辅助程序必须构建并完成真实系统验收后才能发布完整支持版。
+本次试用版为 `@chrissliu/neuma@0.1.0-preview.1`，只支持 **Apple 芯片的 Mac（M 系列，ARM64）**。需要 macOS 13+ 和 Node.js 22.19 或更新版本；本机实际验证使用 Node.js 26.3.0，最低 Node 版本及完整产品认证仍待补齐。Windows、Linux 和 Intel Mac 不在本次试用范围内。试用版通过 `preview` 标签分发，完整三平台版本仍需完成辅助程序与真实系统验收。
+
+```sh
+npm install -g @chrissliu/neuma@preview
+neuma
+```
+
+首次启动自动打开本机网页，在“设置”中填写自己的模型接口、模型名与 API Key；未配置模型时可以打开页面。保留终端运行，Ctrl+C 关闭。安装会下载锁定的 SDK 依赖，不自动下载其他系统、编译器或虚拟机。后续更新使用同一条 `npm install -g @chrissliu/neuma@preview` 命令，再重新启动。
+
+已提供 `neuma` 命令入口、用户主目录 `.neuma` 数据存储、端口保存、重复启动互斥、就绪检查、统一退出及 `neuma migrate --from <源码目录>`。试用版单独检查平台范围、预发布标签与依赖锁文件；`npm run release:check` 继续保留完整三平台发布门槛，不生成未执行的验收记录。
 
 本地可使用 `node bin/neuma.cjs --no-open --data-dir <独立目录>` 检查新入口，Ctrl+C 停止。首次无模型配置可打开设置页。源码版仍使用项目内的 `.neuma` 与 `.env`。迁移先关闭旧服务，目标必须为空；密钥重新填写。
 
