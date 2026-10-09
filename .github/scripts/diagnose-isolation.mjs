@@ -21,6 +21,20 @@ const executor = new DevelopmentExecutor({ spawnImpl: (command, args, options) =
   child.once("close", () => report(pending));
   return child;
 } });
+const checks = ["readDenied", "writeDenied", "codeWriteDenied", "hardlinkDenied", "metadataDenied", "symlinkReadDenied", "scratchWorked", "networkDenied", "subprocessDenied"];
+const sandboxRun = executor.sandboxRun.bind(executor);
+// This script only calls the executor's fixed canary. Publish its booleans and
+// bounded status fields rather than raw output, which may contain OS paths.
+executor.sandboxRun = async (input) => {
+  const result = await sandboxRun(input);
+  let canary;
+  try { canary = JSON.parse(result.stdout); } catch {}
+  const status = ["passed", "failed", "error", "not_run"].includes(result.status) ? result.status : "unknown";
+  const exitCode = Number.isSafeInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode <= 0xffffffff ? result.exitCode : null;
+  const observed = Object.fromEntries(checks.map((key) => [key, typeof canary?.[key] === "boolean" ? canary[key] : null]));
+  console.log(JSON.stringify({ canaryStatus: status, exitCode, checks: observed }));
+  return result;
+};
 const result = await executor.probe();
 console.log(JSON.stringify({ available: result.available, kind: result.kind }));
 if (!result.available) process.exitCode = 1;
