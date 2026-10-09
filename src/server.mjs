@@ -10,6 +10,8 @@ import { PiProjectAgent, createProjectAnalyzer } from "./runtime/pi-runtime.mjs"
 import { PrototypeAgents } from "./agents/agent-prototype.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
 import { APP_VERSION } from "./app-metadata.mjs";
+import { SkillManager } from "./skills/skill-manager.mjs";
+import { routeSkills } from "./skills/skill-api.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = new Map([
@@ -22,6 +24,8 @@ const PUBLIC = new Map([
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
   ["/shell.js", ["shell.js", "text/javascript; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
+  ["/skills.js", ["skills.js", "text/javascript; charset=utf-8"]],
+  ["/skills-view.js", ["skills-view.js", "text/javascript; charset=utf-8"]],
   ["/projects.js", ["projects.js", "text/javascript; charset=utf-8"]],
   ["/project-view.js", ["project-view.js", "text/javascript; charset=utf-8"]],
   ["/runtime.js", ["runtime.js", "text/javascript; charset=utf-8"]],
@@ -36,12 +40,13 @@ function sendJson(response, status, value) {
 }
 
 function safeFailure(error, config) {
-  const status = error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
+  const conflict = error instanceof InputError && error.code === "SKILL_CONFLICT";
+  const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";
   const diagnostic = error instanceof ProviderError || (error instanceof InputError && error.code === "PROJECT_ADD_FAILED" && error.diagnostic) ? error.diagnostic : error instanceof InputError
     ? { stage: "input", reason: "invalid_request" } : { stage: "server", reason: "internal_error" };
   return { status, payload: { error: message, diagnostic: { ...diagnostic, providerModel: config.model || null },
-    ...(error instanceof InputError && error.code === "PROJECT_REMOVE_STOP_FAILED" ? { code: error.code } : {}) } };
+    ...(error instanceof InputError && ["PROJECT_REMOVE_STOP_FAILED", "SKILL_CONFLICT"].includes(error.code) ? { code: error.code } : {}) } };
 }
 
 async function streamProjectReply(response, agent, body, config, signal) {
@@ -208,6 +213,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   pickProjectFolder = createProjectFolderPicker(),
   projects = new ProjectManager({ dataDir, blockedPort: port,
     analyzeProject: createProjectAnalyzer({ config, dataDir }) }),
+  skillManager = new SkillManager({ dataDir, getProjects: () => projects.list?.() ?? [] }),
+  pickSkillFolder = createProjectFolderPicker(),
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
   prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }) } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
@@ -251,7 +258,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         const origin = request.headers.origin;
         const validHost = !host || ["localhost", "127.0.0.1", "[::1]"].includes(new URL(`http://${host}`).hostname);
         if (!validHost || (origin && origin !== `http://${host}`) || request.headers["sec-fetch-site"] === "cross-site") {
-          return sendJson(response, 403, { error: "项目操作仅允许从本机 NUEMA 页面发起" });
+          return sendJson(response, 403, { error: "管理操作仅允许从本机 NUEMA 页面发起" });
         }
       }
       if (request.method === "GET" && path === "/api/health") {
@@ -265,6 +272,15 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         });
       }
       await handler.ready;
+      if (path === "/api/skills" || path.startsWith("/api/skills/")) {
+        const result = await routeSkills({ method: request.method, path, manager: skillManager,
+          readBody: (maxBytes) => readJson(request, maxBytes), signal: requestController.signal,
+          pickFolder: ({ purpose, signal }) => pickSkillFolder({ signal,
+            prompt: purpose === "source" ? "选择要查找 skill 的文件夹" : "选择要导入的 skill 文件夹" }) });
+        if (result && !requestController.signal.aborted) return sendJson(response, 200, result.value);
+        if (requestController.signal.aborted) return;
+        return sendJson(response, 404, { error: "页面不存在" });
+      }
       if (request.method === "GET" && path === "/api/settings") {
         return sendJson(response, 200, settingsView(config));
       }
@@ -433,7 +449,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       for (const controller of activeRequests.keys()) controller.abort();
       await handler.ready.catch(() => {});
       const failures = [];
-      const cancelled = [() => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.()]
+      const cancelled = [() => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.(), () => skillManager.dispose?.()]
         .map((close) => { try { return close(); } catch (error) { return Promise.reject(error); } });
       for (const result of await Promise.allSettled(cancelled)) if (result.status === "rejected") failures.push(result.reason);
       for (const close of [() => settingsQueue, () => prototypeAgents.persistence,

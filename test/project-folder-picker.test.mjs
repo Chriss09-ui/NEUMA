@@ -25,6 +25,17 @@ test("用户取消不是错误，也不访问任何文件夹", async () => {
   assert.deepEqual(await pick(), { cancelled: true });
 });
 
+test("skill 管理复用窗口但显示独立提示，不改变项目选择默认提示", async () => {
+  const scripts = [];
+  const pick = createProjectFolderPicker({ platform: "darwin", run: async (_file, args) => {
+    scripts.push(args[1]); return { stdout: "\n" };
+  }, inspect: async () => assert.fail("取消不访问文件夹") });
+  await pick({ prompt: "选择要导入的 skill 文件夹" });
+  await pick();
+  assert.match(scripts[0], /prompt "选择要导入的 skill 文件夹"/);
+  assert.match(scripts[1], /prompt "选择要添加到 NUEMA 的项目文件夹"/);
+});
+
 test("打开期间拒绝重复请求，取消后释放选择器", async () => {
   let calls = 0;
   const pick = createProjectFolderPicker({ platform: "darwin", run: async (_file, _args, { signal }) => {

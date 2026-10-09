@@ -26,6 +26,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
             <span>管理项目</span>
           </a>
+          <a class="nav-item" href="#skills" data-page="skills" aria-label="Skill 管理" title="Skill 管理">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4M9 3h6v6H9zM7 14h6M7 17h9M18 3v6M15 6h6"/></svg>
+            <span>Skill 管理</span>
+          </a>
           <a id="sidebar-agents-shortcut" class="nav-item sidebar-agents-shortcut" href="#agents" data-page="agents" aria-label="我的智能体" title="我的智能体" inert>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="6" width="14" height="14" rx="4"/><path d="M12 3v3M9 11v2M15 11v2M9 16h6M2 11v4M22 11v4"/></svg>
             <span>我的智能体</span>
@@ -395,6 +399,95 @@
                   <p class="muted-note">需求 Agent 和项目助手共用。接口需兼容 OpenAI，并支持流式回复和工具调用。</p>
                 </div>
                 <span id="settings-llm-status" class="status">检查中</span>
+        <!-- 本机技能管理 -->
+        <section id="page-skills" class="page page-skills" data-page="skills" aria-labelledby="skills-title" hidden>
+          <header class="page-header">
+            <div>
+              <div class="identity-heading"><h1 id="skills-title">Skill 管理</h1><span id="skills-count" class="count">—</span></div>
+              <p class="page-subtitle">查看和整理本机技能，编辑说明，或从本地目录复制导入。</p>
+            </div>
+            <div class="skills-header-actions">
+              <button id="skills-sources-open" class="secondary" type="button">扫描目录</button>
+              <button id="skills-trash-open" class="secondary" type="button">回收站</button>
+              <button id="skills-import-open" class="primary" type="button">＋ 导入技能</button>
+            </div>
+          </header>
+          <div class="skills-feedback">
+            <p id="skills-status" class="muted-note" role="status" aria-live="polite">进入页面后读取本机技能。</p>
+            <button id="skills-refresh" class="ghost-button" type="button">重新扫描</button>
+          </div>
+          <div id="skills-error" class="error" role="alert" hidden></div>
+          <details id="skills-warning-panel" class="skills-warning-panel" hidden>
+            <summary id="skills-warning-summary">扫描诊断</summary>
+            <div id="skills-warnings" class="skills-warnings" hidden></div>
+          </details>
+          <div class="manage-layout skills-layout">
+            <aside class="list-card" aria-label="技能列表">
+              <label class="sr-only" for="skills-search">搜索技能名称、说明或路径</label>
+              <input id="skills-search" class="search" type="search" placeholder="搜索技能名称、说明或路径" spellcheck="false">
+              <label class="sr-only" for="skills-source-filter">按来源筛选技能</label>
+              <select id="skills-source-filter"><option value="">全部来源</option></select>
+              <p id="skills-filter-count" class="muted-note small"></p>
+              <div id="skills-list" class="item-list" aria-live="polite"></div>
+            </aside>
+            <section id="skills-detail-panel" class="card detail-card skills-detail" aria-label="技能详情">
+              <div id="skills-detail-empty" class="detail-empty"><h2>选择一个技能</h2><p>查看它的说明、所在目录和附带资源。</p></div>
+              <div id="skills-detail-content" hidden>
+                <div class="skills-detail-heading"><div><h2 id="skills-detail-name"></h2><p id="skills-detail-description" class="muted-note"></p></div><span id="skills-detail-access" class="status"></span></div>
+                <code id="skills-detail-path" class="skills-path"></code>
+                <p id="skills-shared-note" class="muted-note small"></p>
+                <div id="skills-detail-diagnostics" class="skills-warnings" hidden></div>
+                <div id="skills-locations" class="skills-locations"></div>
+                <div class="skills-editor-heading"><label for="skills-editor">SKILL.md</label><span id="skills-edit-status" class="muted-note small" role="status" aria-live="polite"></span></div>
+                <textarea id="skills-editor" class="skills-editor" spellcheck="false" aria-describedby="skills-edit-status"></textarea>
+                <div id="skills-conflict" class="skills-conflict" hidden>
+                  <p>原文件已更新。你的修改仍保留，请先查看磁盘版本。</p>
+                  <div class="skills-action-row"><button id="skills-conflict-view" class="secondary" type="button">查看磁盘版本</button><button id="skills-conflict-reload" class="ghost-button" type="button">放弃修改并重新读取</button></div>
+                  <pre id="skills-disk-content" class="skills-raw" hidden></pre>
+                </div>
+                <div class="skills-action-row"><button id="skills-save" class="primary" type="button" disabled>保存说明</button><button id="skills-delete" class="ghost-button danger" type="button" hidden>移至回收站</button></div>
+                <details class="skills-resources"><summary>附带资源 <span id="skills-files-count"></span></summary><p class="muted-note small">资源仅供查看；此处只编辑 SKILL.md。</p><ul id="skills-files" class="skills-file-list"></ul></details>
+              </div>
+            </section>
+          </div>
+
+          <dialog id="skills-unsaved-dialog" class="skills-dialog" aria-labelledby="skills-unsaved-title">
+            <div class="skills-dialog-heading"><h2 id="skills-unsaved-title">保存当前修改？</h2></div>
+            <p class="muted-note">当前 SKILL.md 有未保存的修改。保存成功后继续操作，或放弃这些修改。</p>
+            <div id="skills-unsaved-error" class="error" role="alert" hidden></div>
+            <div class="skills-dialog-actions"><button id="skills-unsaved-cancel" class="secondary" type="button">取消</button><button id="skills-unsaved-discard" class="ghost-button" type="button">放弃修改并继续</button><button id="skills-unsaved-save" class="primary" type="button">保存并继续</button></div>
+          </dialog>
+
+          <dialog id="skills-sources-dialog" class="skills-dialog skills-dialog-wide" aria-labelledby="skills-sources-title">
+            <div class="skills-dialog-heading"><div><h2 id="skills-sources-title">扫描目录</h2><p class="muted-note">常用目录与自己添加的目录。停止扫描不会删除目录中的文件。</p></div><button class="ghost-button" type="button" data-skills-close="skills-sources-dialog" aria-label="关闭扫描目录">关闭</button></div>
+            <div id="skills-sources-error" class="error" role="alert" hidden></div>
+            <div id="skills-sources-list" class="skills-source-list"></div>
+            <form id="skills-source-form" class="skills-directory-form" autocomplete="off"><label for="skills-source-path">添加本机技能目录</label><div class="skills-directory-input"><input id="skills-source-path" type="text" placeholder="目录的完整路径" spellcheck="false" required><button id="skills-source-pick" class="secondary" type="button">选择目录</button><button id="skills-source-add" class="primary" type="submit">添加</button></div></form>
+          </dialog>
+
+          <dialog id="skills-import-dialog" class="skills-dialog skills-dialog-wide" aria-labelledby="skills-import-title">
+            <div class="skills-dialog-heading"><div><h2 id="skills-import-title">从本地导入技能</h2><p class="muted-note">复制整个技能目录，包括附带资源；来源文件保留。</p></div><button class="ghost-button" type="button" data-skills-close="skills-import-dialog" aria-label="关闭导入技能">关闭</button></div>
+            <form id="skills-import-form" class="skills-directory-form" autocomplete="off">
+              <label for="skills-import-path">来源目录（包含 SKILL.md）</label><div class="skills-directory-input"><input id="skills-import-path" type="text" placeholder="技能目录的完整路径" spellcheck="false" required><button id="skills-import-pick" class="secondary" type="button">选择目录</button></div>
+              <label for="skills-import-target">复制到</label><select id="skills-import-target" required><option value="">选择通用、Codex、Claude、Pi 或项目目录</option></select>
+              <label for="skills-import-name">目标目录名称</label><input id="skills-import-name" type="text" placeholder="默认使用来源目录名称" spellcheck="false">
+              <div id="skills-import-error" class="error" role="alert" hidden></div><div id="skills-import-preview" class="skills-impact" hidden></div>
+              <div class="skills-dialog-actions"><button class="secondary" type="button" data-skills-close="skills-import-dialog">取消</button><button id="skills-import-preview-button" class="secondary" type="submit">预览导入</button><button id="skills-import-confirm" class="primary" type="button" disabled>复制导入</button></div>
+            </form>
+          </dialog>
+
+          <dialog id="skills-delete-dialog" class="skills-dialog skills-dialog-wide" aria-labelledby="skills-delete-title">
+            <div class="skills-dialog-heading"><h2 id="skills-delete-title">移至回收站</h2><button class="ghost-button" type="button" data-skills-close="skills-delete-dialog" aria-label="取消回收">关闭</button></div>
+            <p id="skills-delete-note" class="muted-note"></p><div id="skills-delete-error" class="error" role="alert" hidden></div><div id="skills-delete-impact" class="skills-impact"></div>
+            <div class="skills-dialog-actions"><button class="secondary" type="button" data-skills-close="skills-delete-dialog">取消</button><button id="skills-delete-confirm" class="primary" type="button" disabled>确认移至回收站</button></div>
+          </dialog>
+
+          <dialog id="skills-trash-dialog" class="skills-dialog skills-dialog-wide" aria-labelledby="skills-trash-title">
+            <div class="skills-dialog-heading"><div><h2 id="skills-trash-title">回收站</h2><p class="muted-note">恢复到原目录；原位置已占用时不会覆盖文件。</p></div><button class="ghost-button" type="button" data-skills-close="skills-trash-dialog" aria-label="关闭回收站">关闭</button></div>
+            <div id="skills-trash-error" class="error" role="alert" hidden></div><div id="skills-trash-list" class="skills-trash-list" aria-live="polite"></div>
+          </dialog>
+        </section>
+
               </div>
               <label class="field">
                 <span class="field-name">接口地址</span>
@@ -457,3 +550,4 @@
     <script type="module" src="/settings.js"></script>
   </body>
 </html>
+    <script type="module" src="/skills.js"></script>
