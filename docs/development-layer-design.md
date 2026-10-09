@@ -1,6 +1,6 @@
 # NEUMA 研发层最终设计
 
-2026 年 10 月 4 日定稿，本轮已按此设计接入研发控制器、Pi 会话交接、代码验收与运行交付。首版执行范围为 macOS 隔离环境中的 Node 内置模块程序；正式外部连接、后台触发及其他运行时仍需相应适配。本文与项目 ARCHITECTURE.md 一起作为实现和验收依据。
+2026 年 10 月 4 日定稿，本轮已按此设计接入研发控制器、Pi 会话交接、代码验收与运行交付。2026-10-08 为 npm 安装增加平台执行适配：macOS 保留实际探测；Windows LPAC/Job Object 与 Linux Landlock/seccomp 提供辅助程序。2026-10-09，Linux 在 Ubuntu 24.04/26.04、x64/ARM64 的云端原生检查通过；Windows 已编译，实际隔离启动仍在验证。缺少程序或探测失败时阻塞，完整安装与桌面验收尚未完成。任务通过 stdin 固定启动层恢复现有 argv[2] 接口，单个 JSON 输出和控制器验收门槛保持不变。正式外部连接、后台触发及其他运行时仍需相应适配。本文与项目 ARCHITECTURE.md 一起作为实现和验收依据。
 
 研发层负责把已经评估通过的架构，变成有代码、有测试证据、可以交给运行层检查的交付物。采用 **五个主节点、两种 Agent 角色、一个程序控制器**。Agent 统一使用项目现有 Pi SDK 底座。
 
@@ -209,8 +209,8 @@ Pi 负责单个角色的模型与工具循环；控制器负责五阶段流转�
 本设计吸收参考项目的文件交接、执行与验收分工、失败检查点和有界修复，并补足其反馈传递、上下文续接与证据版本绑定。它没有迁移参考项目的 Claude 会话实现。
 
 - [NEUMA 当前架构基线](/Users/chriss/Desktop/办公智能体/neuma-requirements/ARCHITECTURE.md)
-- [现有 Pi 会话封装](/Users/chriss/Desktop/办公智能体/neuma-requirements/pi-runtime.mjs:176)
-- [现有结构化提交与独立角色机制](/Users/chriss/Desktop/办公智能体/neuma-requirements/architecture.mjs:99)
+- [现有 Pi 会话封装](../src/runtime/pi-runtime.mjs)
+- [现有结构化提交与独立角色机制](../src/architecture/architecture.mjs)
 - [参考项目研发层节点契约](/Users/chriss/Desktop/harness-clean-integration/src/sinan/coding/NODES.md)
 - [参考项目独立验收](/Users/chriss/Desktop/harness-clean-integration/src/sinan/coding/nodes/evaluator_qa.py:65)
 - [Pi SDK 官方说明](https://pi.dev/docs/latest/sdk)

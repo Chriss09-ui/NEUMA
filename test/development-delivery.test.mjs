@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrototypeAgents } from "../agent-prototype.mjs";
-import { ArchitectureDesigner } from "../architecture.mjs";
-import { DevelopmentController } from "../development.mjs";
-import { DevelopmentExecutor } from "../development-executor.mjs";
+import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
+import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
+import { DevelopmentController } from "../src/development/development.mjs";
+import { DevelopmentExecutor } from "../src/development/development-executor.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { developmentReview, developmentWork } from "./helpers/development.mjs";
 

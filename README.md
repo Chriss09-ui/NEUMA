@@ -4,11 +4,11 @@
 
 NEUMA 是一个在本机运行的智能体工作台。你用自然语言描述想完成的事，它帮你澄清需求、设计方案并检查可行性：简单任务生成轻量助手，需要代码的任务继续进入研发与验收。它也能集中管理电脑上已有的项目。
 
-[快速开始](#快速开始) · [项目特点](#项目特点) · [使用指南](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/docs/user-guide.md) · [npm](https://www.npmjs.com/package/@chrissliu/neuma)
+[快速开始](#快速开始) · [项目特点](#项目特点) · [使用指南](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/user-guide.md) · [npm](https://www.npmjs.com/package/@chrissliu/neuma)
 
-> 当前公开版本是 **Apple 芯片 Mac（M 系列）试用版**，通过 npm 的 `preview` 标签安装。Windows、Linux 和 Intel Mac 尚不在本次公开支持范围内。
+> 当前公开版本 `0.1.0-preview.1` 是 **Apple 芯片 Mac（M 系列）试用版**，通过 npm 的 `preview` 标签安装。Windows、Linux 和 Intel Mac 尚不在本次公开支持范围内。
 
-![NEUMA 需求工作区：对话与需求草稿并排展示](https://raw.githubusercontent.com/Chriss09-ui/NEUMA/codex/npm-macos-preview/docs/images/readme-workspace.jpg)
+![NEUMA 需求工作区：对话与需求草稿并排展示](https://raw.githubusercontent.com/Chriss09-ui/NEUMA/main/docs/images/readme-workspace.jpg)
 
 *边聊边整理需求：左侧管理智能体，中间描述目标，右侧查看需求草稿。截图使用临时演示数据与固定回复。*
 
@@ -23,7 +23,7 @@ NEUMA 是一个在本机运行的智能体工作台。你用自然语言描述�
 | **生成程序隔离运行** | 文件工具限制在专属目录，生成的本地程序经隔离环境运行；缺少所需系统能力时阻止执行。实际产物可预览和下载。 |
 | **管理已有本机项目** | 从文件夹接入现有项目，识别启动方式，打开或停止受管项目，查看运行状态与端口占用。 |
 
-![NEUMA 项目管理：项目列表、启动配置与操作入口](https://raw.githubusercontent.com/Chriss09-ui/NEUMA/codex/npm-macos-preview/docs/images/readme-projects.jpg)
+![NEUMA 项目管理：项目列表、启动配置与操作入口](https://raw.githubusercontent.com/Chriss09-ui/NEUMA/main/docs/images/readme-projects.jpg)
 
 *已有项目留在原位置，在同一个工作区查看配置与操作入口。图中是未启动的演示项目。*
 
@@ -93,10 +93,26 @@ neuma
 
 | 文档 | 内容 |
 | --- | --- |
-| [详细使用指南](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/docs/user-guide.md) | 智能体操作、项目管理、数据保存、诊断及接口参考。 |
-| [安装与迁移](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/docs/npm-installation.md) | CLI、数据迁移、平台进度与发布条件。 |
-| [架构说明](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/ARCHITECTURE.md) | 设计、评估、能力边界与持久状态。 |
-| [研发流程](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/docs/development-layer-design.md) | 任务拆分、开发、独立验收与交付。 |
-| [开发约定](https://github.com/Chriss09-ui/NEUMA/blob/codex/npm-macos-preview/AGENTS.md) | 修改代码前需要遵循的项目规范。 |
+| [详细使用指南](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/user-guide.md) | 智能体操作、项目管理、数据保存、诊断及接口参考。 |
+| [安装与迁移](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/npm-installation.md) | CLI、数据迁移、平台进度与发布条件。 |
+| [架构说明](https://github.com/Chriss09-ui/NEUMA/blob/main/ARCHITECTURE.md) | 设计、评估、能力边界与持久状态。 |
+| [研发流程](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/development-layer-design.md) | 任务拆分、开发、独立验收与交付。 |
+| [开发约定](https://github.com/Chriss09-ui/NEUMA/blob/main/AGENTS.md) | 修改代码前需要遵循的项目规范。 |
 
-当前 npm 试用版的源码在 [`codex/npm-macos-preview`](https://github.com/Chriss09-ui/NEUMA/tree/codex/npm-macos-preview) 分支。源码安装与测试方式见详细使用指南。
+当前 npm 试用版的源码已合并至 [`main`](https://github.com/Chriss09-ui/NEUMA/tree/main) 分支。源码安装与测试方式见详细使用指南。
+
+服务端源码统一放在 `src/`，按功能分组；前端资源、测试、开发脚本和说明文档分别在 `public/`、`test/`、`scripts/` 和 `docs/`。
+
+```text
+src/
+├── server.mjs         服务与 API 入口
+├── settings.mjs       模型与本机设置
+├── app-metadata.mjs   应用版本与元数据
+├── installation/      命令行、安装、数据迁移与实例锁
+├── architecture/      方案设计、契约校验与独立评估
+├── development/       研发流程、验收、工作区与交付
+├── agents/            智能体定义、持久化与保存记录
+├── requirements/      需求澄清、模型服务与响应流
+├── projects/          本机项目登记、检查与运行管理
+└── runtime/           Pi 会话与原生隔离适配
+```

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getProviderConfig, makeProviders } from "../providers.mjs";
-import { ProviderError } from "../core.mjs";
+import { getProviderConfig, makeProviders } from "../src/requirements/providers.mjs";
+import { ProviderError } from "../src/requirements/core.mjs";
 
 const config = {
   chatUrl: "https://example.test/v1/chat/completions",

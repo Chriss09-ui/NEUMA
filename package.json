@@ -1,13 +1,29 @@
 {
-  "name": "neuma-requirements",
-  "private": true,
+  "name": "@chrissliu/neuma",
+  "version": "0.1.0-preview.1",
+  "description": "NEUMA 本机智能体与项目工作台（Apple 芯片 Mac 试用版）",
+  "private": false,
   "type": "module",
+  "bin": { "neuma": "bin/neuma.cjs" },
+  "repository": { "type": "git", "url": "git+https://github.com/Chriss09-ui/NEUMA.git" },
+  "files": ["src/", "npm-shrinkwrap.json", "bin/", "public/", "scripts/check-release.mjs", "scripts/check-preview-release.mjs", "README.md", "ARCHITECTURE.md", "docs/development-layer-design.md", "docs/npm-installation.md", "docs/user-guide.md", "docs/images/readme-workspace.jpg", "docs/images/readme-projects.jpg"],
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "publishConfig": {
+    "access": "public",
+    "tag": "preview",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=22.19"
   },
   "scripts": {
-    "start": "node --env-file=.env server.mjs",
-    "test": "node --test"
+    "start": "node --env-file=.env src/server.mjs",
+    "test": "node --test --test-concurrency=1",
+    "package:prepare": "node scripts/prepare-package.mjs",
+    "release:check": "node scripts/check-release.mjs",
+    "release:preview:check": "node scripts/check-preview-release.mjs",
+    "prepublishOnly": "node scripts/check-preview-release.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.0"

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { InputError, emptyDraft } from "../core.mjs";
+import { InputError, emptyDraft } from "../src/requirements/core.mjs";
 import { ARCHITECTURE_VERSION, CAPABILITIES, requirementItems, validateDesign,
-  validateReview, checkDesign, designHash } from "../architecture-contract.mjs";
+  validateReview, checkDesign, designHash } from "../src/architecture/architecture-contract.mjs";
 
 function readyDraft() {
   const draft = emptyDraft();

@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
-import { createRequestHandler as createHandler } from "../server.mjs";
-import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../core.mjs";
-import { createProjectAddError } from "../project-diagnostics.mjs";
+import { createRequestHandler as createHandler } from "../src/server.mjs";
+import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../src/requirements/core.mjs";
+import { createProjectAddError } from "../src/projects/project-diagnostics.mjs";
 
 const createRequestHandler = (options) => createHandler({ projects: {}, projectAgent: {}, prototypeAgents: {}, ...options });
 
@@ -92,6 +92,22 @@ class StreamingResponse extends EventEmitter {
   write(content) { this.text += content; }
   end(content = "") { this.text += content; this.writableEnded = true; }
 }
+
+test("服务关闭会取消非流式需求请求并等待其结束", async () => {
+  let entered, seen;
+  const started = new Promise((done) => { entered = done; });
+  const handler = createRequestHandler({ config: {}, providers: {
+    generateDraft: async ({ signal }) => {
+      seen = signal; entered();
+      await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+      signal.throwIfAborted();
+    }, judgeJev: null,
+  } });
+  const response = new StreamingResponse();
+  const pending = handler(request("POST", "/api/requirements/turn", { message: "整理会议纪要" }), response);
+  await started; await handler.dispose(); await pending;
+  assert.equal(seen.aborted, true); assert.equal(response.text, "");
+});
 
 test("运行概览只读返回快照，拒绝跨站访问并提供界面资源", async () => {
   let calls = 0;

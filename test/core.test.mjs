@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CONFIRMATION_QUESTION, decideNext, emptyDraft, processTurn, ProviderError } from "../core.mjs";
+import { CONFIRMATION_QUESTION, decideNext, emptyDraft, processTurn, ProviderError } from "../src/requirements/core.mjs";
 
 function completeDraft() {
   const draft = emptyDraft();

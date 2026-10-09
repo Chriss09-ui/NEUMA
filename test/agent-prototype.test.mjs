@@ -4,9 +4,9 @@ import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrototypeAgents } from "../agent-prototype.mjs";
-import { InputError, ProviderError } from "../core.mjs";
-import { CAPABILITIES, designHash } from "../architecture-contract.mjs";
+import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
+import { InputError, ProviderError } from "../src/requirements/core.mjs";
+import { CAPABILITIES, designHash } from "../src/architecture/architecture-contract.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 
 const draft = validDraft;

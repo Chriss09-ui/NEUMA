@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, chmod, readdir, writeFile, readFile, mkdir, symlink, link, stat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DevelopmentWorkspace, DEVELOPMENT_LIMITS, inspectDevelopmentCode } from "../development-workspace.mjs";
+import { DevelopmentWorkspace, DEVELOPMENT_LIMITS, inspectDevelopmentCode } from "../src/development/development-workspace.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "neuma-workspace-test-"));

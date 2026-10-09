@@ -7,9 +7,9 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { validateProjectPlan } from "../project-inspection.mjs";
-import { startScriptServices, stopScriptServices } from "../project-script-runtime.mjs";
-import { ProjectManager } from "../projects.mjs";
+import { validateProjectPlan } from "../src/projects/project-inspection.mjs";
+import { startScriptServices, stopScriptServices } from "../src/projects/project-script-runtime.mjs";
+import { ProjectManager } from "../src/projects/projects.mjs";
 
 const env = Object.fromEntries(["PATH", "HOME", "LANG", "TMPDIR"].filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
 

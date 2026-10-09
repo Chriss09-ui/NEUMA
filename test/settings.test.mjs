@@ -5,9 +5,9 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
-import { createRequestHandler } from "../server.mjs";
-import { getProviderConfig } from "../providers.mjs";
-import { settingsUpdates, writeEnvFile } from "../settings.mjs";
+import { createRequestHandler } from "../src/server.mjs";
+import { getProviderConfig } from "../src/requirements/providers.mjs";
+import { settingsUpdates, writeEnvFile } from "../src/settings.mjs";
 
 async function invoke(handler, method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
@@ -186,7 +186,8 @@ test("非目标字段保留原来的换行和末尾文本，双引号中的反�
 test("配置写入失败后可以重试，失败不改变运行配置或关闭会话", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "neuma-settings-retry-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const envPath = join(dir, "missing", "fixture-config.txt");
+  const envPath = join(dir, "blocked", "fixture-config.txt");
+  await writeFile(join(dir, "blocked"), "目录位置被普通文件占用");
   const config = getProviderConfig({ NEUMA_LLM_MODEL: "old-model" });
   let disposed = 0;
   const handler = createRequestHandler({ config, envPath, projects: {},
@@ -195,7 +196,7 @@ test("配置写入失败后可以重试，失败不改变运行配置或关闭�
   assert.equal(failed.status, 400);
   assert.equal(config.model, "old-model");
   assert.equal(disposed, 0);
-  await mkdir(join(dir, "missing"));
+  await rm(join(dir, "blocked"));
   const saved = await invoke(handler, "POST", "/api/settings", { model: "new-model" });
   assert.equal(saved.status, 200);
   assert.equal(config.model, "new-model");

@@ -1,4 +1,4 @@
-import { emptyDraft } from "../../core.mjs";
+import { emptyDraft } from "../../src/requirements/core.mjs";
 
 export function validDraft(goal = "整理周报") {
   const draft = emptyDraft();

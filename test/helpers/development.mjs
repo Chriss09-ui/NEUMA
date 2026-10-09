@@ -1,4 +1,4 @@
-import { ARCHITECTURE_VERSION, designHash, requirementItems } from "../../architecture-contract.mjs";
+import { ARCHITECTURE_VERSION, designHash, requirementItems } from "../../src/architecture/architecture-contract.mjs";
 import { validDraft, validDesign, passingReview } from "./architecture.mjs";
 
 export function developmentArchitecture(overrides = {}) {

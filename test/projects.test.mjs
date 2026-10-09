@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectManager, openProjectPage } from "../projects.mjs";
+import { ProjectManager, openProjectPage } from "../src/projects/projects.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "neuma-projects-test-"));

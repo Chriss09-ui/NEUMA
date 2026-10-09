@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile, symlink, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createProjectReader, validateProjectPlan } from "../project-inspection.mjs";
-import { ProjectManager } from "../projects.mjs";
-import { createProjectAnalyzer } from "../pi-runtime.mjs";
+import { createProjectReader, validateProjectPlan } from "../src/projects/project-inspection.mjs";
+import { ProjectManager } from "../src/projects/projects.mjs";
+import { createProjectAnalyzer } from "../src/runtime/pi-runtime.mjs";
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "neuma-inspection-")));
