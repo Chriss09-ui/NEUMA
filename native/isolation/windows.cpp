@@ -449,10 +449,14 @@ DWORD parent_pid() {
   do { if (entry.th32ProcessID == GetCurrentProcessId()) return entry.th32ParentProcessID; } while (Process32NextW(snapshot.value, &entry));
   throw failure_at(__LINE__);
 }
+std::wstring system_windows_directory() {
+  wchar_t system[MAX_PATH + 1]; UINT count = GetSystemWindowsDirectoryW(system, MAX_PATH + 1); require(count && count < MAX_PATH + 1);
+  return std::wstring(system, count);
+}
 std::vector<wchar_t> environment(const std::wstring& runtime, const std::wstring& workspace) {
-  wchar_t system[MAX_PATH + 1]; UINT count = GetWindowsDirectoryW(system, MAX_PATH + 1); require(count && count < MAX_PATH + 1);
+  const std::wstring system = system_windows_directory();
   std::vector<std::wstring> values{ L"HOME=" + workspace, L"LANG=en_US.UTF-8", L"LC_ALL=en_US.UTF-8", L"OPENSSL_CONF=NUL", L"PATH=" + runtime,
-    L"SystemRoot=" + std::wstring(system, count), L"TEMP=" + workspace, L"TMP=" + workspace, L"TMPDIR=" + workspace, L"USERPROFILE=" + workspace };
+    L"SystemRoot=" + system, L"TEMP=" + workspace, L"TMP=" + workspace, L"TMPDIR=" + workspace, L"USERPROFILE=" + workspace, L"windir=" + system };
   std::sort(values.begin(), values.end(), [](const std::wstring& left, const std::wstring& right) { return _wcsicmp(left.c_str(), right.c_str()) < 0; });
   std::vector<wchar_t> result; for (const auto& value : values) { result.insert(result.end(), value.begin(), value.end()); result.push_back(0); } result.push_back(0); return result;
 }
@@ -519,6 +523,11 @@ int wmain(int argc, wchar_t **argv) {
     const size_t volume_chars = control.rfind(L"\\\\?\\", 0) == 0 ? 7 : 3;
     require(control.size() >= volume_chars && control[volume_chars - 2] == L':' && control[volume_chars - 1] == L'\\');
     require(SetCurrentDirectoryW(control.substr(0, volume_chars).c_str()));
+    // OS process creation may consult the caller's environment as well as the
+    // explicit child block. Obtain only these OS paths from the trusted API.
+    const std::wstring system_directory = system_windows_directory();
+    require(SetEnvironmentVariableW(L"SystemRoot", system_directory.c_str()));
+    require(SetEnvironmentVariableW(L"windir", system_directory.c_str()));
     Handle parent(OpenProcess(SYNCHRONIZE, FALSE, parent_pid())); require(parent.valid());
     LocalMemory control_descriptor;
     require(ConvertStringSecurityDescriptorToSecurityDescriptorW(owner_sddl().c_str(), SDDL_REVISION_1,
