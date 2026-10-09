@@ -22,9 +22,11 @@ function fakeSandbox(runs = []) {
   const spawnImpl = (command, args, options) => {
     calls.push({ command, args, options });
     const child = new EventEmitter(); child.pid = 999000 + calls.length;
-    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => {};
-    const probe = args.at(-2).endsWith("probe.mjs");
-    const result = probe ? { stdout: JSON.stringify({ readDenied: true, writeDenied: true, codeWriteDenied: true, hardlinkDenied: true, scratchWorked: true, networkDenied: true, subprocessDenied: true }) } : runs[index++] ?? { stdout: '{"ok":true,"values":[42]}' };
+    child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough(); child.kill = () => {};
+    const call = calls.at(-1); call.input = ""; child.stdin.on("data", (data) => { call.input += data.toString("utf8"); });
+    const probe = args.at(-1).endsWith("probe.mjs");
+    const result = probe ? { stdout: JSON.stringify({ readDenied: true, writeDenied: true, codeWriteDenied: true, hardlinkDenied: true,
+      metadataDenied: true, symlinkReadDenied: true, scratchWorked: true, networkDenied: true, subprocessDenied: true }) } : runs[index++] ?? { stdout: '{"ok":true,"values":[42]}' };
     queueMicrotask(() => {
       if (result.hang) return;
       if (result.spawnError) { child.emit("error", new Error("secret transport detail")); return; }
@@ -60,8 +62,9 @@ test("每次执行使用系统沙箱、精简环境、代码只读与独立临�
     assert.equal(call.options.env.HOME, call.options.cwd);
     assert.notEqual(call.options.cwd, input.codeDir);
   }
-  assert.equal(calls[1].args.at(-1), "x");
-  assert.ok(calls[1].args.at(-2).endsWith("/code/main.mjs"));
+  assert.equal(calls[1].input, "x");
+  assert.ok(calls[1].args.at(-1).endsWith("/code/main.mjs"));
+  assert.deepEqual(calls[1].options.stdio, ["pipe", "pipe", "pipe"]);
 });
 
 test("真实值断言、数组路径和完整 JSON 比较决定验收，不只检查字段名", async (t) => {
@@ -133,7 +136,7 @@ test("本机实际隔离探测：仅通过系统边界后执行生成代码", as
   const executor = new DevelopmentExecutor();
   const probe = await executor.probe();
   t.diagnostic(JSON.stringify(probe));
-  if (!probe.available) { assert.equal(probe.available, false); return; }
+  if (!probe.available) { assert.notEqual(process.env.NEUMA_REQUIRE_ISOLATION, "1", probe.reason); assert.equal(probe.available, false); return; }
   const input = await fixture(t);
   const result = await executor.verify({ ...input, cases: [{ id: "real", input: "hello", assertions: [{ path: "values.0", expectedJson: "42" }] }] });
   assert.equal(result.status, "passed", JSON.stringify(result));

@@ -132,8 +132,8 @@ function legacyRequirement(value, id, origin) {
     updatedAt: Number.isFinite(Date.parse(date)) ? date : "1970-01-01T00:00:00.000Z", _legacyFallback: origin };
 }
 
-async function migrate(dataDir) {
-  const originalDataDir = dataDir;
+async function migrate(dataDir, legacyDataDir = dataDir) {
+  const originalDataDir = resolve(legacyDataDir);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   dataDir = await directory(dataDir);
   const marker = await readJson(join(dataDir, MARKER));
@@ -242,11 +242,12 @@ async function migrate(dataDir) {
 }
 
 export class AgentStorage {
-  constructor({ dataDir }) {
+  constructor({ dataDir, legacyDataDir = dataDir }) {
     if (typeof dataDir !== "string" || !dataDir || dataDir.includes("\0")) throw new InputError("Agent 存储目录无效");
+    if (typeof legacyDataDir !== "string" || !legacyDataDir || legacyDataDir.includes("\0")) throw new InputError("旧 Agent 存储目录无效");
     this.dataDir = resolve(dataDir);
     if (!migrations.has(this.dataDir)) {
-      const pending = migrate(this.dataDir);
+      const pending = migrate(this.dataDir, legacyDataDir);
       migrations.set(this.dataDir, pending);
       void pending.finally(() => { if (migrations.get(this.dataDir) === pending) migrations.delete(this.dataDir); }).catch(() => {});
     }

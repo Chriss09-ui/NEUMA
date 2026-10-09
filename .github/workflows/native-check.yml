@@ -1,0 +1,101 @@
+name: Native helper checks (manual)
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neuma-native-check
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: ${{ matrix.runner }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - runner: ubuntu-26.04
+            platform: linux
+            arch: x64
+          - runner: ubuntu-26.04-arm
+            platform: linux
+            arch: arm64
+          # Windows Server 2025 is a build/test target, not Windows 11 x64 certification.
+          - runner: windows-2025
+            platform: win32
+            arch: x64
+          - runner: windows-11-arm
+            platform: win32
+            arch: arm64
+    env:
+      NEUMA_REQUIRE_ISOLATION: '1'
+      NODE_OPTIONS: --max-old-space-size=256
+      TASK_ARCH: ${{ matrix.arch }}
+      TASK_PLATFORM: ${{ matrix.platform }}
+      TASK_ARCHIVE: native-helpers-${{ matrix.runner }}-${{ matrix.arch }}.tar.gz
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Confirm Node platform and architecture
+        run: node -e "if (process.arch !== process.env.TASK_ARCH || process.platform !== process.env.TASK_PLATFORM) throw new Error('Runner/Node architecture mismatch')"
+      - name: Build Linux helpers with preinstalled tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          command -v cc
+          command -v pkg-config
+          pkg-config --exists gio-2.0
+          sh native/isolation/build-linux.sh
+          sh native/projects/build-linux.sh
+      - name: Build Windows helpers with preinstalled Visual Studio
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $TaskVsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $TaskVsWhere)) { throw 'Preinstalled vswhere was not found.' }
+          $TaskVcComponent = if ($env:TASK_ARCH -eq 'arm64') { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
+          $TaskVsInstall = & $TaskVsWhere -latest -products '*' -requires $TaskVcComponent -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $TaskVsInstall) { throw 'Matching preinstalled Visual Studio C++ tools were not found.' }
+          Import-Module (Join-Path $TaskVsInstall 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $TaskVsInstall -SkipAutomaticLocation -Arch $env:TASK_ARCH
+          & ./native/isolation/build-windows.ps1 -Architecture $env:TASK_ARCH
+          & ./native/projects/build-windows.ps1 -Architecture $env:TASK_ARCH
+      - name: Archive Linux helpers with executable modes
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar -czf "$TASK_ARCHIVE" "native/isolation/bin/linux-$TASK_ARCH/neuma-isolation" "native/projects/bin/linux-$TASK_ARCH/neuma-projects"
+      - name: Archive Windows helpers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tar.exe -czf $env:TASK_ARCHIVE "native/isolation/bin/win32-${env:TASK_ARCH}/neuma-isolation.exe" "native/projects/bin/win32-${env:TASK_ARCH}/neuma-projects.exe"
+      - name: Test native execution and project adapters serially
+        run: node --test --test-concurrency=1 test/development-executor.test.mjs test/isolation-native.test.mjs test/project-platform.test.mjs test/project-runtime.test.mjs
+      - name: Check installed helper capabilities
+        if: ${{ !cancelled() }}
+        run: node bin/neuma.cjs doctor
+      - name: Upload helper archive for inspection
+        if: ${{ !cancelled() && hashFiles(env.TASK_ARCHIVE) != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-helpers-${{ matrix.runner }}-${{ matrix.arch }}
+          path: ${{ env.TASK_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1

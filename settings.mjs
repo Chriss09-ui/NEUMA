@@ -1,6 +1,6 @@
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { InputError } from "./core.mjs";
 
@@ -132,6 +132,7 @@ async function replaceEnvFile(path, updates) {
   }
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await writeFile(temp, updated, { mode: 0o600, flag: "wx" });
     await rename(temp, path);
   } finally {

@@ -7,9 +7,10 @@ import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { InputError } from "./core.mjs";
 import { projectRuntimeSnapshot, scanLocalRuntime } from "./project-runtime.mjs";
-import { validateProjectPlan } from "./project-inspection.mjs";
+import { projectPath, validateProjectPlan, validateScriptCommand } from "./project-inspection.mjs";
 import { startScriptServices, stopScriptServices } from "./project-script-runtime.mjs";
 import { createProjectAddError, ProjectFailureStore } from "./project-diagnostics.mjs";
+import { projectEnvironment, spawnProject, stopProjectProcess } from "./project-platform.mjs";
 
 const TYPES = { ".html": "text/html", ".htm": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
   ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
@@ -17,8 +18,6 @@ const TYPES = { ".html": "text/html", ".htm": "text/html", ".js": "text/javascri
   ".woff": "font/woff", ".woff2": "font/woff2" };
 const PROGRAMS = new Set(["npm", "pnpm", "yarn", "bun", "node", "python", "python3", "open"]);
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-const projectEnvironment = () => Object.fromEntries(["PATH", "HOME", "USER", "LANG", "TMPDIR", "SYSTEMROOT", "USERPROFILE", "APPDATA"]
-  .filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
 
 function inside(root, path) {
   const suffix = relative(root, path);
@@ -56,15 +55,19 @@ async function canonicalPath(value) {
   catch { throw new InputError("项目路径不存在或当前程序没有读取权限"); }
 }
 
-async function inspectProject(value) {
+async function inspectProject(value, { platform = process.platform } = {}) {
   const path = await canonicalPath(value);
   const info = await stat(path);
   const root = info.isDirectory() ? path : dirname(path);
   const files = info.isDirectory() ? (await readdir(root)).filter((name) => !name.startsWith(".")
     && !["node_modules", "venv", "__pycache__"].includes(name)) : [basename(path)];
   let kind = "other", launch = null, entry = null, scripts = [];
-  if (path.endsWith(".app") && process.platform === "darwin") {
+  if (path.endsWith(".app") && platform === "darwin") {
     kind = "desktop"; launch = { command: "open", args: [path], url: null };
+  } else if (info.isFile() && platform === "win32" && /\.exe$/i.test(path)) {
+    kind = "desktop"; launch = { command: path, args: [], url: null };
+  } else if (info.isFile() && platform === "linux" && /\.desktop$/i.test(path)) {
+    kind = "desktop"; launch = { command: "/usr/bin/gio", args: ["launch", path], url: null };
   } else if (info.isDirectory() && files.includes("package.json")) {
     try {
       const manifestPath = await realpath(join(root, "package.json"));
@@ -78,9 +81,16 @@ async function inspectProject(value) {
   } else if ((entry = files.find((name) => info.isFile() ? /\.html?$/i.test(name) : name === "index.html"))) {
     kind = "web";
   } else if ((entry = files.find((name) => info.isFile() ? name.endsWith(".py") : ["main.py", "app.py"].includes(name)))) {
-    kind = "python"; launch = { command: "python3", args: [entry], url: null };
+    let command = platform === "win32" ? "python" : "python3";
+    for (const candidate of platform === "win32" ? [".venv/Scripts/python.exe", "venv/Scripts/python.exe"] : [".venv/bin/python", "venv/bin/python"]) {
+      try { command = await projectPath(root, candidate, { executable: true }); break; } catch { /* Optional runtime owned by this project. */ }
+    }
+    kind = "python"; launch = { command, args: [entry], url: null };
   } else if (info.isFile() && [".js", ".mjs", ".cjs"].includes(extname(path))) {
     kind = "node"; launch = { command: "node", args: [basename(path)], url: null };
+  } else if (info.isFile() && (platform === "win32" ? /\.(?:ps1|cmd|bat)$/i : /\.(?:sh|bash|zsh|command)$/i).test(path)) {
+    const command = platform === "win32" ? /\.ps1$/i.test(path) ? "powershell" : "cmd" : /\.zsh$/i.test(path) ? "zsh" : /\.bash$/i.test(path) ? "bash" : "sh";
+    kind = "script"; launch = { ...await validateScriptCommand(root, { command, args: [path] }, { platform }), url: null, background: false, stop: null, healthUrls: [] };
   }
   return { path, root, kind, entry, scripts, launch, name: basename(path) };
 }
@@ -122,9 +132,12 @@ async function staticPreview(project) {
 }
 
 export class ProjectManager {
-  constructor({ dataDir, spawnImpl = spawn, blockedPort = 3000, analyzeProject, openBrowser = openProjectPage, scanRuntime = scanLocalRuntime } = {}) {
+  constructor({ dataDir, spawnImpl = spawn, blockedPort = 3000, analyzeProject, openBrowser = openProjectPage, scanRuntime = scanLocalRuntime,
+    platform = process.platform, projectSpawn = spawnProject, helperPath } = {}) {
     this.dataDir = dataDir;
     this.spawnImpl = spawnImpl;
+    this.platform = platform;
+    this.projectSpawn = (command, args, options) => projectSpawn(command, args, options, { spawnImpl: this.spawnImpl, platform, helperPath });
     this.blockedPort = blockedPort;
     this.records = null;
     this.runs = new Map();
@@ -190,7 +203,8 @@ export class ProjectManager {
       setup: inspecting ? { status: "checking", summary: "NUEMA 正在检查项目文件并识别启动方式…" } : project.setup,
       pageOpened: Boolean(run?.pageOpened), openingPage: Boolean(run?.openingPage || run?.checkingPage), openError: run?.openError ?? null,
       error: run?.error ?? null, canLaunch: !inspecting && !run?.stopping && project.allowLaunch === true && (project.kind === "web" || Boolean(project.launch)),
-      canStop: run?.background ? Boolean(run.ownsService || run.status === "starting") : ["starting", "running"].includes(run?.status) };
+      canStop: run?.background ? Boolean(run.ownsService || run.status === "starting") : ["starting", "running"].includes(run?.status)
+        || Boolean(run?.child && !run.child.neumaClosed && run.child.exitCode === null) };
   }
 
   async list() { await this.queue; await this.load(); return this.records.map((item) => this.view(item)); }
@@ -214,7 +228,7 @@ export class ProjectManager {
 
   async runtime({ signal } = {}) {
     signal?.throwIfAborted();
-    const snapshot = await this.scanRuntime({ signal });
+    const snapshot = await this.scanRuntime({ signal, platform: this.platform });
     signal?.throwIfAborted();
     return projectRuntimeSnapshot(await this.list(), this.runs, snapshot);
   }
@@ -230,7 +244,7 @@ export class ProjectManager {
     options.signal?.throwIfAborted();
     let detected;
     try {
-      detected = await inspectProject(path);
+      detected = await inspectProject(path, { platform: this.platform });
       await this.queue;
       await this.load();
       options.signal?.throwIfAborted();
@@ -294,7 +308,7 @@ export class ProjectManager {
       let result;
       try {
         if (!this.analyzeProject) throw new InputError("自动识别暂不可用，请检查模型设置后重试。");
-        const detected = await inspectProject(project.path);
+        const detected = await inspectProject(project.path, { platform: this.platform });
         result = await this.analyzeProject({ ...project, ...detected, name: project.name }, { signal: combined, instructions, onProgress });
         combined.throwIfAborted();
       } catch (error) {
@@ -324,18 +338,21 @@ export class ProjectManager {
           || args.length > 40 || args.some((arg) => typeof arg !== "string" || arg.length > 2000 || arg.includes("\0"))) {
           throw new InputError("请填写启动程序和有效的参数数组");
         }
-        if (project.kind === "script" || /^(?:\/bin\/)?(?:bash|sh|zsh)$/.test(command)) {
+        if (project.kind === "desktop" && (command !== project.launch.command || JSON.stringify(args) !== JSON.stringify(project.launch.args))) {
+          throw new InputError("桌面启动只支持打开当前登记的应用。");
+        }
+        if (project.kind === "script" || /^(?:\/bin\/)?(?:bash|sh|zsh)$/.test(command) || this.platform === "win32" && /^(?:powershell|cmd)(?:\.exe)?$/i.test(command)) {
           const plan = await validateProjectPlan(project, { ...project.launch, command, args, url,
-            status: "ready", kind: "script", summary: "已保存项目脚本启动方式" });
+            status: "ready", kind: "script", summary: "已保存项目脚本启动方式" }, { platform: this.platform });
           project.kind = "script"; project.launch = plan.launch;
         } else {
-        if (!PROGRAMS.has(command)) {
+        if (!PROGRAMS.has(command) && !(project.kind === "desktop" && this.platform === "linux" && command === "/usr/bin/gio")) {
           const executable = await canonicalPath(command);
           if (!inside(project.root, executable) || !(await stat(executable)).isFile()) throw new InputError("自定义程序必须是项目目录内的可执行文件");
           await access(executable, constants.X_OK);
           command = executable;
         }
-        if (command === "open" && (project.kind !== "desktop" || process.platform !== "darwin"
+        if (command === "open" && (project.kind !== "desktop" || this.platform !== "darwin"
           || args.length !== 1 || args[0] !== project.path)) throw new InputError("桌面启动只支持打开当前登记的应用");
         project.launch = { command, args, url: localUrl(url) };
         }
@@ -382,16 +399,17 @@ export class ProjectManager {
         else { Object.assign(run, preview); await this.openPage(run); }
       } else {
         const launch = project.kind === "script" ? (await validateProjectPlan(project, { ...project.launch,
-          kind: "script", status: "ready", summary: "核对项目脚本启动方式" })).launch : project.launch;
+          kind: "script", status: "ready", summary: "核对项目脚本启动方式" }, { platform: this.platform })).launch : project.launch;
         if (item.cancelled || run.status === "stopped") return this.view(project);
         if (launch.background) {
-          await startScriptServices({ ...project, launch }, run, { spawnImpl: this.spawnImpl, env: projectEnvironment(),
+          await startScriptServices({ ...project, launch }, run, { spawnImpl: this.spawnImpl, projectSpawn: this.projectSpawn, platform: this.platform, env: projectEnvironment(),
             blockedPort: this.blockedPort, onReady: () => this.openPage(run) });
           return this.view(project);
         }
-        const child = this.spawnImpl(launch.command, launch.args, {
-          cwd: project.root, shell: false, detached: process.platform !== "win32", env: projectEnvironment(), stdio: ["ignore", "pipe", "pipe"],
+        const spawned = this.projectSpawn(launch.command, launch.args, {
+          cwd: project.root, shell: false, detached: this.platform !== "win32", env: projectEnvironment(process.env, { desktop: project.kind === "desktop" }), stdio: ["ignore", "pipe", "pipe"],
         });
+        const child = spawned?.then ? await spawned : spawned;
         run.child = child;
         child.on("error", () => { run.status = "failed"; run.error = "启动程序不可用，请检查是否已安装相应运行环境"; });
         child.on("close", (code) => {
@@ -408,6 +426,10 @@ export class ProjectManager {
           if (match) { try { candidate = localUrl(match[0]); } catch { /* Ignore unrecognized output. */ } }
         });
         child.stderr?.resume();
+        if (item.cancelled || run.status === "stopped") {
+          await stopProjectProcess(child, { platform: this.platform });
+          return this.view(project);
+        }
         await sleep(200);
         if (item.cancelled || run.status === "stopped") return this.view(project);
         if (run.status === "starting") run.status = "running";
@@ -463,20 +485,12 @@ export class ProjectManager {
     const project = await this.get(id), run = this.runs.get(id);
     if (!run || !this.view(project).canStop) return this.view(project);
     if (run.background) {
-      await stopScriptServices(project, run, { spawnImpl: this.spawnImpl, env: projectEnvironment() });
+      await stopScriptServices(project, run, { spawnImpl: this.spawnImpl, projectSpawn: this.projectSpawn, platform: this.platform, env: projectEnvironment() });
       return this.view(project);
     }
     run.status = "stopped"; run.url = null; run.pageOpened = false; run.openError = null;
     if (run.server) await new Promise((done) => run.server.close(done));
-    if (run.child?.pid) {
-      const kill = (signal) => {
-        try { if (process.platform !== "win32") process.kill(-run.child.pid, signal); else run.child.kill(signal); }
-        catch (error) { if (error.code !== "ESRCH") throw error; }
-      };
-      kill("SIGTERM");
-      const timer = setTimeout(() => { if (run.child.exitCode === null && run.child.signalCode === null) kill("SIGKILL"); }, 1500);
-      timer.unref();
-    }
+    await stopProjectProcess(run.child, { platform: this.platform });
     return this.view(project);
   }
 
@@ -521,6 +535,11 @@ export class ProjectManager {
     const stopping = [...this.runs.keys()].map((id) => this.stop(id));
     const pending = [...this.pendingAdds.values(), ...this.inspections.values(), ...this.pendingStarts.values()];
     await Promise.allSettled([...stopping, ...pending.map((item) => item.pending)]);
+    // If an owned project's stop script fails during shutdown, the Windows job still must be closed.
+    for (const run of this.runs.values()) {
+      if (run.launcher?.stopTree) await run.launcher.stopTree().catch(() => {});
+      if (run.child?.stopTree) await run.child.stopTree().catch(() => {});
+    }
     this.analyzeProject?.dispose?.();
   }
 }

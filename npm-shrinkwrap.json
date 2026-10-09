@@ -7,9 +7,18 @@
     "": {
       "name": "@chrissliu/neuma",
       "version": "0.1.0",
-      "os": ["darwin", "win32", "linux"],
-      "cpu": ["x64", "arm64"],
-      "bin": { "neuma": "bin/neuma.cjs" },
+      "os": [
+        "darwin",
+        "win32",
+        "linux"
+      ],
+      "cpu": [
+        "x64",
+        "arm64"
+      ],
+      "bin": {
+        "neuma": "bin/neuma.cjs"
+      },
       "dependencies": {
         "@earendil-works/pi-coding-agent": "1.0.0"
       },
