@@ -22,11 +22,13 @@ constexpr size_t MAX_OBJECTS = 20000;
 constexpr wchar_t PROFILE_PREFIX[] = L"neuma-isolation-";
 struct Failure { int line = 0; DWORD error = 0; bool reported = false; };
 void report_failure(int line, DWORD error) noexcept {
+  const DWORD original_error = GetLastError();
   char message[96];
   int size = std::snprintf(message, sizeof(message), "NEUMA_ISOLATION_FAIL line=%d win32=%lu\n", line, static_cast<unsigned long>(error));
-  if (size <= 0 || static_cast<size_t>(size) >= sizeof(message)) return;
+  if (size <= 0 || static_cast<size_t>(size) >= sizeof(message)) { SetLastError(original_error); return; }
   DWORD written = 0;
-  if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, static_cast<DWORD>(size), &written, nullptr)) return;
+  if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, static_cast<DWORD>(size), &written, nullptr)) { SetLastError(original_error); return; }
+  SetLastError(original_error);
 }
 Failure failure_at(int line) { return { line, GetLastError(), false }; }
 void require_impl(bool ok, int line) {
@@ -74,7 +76,7 @@ bool beneath(const std::wstring& root, const std::wstring& path) {
 std::wstring parent_path(const std::wstring& path) {
   size_t last = path.find_last_of(L"\\/");
   if (last == std::wstring::npos) return L"";
-  if (last == 2 && path[1] == L':') return path.substr(0, 3);
+  if ((last == 2 && path[1] == L':') || (last == 6 && path.rfind(L"\\\\?\\", 0) == 0 && path[5] == L':')) return path.substr(0, last + 1);
   return path.substr(0, last);
 }
 DWORD attributes(const std::wstring& path) { DWORD value = GetFileAttributesW(path.c_str()); require(value != INVALID_FILE_ATTRIBUTES); return value; }
@@ -90,12 +92,13 @@ template<typename Function> Function nt_function(const char *name) {
 // at a time relative to an already checked directory HANDLE. Never let a named
 // ACL/label operation resolve the path a second time after this check.
 Handle checked_object(const std::wstring& original, DWORD access = MAXIMUM_ALLOWED, bool final_reparse = false) {
+  const DWORD queried_access = access | FILE_READ_ATTRIBUTES;
   std::wstring path = original; std::replace(path.begin(), path.end(), L'/', L'\\');
   size_t start = 3;
   if (path.rfind(L"\\\\?\\", 0) == 0) start = 7;
   require(path.size() >= start && path[start - 2] == L':' && path[start - 1] == L'\\');
   std::wstring root = path.substr(0, start);
-  Handle current(CreateFileW(root.c_str(), path.size() == start ? access : FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+  Handle current(CreateFileW(root.c_str(), path.size() == start ? queried_access : FILE_READ_ATTRIBUTES | SYNCHRONIZE,
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
   if (!current.valid()) throw failure_at(__LINE__);
   BY_HANDLE_FILE_INFORMATION info{}; require(GetFileInformationByHandle(current.value, &info)
@@ -111,7 +114,7 @@ Handle checked_object(const std::wstring& original, DWORD access = MAXIMUM_ALLOW
     UNICODE_STRING name{}; name.Buffer = component.data(); name.Length = static_cast<USHORT>(component.size() * sizeof(wchar_t)); name.MaximumLength = name.Length;
     OBJECT_ATTRIBUTES object{}; object.Length = sizeof(object); object.RootDirectory = current.value; object.ObjectName = &name; object.Attributes = OBJ_CASE_INSENSITIVE;
     IO_STATUS_BLOCK io{}; HANDLE opened = nullptr;
-    NTSTATUS status = open_relative(&opened, (last ? access : FILE_READ_ATTRIBUTES) | SYNCHRONIZE, &object, &io, nullptr, 0,
+    NTSTATUS status = open_relative(&opened, (last ? queried_access : FILE_READ_ATTRIBUTES) | SYNCHRONIZE, &object, &io, nullptr, 0,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
       FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT | (last ? 0 : FILE_DIRECTORY_FILE), nullptr, 0);
     if (status < 0) { SetLastError(error_code(status)); throw failure_at(__LINE__); }
@@ -334,6 +337,12 @@ size_t remember(Journal& journal, const std::wstring& journal_path, const std::w
 }
 void ancestors(Journal& journal, const std::wstring& journal_path, const std::wstring& root, PSID sid) {
   for (std::wstring path = parent_path(root); !path.empty(); ) {
+    std::wstring parent = parent_path(path);
+    // Volume roots retain Windows' traversal rules. MAXIMUM_ALLOWED includes
+    // delete access, which cannot be acquired for the mounted root directory.
+    const bool volume_root = (path.size() == 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'))
+      || (path.size() == 7 && path.rfind(L"\\\\?\\", 0) == 0 && path[5] == L':' && (path[6] == L'\\' || path[6] == L'/'));
+    if (volume_root || same_path(path, parent)) break;
     Handle writable_acl;
     try { writable_acl = checked_object(path, WRITE_DAC); } catch (...) { require(GetLastError() == ERROR_ACCESS_DENIED); }
     if (writable_acl.valid()) {
@@ -342,7 +351,7 @@ void ancestors(Journal& journal, const std::wstring& journal_path, const std::ws
     }
     // System-owned ancestors retain their standard traversal rules. A normal
     // user never needs elevation or a change to the whole volume's permissions.
-    std::wstring parent = parent_path(path); if (same_path(path, parent)) break; path = parent;
+    path = parent;
   }
 }
 void grant_tree(Journal& journal, const std::wstring& journal_path, const std::wstring& root, PSID sid, bool writable, bool executable = false) {
