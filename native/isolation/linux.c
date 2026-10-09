@@ -285,6 +285,18 @@ static int write_all(int fd, const char *data, size_t size) {
   return 0;
 }
 
+static _Noreturn void child_setup_failed(void) {
+  const unsigned char failed = 1;
+  for (;;) {
+    ssize_t written = write(3, &failed, sizeof(failed));
+    if (written == (ssize_t)sizeof(failed)) break;
+    if (written < 0 && errno == EINTR) continue;
+    // A broken notification pipe cannot turn a setup failure into success.
+    break;
+  }
+  _exit(125);
+}
+
 static int publish_status(const char *path, const char *status, unsigned int exit_code, const char *reason) {
   char output[256];
   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -333,22 +345,21 @@ int main(int argc, char **argv) {
     pid_t supervisor = getppid();
     signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGPIPE, SIG_DFL);
     if (dup2(output[1], STDOUT_FILENO) < 0 || dup2(errors[1], STDERR_FILENO) < 0 || dup3(setup[1], 3, O_CLOEXEC) < 0) _exit(125);
-    unsigned char failed = 1;
     if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != supervisor || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
-        || syscall(__NR_close_range, 4U, ~0U, 0) || chdir(cwd)) { (void)write(3, &failed, 1); _exit(125); }
+        || syscall(__NR_close_range, 4U, ~0U, 0) || chdir(cwd)) child_setup_failed();
     struct rlimit core = { 0, 0 }, file = { 64 * 1024 * 1024, 64 * 1024 * 1024 }, cpu = { timeout / 1000 + 2, timeout / 1000 + 2 };
     /* RLIMIT_DATA also covers anonymous writable mappings on Linux >=4.7.
      * RLIMIT_AS would incorrectly cap V8's large PROT_NONE reservations. The
      * supported-system canary must prove this bound still permits Node startup. */
     struct rlimit memory = { 256 * 1024 * 1024, 256 * 1024 * 1024 };
     if (setrlimit(RLIMIT_CORE, &core) || setrlimit(RLIMIT_FSIZE, &file) || setrlimit(RLIMIT_CPU, &cpu) || setrlimit(RLIMIT_DATA, &memory)
-        || restrict_files(node, code, write_path, read_path) || restrict_syscalls()) { (void)write(3, &failed, 1); _exit(125); }
+        || restrict_files(node, code, write_path, read_path) || restrict_syscalls()) child_setup_failed();
     char **command = calloc((size_t)(argc - command_index + 2), sizeof(char *));
-    if (!command) { (void)write(3, &failed, 1); _exit(125); }
+    if (!command) child_setup_failed();
     command[0] = (char *)node;
     for (int index = command_index; index < argc; index++) command[index - command_index + 1] = argv[index];
     execv(node, command);
-    (void)write(3, &failed, 1); _exit(125);
+    child_setup_failed();
   }
   close(output[1]); close(errors[1]); close(setup[1]);
   fcntl(output[0], F_SETFL, O_NONBLOCK); fcntl(errors[0], F_SETFL, O_NONBLOCK); fcntl(setup[0], F_SETFL, O_NONBLOCK);

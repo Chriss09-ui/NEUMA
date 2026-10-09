@@ -138,6 +138,9 @@ jobs:
       - name: Check installed helper capabilities
         if: ${{ !cancelled() }}
         run: node bin/neuma.cjs doctor
+      - name: Diagnose failed isolation with numeric codes only
+        if: ${{ failure() && !cancelled() }}
+        run: node .github/scripts/diagnose-isolation.mjs
       - name: Upload helper archive for inspection
         if: ${{ !cancelled() && hashFiles(env.TASK_ARCHIVE) != '' }}
         uses: actions/upload-artifact@v7
