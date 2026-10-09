@@ -1,14 +1,24 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { DevelopmentExecutor } from "../../development-executor.mjs";
 
 let remainingBytes = 16384, printed = 0;
+const loaderWrapper = fileURLToPath(new URL("./windows-loader.exe", import.meta.url));
 const report = (line) => {
-  if (printed >= 32) return;
+  if (printed >= 128) return;
   const match = /^NEUMA_ISOLATION_FAIL line=(\d{1,6}) win32=(\d{1,10})$/.exec(line.trim());
-  if (match) { printed += 1; console.log(`NEUMA_ISOLATION_FAIL line=${match[1]} win32=${match[2]}`); }
+  if (match) { printed += 1; console.log(`NEUMA_ISOLATION_FAIL line=${match[1]} win32=${match[2]}`); return; }
+  const safe = line.trim();
+  if (/^NEUMA_LOADER_(?:DLL|MESSAGE) pid=\d{1,10} name=[A-Za-z0-9_.-]{1,128}$/.test(safe)
+    || /^NEUMA_LOADER_EXCEPTION pid=\d{1,10} code=\d{1,10} first=[01]$/.test(safe)
+    || /^NEUMA_LOADER_EXIT pid=\d{1,10} code=\d{1,10}$/.test(safe)
+    || /^NEUMA_LOADER_ERROR code=\d{1,10}$/.test(safe)) { printed += 1; console.log(safe); }
 };
 const executor = new DevelopmentExecutor({ spawnImpl: (command, args, options) => {
-  const child = spawn(command, args, options.stdio === "ignore" ? { ...options, stdio: ["ignore", "ignore", "pipe"] } : options);
+  const useWrapper = process.platform === "win32" && args[0] === "--node" && existsSync(loaderWrapper);
+  const child = spawn(useWrapper ? loaderWrapper : command, useWrapper ? [command, ...args] : args,
+    options.stdio === "ignore" ? { ...options, stdio: ["ignore", "ignore", "pipe"] } : options);
   let pending = "";
   child.stderr?.on("data", (data) => {
     if (remainingBytes <= 0) return;
