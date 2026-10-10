@@ -397,6 +397,11 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .secret-input { display: flex; gap: 8px; }
 .secret-input input { flex: 1; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
 .settings-form { display: grid; gap: 18px; }
+.settings-model-test { display: grid; gap: 10px; padding-top: 4px; }
+.settings-model-test-actions { display: flex; align-items: center; gap: 12px; }
+.settings-model-test-result { margin: 0; overflow-wrap: anywhere; }
+.settings-model-test-result[data-state="success"] { color: var(--accent); }
+.settings-model-test-result[data-state="error"] { color: var(--danger); }
 
 .info-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin: 36px 0 24px; }
 .info-item { padding: 4px 4px 0; display: grid; gap: 12px; align-content: start; }

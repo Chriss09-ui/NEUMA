@@ -507,6 +507,14 @@
                 </div>
                 <span id="settings-api-key-help" class="field-help">留空表示不修改。</span>
               </div>
+              <div class="settings-model-test">
+                <div class="settings-model-test-actions">
+                  <button id="settings-model-test" class="secondary" type="button" disabled>测试连接</button>
+                  <button id="settings-model-test-cancel" class="ghost-button" type="button" hidden>取消测试</button>
+                  <span class="field-help">测试当前填写的配置，不会保存设置。</span>
+                </div>
+                <p id="settings-model-test-result" class="field-help settings-model-test-result" role="status" aria-live="polite" hidden></p>
+              </div>
             </section>
 
             <section class="card form-card">
@@ -530,6 +538,14 @@
                 <span class="field-name">Jev 模型</span>
                 <input id="settings-jev-model" type="text" spellcheck="false" placeholder="jev-1.13.0">
               </label>
+              <div class="settings-model-test">
+                <div class="settings-model-test-actions">
+                  <button id="settings-jev-test" class="secondary" type="button" disabled>测试连接</button>
+                  <button id="settings-jev-test-cancel" class="ghost-button" type="button" hidden>取消测试</button>
+                  <span class="field-help">测试当前填写的 Jev 配置，不会保存设置。</span>
+                </div>
+                <p id="settings-jev-test-result" class="field-help settings-model-test-result" role="status" aria-live="polite" hidden></p>
+              </div>
             </section>
 
             <div id="settings-error" class="error" role="alert" hidden></div>
