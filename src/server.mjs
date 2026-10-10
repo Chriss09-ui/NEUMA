@@ -9,6 +9,7 @@ import { createProjectFolderPicker } from "./projects/project-folder-picker.mjs"
 import { PiProjectAgent, createProjectAnalyzer } from "./runtime/pi-runtime.mjs";
 import { PrototypeAgents } from "./agents/agent-prototype.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
+import { testJevConnection, testModelConnection } from "./model-connection.mjs";
 import { APP_VERSION } from "./app-metadata.mjs";
 import { SkillManager } from "./skills/skill-manager.mjs";
 import { routeSkills } from "./skills/skill-api.mjs";
@@ -215,6 +216,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     analyzeProject: createProjectAnalyzer({ config, dataDir }) }),
   skillManager = new SkillManager({ dataDir, getProjects: () => projects.list?.() ?? [] }),
   pickSkillFolder = createProjectFolderPicker(),
+  modelConnectionTester = testModelConnection,
+  jevConnectionTester = testJevConnection,
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
   prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }) } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
@@ -287,6 +290,16 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (request.method === "POST" && path === "/api/settings") {
         const updates = settingsUpdates(await readJson(request));
         return sendJson(response, 200, await saveSettings(updates));
+      }
+      if (request.method === "POST" && path === "/api/settings/test-model") {
+        const result = await modelConnectionTester(config, await readJson(request, 8_192), { signal: requestController.signal });
+        if (!requestController.signal.aborted) return sendJson(response, 200, result);
+        return;
+      }
+      if (request.method === "POST" && path === "/api/settings/test-jev") {
+        const result = await jevConnectionTester(config, await readJson(request, 8_192), { signal: requestController.signal });
+        if (!requestController.signal.aborted) return sendJson(response, 200, result);
+        return;
       }
       if (request.method === "GET" && path === "/api/agent-requirements") return sendJson(response, 200, await prototypeAgents.getRequirements());
       const agentRequirement = path.match(/^\/api\/agents\/([\w-]+)\/requirements$/);
