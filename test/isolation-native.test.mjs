@@ -21,7 +21,7 @@ async function fixture(t) {
   return { root, helper, codeDir, writableDir };
 }
 
-function nativeMock({ status = true, cleanup = true, journal = false } = {}) {
+function nativeMock({ status = true, executionStatus = status, cleanup = true, journal = false } = {}) {
   const calls = [];
   const spawnImpl = (command, args, options) => {
     const call = { command, args, options, input: "" }; calls.push(call);
@@ -35,9 +35,10 @@ function nativeMock({ status = true, cleanup = true, journal = false } = {}) {
         child.emit("close", cleanup ? 0 : 1, null); return;
       }
       const statusPath = args[args.indexOf("--status") + 1];
+      const isProbe = args.at(-1).endsWith("probe.mjs");
       if (journal) await writeFile(join(dirname(statusPath), "windows-cleanup.bin"), "mock protected journal");
-      if (status) await writeFile(statusPath, JSON.stringify({ protocol: 1, status: "passed", exitCode: 0, cleanupComplete: true }));
-      child.stdout.write(args.at(-1).endsWith("probe.mjs") ? JSON.stringify(CANARY) : '{"ok":true}');
+      if (isProbe ? status : executionStatus) await writeFile(statusPath, JSON.stringify({ protocol: 1, status: "passed", exitCode: 0, cleanupComplete: true }));
+      child.stdout.write(isProbe ? JSON.stringify(CANARY) : '{"ok":true}');
       child.emit("exit", 0, null); child.emit("close", 0, null);
     })().catch((error) => child.emit("error", error)); });
     return child;
@@ -76,11 +77,21 @@ test("Linux协议把长中文输入送入stdin，进程参数不携带任务内�
   assert.ok(mock.calls[1].args.includes("--max-old-space-size=128"));
 });
 
-test("生成程序stdout即使输出通过结果，没有受保护的helper状态也不能通过", async (t) => {
+test("隔离探测stdout即使输出通过结果，没有受保护的helper状态也不能通过", async (t) => {
   const data = await fixture(t), mock = nativeMock({ status: false });
   const executor = new DevelopmentExecutor({ platform: "linux", nativeHelperPath: data.helper, spawnImpl: mock.spawnImpl, temporaryDir: data.root, killImpl: () => {} });
   const probe = await executor.probe(); assert.equal(probe.available, false);
   assert.equal((await executor.run({ codeDir: data.codeDir, entrypoint: "main.mjs", input: "" })).status, "not_run");
+});
+
+test("探测成功后实际程序只有stdout、缺少helper状态仍拒绝通过", async (t) => {
+  const data = await fixture(t), mock = nativeMock({ executionStatus: false });
+  const executor = new DevelopmentExecutor({ platform: "linux", nativeHelperPath: data.helper, spawnImpl: mock.spawnImpl, temporaryDir: data.root, killImpl: () => {} });
+  assert.equal((await executor.probe()).available, true);
+  const result = await executor.run({ codeDir: data.codeDir, entrypoint: "main.mjs", input: "" });
+  assert.equal(mock.calls.length, 2);
+  assert.equal(mock.calls[1].args.at(-1), join(data.codeDir, "main.mjs"));
+  assert.equal(result.status, "error"); assert.equal(result.reason, "isolation_setup_failed");
 });
 
 test("原生状态校验拒绝不一致退出码、非法字段和未完成权限清理", async (t) => {

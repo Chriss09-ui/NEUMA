@@ -33,7 +33,7 @@ test("skill 管理复用窗口但显示独立提示，不改变项目选择默�
   await pick({ prompt: "选择要导入的 skill 文件夹" });
   await pick();
   assert.match(scripts[0], /prompt "选择要导入的 skill 文件夹"/);
-  assert.match(scripts[1], /prompt "选择要添加到 NUEMA 的项目文件夹"/);
+  assert.match(scripts[1], /prompt "选择要添加到 NEUMA 的项目文件夹"/);
 });
 
 test("打开期间拒绝重复请求，取消后释放选择器", async () => {

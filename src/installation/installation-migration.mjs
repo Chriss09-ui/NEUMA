@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, rmdir } from 
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
-import { AgentLibrary } from "../agents/agent-library.mjs";
+import { AgentLibrary, validateConversationRecord } from "../agents/agent-library.mjs";
 import { hashValue } from "../development/development-contract.mjs";
 import { inspectDevelopmentCode } from "../development/development-workspace.mjs";
 
@@ -16,7 +16,7 @@ const safeRunId = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-
 const missing = (error) => error.code === "ENOENT";
 const ignored = (name, prefix) => credentials.test(name) || transient.test(name)
   || (name === "pi" && (prefix === "" || /^agents\/[\w-]+\/$/.test(prefix)));
-const metadata = (name) => /^(?:agents\.json|architectures\.json|agents-layout\.json|projects\.json|project-add-failures\.json|development\/[^/]+\.json|agents\/[^/]+\/(?:definition\.json|requirements\.json|architecture\.json|deleted\.json|conversations\/saved\.json|development\/records\/[^/]+\.json))$/.test(name);
+const metadata = (name) => /^(?:agents\.json|architectures\.json|agents-layout\.json|projects\.json|project-add-failures\.json|development\/[^/]+\.json|agents\/[^/]+\/(?:definition\.json|requirements\.json|architecture\.json|deleted\.json|conversations\/saved\.json|conversations\/records\/[^/]+\.json|development\/records\/[^/]+\.json))$/.test(name);
 const abort = (signal) => signal?.throwIfAborted();
 
 function inputPath(value, label) {
@@ -191,6 +191,10 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
       }
     }
     await library.getConversation(id);
+    for (const name of await storage.jsonFiles(id, "conversations/records")) {
+      const value = await readJson(join(staging, "agents", id, "conversations", "records", name), limits.jsonBytes);
+      validateConversationRecord(id, name.slice(0, -5), value);
+    }
     const records = join(staging, "agents", id, "development", "records");
     let entries;
     try { entries = await readdir(records); } catch (error) { if (missing(error)) continue; throw error; }

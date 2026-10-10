@@ -89,6 +89,43 @@ test("新增持久化接口继续拒绝外部来源，无效对话不会写入�
   assert.equal(writes, 0);
 });
 
+test("multiple conversation APIs persist separate records and report conflicts and deletion without reviving data", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "neuma-multi-chat-api-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const library = new AgentLibrary({ dataDir });
+  await library.saveRequirement(agent.id, { name: agent.name, draft: buildInput.draft });
+  const handler = makeHandler({
+    listConversations: (id) => library.listConversations(id),
+    getConversationRecord: (id, cid) => library.getConversationRecord(id, cid),
+    saveConversationRecord: (id, cid, body) => library.saveConversationRecord(id, cid, body),
+    removeConversation: (id, cid) => library.removeConversation(id, cid),
+  });
+  const base = `/api/agents/${agent.id}/conversations`;
+  const body = { schemaVersion: 3, messages: [{ role: "user", content: "整理周报" }], expectedVersion: 0, mutationId: "save-one" };
+  const first = await invoke(handler, "POST", `${base}/chat-one`, body);
+  assert.equal(first.status, 200);
+  assert.equal(JSON.parse(first.text).conversation.saveVersion, 1);
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `${base}/chat-one`)).text), JSON.parse(first.text));
+  await invoke(handler, "POST", `${base}/chat-two`, { ...body, messages: [{ role: "user", content: "另一份周报" }] });
+  assert.equal(JSON.parse((await invoke(handler, "GET", base)).text).conversations.length, 2);
+  const conflict = await invoke(handler, "POST", `${base}/chat-one`, { ...body, mutationId: "stale-save" });
+  assert.equal(conflict.status, 409);
+  assert.equal(JSON.parse(conflict.text).reason, "conversation_conflict");
+  assert.equal((await invoke(handler, "GET", `${base}/chat-one/remove`)).status, 404);
+  assert.deepEqual(JSON.parse((await invoke(handler, "POST", `${base}/chat-one/remove`, {})).text), { deleted: true, id: "chat-one" });
+  const deleted = await invoke(handler, "POST", `${base}/chat-one`, body);
+  assert.equal(deleted.status, 409);
+  assert.equal(JSON.parse(deleted.text).reason, "conversation_deleted");
+  assert.deepEqual(JSON.parse((await invoke(handler, "GET", `${base}/chat-one`)).text), { conversation: null, deleted: true });
+  assert.equal(JSON.parse((await invoke(handler, "GET", base)).text).conversations.length, 1);
+  const external = request("POST", `${base}/chat-three`, body);
+  external.headers.host = "127.0.0.1:3000";
+  external.headers.origin = "https://outside.example";
+  const denied = new StreamingResponse(); await handler(external, denied);
+  assert.equal(denied.status, 403);
+  assert.deepEqual(await library.getConversationRecord(agent.id, "chat-three"), { conversation: null });
+});
+
 test("用户 Agent JSON 接口使用独立后端，返回定义、实际回复与取消/删除结果", async () => {
   const seen = [];
   const reply = { agentId: agent.id, sessionId: turnInput.sessionId, reply: "已整理周报", status: "completed" };
@@ -284,8 +321,9 @@ test("Agent 接口拒绝跨站/外部 Host 及无效 JSON，删除不能由 GET 
     if (method === "POST") assert.equal((await invoke(handler, method, path)).status, 400);
   }
   for (const body of [null, [], "invalid"]) assert.equal((await invoke(handler, "POST", "/api/agents/build", body)).status, 400);
-  const malformed = request("POST", "/api/agents/build");
-  malformed.headers["content-type"] = "application/json";
+  const malformed = Object.assign(Readable.from([Buffer.from('{"id":')]), {
+    method: "POST", url: "/api/agents/build", headers: { "content-type": "application/json" },
+  });
   const response = new StreamingResponse(); await handler(malformed, response);
   assert.equal(response.status, 400);
   assert.equal((await invoke(handler, "GET", `/api/agents/${agent.id}/remove`)).status, 404);

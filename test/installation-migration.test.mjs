@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { migrateInstallation } from "../src/installation/installation-migration.mjs";
 import { AgentStorage } from "../src/agents/agent-storage.mjs";
+import { AgentLibrary } from "../src/agents/agent-library.mjs";
 import { DevelopmentWorkspace, inspectDevelopmentCode } from "../src/development/development-workspace.mjs";
 import { InputError } from "../src/requirements/core.mjs";
 
@@ -50,6 +51,43 @@ async function noDestination(fixture) {
   await assert.rejects(readdir(fixture.dataDir), { code: "ENOENT" });
   assert.equal((await readdir(fixture.root)).some((name) => name.startsWith(".installation-migration-")), false);
 }
+
+const chatRecord = (id = "chat-one") => ({ schemaVersion: 3, id, agentId: "alpha", title: "保存历史", createdAt: date,
+  updatedAt: date, saveVersion: 2, mutationId: "second-save", messages: [{ role: "user", content: "保存历史" },
+    { role: "assistant", content: "完整结果", status: "complete" }] });
+
+test("installation migration preserves multi-conversation records and tombstones without reviving legacy saved data", async (t) => {
+  const f = await fixture(t);
+  await json(join(f.source, "agents-layout.json"), { version: 1 });
+  await json(join(f.source, "agents/alpha/definition.json"), { version: 1, agent: definition() });
+  await json(join(f.source, "agents/alpha/conversations/records/chat-one.json"), chatRecord());
+  const tombstone = { schemaVersion: 3, id: "legacy-saved", agentId: "alpha", deletedAt: date };
+  await json(join(f.source, "agents/alpha/conversations/records/legacy-saved.json"), tombstone);
+  await json(join(f.source, "agents/alpha/conversations/saved.json"), { schemaVersion: 2, messages: [{ role: "user", content: "已删除旧内容" }] });
+  await f.migrate();
+  const library = new AgentLibrary({ dataDir: f.dataDir });
+  assert.deepEqual((await library.listConversations("alpha")).conversations.map((item) => item.id), ["chat-one"]);
+  assert.deepEqual(await library.getConversationRecord("alpha", "chat-one"), { conversation: chatRecord() });
+  assert.deepEqual(await library.getConversationRecord("alpha", "legacy-saved"), { conversation: null, deleted: true });
+  assert.deepEqual(await library.storage.readJson("alpha", "conversations/records/legacy-saved.json"), tombstone);
+  assert.deepEqual(JSON.parse(await readFile(join(f.source, "agents/alpha/conversations/records/chat-one.json"), "utf8")), chatRecord());
+});
+
+test("installation migration rejects invalid conversation identity, tombstones and byte budgets", async (t) => {
+  for (const value of [chatRecord("different-id"), { ...chatRecord(), agentId: "another" },
+    { ...chatRecord(), title: "伪造标题" }, { schemaVersion: 3, id: "chat-one", agentId: "alpha", deletedAt: date, messages: [] }]) {
+    const f = await fixture(t);
+    await json(join(f.source, "agents-layout.json"), { version: 1 });
+    await json(join(f.source, "agents/alpha/conversations/records/chat-one.json"), value);
+    await assert.rejects(f.migrate(), InputError);
+    await noDestination(f);
+  }
+  const f = await fixture(t);
+  await json(join(f.source, "agents-layout.json"), { version: 1 });
+  await json(join(f.source, "agents/alpha/conversations/records/chat-one.json"), chatRecord());
+  await assert.rejects(f.migrate({ maxJsonBytes: 100 }), /元数据超过大小限制/);
+  await noDestination(f);
+});
 
 test("current Agent layout migrates controlled references and preserves identities, state and business values", async (t) => {
   const f = await fixture(t), snapshot = await snapshotAt(f.source);

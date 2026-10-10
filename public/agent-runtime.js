@@ -117,7 +117,12 @@ export function createAgentRuntime(request = fetch) {
     const response = await request(path, options);
     const result = await response.json();
     signal?.throwIfAborted();
-    if (!response.ok) throw new Error(result.error || "智能体请求失败，请重试。");
+    if (!response.ok) {
+      const error = new Error(result.error || "智能体请求失败，请重试。");
+      error.status = response.status;
+      if (typeof result.reason === "string") error.reason = result.reason;
+      throw error;
+    }
     return result;
   }
 
@@ -139,6 +144,10 @@ export function createAgentRuntime(request = fetch) {
     saveRequirements: (id, requirement, options) => json(`/api/agents/${encodeURIComponent(id)}/requirements`, requirement, options),
     getConversation: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/conversation`, undefined, options),
     saveConversation: (id, conversation, options) => json(`/api/agents/${encodeURIComponent(id)}/conversation`, conversation, options),
+    listConversations: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/conversations`, undefined, options),
+    getHistoryConversation: (id, conversationId, options) => json(`/api/agents/${encodeURIComponent(id)}/conversations/${encodeURIComponent(conversationId)}`, undefined, options),
+    saveHistoryConversation: (id, conversationId, conversation, options) => json(`/api/agents/${encodeURIComponent(id)}/conversations/${encodeURIComponent(conversationId)}`, conversation, options),
+    removeConversation: (id, conversationId, options) => json(`/api/agents/${encodeURIComponent(id)}/conversations/${encodeURIComponent(conversationId)}/remove`, {}, options),
     listProfiles: (options) => json("/api/agent-profiles", undefined, options),
     saveProfile: (id, profile, options) => json(`/api/agents/${encodeURIComponent(id)}/profile`, profile, options),
     getMemory: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, undefined, options),

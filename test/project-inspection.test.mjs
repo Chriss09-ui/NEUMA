@@ -83,7 +83,7 @@ test("路径添加自动调用 PI，读文件后持久化配置，无需手填�
   const progress = [];
   const project = await manager.add({ path: app }, { onProgress: (event) => progress.push(event) });
   assert.equal(project.canLaunch, true); assert.equal(project.allowLaunch, true); assert.equal(project.setup.source, "pi");
-  assert.equal(progress[0].label, "NUEMA 正在识别项目…");
+  assert.equal(progress[0].label, "NEUMA 正在识别项目…");
   assert.equal((await manager.add({ path: app })).id, project.id); assert.equal(calls, 1);
   const persisted = JSON.parse(await readFile(join(root, "data", "projects.json"), "utf8"));
   assert.equal(persisted.projects[0].setup.status, "ready");
@@ -101,7 +101,7 @@ test("重新识别读取更新后的启动脚本，原记录更新且不会自�
     const result = await tools.read_project_file({ file: "package.json" });
     const { text } = JSON.parse(result.content[0].text);
     const script = Object.keys(JSON.parse(text).scripts)[0];
-    await tools.submit_launch_plan({ status: "ready", summary: "NUEMA 已读取当前入口。", command: "npm", args: ["run", script] });
+    await tools.submit_launch_plan({ status: "ready", summary: "NEUMA 已读取当前入口。", command: "npm", args: ["run", script] });
   }) });
   t.after(() => manager.dispose());
   const initial = await manager.add({ path: app });
@@ -207,10 +207,11 @@ test("新项目失败、缺少方案和接口异常都不登记，提示安全�
 test("新项目取消或关闭管理器会停止检查且不落入登记", async (t) => {
   const { root, app } = await fixture(t);
   for (const action of ["cancel", "dispose"]) {
-    let started, aborted = false;
+    let started, inspectionSignal, aborted = false;
     const ready = new Promise((done) => { started = done; });
     const dataDir = join(root, action);
     const manager = new ProjectManager({ dataDir, analyzeProject: async (_project, { signal }) => {
+      inspectionSignal = signal;
       started(); await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
       aborted = true;
       return { setup: { status: "ready", summary: "迟到的结果" } };
@@ -218,11 +219,17 @@ test("新项目取消或关闭管理器会停止检查且不落入登记", async
     const controller = new AbortController();
     const pending = manager.add({ path: app }, { signal: controller.signal });
     const rejected = assert.rejects(pending, (error) => error.name === "AbortError");
-    await ready;
-    if (action === "cancel") controller.abort();
-    await manager.dispose(); await rejected;
-    assert.equal(aborted, true); assert.equal((await manager.list()).length, 0); assert.equal(manager.pendingAdds.size, 0);
-    await assert.rejects(readFile(join(dataDir, "projects.json")), { code: "ENOENT" });
+    try {
+      await ready;
+      if (action === "cancel") {
+        controller.abort();
+        assert.equal(inspectionSignal.aborted, true);
+      } else await manager.dispose();
+      await rejected;
+      await Promise.allSettled([...manager.pendingAdds.values()].map((item) => item.pending));
+      assert.equal(aborted, true); assert.equal((await manager.list()).length, 0); assert.equal(manager.pendingAdds.size, 0);
+      await assert.rejects(readFile(join(dataDir, "projects.json")), { code: "ENOENT" });
+    } finally { await manager.dispose(); }
   }
 });
 

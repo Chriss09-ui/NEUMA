@@ -318,20 +318,21 @@ test("都不对也可用短选项纠正，后续编号不会直接确认旧方�
 test("模型和 Jev 收到当前用户原话，下一份请求不会继承前一份对话", async () => {
   const seen = [];
   const providers = {
-    generateDraft: async ({ userMessages }) => {
-      seen.push(userMessages);
+    generateDraft: async ({ message, userMessages, lastQuestion }) => {
+      seen.push({ message, userMessages, lastQuestion });
       return { draft: completeDraft(), proposedGap: "none", question: "" };
     },
-    judgeJev: async ({ userMessages, lastQuestion }) => {
-      seen.push(userMessages);
-      assert.equal(typeof lastQuestion, "string");
+    judgeJev: async ({ message, userMessages, lastQuestion }) => {
+      seen.push({ message, userMessages, lastQuestion });
       return jevAnswers();
     },
   };
-  await processTurn({ message: "简短要点", userMessages: ["我提供会议转写", "提取结论和待办"] }, providers);
+  const current = { message: "简短要点", userMessages: ["我提供会议转写", "提取结论和待办"], lastQuestion: "先要简短要点还是详细解释？" };
+  await processTurn(current, providers);
   await processTurn({ message: "全新任务" }, providers);
-  assert.deepEqual(seen, [["我提供会议转写", "提取结论和待办"],
-    ["我提供会议转写", "提取结论和待办"], [], []]);
+  assert.deepEqual(seen, [current, current,
+    { message: "全新任务", userMessages: [], lastQuestion: "" },
+    { message: "全新任务", userMessages: [], lastQuestion: "" }]);
 });
 
 test("用户暂时说不出额外标准时不重复追问同一个边界问题", async () => {

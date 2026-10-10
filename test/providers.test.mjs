@@ -176,16 +176,20 @@ test("需求模型与 Jev 都以用户原话和上一问题核对草稿", async 
   const lastQuestion = "先要简短要点还是详细解释？";
   await generateDraft({ message: "简短要点", previousDraft: {}, lastQuestion, userMessages });
   await judgeJev({ message: "简短要点", draft: {}, lastQuestion, userMessages });
+  assert.equal(bodies.length, 2);
   const modelContext = JSON.parse(bodies[0].messages[1].content);
+  assert.equal(modelContext.latestUserMessage, "简短要点");
   assert.deepEqual(modelContext.userMessages, userMessages);
   assert.equal(modelContext.lastQuestion, lastQuestion);
+  assert.equal(bodies[1].state.latest_message, "简短要点");
   assert.deepEqual(bodies[1].state.user_messages, userMessages);
   assert.equal(bodies[1].state.last_question, lastQuestion);
 });
 
 test("Jev 每轮只发一个含场景与任务判断的结构化请求", async () => {
-  let seen;
+  let seen, calls = 0;
   const fetchImpl = async (url, init) => {
+    calls++;
     seen = { url, body: JSON.parse(init.body), authorization: init.headers.authorization };
     return new Response(JSON.stringify({ model: "jev-1.13.0", answers: {} }), {
       status: 200, headers: { "content-type": "application/json" },
@@ -193,6 +197,7 @@ test("Jev 每轮只发一个含场景与任务判断的结构化请求", async (
   };
   const { judgeJev } = makeProviders(config, fetchImpl);
   await judgeJev({ message: "创建周报助手", draft: {} });
+  assert.equal(calls, 1);
   assert.equal(seen.url, "https://api.typesafe.ai/v1/systemone");
   assert.equal(seen.body.model, "jev-1.13.0");
   assert.equal(Object.keys(seen.body.questions).length, 10);

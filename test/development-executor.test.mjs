@@ -16,6 +16,14 @@ async function fixture(t, source = "console.log(JSON.stringify({ok:true,values:[
   return { root, codeDir, snapshot: { hash, files, path }, entrypoint: "main.mjs" };
 }
 
+async function requireIsolation(t, executor) {
+  const probe = await executor.probe();
+  if (probe.available) return true;
+  if (process.env.NEUMA_REQUIRE_ISOLATION === "1") assert.fail(probe.reason);
+  t.skip(`当前宿主隔离不可用：${probe.reason}`);
+  return false;
+}
+
 function fakeSandbox(runs = []) {
   const calls = [], killed = [];
   let index = 0;
@@ -134,9 +142,7 @@ test("隔离探测启动失败时绝不退回普通 node，也不公开进程错
 
 test("本机实际隔离探测：仅通过系统边界后执行生成代码", async (t) => {
   const executor = new DevelopmentExecutor();
-  const probe = await executor.probe();
-  t.diagnostic(JSON.stringify(probe));
-  if (!probe.available) { assert.notEqual(process.env.NEUMA_REQUIRE_ISOLATION, "1", probe.reason); assert.equal(probe.available, false); return; }
+  if (!await requireIsolation(t, executor)) return;
   const input = await fixture(t);
   const result = await executor.verify({ ...input, cases: [{ id: "real", input: "hello", assertions: [{ path: "values.0", expectedJson: "42" }] }] });
   assert.equal(result.status, "passed", JSON.stringify(result));
@@ -144,7 +150,7 @@ test("本机实际隔离探测：仅通过系统边界后执行生成代码", as
 
 test("真实隔离运行只写指定用户目录，超时与取消终止正在运行的 Node", async (t) => {
   const executor = new DevelopmentExecutor();
-  if (!(await executor.probe()).available) { t.diagnostic("当前宿主隔离不可用，真实执行保持未执行"); return; }
+  if (!await requireIsolation(t, executor)) return;
   const input = await fixture(t, "import fs from 'node:fs'; fs.writeFileSync('result.json', JSON.stringify({input:process.argv[2]})); console.log(JSON.stringify({saved:true}));");
   const workspaceDir = join(input.root, "runtime"); await mkdir(workspaceDir);
   const run = await executor.run({ ...input, workspaceDir, input: "hello" });
@@ -178,7 +184,7 @@ test("运行工作目录存在隐藏凭据、符号链接或硬链接时停止�
 
 test("真实只读工作目录能读取用户材料，但只有独立 scratch 可以写入", async (t) => {
   const executor = new DevelopmentExecutor();
-  if (!(await executor.probe()).available) { t.diagnostic("当前宿主隔离不可用，真实执行保持未执行"); return; }
+  if (!await requireIsolation(t, executor)) return;
   const source = "import fs from 'node:fs'; import path from 'node:path'; let denied=false; try{fs.writeFileSync('forbidden.txt','bad')}catch(e){denied=['EPERM','EACCES'].includes(e.code)} fs.writeFileSync(path.join(process.env.TMPDIR,'scratch.txt'),'ok'); console.log(JSON.stringify({content:fs.readFileSync('input.txt','utf8'),denied}));";
   const input = await fixture(t, source), workspaceDir = join(input.root, "readonly"); await mkdir(workspaceDir);
   await writeFile(join(workspaceDir, "input.txt"), "user material");
@@ -190,7 +196,7 @@ test("真实只读工作目录能读取用户材料，但只有独立 scratch �
 
 test("真实持久状态验收按用例顺序共享新目录，不同验收重新从初始状态开始", async (t) => {
   const executor = new DevelopmentExecutor();
-  if (!(await executor.probe()).available) { t.diagnostic("当前宿主隔离不可用，真实执行保持未执行"); return; }
+  if (!await requireIsolation(t, executor)) return;
   const source = "import fs from 'node:fs'; let count=0; try{count=JSON.parse(fs.readFileSync('counter.json','utf8')).count}catch(error){if(error.code!=='ENOENT')throw error} count++;fs.writeFileSync('counter.json',JSON.stringify({count}));console.log(JSON.stringify({count}));";
   const input = await fixture(t, source);
   const cases = [1, 2].map((value) => ({ id: `increment_${value}`, input: "increment", assertions: [{ path: "count", expectedJson: String(value) }] }));

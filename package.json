@@ -19,7 +19,7 @@
   },
   "scripts": {
     "start": "node --env-file=.env src/server.mjs",
-    "test": "node --test --test-concurrency=1",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "package:prepare": "node scripts/prepare-package.mjs",
     "release:check": "node scripts/check-release.mjs",
     "release:preview:check": "node scripts/check-preview-release.mjs",

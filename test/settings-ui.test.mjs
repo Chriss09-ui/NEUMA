@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
-const source = await readFile(new URL("../public/settings.js", import.meta.url), "utf8");
+const [source, html] = await Promise.all(["settings.js", "index.html"].map((file) =>
+  readFile(new URL(`../public/${file}`, import.meta.url), "utf8")));
 const settle = () => new Promise(setImmediate);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const settings = (overrides = {}) => ({ chatUrl: "https://example.test/v1/chat/completions", model: "old-model", jevModel: "jev",
@@ -15,13 +16,33 @@ async function setup({ load, save, probe, probeJev } = {}) {
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
     dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) ?? []).map((callback) => callback(event))); }
   }
-  const document = new Events(), nodes = new Map(), requests = [];
+  const document = new Events(), nodes = new Map(), requests = [], formControls = [];
   class Element extends Events {
     value = ""; textContent = ""; hidden = false; disabled = false; dataset = {};
     focus() { document.activeElement = this; }
-    querySelectorAll(selector) { return selector === "input, button" ? [...nodes.values()].filter((node) => node !== this) : []; }
+    querySelectorAll(selector) {
+      if (this.id !== "settings-form") return [];
+      if (selector === "input, button") return formControls;
+      return selector === "[data-reveal]" ? formControls.filter((element) => element.dataset.reveal) : [];
+    }
   }
-  const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
+  let inSettingsForm = false;
+  for (const [, closing, tag, attributes] of html.matchAll(/<(\/?)([a-z][\w-]*)\b([^>]*)>/gi)) {
+    if (closing) { if (tag === "form") inSettingsForm = false; continue; }
+    const id = attributes.match(/(?:^|\s)id="([^"]+)"/)?.[1];
+    const element = Object.assign(new Element(), { id, tagName: tag.toUpperCase(),
+      type: attributes.match(/(?:^|\s)type="([^"]+)"/)?.[1],
+      hidden: /\shidden(?:\s|$)/.test(attributes), disabled: /\sdisabled(?:\s|$)/.test(attributes) });
+    const reveal = attributes.match(/(?:^|\s)data-reveal="([^"]+)"/)?.[1];
+    if (reveal) element.dataset.reveal = reveal;
+    if (id) {
+      assert.equal(nodes.has(id), false, `页面 ID 不应重复：${id}`);
+      nodes.set(id, element);
+    }
+    if (tag === "form" && id === "settings-form") inSettingsForm = true;
+    if (inSettingsForm && ["input", "button"].includes(tag)) formControls.push(element);
+  }
+  const get = (id) => nodes.get(id) ?? null;
   document.getElementById = get;
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
   vm.runInNewContext(source, { document, CustomEvent: Event, AbortController,
@@ -88,18 +109,6 @@ test("保存后旧读取结果和旧读取失败都不能回写表单或错误",
     assert.equal(ui.get("settings-error").hidden, true);
     assert.match(ui.get("settings-note").textContent, /已保存/);
   }
-});
-
-test("读取配置时禁止测试连接但保留输入编辑，读取成功后可测试", async () => {
-  const pending = deferred(), ui = await setup({ load: () => pending.promise });
-  assert.equal(ui.get("settings-model-test").disabled, true);
-  assert.equal(ui.get("settings-model").disabled, false);
-  await ui.input("settings-model", "pending-edit");
-  await ui.click("settings-model-test");
-  assert.equal(ui.requests.length, 1);
-  pending.resolve(Response.json(settings())); await settle();
-  assert.equal(ui.get("settings-model-test").disabled, false);
-  assert.equal(ui.get("settings-model").value, "pending-edit");
 });
 
 test("连接测试使用当前未保存值并裁剪空白，不保存或清空新 Key", async () => {
@@ -241,14 +250,18 @@ test("保存成功清除测试结果，保存失败保留结果", async () => {
   }
 });
 
-test("读取设置期间两个测试均不可用，Jev 测试不要求主模型已配置", async () => {
+test("读取设置期间两个测试均不可用但保留草稿，读取后恢复且 Jev 不要求主模型已配置", async () => {
   const pending = deferred(), ui = await setup({ load: () => pending.promise });
   assert.equal(ui.get("settings-model-test").disabled, true);
   assert.equal(ui.get("settings-jev-test").disabled, true);
-  await ui.click("settings-jev-test");
+  assert.equal(ui.get("settings-model").disabled, false);
+  await ui.input("settings-model", "pending-edit");
+  await ui.click("settings-model-test"); await ui.click("settings-jev-test");
   assert.equal(ui.requests.length, 1);
   pending.resolve(Response.json(settings({ chatUrl: "", model: "", llmConfigured: false }))); await settle();
+  assert.equal(ui.get("settings-model-test").disabled, false);
   assert.equal(ui.get("settings-jev-test").disabled, false);
+  assert.equal(ui.get("settings-model").value, "pending-edit");
   await ui.click("settings-jev-test");
   assert.equal(ui.get("settings-jev-test-result").dataset.state, "success");
   assert.match(ui.get("settings-jev-test-result").textContent, /连接成功.*jev.*80/);

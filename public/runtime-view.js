@@ -1,7 +1,7 @@
-import { node } from "./project-view.js";
+import { node, nuemaText } from "./project-view.js";
 
 const STATE_LABELS = { running: "运行中", stopped: "未发现运行", unknown: "待确认" };
-const SOURCE_LABELS = { nuema: "NUEMA 启动", external: "外部启动" };
+const SOURCE_LABELS = { nuema: "NEUMA 启动", external: "外部启动" };
 
 function empty(container, title, description) {
   const state = node("div", "runtime-empty");
@@ -46,7 +46,7 @@ export function renderRuntimeProjects({ container, projects, filter, onSelect })
     const badge = node("span", `runtime-state runtime-state-${state}`, STATE_LABELS[state]);
     status.append(badge);
     if (SOURCE_LABELS[runtime.source]) status.append(node("small", "runtime-source", SOURCE_LABELS[runtime.source]));
-    if (runtime.reason) status.append(node("small", "runtime-reason", runtime.reason));
+    if (runtime.reason) status.append(node("small", "runtime-reason", nuemaText(runtime.reason)));
     const ports = node("td", "runtime-port-values", runtime.ports?.length ? runtime.ports.join(" · ") : "—");
     const action = node("td", "runtime-row-action"); action.append(projectLink(project, onSelect, "查看配置 →"));
     row.append(identity, status, ports, action); body.append(row);

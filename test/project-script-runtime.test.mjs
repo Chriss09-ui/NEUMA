@@ -145,7 +145,7 @@ test("启动脚本尚未退出时保持启动中，预检查阶段停止后不�
   const starting = startScriptServices(project, cancelled, { env, spawnImpl: () => { spawned++; throw new Error("must not spawn"); } });
   await stopScriptServices(project, cancelled, { env }); await starting;
   assert.equal(cancelled.status, "stopped"); assert.equal(spawned, 0);
-  await assert.rejects(startScriptServices(project, { status: "starting" }, { env, blockedPort: new URL(urls[0]).port }), /NUEMA 自身/);
+  await assert.rejects(startScriptServices(project, { status: "starting" }, { env, blockedPort: new URL(urls[0]).port }), /NEUMA 自身/);
 });
 
 test("未创建进程的启动失败不保留所有权，已创建脚本的非零退出保留停止入口并报告退出码", async (t) => {

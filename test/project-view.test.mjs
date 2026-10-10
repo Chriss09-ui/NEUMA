@@ -64,7 +64,7 @@ test("重新识别在配置卡片独立显示，运行时解释禁用原因，�
   const inspect = ui.container.querySelectorAll("button").find((button) => button.dataset.projectAction === "inspect");
   const setup = ui.container.children.find((child) => child.className === "project-setup");
   assert.ok(setup.contains(inspect)); assert.equal(inspect.disabled, false);
-  assert.match(ui.container.querySelector("#project-inspect-hint").textContent, /NUEMA/);
+  assert.match(ui.container.querySelector("#project-inspect-hint").textContent, /NEUMA/);
   updateProjectStatus(ui.container, { ...project, canStop: true }, false);
   assert.equal(inspect.disabled, true); assert.match(inspect.title, /先停止/);
   updateProjectStatus(ui.container, { ...project, canLaunch: false, setup: { status: "checking" } }, true);

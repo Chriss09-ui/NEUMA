@@ -4,7 +4,7 @@ const STATUS_TONE = { running: "ok", external: "ok", starting: "warn", failed: "
 
 // Older saved summaries and running servers can still use the internal engine name.
 export function nuemaText(value = "") {
-  return value.replace(/\bPI(?:[\s-]*agent)?\b/gi, "NUEMA");
+  return value.replace(/\b(?:NUEMA|PI(?:[\s-]*agent)?)\b/gi, "NEUMA");
 }
 
 export function node(tag, className = "", text = "") {
@@ -51,7 +51,7 @@ export function renderProjectList({ container, projects, selectedId, busy, onSel
       const inspect = node("button", "project-list-inspect", checking ? "识别中…" : "重新识别");
       inspect.type = "button"; inspect.disabled = busy || removeDisabled || checking || project.canStop;
       inspect.dataset.projectInspectId = project.id;
-      inspect.title = project.canStop ? "请先停止项目，再重新识别启动方式" : "让 NUEMA 重新读取项目并更新启动方式";
+      inspect.title = project.canStop ? "请先停止项目，再重新识别启动方式" : "让 NEUMA 重新读取项目并更新启动方式";
       inspect.setAttribute("aria-label", `重新识别项目 ${project.name}`);
       inspect.setAttribute("aria-busy", String(checking));
       inspect.addEventListener("click", () => { void onInspect(project.id); });
@@ -107,7 +107,7 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
   } else form.append(node("p", "project-action-note", "这是静态网页，会通过独立的本机预览地址打开。"));
   const permission = node("label", "launch-permission"), check = node("input");
   check.type = "checkbox"; check.checked = project.allowLaunch;
-  permission.append(check, node("span", "", "允许 NUEMA 按此方式启动这个项目。启动会运行项目自己的代码。"));
+  permission.append(check, node("span", "", "允许 NEUMA 按此方式启动这个项目。启动会运行项目自己的代码。"));
   form.append(permission);
   const save = node("button", "secondary", "保存启动方式"); save.type = "submit"; form.append(save);
   form.addEventListener("submit", (event) => {
@@ -130,7 +130,7 @@ export function renderProjectDetails({ container, project, onConfigure, onAction
   const setup = node("div", "project-setup"); setup.setAttribute("aria-busy", String(project.setup?.status === "checking"));
   setup.append(node("span", "project-setup-mark", project.setup?.status === "checking" ? "◌" : project.canLaunch ? "✓" : "·"));
   const setupText = node("div", "project-setup-text"); setupText.setAttribute("role", "status");
-  setupText.append(node("strong", "", project.setup?.status === "checking" ? "NUEMA 正在重新识别" : project.setup?.status === "paused" ? "检查已暂停" : project.canLaunch ? "启动方式已配好" : "让 NUEMA 帮你配置"),
+  setupText.append(node("strong", "", project.setup?.status === "checking" ? "NEUMA 正在重新识别" : project.setup?.status === "paused" ? "检查已暂停" : project.canLaunch ? "启动方式已配好" : "让 NEUMA 帮你配置"),
     node("p", "", nuemaText(project.setup?.summary || "自动检查项目说明和入口，识别后即可一键打开，无需填写启动参数。")));
   const help = node("p", "project-inspect-hint"); help.id = "project-inspect-hint"; setupText.append(help);
   const inspect = node("button", "secondary project-reinspect", "重新识别"); inspect.type = "button";
@@ -153,12 +153,12 @@ export function updateProjectStatus(container, project, busy) {
     if (action === "inspect") {
       el.textContent = project.setup?.status === "checking" ? "识别中…" : "重新识别";
       el.setAttribute("aria-busy", String(project.setup?.status === "checking"));
-      el.title = project.canStop ? "请先停止项目，再重新识别启动方式" : "让 NUEMA 重新读取项目并更新启动方式";
+      el.title = project.canStop ? "请先停止项目，再重新识别启动方式" : "让 NEUMA 重新读取项目并更新启动方式";
     }
   }
   container.querySelector("#project-inspect-hint").textContent = project.setup?.status === "checking"
     ? "正在读取最新文件，完成后会更新启动配置。"
-    : project.canStop ? "请先停止项目，再重新识别启动方式。" : "启动方式有变化？让 NUEMA 重新识别，一键更新配置。";
+    : project.canStop ? "请先停止项目，再重新识别启动方式。" : "启动方式有变化？让 NEUMA 重新识别，一键更新配置。";
   const note = container.querySelector("#project-runtime-note");
   note.textContent = nuemaText(project.error || project.openError || (project.openingPage || project.status === "starting"
     ? "正在准备项目，完成后会自动打开窗口。"

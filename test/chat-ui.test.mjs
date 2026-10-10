@@ -18,7 +18,8 @@ test("中文流式回复支持跨数据块的 UTF-8 字符和多条事件", asyn
   ].map((item) => JSON.stringify(item)).join("\r\n"));
   const events = [];
   const result = await readReply(streamResponse(Array.from(data, (byte) => Uint8Array.of(byte))), (event) => events.push(event));
-  assert.equal(events.filter((event) => event.type === "text-delta").map((event) => event.delta).join(""), result.reply);
+  assert.equal(result.reply, "你好，我可以帮你管理项目。");
+  assert.equal(events.filter((event) => event.type === "text-delta").map((event) => event.delta).join(""), "你好，我可以帮你管理项目。");
   assert.equal(events[0].phase, "thinking");
 });
 

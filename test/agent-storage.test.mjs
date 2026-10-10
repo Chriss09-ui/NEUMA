@@ -151,6 +151,24 @@ test("Agent paths and metadata reject traversal, directory links and linked file
   await assert.rejects(storage.agentIds(), InputError);
 });
 
+test("conversation enumeration rejects non-files, linked records and unsafe names", async (t) => {
+  const dataDir = await fixture(t), storage = new AgentStorage({ dataDir }); await storage.ready;
+  assert.deepEqual(await storage.jsonFiles("alpha", "conversations/records"), []);
+  await storage.writeJson("alpha", "conversations/records/chat-one.json", {});
+  await assert.rejects(storage.readJson("alpha", "conversations/records/chat-one.json", { maxBytes: 1 }), /超过大小限制/);
+  const root = await storage.directory("alpha", "conversations/records");
+  await writeFile(join(root, ".pending-unfinished.json"), "{ partial");
+  assert.deepEqual(await storage.jsonFiles("alpha", "conversations/records"), ["chat-one.json"]);
+  await symlink(join(root, "chat-one.json"), join(root, "linked.json"));
+  await assert.rejects(storage.jsonFiles("alpha", "conversations/records"), InputError);
+  await rm(join(root, "linked.json"));
+  await mkdir(join(root, "directory.json"));
+  await assert.rejects(storage.jsonFiles("alpha", "conversations/records"), InputError);
+  await rm(join(root, "directory.json"), { recursive: true });
+  await writeFile(join(root, "unsafe name.json"), "{}");
+  await assert.rejects(storage.jsonFiles("alpha", "conversations/records"), InputError);
+});
+
 test("deletion retains files and cannot be undone by legacy metadata on restart", async (t) => {
   const dataDir = await fixture(t);
   await writeFile(join(dataDir, "agents.json"), JSON.stringify({ version: 1, agents: [definition()] }));

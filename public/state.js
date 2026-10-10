@@ -3,6 +3,9 @@ const LEGACY_STORAGE_KEY = "neuma.requirements.session.v1";
 const REQUIREMENTS_KEY = "neuma.requirements.saved-list.v1";
 const AGENT_PREVIEW_PREFIX = "neuma.agent.preview.v1.";
 const AGENT_CONVERSATION_PREFIX = "neuma.agent.conversation.v2.";
+const AGENT_HISTORY_PREFIX = "neuma.agent.conversations.v3.";
+const ACTIVE_AGENT_CONVERSATION_PREFIX = "neuma.agent.active-conversation.v1.";
+const AGENT_HISTORY_MAX_BYTES = 8 * 1024 * 1024;
 
 export function agentDisplayName(agent) {
   const name = typeof agent?.profile?.name === "string" && agent.profile.name.trim() ? agent.profile.name : agent?.name;
@@ -192,11 +195,14 @@ function previewMessages(messages) {
     .slice(-80).map((item) => ({ role: "user", content: item.content }));
 }
 
-function conversationMessages(messages) {
+function conversationMessages(messages, { complete = false } = {}) {
   if (!Array.isArray(messages)) return [];
-  return messages.filter((item) => item && ["user", "assistant"].includes(item.role)
-    && typeof item.content === "string" && item.content.length <= (item.role === "user" ? 4000 : 32_000)
-    && (item.content.trim() || item.role === "assistant")).slice(-80).map((item) => {
+  const valid = (item) => item && ["user", "assistant"].includes(item.role)
+    && typeof item.content === "string" && (item.role === "user" ? item.content.length <= 4000 : complete || item.content.length <= 32_000)
+    && (item.content.trim() || item.role === "assistant");
+  if (complete && messages.some((item) => !valid(item))) throw new Error("对话消息格式无效，完整内容未保存。");
+  const selected = complete ? messages : messages.filter(valid).slice(-80);
+  return selected.map((item) => {
     const result = { role: item.role, content: item.content };
     if (typeof item.revision === "string" && item.revision.length <= 120) result.revision = item.revision;
     if (item.role === "user" && ["sent", "failed", "stopped", "pending"].includes(item.delivery)) {
@@ -212,6 +218,122 @@ function conversationMessages(messages) {
 
 export function agentConversationSnapshot(messages) {
   return { schemaVersion: 2, messages: conversationMessages(messages) };
+}
+
+export function agentHistorySnapshot(messages) {
+  if (!Array.isArray(messages)) throw new Error("对话消息格式无效，完整内容未保存。");
+  const snapshot = { schemaVersion: 3, messages: conversationMessages(messages, { complete: true }) };
+  if (new TextEncoder().encode(JSON.stringify(snapshot)).length > AGENT_HISTORY_MAX_BYTES) {
+    throw new Error("单条对话超过 8 MiB，完整内容未保存；请保留当前内容并开启新对话。");
+  }
+  return snapshot;
+}
+
+function agentConversationBackup(agentId, record, options = {}) {
+  if (!record || record.schemaVersion !== 3 || typeof record.id !== "string" || !record.id
+    || record.agentId !== agentId || typeof record.title !== "string"
+    || typeof record.createdAt !== "string" || typeof record.updatedAt !== "string"
+    || !Number.isSafeInteger(record.saveVersion) || record.saveVersion < 0) {
+    throw new Error("对话备份格式无效。");
+  }
+  const expectedVersion = options.expectedVersion ?? record.saveVersion;
+  const mutationId = options.mutationId ?? record.mutationId;
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0
+    || typeof mutationId !== "string" || !mutationId) throw new Error("对话保存版本无效。");
+  const value = { ...agentHistorySnapshot(record.messages), id: record.id, agentId,
+    title: record.title, createdAt: record.createdAt, updatedAt: record.updatedAt,
+    saveVersion: record.saveVersion, expectedVersion, mutationId,
+    ...(options.pendingSync === true ? { pendingSync: true } : {}) };
+  if (new TextEncoder().encode(JSON.stringify(value)).length > AGENT_HISTORY_MAX_BYTES) {
+    throw new Error("单条对话超过 8 MiB，完整内容未保存。");
+  }
+  const retryRequest = options.retryRequest ?? record.retryRequest;
+  if (retryRequest !== undefined) {
+    if (retryRequest?.schemaVersion !== 3 || !Number.isSafeInteger(retryRequest.expectedVersion)
+      || retryRequest.expectedVersion < 0 || typeof retryRequest.mutationId !== "string" || !retryRequest.mutationId) {
+      throw new Error("待同步对话请求无效。");
+    }
+    agentHistorySnapshot(retryRequest.messages);
+    if (new TextEncoder().encode(JSON.stringify(retryRequest)).length > AGENT_HISTORY_MAX_BYTES) {
+      throw new Error("单条对话超过 8 MiB，待同步请求未保存。");
+    }
+    value.retryRequest = structuredClone(retryRequest);
+  }
+  return value;
+}
+
+export function loadAgentConversationBackups(storage, agentId) {
+  try {
+    const stored = JSON.parse(storage.getItem(AGENT_HISTORY_PREFIX + agentId) ?? "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored.flatMap((record) => {
+      try { return [agentConversationBackup(agentId, record, record)]; } catch { return []; }
+    }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  } catch {
+    return [];
+  }
+}
+
+export function saveAgentConversationBackup(storage, agentId, record,
+  { pendingSync = false, expectedVersion = record?.saveVersion, mutationId = record?.mutationId, retryRequest = record?.retryRequest } = {}) {
+  try {
+    const value = agentConversationBackup(agentId, record, { pendingSync, expectedVersion, mutationId, retryRequest });
+    const stored = JSON.parse(storage.getItem(AGENT_HISTORY_PREFIX + agentId) ?? "[]");
+    if (!Array.isArray(stored)) return false;
+    const others = stored.filter((item) => item?.id !== value.id);
+    storage.setItem(AGENT_HISTORY_PREFIX + agentId, JSON.stringify([value, ...others]));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function deleteAgentConversationBackup(storage, agentId, conversationId) {
+  try {
+    const stored = JSON.parse(storage.getItem(AGENT_HISTORY_PREFIX + agentId) ?? "[]");
+    if (!Array.isArray(stored)) return false;
+    const remaining = stored.filter((item) => item?.id !== conversationId);
+    if (remaining.length) storage.setItem(AGENT_HISTORY_PREFIX + agentId, JSON.stringify(remaining));
+    else storage.removeItem(AGENT_HISTORY_PREFIX + agentId);
+    if (loadActiveAgentConversation(storage, agentId) === conversationId) {
+      storage.removeItem(ACTIVE_AGENT_CONVERSATION_PREFIX + agentId);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function deleteAgentConversationBackups(storage, agentId) {
+  try {
+    storage.removeItem(AGENT_HISTORY_PREFIX + agentId);
+    storage.removeItem(ACTIVE_AGENT_CONVERSATION_PREFIX + agentId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadActiveAgentConversation(storage, agentId) {
+  try {
+    const id = storage.getItem(ACTIVE_AGENT_CONVERSATION_PREFIX + agentId);
+    return typeof id === "string" && id ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveActiveAgentConversation(storage, agentId, conversationId) {
+  try {
+    if (conversationId === null) storage.removeItem(ACTIVE_AGENT_CONVERSATION_PREFIX + agentId);
+    else {
+      if (typeof conversationId !== "string" || !conversationId) return false;
+      storage.setItem(ACTIVE_AGENT_CONVERSATION_PREFIX + agentId, conversationId);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function loadSavedAgentConversation(storage, id) {

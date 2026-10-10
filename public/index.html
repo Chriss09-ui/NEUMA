@@ -3,24 +3,24 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>NUEMA · Agent 运行测试版</title>
+    <title>NEUMA · Agent 运行测试版</title>
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
     <div id="app-shell" class="app">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">N</span>
-          <span class="brand-text"><strong>NUEMA</strong><small>Agent 运行测试版</small></span>
+          <span class="brand-mark" aria-hidden="true"><img src="/assets/brand/neuma-mark.png" alt="" width="34" height="34" draggable="false"></span>
+          <span class="brand-text"><strong>NEUMA</strong><small>Agent 运行测试版</small></span>
           <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="收起主导航" title="收起主导航" aria-expanded="true" aria-controls="sidebar-details">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="sidebar-toggle-arrow" d="m16 9-3 3 3 3"/></svg>
           </button>
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <a class="nav-item" href="#chat" data-page="chat" aria-label="NUEMA" title="NUEMA">
+          <a class="nav-item" href="#chat" data-page="chat" aria-label="NEUMA" title="NEUMA">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z"/></svg>
-            <span>NUEMA</span>
+            <span>NEUMA</span>
           </a>
           <a class="nav-item" href="#projects/assistant" data-page="projects" aria-label="管理项目" title="管理项目">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
@@ -42,11 +42,11 @@
             <h2 id="sidebar-agents-title">我的智能体</h2>
             <div class="sidebar-section-actions">
               <a class="sidebar-manage" href="#agents" data-page="agents" aria-label="管理我的智能体">管理</a>
-              <button id="sidebar-create-agent" class="ghost-button" type="button" aria-label="通过 NUEMA 创建智能体">＋</button>
+              <button id="sidebar-create-agent" class="ghost-button" type="button" aria-label="通过 NEUMA 创建智能体">＋</button>
             </div>
           </div>
           <nav id="sidebar-agent-list" class="sidebar-agent-list" aria-label="我的智能体"></nav>
-          <p id="sidebar-agents-empty" class="sidebar-empty">向 NUEMA 描述需求，确认后会出现在这里。</p>
+          <p id="sidebar-agents-empty" class="sidebar-empty">向 NEUMA 描述需求，确认后会出现在这里。</p>
         </section>
 
         <div class="sidebar-footer">
@@ -68,7 +68,7 @@
         <section id="page-chat" class="page page-chat" data-page="chat" aria-labelledby="chat-title">
           <header class="page-header chat-header">
             <div>
-              <div class="identity-heading"><h1 id="chat-title">NUEMA</h1><span class="identity-badge">创建与迭代</span></div>
+              <div class="identity-heading"><h1 id="chat-title">NEUMA</h1><span class="identity-badge">创建与迭代</span></div>
               <p id="chat-subtitle" class="page-subtitle">从一个想法开始，做一个懂你工作的智能体。</p>
             </div>
             <button id="chat-panel-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="requirements-panel">
@@ -138,7 +138,7 @@
               <details class="panel-disclosure">
                 <summary>关于这份需求<span aria-hidden="true">＋</span></summary>
                 <div class="disclosure-content">
-                  <p class="muted-note">确认后，智能体会拥有左侧的独立入口。后续可以回到 NUEMA 继续迭代。</p>
+                  <p class="muted-note">确认后，智能体会拥有左侧的独立入口。后续可以回到 NEUMA 继续迭代。</p>
                   <div id="jev-status" class="jev-status" aria-live="polite">Jev 尚未参与判断</div>
                 </div>
               </details>
@@ -162,22 +162,22 @@
           </header>
           <div id="agent-missing" class="empty-state card" hidden>
             <p>这个智能体入口已移除，或需求尚未保存。</p>
-            <a class="text-link" href="#chat">回到 NUEMA</a>
+            <a class="text-link" href="#chat">回到 NEUMA</a>
           </div>
           <div id="agent-workspace" class="agent-chat-layout">
-            <aside id="agent-artifacts-sidebar" class="agent-artifacts-sidebar" aria-label="历史产物">
-              <div class="agent-artifacts-heading"><h2>历史产物 <span id="agent-artifacts-count" class="count">0</span></h2><button id="agent-artifacts-toggle" class="library-toggle" type="button" aria-label="收起历史产物" title="收起历史产物" aria-expanded="true" aria-controls="agent-artifacts-body"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="library-toggle-arrow" d="m16 9-3 3 3 3"/></svg></button></div>
-              <span class="agent-artifacts-rail-label" aria-hidden="true">产物</span>
-              <div id="agent-artifacts-body" class="agent-artifacts-body">
-                <div class="agent-files-heading"><p>按最近更新排列</p><button id="agent-files-refresh" class="ghost-button" type="button" aria-label="刷新历史产物" title="刷新历史产物"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20v-4h-4"/></svg></button></div>
-                <p id="agent-files-feedback" class="muted-note small" role="status"></p><div id="agent-file-list" class="agent-file-list"></div>
-                <p class="agent-artifacts-footnote">这个智能体保存的文件，会留在这里。</p>
+            <aside id="agent-history-sidebar" class="agent-history-sidebar" aria-label="历史对话">
+              <div class="agent-history-heading"><h2>历史对话 <span id="agent-history-count" class="count">0</span></h2><button id="agent-history-toggle" class="library-toggle" type="button" aria-label="收起历史对话" title="收起历史对话" aria-expanded="true" aria-controls="agent-history-body"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="library-toggle-arrow" d="m16 9-3 3 3 3"/></svg></button></div>
+              <span class="agent-history-rail-label" aria-hidden="true">对话</span>
+              <div id="agent-history-body" class="agent-history-body">
+                <p id="agent-history-feedback" class="muted-note small" role="status"></p>
+                <nav id="agent-history-list" class="agent-history-list" aria-label="这个智能体的历史对话"></nav>
+                <p class="agent-history-footnote">选择历史对话，可继续聊天。</p>
               </div>
             </aside>
             <section class="conversation" aria-label="用户智能体的独立对话">
               <div class="conversation-bar">
                 <span id="agent-conversation-title" class="conversation-title"></span>
-                <div class="header-actions"><button id="agent-save-chat" class="ghost-button" type="button">保存对话</button><button id="agent-new-chat" class="new-chat-button" type="button">＋ 新对话</button></div>
+                <div class="header-actions"><span id="agent-chat-save-status" class="agent-chat-save-status" role="status" aria-live="polite" hidden></span><button id="agent-chat-retry" class="ghost-button" type="button" hidden>重试保存</button><button id="agent-chat-fork" class="ghost-button" type="button" hidden>另存为新对话</button><button id="agent-artifacts-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="agent-file-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>产物</span><span id="agent-artifacts-count" class="agent-artifacts-badge">0</span></button><button id="agent-new-chat" class="new-chat-button" type="button">＋ 新对话</button></div>
               </div>
               <div class="agent-status-line"><p id="agent-runtime-status" role="status" aria-live="polite">智能体界面尚未加载。若此提示持续显示，请刷新页面；更新代码后需重启本机服务。</p><button id="agent-build-shortcut" class="text-link link-button" type="button" hidden>生成智能体</button></div>
               <div id="agent-development" class="agent-development" hidden></div>
@@ -203,17 +203,34 @@
             </section>
             <section id="agent-details-profile" class="agent-detail-section" aria-label="智能体设置">
               <form id="agent-profile-form">
-                <label for="agent-profile-icon">图标</label><div class="agent-icon-editor"><input id="agent-profile-icon" type="text" maxlength="16" autocomplete="off" aria-describedby="agent-icon-hint"><div id="agent-icon-options" class="agent-icon-options" aria-label="常用图标"></div></div><p id="agent-icon-hint" class="muted-note small">选择一个图标，也可以输入 emoji 或简短文字；留空则使用名称首字。</p>
+                <input id="agent-profile-icon" type="hidden">
+                <fieldset class="agent-avatar-editor">
+                  <legend>头像</legend>
+                  <div class="agent-avatar-preview-row"><div id="agent-avatar-preview" class="agent-avatar-preview" role="img" aria-label="头像预览"></div><div class="agent-avatar-preview-copy"><strong>给它一个小星核</strong><p class="muted-note small">选个造型，配上喜欢的颜色。</p><button id="agent-avatar-reset" class="ghost-button" type="button">恢复自动分配</button></div></div>
+                  <div class="agent-avatar-choice-row"><span id="agent-avatar-shapes-label" class="agent-avatar-choice-label">造型</span><div id="agent-avatar-shapes" class="agent-avatar-shapes" role="group" aria-labelledby="agent-avatar-shapes-label"></div></div>
+                  <div class="agent-avatar-choice-row"><span id="agent-avatar-colors-label" class="agent-avatar-choice-label">配色</span><div id="agent-avatar-colors" class="agent-avatar-colors" role="group" aria-labelledby="agent-avatar-colors-label"></div></div>
+                </fieldset>
+                <details class="agent-avatar-custom"><summary>使用文字或 Emoji</summary><label for="agent-profile-custom-icon">自定义头像</label><div class="agent-icon-editor"><input id="agent-profile-custom-icon" type="text" maxlength="16" autocomplete="off" aria-describedby="agent-icon-hint" placeholder="输入 Emoji 或简短文字"><div id="agent-icon-options" class="agent-icon-options" aria-label="常用图标"></div></div><p id="agent-icon-hint" class="muted-note small">留空则恢复这个智能体固定的小星核组合。</p></details>
                 <label for="agent-profile-name">名称</label><input id="agent-profile-name" type="text" maxlength="120" required autocomplete="off">
                 <label for="agent-profile-description">简介</label><textarea id="agent-profile-description" rows="3" maxlength="240" placeholder="用一句话介绍这个智能体…"></textarea>
                 <div class="agent-detail-footer"><p id="agent-profile-feedback" class="muted-note small" role="status" aria-live="polite">修改资料即可保存，无需重新生成。</p><button id="agent-profile-save" class="primary" type="submit">保存资料</button></div>
               </form>
-              <details class="agent-requirements-details"><summary>需求与运行设置</summary><div id="agent-brief" class="draft-content"></div><div class="panel-actions"><button id="agent-iterate" class="secondary" type="button">让 NUEMA 帮我迭代</button><button id="agent-save-entry" class="secondary" type="button">保存智能体需求</button><button id="agent-build" class="primary" type="button" disabled>生成智能体</button></div><p id="agent-storage-note" class="muted-note small" aria-live="polite"></p></details>
+              <details class="agent-requirements-details"><summary>需求与运行设置</summary><div id="agent-brief" class="draft-content"></div><div class="panel-actions"><button id="agent-iterate" class="secondary" type="button">让 NEUMA 帮我迭代</button><button id="agent-save-entry" class="secondary" type="button">保存智能体需求</button><button id="agent-build" class="primary" type="button" disabled>生成智能体</button></div><p id="agent-storage-note" class="muted-note small" aria-live="polite"></p></details>
             </section>
           </dialog>
-          <dialog id="agent-file-dialog" class="agent-file-dialog" aria-labelledby="agent-file-name">
-            <header class="agent-file-heading"><div><h2 id="agent-file-name">产物预览</h2><p id="agent-file-info" class="muted-note small">文件保存在这个智能体的专属目录。</p></div><div class="header-actions"><button id="agent-file-download" class="secondary" type="button" hidden>下载</button><button id="agent-file-close" class="ghost-button" type="button" aria-label="关闭产物预览">关闭</button></div></header>
-            <div id="agent-file-content" class="agent-file-content"></div>
+          <dialog id="agent-file-dialog" class="agent-file-dialog" aria-labelledby="agent-artifacts-title">
+            <header class="agent-file-heading"><div><h2 id="agent-artifacts-title">产物</h2><p class="muted-note small">这个智能体保存的文件，都在这里。</p></div><button id="agent-file-close" class="ghost-button" type="button" aria-label="关闭产物文件库">关闭</button></header>
+            <div class="agent-file-library">
+              <aside class="agent-files-panel" aria-label="产物文件列表">
+                <div class="agent-files-heading"><p>按最近更新排列</p><button id="agent-files-refresh" class="ghost-button" type="button" aria-label="刷新产物" title="刷新产物"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20v-4h-4"/></svg></button></div>
+                <p id="agent-files-feedback" class="muted-note small" role="status"></p>
+                <div id="agent-file-list" class="agent-file-list"></div>
+              </aside>
+              <section class="agent-file-preview" aria-label="产物预览">
+                <header class="agent-file-preview-heading"><div><h3 id="agent-file-name">选择一份产物</h3><p id="agent-file-info" class="muted-note small">文件保存在这个智能体的专属目录。</p></div><button id="agent-file-download" class="secondary" type="button" hidden>下载</button></header>
+                <div id="agent-file-content" class="agent-file-content"></div>
+              </section>
+            </div>
           </dialog>
         </section>
 
@@ -300,7 +317,7 @@
           <dialog id="project-add-panel" class="project-add-dialog" aria-labelledby="project-add-title">
             <button id="project-add-close" class="dialog-close ghost-button" type="button" aria-label="关闭添加项目">×</button>
           <form id="project-add-form" class="card form-card">
-            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">给一个路径，剩下的交给 NUEMA。</p></div></div>
+            <div class="form-intro"><span class="form-symbol" aria-hidden="true">＋</span><div><h2 id="project-add-title">添加本地项目</h2><p class="muted-note">给一个路径，剩下的交给 NEUMA。</p></div></div>
             <div class="field">
               <label class="field-name" for="project-path">项目文件夹 <b>必填</b></label>
               <div class="project-path-control">
@@ -320,7 +337,7 @@
               </label>
             </div></details>
             <div id="add-error" class="error" role="alert" hidden></div>
-            <p class="muted-note">NUEMA 会阅读项目说明和启动入口，自动保存配置。原文件保留在原处，准备好后由你点击启动。</p>
+            <p class="muted-note">NEUMA 会阅读项目说明和启动入口，自动保存配置。原文件保留在原处，准备好后由你点击启动。</p>
             <div class="form-actions">
               <button id="project-add-cancel" class="secondary" type="button">取消</button>
               <button id="project-add-submit" class="primary" type="submit">添加并自动配置</button>
@@ -371,7 +388,7 @@
           <header class="page-header">
             <div>
               <div class="identity-heading"><h1 id="agents-title">我的智能体</h1><span id="agent-count" class="count">0</span></div>
-              <p class="page-subtitle">进入独立对话、保存需求，或交给 NUEMA 继续迭代。</p>
+              <p class="page-subtitle">进入独立对话、保存需求，或交给 NEUMA 继续迭代。</p>
             </div>
             <button id="agents-create" class="primary" type="button">＋ 创建智能体</button>
           </header>

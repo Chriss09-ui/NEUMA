@@ -65,6 +65,7 @@ test("skill 接口使用独立服务，逐项转发参数且不调用任何 Agen
       assert.deepEqual(calls.at(-1).args[1], body);
     }
     if (["addSource", "previewImport", "importSkill"].includes(expected)) assert.deepEqual(calls.at(-1).args[0], body);
+    if (expected === "removeSource") assert.equal(calls.at(-1).args[0], "custom-1");
     if (["sources", "addSource", "removeSource"].includes(expected)) assert.deepEqual(result.json, { sources: [{ id: expected }] });
     if (expected === "listTrash") assert.deepEqual(result.json, { entries: [{ id: expected }] });
   }

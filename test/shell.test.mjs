@@ -40,7 +40,7 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     }
     focus() { document.activeElement = this; }
     click() { this.dispatchEvent({ type: "click" }); }
-    scrollIntoView() { this.scrolled = true; }
+    scrollIntoView(options) { this.scrolled = true; this.scrollOptions = options; }
     showModal() { this.open = true; get("project-path").focus(); }
     close() { this.open = false; }
   }
@@ -251,10 +251,16 @@ test("窄屏默认收起辅助信息，展开后滚动到内容", () => {
   get("chat-panel-toggle").click();
   assert.equal(get("requirements-panel").hidden, false);
   assert.equal(get("requirements-panel").scrolled, true);
+  assert.equal(get("requirements-panel").scrollOptions.behavior, "smooth");
+  assert.equal(get("requirements-panel").scrollOptions.block, "start");
 });
 
-test("减少动态效果时直接切换，并正确聚焦目标输入", () => {
-  const { get, pending, navigate, document } = setup({ reduced: true, transitions: true });
+test("减少动态效果时展开辅助信息使用即时滚动，切换仍聚焦目标输入", () => {
+  const { get, pending, navigate, document } = setup({ compact: true, reduced: true, transitions: true });
+  get("chat-panel-toggle").click();
+  assert.equal(get("requirements-panel").hidden, false);
+  assert.equal(get("requirements-panel").scrollOptions.behavior, "instant");
+  assert.equal(get("requirements-panel").scrollOptions.block, "start");
   navigate({ page: "projects", projectView: "assistant" });
   assert.equal(pending.length, 0);
   assert.equal(get("chat-projects").hidden, false);

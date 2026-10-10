@@ -176,3 +176,33 @@ test("Agent 需求与手动保存对话使用独立持久接口，并传递迁�
   controller.abort();
   await assert.rejects(api.getConversation("one/two", { signal: controller.signal }), { name: "AbortError" });
 });
+
+test("历史对话使用独立ID接口，保存传递版本、幂等键，删除使用POST并支持取消", async () => {
+  const requests = [], controller = new AbortController();
+  const conversation = { schemaVersion: 3, messages: [{ role: "user", content: "材料" }], expectedVersion: 2, mutationId: "same-request" };
+  const api = createAgentRuntime(async (path, options) => {
+    requests.push({ path, ...options });
+    return Response.json(path.endsWith("/remove") ? { deleted: true, id: "chat/one" }
+      : path.endsWith("/conversations") ? { conversations: [] } : { conversation });
+  });
+  assert.deepEqual(await api.listConversations("one/two"), { conversations: [] });
+  assert.deepEqual(await api.getHistoryConversation("one/two", "chat/one", { signal: controller.signal }), { conversation });
+  assert.deepEqual(await api.saveHistoryConversation("one/two", "chat/one", conversation), { conversation });
+  assert.deepEqual(await api.removeConversation("one/two", "chat/one"), { deleted: true, id: "chat/one" });
+  assert.deepEqual(requests.map((item) => item.path), ["/api/agents/one%2Ftwo/conversations",
+    "/api/agents/one%2Ftwo/conversations/chat%2Fone", "/api/agents/one%2Ftwo/conversations/chat%2Fone",
+    "/api/agents/one%2Ftwo/conversations/chat%2Fone/remove"]);
+  assert.deepEqual(JSON.parse(requests[2].body), conversation);
+  assert.equal(requests[3].method, "POST");
+  assert.equal(requests[1].signal, controller.signal);
+  controller.abort();
+  await assert.rejects(api.listConversations("one/two", { signal: controller.signal }), { name: "AbortError" });
+});
+
+test("历史保存冲突和删除错误保留HTTP状态与原因供界面保留本机内容", async () => {
+  for (const reason of ["conversation_conflict", "conversation_deleted"]) {
+    const api = createAgentRuntime(async () => Response.json({ error: "对话已更新", reason }, { status: 409 }));
+    await assert.rejects(api.saveHistoryConversation("one", "chat", {}), (error) => error.status === 409
+      && error.reason === reason && error.message === "对话已更新");
+  }
+});

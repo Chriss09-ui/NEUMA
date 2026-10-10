@@ -200,7 +200,7 @@ export class ProjectManager {
     const run = this.runs.get(project.id);
     const inspecting = this.inspections.has(project.id);
     return { ...project, status: run?.status ?? "stopped", url: run?.url ?? null,
-      setup: inspecting ? { status: "checking", summary: "NUEMA 正在检查项目文件并识别启动方式…" } : project.setup,
+      setup: inspecting ? { status: "checking", summary: "NEUMA 正在检查项目文件并识别启动方式…" } : project.setup,
       pageOpened: Boolean(run?.pageOpened), openingPage: Boolean(run?.openingPage || run?.checkingPage), openError: run?.openError ?? null,
       error: run?.error ?? null, canLaunch: !inspecting && !run?.stopping && project.allowLaunch === true && (project.kind === "web" || Boolean(project.launch)),
       canStop: run?.background ? Boolean(run.ownsService || run.status === "starting") : ["starting", "running"].includes(run?.status)
