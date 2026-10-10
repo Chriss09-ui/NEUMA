@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import * as state from "../public/state.js";
+import { installAvatarMotion, renderAgentAvatar } from "../public/agent-avatar.js";
 
-const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agents.js"].map((file) =>
+const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-conversations.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
-  text.replace(/^import .*;\n/gm, "").replace(/^export /gm, "")).join("\n");
+  text.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "")).join("\n");
 const settle = () => new Promise(setImmediate);
+let ids = 0;
 const requirements = ["one", "two"].map((id, index) => ({ id, name: index ? "日报助手" : "会议助手", persisted: true,
   draft: { goal: { value: index ? "生成日报" : "整理会议", source: "user" } } }));
 const definition = (id = "one", revision = 1) => ({ ...requirements.find((item) => item.id === id), status: "ready", revision,
@@ -30,7 +32,8 @@ function stream() {
   };
 }
 
-async function setup({ turn, build, develop, cancelDevelopment, inspect, profiles, conversationRequest, savedConversations = new Map(), stored = new Map() } = {}) {
+async function setup({ turn, build, develop, cancelDevelopment, inspect, profiles, conversationRequest, historyRequest,
+  savedConversations = new Map(), records = new Map(), stored = new Map() } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -38,9 +41,16 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   }
   const document = new Events();
   class Element extends Events {
-    value = ""; textContent = ""; children = []; hidden = false; disabled = false; classes = new Set(); attributes = new Map();
+    value = ""; _textContent = ""; children = []; hidden = false; disabled = false; classes = new Set(); attributes = new Map();
+    dataset = {}; ownerDocument = document;
     scrollTop = 0; scrollHeight = 200; clientHeight = 200; versions = 0;
-    classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) };
+    classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name),
+      add: (...names) => names.forEach((name) => this.classes.add(name)),
+      remove: (...names) => names.forEach((name) => this.classes.delete(name)), contains: (name) => this.classes.has(name) };
+    style = { values: new Map(), setProperty(name, value) { this.values.set(name, value); },
+      removeProperty(name) { this.values.delete(name); }, getPropertyValue(name) { return this.values.get(name) ?? ""; } };
+    get textContent() { return this._textContent; }
+    set textContent(value) { this._textContent = value; this.children = []; }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
     replaceChildren(...children) { this.children = []; this.append(...children); this.versions++; }
     replaceWith(next) { this.parent.children[this.parent.children.indexOf(this)] = next; next.parent = this.parent; }
@@ -53,13 +63,13 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   let timerId = 0;
   const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   document.getElementById = get;
-  document.createElement = () => new Element();
+  document.createElement = (tag) => Object.assign(new Element(), { tagName: tag.toUpperCase() });
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
   document.addEventListener("neuma:agent-runtime-change", (event) => runtimeEvents.push(event.detail));
   document.addEventListener("neuma:agent-profile-changed", (event) => profileEvents.push(event.detail));
   document.addEventListener("neuma:agent-profiles-loaded", (event) => profileEvents.push(event.detail));
-  let ids = 0;
   const context = vm.createContext({ ...state, document, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
+    renderAgentAvatar: (target, agent) => renderAgentAvatar(target, agent, { document }), installAvatarMotion,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: (id) => timers.delete(id),
     window: { confirm: () => true, localStorage: {
@@ -74,6 +84,29 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
       if (path === "/api/agents/turn") return turn?.(body, options) ?? Response.json(completed(body));
       if (path === "/api/agents/build") return build?.(body, options) ?? Response.json(readyResult({ ...definition(body.id, 2), ...body }));
       if (path === "/api/agents/cancel") return Response.json({ cancelled: true });
+      if (path.includes("/conversations")) {
+        if (historyRequest) { const response = await historyRequest(path, body, options); if (response) return response; }
+        const [, , , id, , cid, remove] = path.split("/");
+        if (savedConversations.has(id) && !records.has(`${id}/legacy-saved`)) {
+          const now = new Date().toISOString(), legacy = savedConversations.get(id);
+          records.set(`${id}/legacy-saved`, { schemaVersion: 3, id: "legacy-saved", agentId: id, messages: legacy.messages,
+            title: legacy.messages.find((entry) => entry.role === "user")?.content.slice(0, 30) || "旧对话",
+            createdAt: now, updatedAt: now, saveVersion: 1, mutationId: "legacy-mutation" });
+        }
+        if (!cid) return Response.json({ conversations: [...records.values()].filter((entry) => entry.agentId === id && !entry.deletedAt)
+          .map(({ messages, ...summary }) => summary) });
+        const key = `${id}/${cid}`, previous = records.get(key);
+        if (remove) { records.set(key, { id: cid, agentId: id, deletedAt: new Date().toISOString() }); return Response.json({ deleted: true, id: cid }); }
+        if (!body) return Response.json({ conversation: previous?.deletedAt ? null : previous || null, ...(previous?.deletedAt ? { deleted: true } : {}) });
+        if (previous?.deletedAt) return Response.json({ error: "对话已删除", reason: "conversation_deleted" }, { status: 409 });
+        if (previous?.mutationId === body.mutationId || body.importOnly && previous) return Response.json({ conversation: previous });
+        if (body.expectedVersion !== (previous?.saveVersion || 0)) return Response.json({ error: "另一个窗口已修改对话", reason: "conversation_conflict" }, { status: 409 });
+        const now = new Date().toISOString(), record = { schemaVersion: 3, id: cid, agentId: id,
+          ...state.agentHistorySnapshot(body.messages), title: Array.from(body.messages.find((entry) => entry.role === "user")?.content.replace(/\s+/g, " ").trim() || "新对话").slice(0, 30).join(""),
+          createdAt: previous?.createdAt || now, updatedAt: now, saveVersion: (previous?.saveVersion || 0) + 1, mutationId: body.mutationId };
+        records.set(key, record);
+        return Response.json({ conversation: record });
+      }
       if (path.endsWith("/conversation")) {
         if (conversationRequest) return conversationRequest(path, body, options);
         const id = decodeURIComponent(path.split("/")[3]);
@@ -90,9 +123,13 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   await emit("neuma:agents-changed", { items: requirements, busy: false });
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route("one");
-  return { get, requests, savedConversations, stored, emit, route, document, runtimeEvents, profileEvents,
+  return { get, requests, savedConversations, records, stored, emit, route, document, runtimeEvents, profileEvents,
     timers, poll: async () => { const pending = [...timers.values()]; timers.clear(); await Promise.all(pending.map((callback) => callback())); await settle(); },
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context),
+    history: (id = "one") => vm.runInContext(`history.records(${JSON.stringify(id)})`, context),
+    select: (cid, id = "one") => vm.runInContext(`selectConversation(${JSON.stringify(id)}, ${JSON.stringify(cid)})`, context),
+    remove: (cid, id = "one") => vm.runInContext(`deleteConversation(${JSON.stringify(id)}, ${JSON.stringify(cid)})`, context),
+    readCurrent: (id = "one") => vm.runInContext(`history.read(${JSON.stringify(id)}, conversation(${JSON.stringify(id)}))`, context),
     runtime: (id = "one") => vm.runInContext(`runtimes.get(${JSON.stringify(id)})`, context),
     submit: (text) => { get("agent-message").value = text; return get("agent-chat-form").dispatchEvent({ type: "submit", preventDefault() {} }); },
   };
@@ -106,6 +143,76 @@ const developmentResult = (record, overrides = {}) => ({ agent: null, architectu
   development: record, ...overrides });
 const treeText = (node) => [node.textContent, ...node.children.map(treeText)].join(" ");
 const developmentButton = (ui) => ui.get("agent-development").children[0].children.at(-1).children[0];
+const avatarTargets = (ui) => [ui.get("sidebar-agent-list").children[0].children[0],
+  ui.get("agent-messages").children[0].children[0], ui.get("agent-icon")];
+const treeNodes = (node) => [node, ...node.children.flatMap(treeNodes)];
+function assertStarAvatar(target, icon) {
+  assert.equal(target.dataset.avatarKind, "star");
+  assert.equal(target.classes.has("has-star-avatar"), true);
+  assert.match(target.dataset.avatarIcon, /^star:[0-5]:[0-7]$/);
+  if (icon) assert.equal(target.dataset.avatarIcon, icon);
+  const nodes = treeNodes(target), star = nodes.find((node) => node.className === "star-avatar");
+  assert.ok(star);
+  assert.equal(star.dataset.starAvatar, "true");
+  assert.equal(star.dataset.avatarMotion, "true");
+  assert.ok(star.dataset.shape);
+  assert.ok(star.dataset.color);
+  assert.ok(nodes.some((node) => node.className === "star-avatar-world"));
+  assert.ok(nodes.some((node) => node.className === "star-avatar-shell"));
+  assert.ok(nodes.some((node) => node.className === "star-avatar-core" && node.tagName === "IMG"));
+  return { icon: target.dataset.avatarIcon, shape: star.dataset.shape, color: star.dataset.color };
+}
+
+test("默认小星核使用稳定智能体 ID，侧栏、欢迎区和标题使用相同真实图层", async () => {
+  const ui = await setup();
+  const original = assertStarAvatar(ui.get("agent-icon"));
+  for (const target of avatarTargets(ui)) assert.deepEqual(assertStarAvatar(target), original);
+  const updated = requirements.map((agent) => agent.id === "one" ? { ...agent, name: "修改后的会议名称",
+    profile: { name: "新的伙伴名字", description: "更换简介" } } : agent);
+  await ui.emit("neuma:agents-changed", { items: updated, busy: false });
+  for (const target of avatarTargets(ui)) assert.deepEqual(assertStarAvatar(target), original);
+  await ui.route("two");
+  assertStarAvatar(ui.get("agent-icon"));
+  await ui.route("one");
+  assert.deepEqual(assertStarAvatar(ui.get("agent-icon")), original);
+  const refreshed = await setup();
+  assert.deepEqual(assertStarAvatar(refreshed.get("agent-icon")), original);
+});
+
+test("头像展示资料变更同步侧栏、欢迎区和标题，不改变智能体运行版本", async () => {
+  const ui = await setup(), profile = { name: "我的星核伙伴", description: "我的头像", icon: "star:4:6" };
+  await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one"
+    ? { ...agent, profile } : agent), busy: false });
+  const selected = assertStarAvatar(ui.get("agent-icon"), profile.icon);
+  assert.deepEqual(selected, { icon: profile.icon, shape: "diamond", color: "lime" });
+  for (const target of avatarTargets(ui)) assert.deepEqual(assertStarAvatar(target, profile.icon), selected);
+  assert.equal(ui.get("agent-title").textContent, profile.name);
+  assert.equal(ui.runtime().status, "ready");
+  assert.equal(ui.runtime().definition.revision, 1);
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/build")), false);
+  const changed = { ...profile, icon: "star:2:1" };
+  await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one"
+    ? { ...agent, profile: changed } : agent), busy: false });
+  for (const target of avatarTargets(ui)) {
+    const rendered = assertStarAvatar(target, changed.icon);
+    assert.deepEqual(rendered, { icon: changed.icon, shape: "trapezoid", color: "blue" });
+    assert.notDeepEqual(rendered, selected);
+    assert.equal(target.children.length, 1);
+  }
+});
+
+test("找不到智能体时标题头像清空旧图层与展示状态", async () => {
+  const ui = await setup();
+  assertStarAvatar(ui.get("agent-icon"));
+  await ui.route("missing");
+  const target = ui.get("agent-icon");
+  assert.equal(target.dataset.avatarKind, "empty");
+  assert.equal(target.dataset.avatarIcon, "");
+  assert.equal(target.classes.has("has-star-avatar"), false);
+  assert.equal(target.textContent, "");
+  assert.equal(target.children.length, 0);
+  assert.equal(ui.get("agent-missing").hidden, false);
+});
 
 test("另一个页面的后台研发完成后自动核对，离开页面停轮询并在返回时重新检查", async () => {
   let saved = developmentResult(developmentRecord());
@@ -430,8 +537,13 @@ test("旧原型和无mode定义不可发送，保留资料快照并允许重新�
 });
 
 test("服务端非ready定义或不匹配的架构记录不能运行", async () => {
-  const unavailable = await setup({ inspect: () => Response.json({ agent: { ...definition(), status: "failed" } }) });
+  const unavailable = await setup({ inspect: () => Response.json(readyResult({ ...definition(), status: "failed" })) });
+  assert.equal(unavailable.runtime().architecture.status, "passed");
+  assert.equal(unavailable.runtime().architecture.delivery, "ready");
+  assert.equal(unavailable.runtime().status, "blocked");
   assert.equal(unavailable.get("agent-send").disabled, true);
+  await unavailable.submit("不能运行失败的定义");
+  assert.equal(unavailable.requests.some((request) => request.path.endsWith("/turn")), false);
   const stale = await setup({ inspect: () => Response.json({ agent: designedDefinition(), architecture: architecture({ draft: { goal: { value: "旧需求" } } }) }) });
   assert.equal(stale.runtime().status, "stale");
   assert.equal(stale.get("agent-send").disabled, true);
@@ -460,7 +572,7 @@ test("逐段显示回复且复用气泡，完成前阻止重复任务并保留�
   const row = ui.get("agent-messages").children.at(-1), versions = ui.get("agent-messages").versions;
   assert.equal(ui.get("agent-message").value, "");
   assert.equal(ui.get("agent-cancel-reply").hidden, false);
-  assert.equal(ui.get("agent-save-chat").disabled, true);
+  assert.equal(ui.get("agent-send").disabled, true);
   ui.get("agent-message").value = "下一条草稿";
   await ui.get("agent-chat-form").dispatchEvent({ type: "submit", preventDefault() {} });
   assert.equal(ui.requests.filter((request) => request.path.endsWith("/turn")).length, 1);
@@ -496,8 +608,8 @@ test("停止发送取消请求并保留部分回复，迟到完成不会把任�
   assert.equal(ui.get("agent-message").value, "下一条草稿\n\n当前任务");
 });
 
-test("任务结束保留产物栏的操作焦点，发送按钮上的焦点才恢复到输入框", async () => {
-  for (const focusedId of ["agent-artifacts-toggle", "agent-send"]) {
+test("任务结束保留产物弹窗或历史栏的操作焦点，发送按钮上的焦点才恢复到输入框", async () => {
+  for (const focusedId of ["agent-artifacts-open", "agent-files-refresh", "agent-history-toggle", "agent-send"]) {
     const partial = stream(), ui = await setup({ turn: () => partial.response });
     const pending = ui.submit("当前任务"); await settle();
     ui.get(focusedId).focus();
@@ -568,10 +680,10 @@ test("需求修改使产物过期待重新生成，保留可见消息且新版�
   assert.deepEqual(ui.requests.filter((item) => item.path.endsWith("/turn"))[1].body.history, []);
 });
 
-test("手动保存真实问答，刷新恢复时仅把同版本成功对话带回后端", async () => {
+test("自动保存真实问答，刷新恢复时仅把同版本成功对话带回后端", async () => {
   const ui = await setup();
-  await ui.submit("已保存任务"); await ui.get("agent-save-chat").click();
-  const restored = await setup({ stored: ui.stored });
+  await ui.submit("已保存任务");
+  const restored = await setup({ stored: ui.stored, records: ui.records });
   assert.equal(restored.item().messages.length, 2);
   assert.equal(restored.item().messages[1].status, "complete");
   await restored.submit("追问");
@@ -582,21 +694,89 @@ test("手动保存真实问答，刷新恢复时仅把同版本成功对话带�
   ]);
 });
 
-test("Agent 文件夹的手动对话在清除浏览器后可恢复，任务与新对话不自动写入", async () => {
+test("自动保存到独立记录，清除浏览器后可恢复，新建空白不会增加记录", async () => {
   const ui = await setup();
+  assert.equal(ui.get("agent-chat-save-status").hidden, true);
   await ui.submit("磁盘保存任务");
-  assert.equal(ui.requests.some((request) => request.path.endsWith("/conversation") && request.body), false);
-  await ui.get("agent-save-chat").click();
+  assert.equal(ui.requests.some((request) => request.path.includes("/conversations/") && request.body), true);
   assert.equal(ui.item().saved, true);
-  assert.match(ui.get("agent-storage-note").textContent, /已手动保存到 Agent 文件夹/);
-  const restored = await setup({ savedConversations: ui.savedConversations });
+  assert.equal(ui.get("agent-chat-save-status").hidden, true);
+  assert.match(ui.get("agent-storage-note").textContent, /已自动保存在 Agent 文件夹/);
+  const restored = await setup({ records: ui.records });
   assert.equal(restored.item().messages[0].content, "磁盘保存任务");
   assert.equal(restored.item().messages[1].status, "complete");
   assert.equal(restored.item().saved, true);
+  assert.equal(restored.get("agent-chat-save-status").hidden, true);
   await restored.get("agent-new-chat").click();
   assert.equal(restored.item().messages.length, 0);
-  assert.equal(restored.requests.some((request) => request.path.endsWith("/conversation") && request.body), false);
-  assert.equal(restored.savedConversations.get("one").messages[0].content, "磁盘保存任务");
+  assert.equal(restored.get("agent-chat-save-status").hidden, true);
+  assert.equal(restored.records.size, 1);
+  assert.equal([...restored.records.values()][0].messages[0].content, "磁盘保存任务");
+});
+
+test("左栏逐条显示当前智能体历史，切换继续聊天并刷新恢复选中项", async () => {
+  const ui = await setup();
+  await ui.submit("第一条对话"); const first = ui.item().id;
+  await ui.get("agent-new-chat").click();
+  assert.equal(ui.get("agent-history-count").textContent, "1");
+  await ui.submit("第二条对话"); const second = ui.item().id;
+  assert.notEqual(first, second);
+  assert.equal(ui.get("agent-history-list").children.length, 2);
+  assert.ok(ui.get("agent-history-list").children.some((row) => row.children[0].children[0].textContent === "第一条对话"));
+  await ui.select(first);
+  assert.equal(ui.get("agent-conversation-title").textContent, "第一条对话");
+  await ui.submit("只追问第一条");
+  const request = ui.requests.filter((entry) => entry.path.endsWith("/turn")).at(-1);
+  assert.equal(request.body.history[0].content, "第一条对话");
+  assert.equal(request.body.history.some((entry) => entry.content === "第二条对话"), false);
+  const restored = await setup({ stored: ui.stored, records: ui.records });
+  assert.equal(restored.item().id, first);
+  assert.equal(restored.item().messages.length, 4);
+  await restored.route("two");
+  assert.equal(restored.get("agent-history-count").textContent, "0");
+});
+
+test("删除当前历史打开剩余记录，删除最后一条回到空白，刷新不能恢复已删聊天", async () => {
+  const ui = await setup(); await ui.submit("保留的对话"); const first = ui.item().id;
+  await ui.get("agent-new-chat").click(); await ui.submit("删除的对话"); const second = ui.item().id;
+  await ui.remove(second);
+  assert.equal(ui.item().id, first);
+  assert.equal(ui.get("agent-history-count").textContent, "1");
+  assert.equal(ui.records.get(`one/${second}`).messages, undefined);
+  const restored = await setup({ stored: ui.stored, records: ui.records });
+  assert.equal(restored.item().id, first);
+  assert.equal(restored.history().some((entry) => entry.id === second), false);
+  await restored.remove(first);
+  assert.equal(restored.item().messages.length, 0);
+  assert.equal(restored.get("agent-history-count").textContent, "0");
+});
+
+test("切换历史对话即停止原任务，保存部分回复且忽略迟到文本", async () => {
+  const partial = stream(); let turns = 0;
+  const ui = await setup({ turn: (body) => ++turns === 1 ? Response.json(completed(body)) : partial.response });
+  await ui.submit("已有对话"); const first = ui.item().id;
+  await ui.get("agent-new-chat").click(); const pending = ui.submit("运行中的对话"); await settle();
+  const second = ui.item().id;
+  partial.send({ type: "text-delta", delta: "部分内容" }); await settle();
+  await ui.select(first);
+  assert.equal(ui.requests.filter((entry) => entry.path.endsWith("/turn"))[1].signal.aborted, true);
+  partial.send({ type: "text-delta", delta: "不应出现" }); partial.close(); await pending;
+  assert.equal(ui.item().id, first);
+  const saved = ui.records.get(`one/${second}`);
+  assert.equal(saved.messages[1].content, "部分内容");
+  assert.equal(saved.messages[1].status, "stopped");
+  assert.equal(ui.item().messages[0].content, "已有对话");
+});
+
+test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存", async () => {
+  const ui = await setup({ stored: new Map([["neuma-agent-artifacts-collapsed", "true"]]) });
+  assert.equal(ui.get("agent-history-body").hidden, false);
+  await ui.get("agent-history-toggle").click();
+  assert.equal(ui.get("agent-workspace").classes.has("history-collapsed"), true);
+  assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+  const restored = await setup({ stored: ui.stored });
+  assert.equal(restored.get("agent-history-body").hidden, true);
+  assert.equal(restored.get("agent-history-toggle").attributes.get("aria-expanded"), "false");
 });
 
 test("磁盘对话优先于浏览器旧备份，读取不会覆盖服务器已有内容", async () => {
@@ -609,43 +789,51 @@ test("磁盘对话优先于浏览器旧备份，读取不会覆盖服务器已�
 });
 
 test("对话保存失败保留浏览器备份并提示，不能显示已经写入 Agent 文件夹", async () => {
-  const ui = await setup({ conversationRequest: (_path, body) => body
-    ? Response.json({ error: "磁盘不可写" }, { status: 503 }) : Response.json({ conversation: null }) });
+  let failing = true;
+  const ui = await setup({ historyRequest: (_path, body) => body && failing
+    ? Response.json({ error: "磁盘不可写" }, { status: 503 }) : undefined });
+  assert.equal(ui.get("agent-chat-save-status").hidden, true);
   await ui.submit("需要保留的任务");
-  await ui.get("agent-save-chat").click();
   assert.equal(ui.item().saved, false);
   assert.equal(ui.item().localBackup, true);
-  assert.equal(JSON.parse(ui.stored.get("neuma.agent.conversation.v2.one")).messages[0].content, "需要保留的任务");
-  assert.match(ui.get("agent-error").textContent, /未保存到 Agent 文件夹.*磁盘不可写.*浏览器备份已保留/);
-  assert.doesNotMatch(ui.get("agent-storage-note").textContent, /已手动保存到 Agent 文件夹/);
+  assert.equal(state.loadAgentConversationBackups({ getItem: (key) => ui.stored.get(key) }, "one")[0].messages[0].content, "需要保留的任务");
+  assert.match(ui.get("agent-error").textContent, /磁盘不可写.*本机备份已保留/);
+  assert.equal(ui.get("agent-chat-save-status").textContent, "待同步");
+  assert.equal(ui.get("agent-chat-save-status").hidden, false);
+  assert.equal(ui.get("agent-chat-retry").hidden, false);
   assert.equal(ui.get("agent-send").disabled, false);
+  failing = false;
+  await ui.get("agent-chat-retry").click();
+  assert.equal(ui.item().saved, true);
+  assert.equal(ui.get("agent-chat-save-status").textContent, "已保存");
+  assert.equal(ui.get("agent-chat-save-status").hidden, true);
+  assert.equal(ui.get("agent-chat-retry").hidden, true);
 });
 
-test("读取失败保留浏览器备份，随后未保存的任务不会被再次进入时的读取覆盖", async () => {
-  const stored = new Map([["neuma.agent.conversation.v2.one", JSON.stringify({ schemaVersion: 2,
-    messages: [{ role: "user", content: "备份消息" }] })]]);
-  const ui = await setup({ stored, conversationRequest: () => Response.json({ error: "服务未响应" }, { status: 503 }) });
-  assert.equal(ui.item().saved, false);
+test("读取失败保留完整浏览器备份，后续任务不会被再次进入时的读取覆盖", async () => {
+  const original = await setup();
+  await original.submit("备份消息");
+  const ui = await setup({ stored: original.stored, records: original.records,
+    historyRequest: (_path, body) => !body ? Response.json({ error: "服务未响应" }, { status: 503 }) : undefined });
   assert.equal(ui.item().messages[0].content, "备份消息");
-  assert.match(ui.get("agent-error").textContent, /保存对话暂时无法读取.*服务未响应.*浏览器备份/);
-  await ui.submit("尚未保存的新任务");
+  assert.match(ui.get("agent-history-feedback").textContent, /历史对话暂时无法读取.*服务未响应/);
+  await ui.submit("新任务");
   await ui.route(null); await ui.route("one");
-  assert.equal(ui.item().messages.at(-2).content, "尚未保存的新任务");
-  assert.equal(ui.requests.filter((request) => request.path.endsWith("/conversation")).length, 1);
+  assert.equal(ui.item().messages.at(-2).content, "新任务");
 });
 
 test("迟到的保存对话读取不能覆盖用户开启的新对话", async () => {
   let release, reads = 0;
-  const ui = await setup({ conversationRequest: () => ++reads === 1 ? Response.json({ conversation: null })
-    : new Promise((done) => { release = done; }) });
-  ui.item().loaded = false;
-  await ui.route(null);
-  const pending = ui.route("one"); await settle();
-  assert.equal(ui.get("agent-send").disabled, true);
+  const original = await setup(); await original.submit("原对话");
+  const record = [...original.records.values()][0];
+  const ui = await setup({ records: original.records, historyRequest: (path, body) => !body && path.endsWith(`/${record.id}`) && ++reads > 1
+    ? new Promise((done) => { release = done; }) : undefined });
   const previous = ui.item();
+  previous.loaded = false;
+  const pending = ui.readCurrent(); await settle();
+  assert.equal(typeof release, "function");
   await ui.get("agent-new-chat").click();
-  release(Response.json({ conversation: { schemaVersion: 2, messages: [{ role: "user", content: "迟到旧消息" }] } }));
-  await pending;
+  release(Response.json({ conversation: record })); await pending;
   assert.notEqual(ui.item(), previous);
   assert.equal(ui.item().messages.length, 0);
   assert.equal(ui.item().saved, false);
@@ -655,25 +843,27 @@ test("迟到的保存对话读取不能覆盖用户开启的新对话", async ()
 test("服务器已有旧对话时，失败保存的新对话刷新后仍可恢复并显式重试", async () => {
   const old = { schemaVersion: 2, messages: [{ role: "user", content: "旧对话 A" }] };
   const savedConversations = new Map([["one", old]]);
-  const ui = await setup({ savedConversations, conversationRequest: (_path, body) => body
-    ? Response.json({ error: "保存连接中断" }, { status: 503 }) : Response.json({ conversation: old }) });
+  const failSave = (_path, body) => body ? Response.json({ error: "保存连接中断" }, { status: 503 }) : undefined;
+  const ui = await setup({ savedConversations, historyRequest: failSave });
   await ui.get("agent-new-chat").click();
   await ui.submit("新对话 B");
-  await ui.get("agent-save-chat").click();
   assert.equal(savedConversations.get("one").messages[0].content, "旧对话 A");
-  assert.equal(JSON.parse(ui.stored.get("neuma.agent.conversation.v2.one")).pendingSync, true);
-  const restored = await setup({ savedConversations, stored: ui.stored });
+  assert.equal(ui.item().pendingSync, true);
+  const restored = await setup({ records: ui.records, stored: ui.stored, historyRequest: failSave });
+  await settle();
   assert.equal(restored.item().messages[0].content, "新对话 B");
   assert.equal(restored.item().saved, false);
   assert.equal(restored.item().pendingSync, true);
-  assert.equal(restored.requests.some((request) => request.path.endsWith("/conversation")), false);
-  assert.match(restored.get("agent-error").textContent, /未同步的对话.*再次点击保存/);
-  assert.equal(JSON.parse(restored.stored.get("neuma.agent.conversation.v2.one")).messages[0].content, "新对话 B");
-  await restored.get("agent-save-chat").click();
-  assert.equal(savedConversations.get("one").messages[0].content, "新对话 B");
-  assert.equal(restored.item().saved, true);
-  assert.equal(restored.item().pendingSync, false);
-  assert.equal(JSON.parse(restored.stored.get("neuma.agent.conversation.v2.one")).pendingSync, undefined);
+  assert.equal(restored.get("agent-chat-save-status").hidden, false);
+  assert.equal(restored.get("agent-chat-save-status").textContent, "待同步");
+  assert.equal(restored.get("agent-chat-retry").hidden, false);
+  const synced = await setup({ records: ui.records, stored: ui.stored }); await settle();
+  assert.equal(synced.item().saved, true);
+  assert.equal(synced.item().pendingSync, false);
+  assert.equal(synced.get("agent-chat-save-status").hidden, true);
+  assert.equal(synced.records.size, 2);
+  assert.equal(synced.records.get("one/legacy-saved").messages[0].content, "旧对话 A");
+  assert.equal(synced.records.get(`one/${synced.item().id}`).messages[0].content, "新对话 B");
 });
 
 test("重新生成取消后不把迟到结果设为可运行，旧定义仍可见且可重试", async () => {
@@ -731,6 +921,12 @@ test("展示 overlay 同步标题、简介、emoji和消息标签，不改变构
   assert.equal(ui.get("agent-subtitle").textContent, "");
   assert.equal(ui.get("agent-icon").textContent, "📝");
   assert.equal(ui.get("sidebar-agent-list").children[0].children[0].textContent, "📝");
+  for (const target of avatarTargets(ui)) {
+    assert.equal(target.textContent, "📝");
+    assert.equal(target.dataset.avatarKind, "text");
+    assert.equal(target.classes.has("has-star-avatar"), false);
+    assert.equal(target.children.length, 0);
+  }
   assert.equal(ui.get("sidebar-agent-list").children[0].children[1].children[0].textContent, "我的会议伙伴");
   assert.equal(ui.get("agent-messages").children[0].children[1].textContent, "这里是「我的会议伙伴」的对话");
   assert.equal(ui.runtime().status, "ready");

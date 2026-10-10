@@ -1,19 +1,35 @@
-import { agentConversationSnapshot, agentDisplayDescription, agentDisplayIcon, agentDisplayName, deleteAgentPreview, loadSavedAgentConversation, saveAgentPreview } from "./state.js";
+import { agentDisplayDescription, agentDisplayName, deleteAgentPreview } from "./state.js";
+import { AgentConversationHistory } from "./agent-conversations.js";
 import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js";
 import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime, developmentPhases } from "./agent-runtime.js";
 import { createDevelopmentView } from "./agent-details-view.js";
+import { installAvatarMotion, renderAgentAvatar } from "./agent-avatar.js";
+
+installAvatarMotion(document, window);
 
 let storage;
 try { storage = window.localStorage; } catch { storage = null; }
 let agents = [];
 let mainBusy = false;
 let route = { page: "chat", agentId: null };
-const conversations = new Map(), runtimes = new Map(), inputs = new Map();
+const runtimes = new Map(), inputs = new Map();
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
 let developmentView = null;
 let inspectionTimer = null;
 const api = createAgentRuntime();
+const history = new AgentConversationHistory({ api, storage, exists: (id) => agents.some((agent) => agent.id === id),
+  onChange(id, messagesChanged = false) {
+    if (!visible(id) || !current()) return;
+    renderHistory(current());
+    if (messagesChanged) renderMessages(current());
+    renderControls(current());
+    const item = conversation(id);
+    byId("agent-conversation-title").textContent = item.messages.length || item.saveVersion ? item.title : agentDisplayName(current());
+    renderStorageNote(current());
+  } });
+const conversations = history.active;
+const switchRequests = new Map();
 const byId = (id) => document.getElementById(id);
 const input = byId("agent-message");
 const current = () => agents.find((item) => item.id === route.agentId);
@@ -32,55 +48,89 @@ function action(action, id = route.agentId) {
 }
 
 function conversation(id) {
-  if (!conversations.has(id)) {
-    const backup = loadSavedAgentConversation(storage, id);
-    conversations.set(id, { messages: backup?.messages ?? [], saved: false, localBackup: Boolean(backup),
-      loaded: backup?.pendingSync === true, pendingSync: backup?.pendingSync === true, loading: null, saving: null,
-      storageError: backup?.pendingSync ? "浏览器保留上次未同步的对话，请再次点击保存。Agent 文件夹已有版本暂未更新。" : "",
-      sessionId: crypto.randomUUID(), turn: null, error: "" });
-  }
-  return conversations.get(id);
+  return history.current(id);
 }
 
 async function loadConversation(agent) {
-  const item = conversation(agent.id);
-  if (!agent.persisted || item.loaded || item.loading || item.turn || item.saving) return;
-  const loading = { controller: new AbortController() };
-  item.loading = loading;
-  const valid = () => conversations.get(agent.id) === item && item.loading === loading && !item.turn
-    && !loading.controller.signal.aborted && agents.some((entry) => entry.id === agent.id);
-  if (visible(agent.id, item)) renderControls(agent);
-  try {
-    let result = await api.getConversation(agent.id, { signal: loading.controller.signal });
-    if (!valid()) return;
-    const backup = loadSavedAgentConversation(storage, agent.id);
-    if (backup?.pendingSync) {
-      item.messages = backup.messages;
-      item.saved = false;
-      item.loaded = item.pendingSync = true;
-      item.storageError = "浏览器保留上次未同步的对话，请再次点击保存。Agent 文件夹已有版本暂未更新。";
-      return;
-    }
-    if (result.conversation === null && backup) {
-      result = await api.saveConversation(agent.id, { ...backup, importOnly: true }, { signal: loading.controller.signal });
-    }
-    if (!valid()) return;
-    if (result.deleted) { item.messages = []; item.saved = false; item.loaded = true; return; }
-    if (result.conversation !== null && (result.conversation?.schemaVersion !== 2 || !Array.isArray(result.conversation.messages))) {
-      throw new Error("保存对话尚未确认");
-    }
-    item.messages = result.conversation ? agentConversationSnapshot(result.conversation.messages).messages : [];
-    item.saved = Boolean(result.conversation);
-    item.loaded = true;
-    item.storageError = "";
-    if (result.conversation) item.localBackup = saveAgentPreview(storage, agent.id, item.messages);
-  } catch (error) {
-    if (!valid()) return;
-    item.storageError = `保存对话暂时无法读取：${error.message || "服务未响应"}。${item.localBackup ? "当前显示浏览器备份，请重试保存。" : "请稍后重新进入。"}`;
-  } finally {
-    if (item.loading === loading) item.loading = null;
-    if (visible(agent.id, item)) renderWorkspace();
+  return history.load(agent);
+}
+
+let historyCollapsed = false;
+try { historyCollapsed = storage?.getItem("neuma.agent.history-collapsed.v1") === "true"; } catch {}
+
+function renderHistory(agent) {
+  const list = byId("agent-history-list"), state = history.state(agent.id), selected = conversation(agent.id);
+  const focusedId = document.activeElement?.dataset?.conversationId;
+  const focusedDelete = document.activeElement?.className === "agent-history-delete";
+  list.replaceChildren();
+  const records = history.records(agent.id);
+  byId("agent-history-count").textContent = String(records.length);
+  byId("agent-history-feedback").textContent = state.loading ? "正在读取历史对话…" : state.error
+    || (!records.length ? "还没有历史对话，发送消息开始聊天。" : "按最近更新排列");
+  byId("agent-workspace").classList.toggle("history-collapsed", historyCollapsed);
+  byId("agent-history-body").hidden = historyCollapsed;
+  const toggle = byId("agent-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
+  toggle.setAttribute("aria-expanded", String(!historyCollapsed));
+  toggle.setAttribute("aria-label", label); toggle.title = label;
+  for (const item of records) {
+    const row = element("div", "agent-history-row", "");
+    row.classList.toggle("is-current", item === selected);
+    const select = element("button", "agent-history-select", "");
+    select.type = "button"; select.dataset.conversationId = item.id;
+    select.setAttribute("aria-label", `打开对话：${item.title}`);
+    if (item === selected) select.setAttribute("aria-current", "true");
+    const date = new Date(item.updatedAt);
+    select.append(element("span", "agent-history-title", item.title), element("span", "agent-history-time",
+      `${Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""}${item.pendingSync ? " · 待同步" : ""}`));
+    select.disabled = item.deleting;
+    select.addEventListener("click", () => selectConversation(agent.id, item.id));
+    const remove = element("button", "agent-history-delete", "删除");
+    remove.type = "button"; remove.dataset.conversationId = item.id;
+    remove.setAttribute("aria-label", `删除对话：${item.title}`); remove.disabled = item.deleting;
+    remove.addEventListener("click", () => deleteConversation(agent.id, item.id));
+    row.append(select, remove); list.append(row);
+    if (focusedId === item.id) (focusedDelete ? remove : select).focus({ preventScroll: true });
   }
+}
+
+async function stopConversation(id, item = conversation(id)) {
+  const operation = item.turn;
+  if (!operation) return;
+  operation.controller.abort();
+  operation.reply.status = "stopped";
+  operation.reply.error = "本轮任务未完成，已显示的内容保留。";
+  const user = item.messages[item.messages.indexOf(operation.reply) - 1];
+  if (user?.role === "user") user.delivery = "stopped";
+  item.turn = item.replyView = null;
+  void history.changed(id, item, { immediate: true });
+  if (visible(id, item) && current()) { renderMessages(current()); renderControls(current()); }
+  try { await api.cancel(item.sessionId); }
+  catch (error) { item.error = error.message || "停止请求未确认，请稍后重试。"; }
+}
+
+async function selectConversation(id, cid) {
+  if (!visible(id) || conversation(id).id === cid) return;
+  const sequence = (switchRequests.get(id) || 0) + 1;
+  switchRequests.set(id, sequence);
+  const previous = conversation(id);
+  inputs.set(previous.id, input.value);
+  await stopConversation(id, previous);
+  if (!visible(id) || switchRequests.get(id) !== sequence) return;
+  await history.select(id, cid);
+  if (!visible(id) || switchRequests.get(id) !== sequence || conversation(id).id !== cid) return;
+  input.value = inputs.get(cid) || "";
+  input.dispatchEvent(new Event("input"));
+  renderWorkspace(); input.focus();
+}
+
+async function deleteConversation(id, cid) {
+  const item = history.state(id).items.get(cid);
+  if (!item || !window.confirm(`删除“${item.title}”？删除后无法恢复对话，已生成的文件仍可在产物中查看。`)) return;
+  const selected = conversation(id) === item;
+  await stopConversation(id, item);
+  if (!await history.remove(id, cid)) return;
+  inputs.delete(cid);
+  if (selected && visible(id)) { input.value = inputs.get(conversation(id).id) || ""; input.dispatchEvent(new Event("input")); input.focus(); }
 }
 
 function runtime(agent) {
@@ -107,7 +157,8 @@ function renderSidebar() {
     const name = agentDisplayName(agent);
     link.setAttribute("aria-label", `进入 ${name} 的对话`);
     if (visible(agent.id)) link.setAttribute("aria-current", "page");
-    const mark = element("span", "agent-avatar", agentDisplayIcon(agent));
+    const mark = element("span", "agent-avatar", "");
+    renderAgentAvatar(mark, agent);
     mark.setAttribute("aria-hidden", "true");
     const state = runtime(agent);
     const label = element("span", "sidebar-agent-label", "");
@@ -129,7 +180,9 @@ function renderMessages(agent) {
   item.userRows = new Map();
   if (!item.messages.length) {
     const welcome = element("div", "welcome", "");
-    welcome.append(element("span", "welcome-mark", agentDisplayIcon(agent)),
+    const mark = element("span", "welcome-mark", "");
+    renderAgentAvatar(mark, agent);
+    welcome.append(mark,
       element("strong", "", `这里是「${agentDisplayName(agent)}」的对话`),
       element("p", "", agentDisplayDescription(agent)),
       element("p", "muted-note", runtime(agent).status === "ready"
@@ -155,7 +208,10 @@ function renderMessages(agent) {
 function renderControls(agent) {
   const state = runtime(agent), item = conversation(agent.id), operation = state.operation || item.turn;
   const development = agentDevelopmentState(agent, state);
-  const busy = Boolean(operation || development.active || item.loading || item.saving);
+  const library = history.state(agent.id);
+  const busy = Boolean(operation || development.active || item.loading
+    || (library.loading && library.selection === library.loading.selection) || item.deleting
+    || (!item.loaded && item.saveVersion));
   byId("agent-runtime-status").textContent = state.status === "building" ? state.label || "正在设计与检查…"
     : state.status === "ready" && item.turn ? "正在处理任务…"
       : state.status === "stale" ? "需求已更新，请重新生成后继续任务。"
@@ -169,8 +225,15 @@ function renderControls(agent) {
   byId("agent-cancel-reply").hidden = !operation || Boolean(operation.kind?.startsWith("development") || operation.development);
   byId("agent-cancel-reply").disabled = Boolean(operation?.controller.signal.aborted);
   byId("agent-chat-form").setAttribute("aria-busy", String(busy));
-  byId("agent-save-chat").disabled = Boolean(item.turn || item.loading || item.saving);
-  byId("agent-new-chat").disabled = Boolean(item.saving);
+  byId("agent-chat-save-status").textContent = item.messages.length
+    ? item.saving ? "保存中" : item.pendingSync ? "待同步" : item.saved ? "已保存" : "自动保存" : "自动保存";
+  byId("agent-chat-save-status").hidden = !item.storageError;
+  byId("agent-chat-save-status").dataset.error = String(Boolean(item.storageError));
+  byId("agent-chat-retry").hidden = !item.storageError && !library.error;
+  byId("agent-chat-retry").disabled = Boolean(item.saving || item.loading || library.loading || item.conflict);
+  byId("agent-chat-fork").hidden = !item.conflict;
+  byId("agent-chat-fork").disabled = Boolean(item.turn || item.deleting);
+  byId("agent-new-chat").disabled = Boolean(item.deleting);
   showError(item.error || item.storageError || state.error);
   renderDevelopment(agent, development);
   broadcastRuntime(agent);
@@ -222,7 +285,7 @@ function broadcastRuntime(agent = current()) {
   agent = agents.find((entry) => entry.id === agent.id);
   if (!agent) return;
   const state = runtime(agent), item = conversation(agent.id), development = agentDevelopmentState(agent, state);
-  const busy = Boolean(state.operation || item.turn || development.active || item.loading || item.saving);
+  const busy = Boolean(state.operation || item.turn || development.active || item.loading || history.state(agent.id).loading);
   broadcasting.add(agent.id);
   try {
     document.dispatchEvent(new CustomEvent("neuma:agent-runtime-change", { detail: {
@@ -291,10 +354,11 @@ function renderWorkspace({ renderConversation = true } = {}) {
   byId("agent-workspace").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
   byId("agent-title").textContent = agent ? agentDisplayName(agent) : "找不到智能体";
-  byId("agent-icon").textContent = agent ? agentDisplayIcon(agent) : "";
-  byId("agent-subtitle").textContent = agent ? agentDisplayDescription(agent) : "请回到 NUEMA 创建或确认需求。";
+  renderAgentAvatar(byId("agent-icon"), agent);
+  byId("agent-subtitle").textContent = agent ? agentDisplayDescription(agent) : "请回到 NEUMA 创建或确认需求。";
   if (!agent) return;
-  byId("agent-conversation-title").textContent = agentDisplayName(agent);
+  byId("agent-conversation-title").textContent = conversation(agent.id).messages.length || conversation(agent.id).saveVersion
+    ? conversation(agent.id).title : agentDisplayName(agent);
   byId("agent-message-label").textContent = `给 ${agentDisplayName(agent)} 的任务`;
   byId("agent-iterate").disabled = mainBusy;
   byId("agent-save-entry").disabled = mainBusy || (agent.persisted && !agent.dirty);
@@ -309,12 +373,17 @@ function renderWorkspace({ renderConversation = true } = {}) {
     brief.append(field);
   }
   renderArchitecture(agent, brief);
+  renderHistory(agent);
   if (renderConversation || !conversation(agent.id).messages.length) renderMessages(agent);
   renderControls(agent);
+  renderStorageNote(agent);
+}
+
+function renderStorageNote(agent) {
   const item = conversation(agent.id);
   byId("agent-storage-note").textContent = `${agent.persisted ? agent.dirty ? "原需求在 Agent 文件夹，当前修改尚未保存。" : "需求已保存在 Agent 文件夹。" : agent.localBackup ? "需求仅有浏览器备份，请重试保存到 Agent 文件夹。" : "入口仅在当前页面存在，请保存需求以便下次打开。"}${item.loading
-    ? "正在读取已保存对话。" : item.saved ? "这份对话已手动保存到 Agent 文件夹；新消息需再次保存。"
-      : item.localBackup ? "当前对话尚未确认保存，浏览器备份保留。" : "对话仅在本页保留，点击保存后刷新可恢复。"}`;
+    ? "正在读取历史对话。" : item.saved ? "对话已自动保存在 Agent 文件夹。"
+      : item.localBackup ? "当前对话的本机备份已保留。" : "发送消息后，对话会自动保存。"}`;
 }
 
 async function inspectAgent(agent, refresh = false) {
@@ -520,6 +589,7 @@ async function stopAgent(id) {
   if (!agent) return;
   const state = runtime(agent), item = conversation(id), operation = state.operation || item.turn;
   if (operation?.kind?.startsWith("development")) return stopDevelopment(id);
+  if (item.turn) return stopConversation(id, item);
   if (!operation || operation.controller.signal.aborted) return;
   if (item.turn) { item.turn.reply.status = "stopping"; updateReply(id, item); }
   operation.controller.abort();
@@ -536,9 +606,12 @@ async function sendMessage() {
   const agent = current(), message = input.value.trim();
   if (!agent || !message) return;
   const state = runtime(agent), item = conversation(agent.id);
-  if (state.status !== "ready" || state.operation || item.turn || item.loading || item.saving) return;
+  const library = history.state(agent.id);
+  if (state.status !== "ready" || state.operation || item.turn || item.loading
+    || (library.loading && library.selection === library.loading.selection)
+    || item.deleting || (!item.loaded && item.saveVersion)) return;
   if (message.length > 4000) return showError("任务输入需为 1～4000 字。");
-  const history = agentHistory(item.messages, state.definition.revision);
+  const turnHistory = agentHistory(item.messages, state.definition.revision);
   const user = addUserMessage(item.messages, message);
   user.revision = String(state.definition.revision);
   const reply = { role: "assistant", content: "", status: "thinking", label: "正在处理任务…", revision: user.revision };
@@ -549,17 +622,19 @@ async function sendMessage() {
   item.saved = false;
   item.error = "";
   input.value = "";
-  inputs.delete(agent.id);
+  inputs.delete(item.id);
   input.dispatchEvent(new Event("input"));
   renderWorkspace();
+  void history.changed(agent.id, item, { immediate: true });
   try {
-    const result = await api.turn({ agentId: agent.id, sessionId: item.sessionId, message, history }, {
+    const result = await api.turn({ agentId: agent.id, sessionId: item.sessionId, message, history: turnHistory }, {
       signal: operation.controller.signal, onProgress(progress) {
         if (operation.controller.signal.aborted) return;
         if (progress.type === "text-start") { reply.content = ""; reply.status = "thinking"; }
         if (progress.type === "text-delta" && typeof progress.delta === "string") { reply.content += progress.delta; reply.status = "writing"; }
         if (progress.type === "status") { reply.status = "thinking"; reply.label = progress.label || "正在处理任务…"; }
         updateReply(agent.id, item);
+        history.changed(agent.id, item);
       },
     });
     operation.controller.signal.throwIfAborted();
@@ -573,14 +648,15 @@ async function sendMessage() {
     item.error = stopped ? item.error : reply.error;
     if (!stopped && conversations.get(agent.id) === item) {
       if (visible(agent.id, item) && !input.value.trim()) { input.value = message; input.dispatchEvent(new Event("input")); }
-      else if (!visible(agent.id, item) && !inputs.get(agent.id)?.trim()) inputs.set(agent.id, message);
+      else if (!visible(agent.id, item) && !inputs.get(item.id)?.trim()) inputs.set(item.id, message);
     }
   } finally {
     if (visible(agent.id, item)) {
       updateReply(agent.id, item);
       if (user.delivery !== "sent") item.userRows.get(user)?.replaceWith(renderUserMessage(user, input));
     }
-    item.turn = item.replyView = null;
+    if (item.turn === operation) item.turn = item.replyView = null;
+    await history.changed(agent.id, item, { immediate: true });
     if (visible(agent.id, item)) {
       const restoreInput = [input, byId("agent-send"), byId("agent-cancel-reply")].includes(document.activeElement);
       renderControls(agent);
@@ -609,11 +685,11 @@ document.addEventListener("neuma:agents-changed", (event) => {
 });
 document.addEventListener("neuma:route", (event) => {
   clearInspectionTimer();
-  if (route.page === "agent") inputs.set(route.agentId, input.value);
+  if (route.page === "agent" && current()) inputs.set(conversation(route.agentId).id, input.value);
   const previousPage = route.page, previousId = route.agentId;
   route = event.detail;
   if (route.page === "agent" && previousId !== route.agentId) {
-    input.value = inputs.get(route.agentId) ?? "";
+    input.value = inputs.get(conversation(route.agentId).id) ?? "";
     input.dispatchEvent(new Event("input"));
   }
   renderSidebar();
@@ -641,7 +717,8 @@ document.addEventListener("neuma:agent-removed", (event) => {
   item?.loading?.controller.abort();
   item?.saving?.controller.abort();
   if (item?.turn) { item.turn.controller.abort(); api.cancel(item.sessionId).catch(() => {}); }
-  conversations.delete(id);
+  for (const entry of history.state(id).items.values()) inputs.delete(entry.id);
+  history.clear(id);
   runtimes.delete(id);
   inputs.delete(id);
   profileVersions.delete(id);
@@ -656,53 +733,46 @@ byId("agent-iterate").addEventListener("click", () => action("edit"));
 byId("agent-save-entry").addEventListener("click", () => action("save"));
 byId("agent-build").addEventListener("click", () => buildAgent(route.agentId));
 byId("agent-cancel-reply").addEventListener("click", () => stopAgent(route.agentId));
-byId("agent-save-chat").addEventListener("click", async () => {
+byId("agent-chat-retry").addEventListener("click", async () => {
   const agent = current();
   if (!agent) return;
-  if (!agent.persisted) return showError("请先保存智能体需求，再保存这份对话。");
-  const item = conversation(agent.id);
-  if (item.turn || item.loading || item.saving) return;
-  const snapshot = agentConversationSnapshot(item.messages), saving = { controller: new AbortController() };
-  item.localBackup = saveAgentPreview(storage, agent.id, snapshot.messages, { pendingSync: true });
-  item.pendingSync = true;
-  item.loaded = true;
-  item.saving = saving;
-  renderControls(agent);
-  try {
-    const result = await api.saveConversation(agent.id, snapshot, { signal: saving.controller.signal });
-    if (conversations.get(agent.id) !== item || item.saving !== saving) return;
-    if (result.conversation?.schemaVersion !== 2 || !Array.isArray(result.conversation.messages)
-      || JSON.stringify(agentConversationSnapshot(result.conversation.messages)) !== JSON.stringify(snapshot)) throw new Error("对话保存尚未确认");
-    item.saved = true;
-    item.pendingSync = false;
-    item.localBackup = saveAgentPreview(storage, agent.id, snapshot.messages);
-    item.loaded = true;
-    item.error = item.storageError = "";
-  } catch (error) {
-    if (conversations.get(agent.id) !== item) return;
-    item.saved = false;
-    item.storageError = `对话未保存到 Agent 文件夹：${error.message || "服务未响应"}。${item.localBackup ? "浏览器备份已保留，请重试保存。" : "浏览器也无法备份，请复制需要保留的内容。"}`;
-  } finally {
-    if (item.saving === saving) item.saving = null;
-    if (visible(agent.id, item)) renderWorkspace();
-  }
+  const state = history.state(agent.id), item = conversation(agent.id);
+  if (state.error) { state.loaded = false; return loadConversation(agent); }
+  if (!item.loaded && item.saveVersion) return history.read(agent.id, item);
+  return history.save(agent.id, item);
 });
-byId("agent-new-chat").addEventListener("click", () => {
+byId("agent-chat-fork").addEventListener("click", async () => {
   const agent = current();
   if (!agent) return;
-  if (conversation(agent.id).saving) return;
-  if (conversation(agent.id).messages.length && !window.confirm("开启空白新对话？本页消息会清空，已保存的版本保留到下次点击保存。")) return;
-  stopAgent(agent.id);
-  conversation(agent.id).loading?.controller.abort();
-  conversations.set(agent.id, { messages: [], saved: false, loaded: true, loading: null, saving: null, localBackup: false,
-    storageError: "", sessionId: crypto.randomUUID(), turn: null, error: "" });
+  await stopConversation(agent.id);
+  await history.fork(agent.id);
+  if (visible(agent.id)) renderWorkspace();
+});
+byId("agent-history-toggle").addEventListener("click", () => {
+  const agent = current();
+  if (!agent) return;
+  historyCollapsed = !historyCollapsed;
+  try { storage?.setItem("neuma.agent.history-collapsed.v1", String(historyCollapsed)); } catch {}
+  if (historyCollapsed) byId("agent-history-toggle").focus({ preventScroll: true });
+  renderHistory(agent);
+});
+byId("agent-new-chat").addEventListener("click", async () => {
+  const agent = current();
+  if (!agent) return;
+  const sequence = (switchRequests.get(agent.id) || 0) + 1;
+  switchRequests.set(agent.id, sequence);
+  const previous = conversation(agent.id);
+  inputs.set(previous.id, input.value);
+  await stopConversation(agent.id, previous);
+  if (!visible(agent.id) || switchRequests.get(agent.id) !== sequence) return;
+  history.blank(agent.id);
   input.value = "";
-  inputs.delete(agent.id);
   renderWorkspace();
   input.dispatchEvent(new Event("input"));
   input.focus();
 });
 byId("agent-chat-form").addEventListener("submit", (event) => { event.preventDefault(); return sendMessage(); });
+window.addEventListener?.("pagehide", () => history.checkpoint());
 
 document.dispatchEvent(new CustomEvent("neuma:agents-request"));
 void loadProfiles();

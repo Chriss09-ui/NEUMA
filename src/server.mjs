@@ -19,9 +19,16 @@ const PUBLIC = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/agents.js", ["agents.js", "text/javascript; charset=utf-8"]],
+  ["/agent-conversations.js", ["agent-conversations.js", "text/javascript; charset=utf-8"]],
   ["/agent-runtime.js", ["agent-runtime.js", "text/javascript; charset=utf-8"]],
   ["/agent-details.js", ["agent-details.js", "text/javascript; charset=utf-8"]],
   ["/agent-details-view.js", ["agent-details-view.js", "text/javascript; charset=utf-8"]],
+  ["/agent-avatar.js", ["agent-avatar.js", "text/javascript; charset=utf-8"]],
+  ["/agent-avatar-motion.js", ["agent-avatar-motion.js", "text/javascript; charset=utf-8"]],
+  ["/assets/brand/neuma-mark.png", ["assets/brand/neuma-mark.png", "image/png"]],
+  ["/assets/avatars/core.png", ["assets/avatars/core.png", "image/png"]],
+  ...["cut", "shield", "trapezoid", "disc", "diamond", "pentagon"].map((shape) =>
+    [`/assets/avatars/${shape}-mask.png`, [`assets/avatars/${shape}-mask.png`, "image/png"]]),
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
   ["/shell.js", ["shell.js", "text/javascript; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
@@ -41,12 +48,14 @@ function sendJson(response, status, value) {
 }
 
 function safeFailure(error, config) {
-  const conflict = error instanceof InputError && error.code === "SKILL_CONFLICT";
+  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted"].includes(error.reason) ? error.reason : null;
+  const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason);
   const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";
   const diagnostic = error instanceof ProviderError || (error instanceof InputError && error.code === "PROJECT_ADD_FAILED" && error.diagnostic) ? error.diagnostic : error instanceof InputError
     ? { stage: "input", reason: "invalid_request" } : { stage: "server", reason: "internal_error" };
   return { status, payload: { error: message, diagnostic: { ...diagnostic, providerModel: config.model || null },
+    ...(conversationReason ? { reason: conversationReason } : {}),
     ...(error instanceof InputError && ["PROJECT_REMOVE_STOP_FAILED", "SKILL_CONFLICT"].includes(error.code) ? { code: error.code } : {}) } };
 }
 
@@ -261,7 +270,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         const origin = request.headers.origin;
         const validHost = !host || ["localhost", "127.0.0.1", "[::1]"].includes(new URL(`http://${host}`).hostname);
         if (!validHost || (origin && origin !== `http://${host}`) || request.headers["sec-fetch-site"] === "cross-site") {
-          return sendJson(response, 403, { error: "管理操作仅允许从本机 NUEMA 页面发起" });
+          return sendJson(response, 403, { error: "管理操作仅允许从本机 NEUMA 页面发起" });
         }
       }
       if (request.method === "GET" && path === "/api/health") {
@@ -310,6 +319,19 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         return sendJson(response, 200, await prototypeAgents.getConversation(agentConversation[1]));
       if (agentConversation && request.method === "POST")
         return sendJson(response, 200, await prototypeAgents.saveConversation(agentConversation[1], await readJson(request, 20_000_000)));
+      const agentConversations = path.match(/^\/api\/agents\/([\w-]+)\/conversations$/);
+      if (agentConversations && request.method === "GET")
+        return sendJson(response, 200, await prototypeAgents.listConversations(agentConversations[1]));
+      const conversationRecord = path.match(/^\/api\/agents\/([\w-]+)\/conversations\/([\w-]+)(?:\/(remove))?$/);
+      if (conversationRecord) {
+        const [, id, cid, action] = conversationRecord;
+        if (!action && request.method === "GET") return sendJson(response, 200, await prototypeAgents.getConversationRecord(id, cid));
+        if (request.method === "POST") {
+          const body = await readJson(request, 20_000_000);
+          return sendJson(response, 200, action === "remove" ? await prototypeAgents.removeConversation(id, cid)
+            : await prototypeAgents.saveConversationRecord(id, cid, body));
+        }
+      }
       if (request.method === "POST" && path === "/api/agents/build") {
         return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config, false, requestController.signal);
       }

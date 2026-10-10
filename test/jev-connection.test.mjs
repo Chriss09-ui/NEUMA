@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { setTimeout as delay } from "node:timers/promises";
+import { registerConnectionProbeTests } from "./helpers/connection-probe.mjs";
 import { testJevConnection } from "../src/model-connection.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 
@@ -119,8 +119,8 @@ test("Jev 成功状态码必须含合法判断，任意成功 JSON 不能冒充�
   const invalid = [{}, { answers: {} }, { choices: [{ message: { content: "OK" } }] },
     { error: { message: config.jevApiKey }, answers: { connectivity: { type: "noul", noul: 1 } } },
     ...[{ type: "noul", noul: -0.1 }, { type: "noul", noul: 1.1 }, { type: "noul", noul: null },
-      { type: "noul", noul: "1" }, { type: "noul", noul: true }, { type: "noul", noul: Infinity },
-      { type: "noul", noul: NaN }, { type: "boolean", noul: 1 }, { noul: 1 }]
+      { type: "noul", noul: "1" }, { type: "noul", noul: true },
+      { type: "boolean", noul: 1 }, { noul: 1 }]
       .map((connectivity) => ({ answers: { connectivity } }))];
   for (const payload of invalid) {
     await assert.rejects(testJevConnection(config, {}, { fetchImpl: async () => new Response(JSON.stringify(payload)) }),
@@ -128,87 +128,4 @@ test("Jev 成功状态码必须含合法判断，任意成功 JSON 不能冒充�
   }
 });
 
-test("Jev HTTP 错误固定文案与诊断，不读取失败正文", async () => {
-  for (const [status, reason] of [[401, "authentication"], [403, "authentication"], [429, "rate_limit"],
-    [404, "not_found"], [500, "service_unavailable"], [503, "service_unavailable"],
-    [400, "http_error"], [302, "redirect_rejected"]]) {
-    let cancelled = false;
-    const response = new Response(new ReadableStream({
-      start(controller) { controller.enqueue(new TextEncoder().encode(config.jevApiKey)); },
-      cancel() { cancelled = true; },
-    }), { status, headers: { "x-provider-key": config.jevApiKey } });
-    response.text = async () => { assert.fail("不能读取错误正文"); };
-    await assert.rejects(testJevConnection(config, {}, { fetchImpl: async () => response }), (error) => {
-      assertSafe(error, reason);
-      assert.equal(error.diagnostic.httpStatus, status);
-      return true;
-    });
-    assert.equal(cancelled, true);
-  }
-});
-
-test("Jev 无效 JSON、UTF-8 和超限响应均安全拒绝", async () => {
-  for (const content of [config.jevApiKey, "{", new Uint8Array([0xff]), null]) {
-    await assert.rejects(testJevConnection(config, {}, { fetchImpl: async () => new Response(content) }),
-      (error) => assertSafe(error, "invalid_json"));
-  }
-  await assert.rejects(testJevConnection(config, {}, { fetchImpl: async () => new Response("x".repeat(65_537)) }),
-    (error) => assertSafe(error, "response_too_large"));
-});
-
-test("Jev 网络故障分类使用 Jev stage，异常正文和未知代码不泄漏", async () => {
-  for (const [code, reason] of [["ENOTFOUND", "dns"], ["ETIMEDOUT", "connect_timeout"],
-    ["UND_ERR_BODY_TIMEOUT", "timeout"], ["ECONNRESET", "connection_reset"], [config.jevApiKey, "connection_failed"]]) {
-    await assert.rejects(testJevConnection(config, {}, { fetchImpl: async () => {
-      throw Object.assign(new Error(config.jevApiKey), { cause: { code } });
-    } }), (error) => assertSafe(error, reason));
-  }
-  await assert.rejects(testJevConnection(config, {}, { fetchImpl: async () => {
-    throw new ProviderError(config.jevApiKey, { stage: config.chatUrl, reason: config.apiKey });
-  } }), (error) => assertSafe(error, "connection_failed"));
-});
-
-test("Jev 超时同时覆盖等待接口和等待正文", async () => {
-  let requestSignal;
-  await assert.rejects(testJevConnection(config, {}, { timeoutMs: 15, fetchImpl: async (_url, init) => {
-    requestSignal = init.signal;
-    return new Promise(() => {});
-  } }), (error) => assertSafe(error, "timeout"));
-  assert.equal(requestSignal.aborted, true);
-  let cancelled = false;
-  await assert.rejects(testJevConnection(config, {}, { timeoutMs: 15,
-    fetchImpl: async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })) }),
-  (error) => assertSafe(error, "timeout"));
-  assert.equal(cancelled, true);
-});
-
-test("Jev 外部取消不发新请求，也能中止正在等待的 fetch", async () => {
-  const alreadyCancelled = new AbortController();
-  alreadyCancelled.abort(config.jevApiKey);
-  await assert.rejects(testJevConnection(config, {}, { signal: alreadyCancelled.signal,
-    fetchImpl: async () => { assert.fail("不能发请求"); } }), (error) => {
-    assert.equal(error.name, "AbortError");
-    assert.equal(error.message.includes(config.jevApiKey), false);
-    return true;
-  });
-  const controller = new AbortController();
-  let requestSignal;
-  const probe = testJevConnection(config, {}, { signal: controller.signal, fetchImpl: async (_url, init) => {
-    requestSignal = init.signal;
-    return new Promise(() => {});
-  } });
-  controller.abort(config.jevApiKey);
-  await assert.rejects(probe, { name: "AbortError" });
-  assert.equal(requestSignal.aborted, true);
-});
-
-test("Jev 读取响应正文时取消会释放 reader", async () => {
-  const controller = new AbortController();
-  let cancelled = false;
-  const probe = testJevConnection(config, {}, { signal: controller.signal,
-    fetchImpl: async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })) });
-  await delay(0);
-  controller.abort();
-  await assert.rejects(probe, { name: "AbortError" });
-  assert.equal(cancelled, true);
-});
+registerConnectionProbeTests({ label: "Jev", testConnection: testJevConnection, config, apiKey: config.jevApiKey, assertSafe });

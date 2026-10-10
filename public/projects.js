@@ -25,7 +25,7 @@ function addFailureMessage(failure) {
     return /^添加失败/.test(failure.message) ? failure.message : `添加失败：${failure.message.replace(/[。.!！\s]+$/, "")}。项目未加入列表。`;
   }
   if (/failed to fetch|fetch failed|load failed|network|连接中断/i.test(failure?.message ?? "")) {
-    return "添加失败：与本机服务的连接中断，请确认 NUEMA 正在运行后重试。";
+    return "添加失败：与本机服务的连接中断，请确认 NEUMA 正在运行后重试。";
   }
   return "添加失败：项目检查未完成，请稍后重试。项目未加入列表。";
 }
@@ -113,7 +113,7 @@ function renderMessages(scrollToEnd = true) {
 function render() {
   const query = byId("project-search").value.trim().toLowerCase();
   const presented = projects.map((item) => item.id === inspectingId
-    ? { ...item, canLaunch: false, setup: { status: "checking", summary: "NUEMA 正在检查最新的项目说明和启动入口…" } } : item);
+    ? { ...item, canLaunch: false, setup: { status: "checking", summary: "NEUMA 正在检查最新的项目说明和启动入口…" } } : item);
   const shown = presented.filter((item) => `${item.name} ${item.description ?? ""}`.toLowerCase().includes(query));
   const activeId = route.projectView === "list" || (route.projectView === "add" && !byId("manage-projects").hidden) ? selectedId : null;
   const signature = JSON.stringify([shown, activeId, query, projects.length, busy]);
@@ -173,7 +173,7 @@ async function refresh() {
 async function runAction(action, body = {}, actionId = selectedId) {
   if (busy || !actionId) return;
   const target = projects.find((project) => project.id === actionId);
-  if (action === "remove" && (!target || !window.confirm(`删除项目“${target.name}”？\n\n只从 NUEMA 中移除，电脑上的项目文件不会删除。${target.canStop ? "\n由 NUEMA 启动的这个项目也会停止运行。" : ""}${target.setup?.status === "checking" ? "\n当前项目检查也会停止。" : ""}`))) return;
+  if (action === "remove" && (!target || !window.confirm(`删除项目“${target.name}”？\n\n只从 NEUMA 中移除，电脑上的项目文件不会删除。${target.canStop ? "\n由 NEUMA 启动的这个项目也会停止运行。" : ""}${target.setup?.status === "checking" ? "\n当前项目检查也会停止。" : ""}`))) return;
   if (action === "inspect") {
     if (!target || target.canStop || target.setup?.status === "checking") return;
     openProject(actionId); inspectingId = actionId;
@@ -184,7 +184,7 @@ async function runAction(action, body = {}, actionId = selectedId) {
     try { result = await api(`/api/projects/${actionId}/${action}`, action === "remove" ? { confirm: true } : body); }
     catch (failure) {
       if (action !== "remove" || failure.code !== "PROJECT_REMOVE_STOP_FAILED") throw failure;
-      const message = `无法停止“${target.name}”。\n\n${nuemaText(failure.message)}\n\n是否仅从 NUEMA 中移除这个项目？本地文件不会删除。`;
+      const message = `无法停止“${target.name}”。\n\n${nuemaText(failure.message)}\n\n是否仅从 NEUMA 中移除这个项目？本地文件不会删除。`;
       if (!window.confirm(message)) {
         showError("manage-error", "已保留项目记录。停止未完成，可以修复停止脚本后重试，或再次删除并选择仅移除记录。");
         await refresh(); return;
@@ -198,7 +198,7 @@ async function runAction(action, body = {}, actionId = selectedId) {
     }
     if (["configure", "inspect", "remove"].includes(action)) renderedId = undefined;
     await refresh();
-    feedback(action === "inspect" ? result.project.canLaunch ? "NUEMA 已更新启动方式，可以打开项目了。"
+    feedback(action === "inspect" ? result.project.canLaunch ? "NEUMA 已更新启动方式，可以打开项目了。"
       : result.project.setup?.status === "paused" ? "检查已暂停，可以稍后继续。" : "项目检查已结束，请查看下方结果。"
       : { configure: "启动方式已保存", start: "", stop: "项目已停止", remove: result.project?.servicesMayBeRunning
         ? `已移除“${target?.name}”，本地文件已保留。未能停止的服务可能仍在运行，可在“运行与端口”中查看。`
@@ -233,7 +233,7 @@ async function chooseProjectFolder() {
     const name = byId("project-name");
     if (!name.value.trim() || name.value === suggestedProjectName) name.value = result.name || "";
     suggestedProjectName = result.name || "";
-    byId("project-folder-status").textContent = "文件夹已选好，NUEMA 会自动检查项目并配置启动方式。";
+    byId("project-folder-status").textContent = "文件夹已选好，NEUMA 会自动检查项目并配置启动方式。";
     focusId = "project-add-submit";
   } catch (error) {
     if (controller.signal.aborted || folderController !== controller) return;
@@ -248,7 +248,7 @@ async function chooseProjectFolder() {
 byId("project-choose-folder").addEventListener("click", chooseProjectFolder);
 byId("project-path").addEventListener("input", () => {
   addFailed = false; showError("add-error");
-  byId("project-folder-status").textContent = "只需提供路径，NUEMA 会检查项目说明和入口，自动配置启动方式。";
+  byId("project-folder-status").textContent = "只需提供路径，NEUMA 会检查项目说明和入口，自动配置启动方式。";
   render();
 });
 

@@ -72,7 +72,7 @@ export async function startScriptServices(project, run, { spawnImpl = spawn, env
   if (run.stopping || run.status === "stopped") { run.monitorController.abort(); return run; }
   const addresses = [project.launch.url, ...project.launch.healthUrls];
   if (addresses.some((url) => Number(new URL(url).port || 80) === Number(blockedPort))) {
-    throw new InputError("项目地址不能使用 NUEMA 自身的服务端口");
+    throw new InputError("项目地址不能使用 NEUMA 自身的服务端口");
   }
   const states = await Promise.all(project.launch.healthUrls.map((url) => health(url, run.monitorController.signal)));
   if (cancelled(run)) return run;

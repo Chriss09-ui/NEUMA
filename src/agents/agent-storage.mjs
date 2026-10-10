@@ -35,20 +35,24 @@ async function ensureDirectory(path) {
   }
 }
 
-async function readFile(path) {
+async function readFile(path, maxBytes = Infinity) {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new InputError("Agent 数据只允许普通文件，不允许链接");
+  if (info.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const current = await handle.stat();
     if (!current.isFile() || current.nlink !== 1) throw new InputError("Agent 数据只允许普通文件");
-    return await handle.readFile();
+    if (current.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+    const content = await handle.readFile();
+    if (content.length > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+    return content;
   } finally { await handle.close(); }
 }
 
-async function readJson(path) {
+async function readJson(path, maxBytes) {
   try {
-    const value = JSON.parse((await readFile(path)).toString("utf8"));
+    const value = JSON.parse((await readFile(path, maxBytes)).toString("utf8"));
     if (!value || typeof value !== "object") throw new InputError("Agent 数据文件格式无效");
     return value;
   }
@@ -282,9 +286,24 @@ export class AgentStorage {
     return join(await this.directory(id, names.join("/"), { create }), name);
   }
 
-  async readJson(id, file) {
-    try { return await readJson(await this.path(id, file)); }
+  async readJson(id, file, { maxBytes } = {}) {
+    try { return await readJson(await this.path(id, file), maxBytes); }
     catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  }
+
+  async jsonFiles(id, subpath) {
+    let root;
+    try { root = await this.directory(id, subpath); }
+    catch (error) { if (error.code === "ENOENT") return []; throw error; }
+    const files = [];
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (entry.name.startsWith(".pending-") && entry.name.endsWith(".json")) continue;
+      if (!/^[\w-]{1,80}\.json$/.test(entry.name)) throw new InputError("Agent 元数据文件名无效");
+      const info = await lstat(join(root, entry.name));
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new InputError("Agent 数据只允许普通文件，不允许链接");
+      files.push(entry.name);
+    }
+    return files.sort();
   }
 
   async writeJson(id, file, value, { signal } = {}) {

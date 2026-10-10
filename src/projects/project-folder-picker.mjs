@@ -8,7 +8,7 @@ import { projectEnvironment, requireProjectHelper } from "./project-platform.mjs
 
 const runFile = promisify(execFile);
 const PICK_FOLDER = `try
-  set selectedFolder to choose folder with prompt "选择要添加到 NUEMA 的项目文件夹"
+  set selectedFolder to choose folder with prompt "选择要添加到 NEUMA 的项目文件夹"
   return POSIX path of selectedFolder
 on error number -128
   return ""
@@ -17,14 +17,14 @@ end try`;
 export function createProjectFolderPicker({ platform = process.platform, run = runFile, inspect = stat, helperPath,
   helper = requireProjectHelper } = {}) {
   let selecting = false;
-  return async ({ signal, prompt = "选择要添加到 NUEMA 的项目文件夹" } = {}) => {
+  return async ({ signal, prompt = "选择要添加到 NEUMA 的项目文件夹" } = {}) => {
     signal?.throwIfAborted();
     if (!["darwin", "win32", "linux"].includes(platform)) throw new InputError("当前系统暂不支持选择窗口，请手动填写项目路径。");
     if (selecting) throw new InputError("文件夹选择窗口已经打开，请先完成或取消当前选择。");
     selecting = true;
     try {
       const executable = platform === "darwin" ? "/usr/bin/osascript" : await helper({ platform, helperPath });
-      const script = PICK_FOLDER.replace('"选择要添加到 NUEMA 的项目文件夹"', JSON.stringify(prompt));
+      const script = PICK_FOLDER.replace('"选择要添加到 NEUMA 的项目文件夹"', JSON.stringify(prompt));
       const { stdout } = await run(executable, platform === "darwin" ? ["-e", script] : ["pick-folder"], {
         encoding: "utf8", maxBuffer: 16_384, timeout: 300_000, signal,
         env: platform === "darwin" ? { PATH: "/usr/bin:/bin", HOME: homedir(), LANG: "en_US.UTF-8" } : projectEnvironment(process.env, { desktop: true }),

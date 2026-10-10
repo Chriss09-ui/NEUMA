@@ -156,7 +156,7 @@ export async function runSourceApplication({ root, createHandler }) {
     application = await startLocalApplication({ dataDir: resolve(root, ".neuma"),
       envPath: resolve(root, ".env"), port: Number(process.env.PORT || 3000), signal: controller.signal, createHandler });
     application.server.once("close", removeSignals);
-    process.stdout.write(`NUEMA Agent 运行测试版：${application.url}\n`);
+    process.stdout.write(`NEUMA Agent 运行测试版：${application.url}\n`);
   } catch (error) {
     removeSignals();
     process.stderr.write(`${error instanceof DataDirectoryBusyError ? error.message : controller.signal.aborted ? "NEUMA 启动已取消。" : error.message}\n`);

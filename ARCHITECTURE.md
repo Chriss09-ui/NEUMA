@@ -51,11 +51,13 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 
 ## 每个 Agent 的独立持久目录
 
-2026-10-08：服务端统一使用 `.neuma/agents/<稳定 Agent ID>/`。`definition.json` 保存定义、指令、记忆和展示设置；`requirements.json` 保存需求入口；`architecture.json` 保存全部架构版本；`development/` 包含记录、代码工作区和只读快照；`conversations/saved.json` 保存用户主动保存的对话；`workspace/` 保存输入材料和执行产物。Agent 的 Pi 辅助目录也绑定到本 Agent 根目录。模型仍只获得评估后的专属工作子目录工具，不因元数据与代码同处一个 Agent 根目录而扩大文件权限。
+2026-10-09：服务端统一使用 `.neuma/agents/<稳定 Agent ID>/`。`definition.json` 保存定义、指令、记忆和展示设置；`requirements.json` 保存需求入口；`architecture.json` 保存全部架构版本；`development/` 包含记录、代码工作区和只读快照；`conversations/records/<对话 ID>.json` 保存独立的自动对话快照；`workspace/` 保存输入材料和执行产物。Agent 的 Pi 辅助目录也绑定到本 Agent 根目录。模型仍只获得评估后的专属工作子目录工具，不因元数据与代码同处一个 Agent 根目录而扩大文件权限。
 
 `src/agents/agent-storage.mjs` 在各 Store 加载前协调旧格式迁移。先检查旧元数据及文件类型，在临时目录完整复制，重定位受控快照对象中的路径并添加 Agent 身份，再发布每个完整目录和全局迁移标记。旧文件保留但完成迁移后不再作为活动源；部分发布可重试，不覆盖已发布的新数据。拒绝路径穿越、符号链接和硬链接元数据。保存使用原子替换，失败不发布内存状态。
 
-`src/agents/agent-library.mjs` 管理已保存需求及显式对话快照。旧浏览器数据通过本机接口逐 Agent 补入；已有服务端保存版本优先，旧定义/架构推导需求允许补入更新的浏览器版本。保存失败的浏览器新版使用待同步备份，刷新不丢失，需要用户重试。新对话和普通任务不自动写聊天。清除浏览器数据后可从服务端恢复入口和已保存对话；主需求澄清对话和项目助手会话仍独立。
+`src/agents/agent-library.mjs` 管理已保存需求及 schemaVersion=3 的多对话快照。每条对话的稳定 ID 与运行会话 ID 分开，保存完整消息、首条消息前 30 字标题、创建与更新时间和保存版本。发送即保存，流式回复每秒合并保存，完成、失败或停止立即保存；保存队列不阻塞输入。每条记录串行原子替换，使用 expectedVersion 检查和 mutationId 幂等重试，冲突保留本机内容并提供另存为新对话。删除将同一记录原子替换为不含正文的删除标记，拒绝迟到保存或旧备份重导入。完整历史不裁剪条数，单条记录上限为 8 MiB；运行请求仍只选当前版本的成功问答，并保留原有条数、字符与请求字节限制。
+
+旧 `conversations/saved.json` 迁为 `legacy-saved`，浏览器未同步的不同内容另迁为 `legacy-browser-pending`；迁移与安装复制包含独立记录及删除标记，可重复执行且不覆盖服务端记录。确认迁移后清除浏览器旧单份键，新备份按 Agent 和对话保存，保留最新正文与未知提交结果的冻结重试请求。保存失败显示待同步，刷新不被服务器旧版覆盖，可重试；超限时保留当前内容并明确提示。清除浏览器数据后可从服务端恢复需求入口和历史对话；主需求澄清对话与项目助手会话仍独立。
 
 删除先停止任务并移除定义，再记录删除标记和清理活动元数据，保留代码、快照及工作产物。删除标记阻止重启、旧浏览器导入或残留研发记录恢复已删除 Agent；不删除整个 Agent 文件夹。
 
@@ -76,7 +78,10 @@ search_technical_sources 是按需工具，当前实现是固定官方目录检�
 - GET /api/agents/:id 返回 {agent,architecture}；无架构时为 null。
 - 流协议仍是 status、done.result、error。只显示简洁进度，不暴露内部提示词、模型思考或工具参数。
 - 前端与后端均核实就绪状态；正式定义额外核实 architectureRef 的 version/candidateHash。设置中的原需求区域可展开查看方案与检查结果。
-- 原始需求、稳定 ID、独立会话、资料/记忆/文件隔离和桌面产物栏保持原语义。没有自动新增外部业务权限。
+- 工作 Agent 左侧为可折叠的历史对话列表，只列当前 Agent，按最近更新排序；刷新恢复上次选中记录，记录不存在时打开最新一条。空白新对话在首条消息发送后入列；切换对话先停止原任务并保存部分内容，迟到回复不能更新新对话。
+- 顶栏正常保存时隐藏状态文字，异常时显示待同步与重试，冲突可另存。右上角带文件夹图标、边框和数量徽标的“产物”按钮打开复用的文件预览弹窗，左侧列表与刷新、右侧预览与下载，关闭或 Esc 后返回入口焦点。产物仍汇总当前 Agent 的所有文件，安全预览和下载限制不变。
+- GET `/api/agents/:id/conversations` 返回摘要列表；GET/POST `/api/agents/:id/conversations/:conversationId` 读取或自动保存独立对话；POST `/api/agents/:id/conversations/:conversationId/remove` 删除。保存请求包含 schemaVersion=3、messages、expectedVersion、mutationId；旧数据补入使用 importOnly。版本冲突与删除均返回 HTTP 409，reason 分别为 conversation_conflict 和 conversation_deleted。旧单份 `/conversation` 接口保留兼容。
+- 原始需求、稳定 ID、独立会话、资料/记忆/文件隔离保持原语义。没有自动新增外部业务权限。
 
 ## 文件与验证
 

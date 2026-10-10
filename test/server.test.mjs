@@ -17,10 +17,13 @@ function request(method, url, body) {
 }
 
 async function invoke(handler, method, url, body) {
-  const result = { status: null, headers: null, text: "" };
+  const result = { status: null, headers: null, text: "", body: Buffer.alloc(0) };
   const response = {
     writeHead(status, headers) { result.status = status; result.headers = headers; },
-    end(content) { result.text = content?.toString() ?? ""; },
+    end(content) {
+      result.body = Buffer.isBuffer(content) ? content : Buffer.from(content?.toString() ?? "");
+      result.text = result.body.toString();
+    },
   };
   await handler(request(method, url, body), response);
   return result;
@@ -59,9 +62,9 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(page.text, /id="agent-runtime-status"[^>]*>智能体界面尚未加载/);
   assert.match(page.text, /id="agent-send"[^>]*disabled/);
   assert.match(page.text, /id="agent-build"[^>]*disabled/);
-  assert.match(page.text, /让 NUEMA 帮我迭代/);
-  assert.match(page.text, /<h1 id="chat-title">NUEMA<\/h1>/);
-  assert.doesNotMatch(page.text, /主\s*Agent|NEUMA/);
+  assert.match(page.text, /让 NEUMA 帮我迭代/);
+  assert.match(page.text, /<h1 id="chat-title">NEUMA<\/h1>/);
+  assert.doesNotMatch(page.text, /主\s*Agent|NUEMA/);
   const agentUi = await invoke(handler, "GET", "/agents.js");
   assert.equal(agentUi.status, 200);
   assert.match(agentUi.headers["content-type"], /javascript/);
@@ -92,6 +95,39 @@ class StreamingResponse extends EventEmitter {
   write(content) { this.text += content; }
   end(content = "") { this.text += content; this.writableEnded = true; }
 }
+
+test("小星核脚本和七张图形通过静态白名单加载，其他资源仍不可访问", async () => {
+  const handler = createRequestHandler({ config: {}, providers: {} });
+  for (const path of ["/agent-avatar.js", "/agent-avatar-motion.js"]) {
+    const result = await invoke(handler, "GET", path);
+    assert.equal(result.status, 200); assert.match(result.headers["content-type"], /^text\/javascript/);
+    assert.ok(result.text.trim());
+  }
+  for (const file of ["core.png", ...["cut", "shield", "trapezoid", "disc", "diamond", "pentagon"].map((shape) => `${shape}-mask.png`)]) {
+    const result = await invoke(handler, "GET", `/assets/avatars/${file}`);
+    assert.equal(result.status, 200); assert.equal(result.headers["content-type"], "image/png");
+    assert.ok(result.text.length > 500);
+  }
+  for (const path of ["/assets/avatars/unknown.png", "/assets/avatars/../../.env", "/assets/avatars/%2e%2e/%2e%2e/.env"])
+    assert.equal((await invoke(handler, "GET", path)).status, 404);
+});
+
+test("左上品牌使用新图标图片，静态白名单提供有效PNG并拒绝未知品牌资源", async () => {
+  const handler = createRequestHandler({ config: {}, providers: {} });
+  const page = await invoke(handler, "GET", "/");
+  assert.equal(page.status, 200);
+  const mark = page.text.match(/<span\b[^>]*class="brand-mark"[^>]*>([\s\S]*?)<\/span>/);
+  assert.ok(mark, "页面应保留左上品牌图标容器");
+  assert.match(mark[1], /<img\b[^>]*src="\/assets\/brand\/neuma-mark\.png"/);
+  assert.doesNotMatch(page.text, /<span\b[^>]*class="brand-mark"[^>]*>\s*N\s*<\/span>/);
+
+  const image = await invoke(handler, "GET", "/assets/brand/neuma-mark.png");
+  assert.equal(image.status, 200);
+  assert.equal(image.headers["content-type"], "image/png");
+  assert.ok(image.body.length > 8, "品牌PNG应包含签名之外的图像数据");
+  assert.deepEqual(image.body.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  assert.equal((await invoke(handler, "GET", "/assets/brand/unknown.png")).status, 404);
+});
 
 test("服务关闭会取消非流式需求请求并等待其结束", async () => {
   let entered, seen;

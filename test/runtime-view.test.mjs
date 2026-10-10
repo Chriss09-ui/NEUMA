@@ -22,11 +22,14 @@ test("运行筛选保留待确认与外部启动的区别，项目链接打开�
   const container = dom(t), selected = [];
   const projects = [
     { id: "external", name: "已打开的工具", path: "/apps/tool", runtime: { state: "running", source: "external", ports: [5173] } },
+    { id: "managed", name: "托管工具", path: "/apps/managed", runtime: { state: "running", source: "nuema", reason: "由 NUEMA 启动的项目进程仍在运行。", ports: [3001] } },
     { id: "stopped", name: "已关闭的工具", path: "/apps/other", runtime: { state: "stopped", source: "none", ports: [] } },
     { id: "unknown", name: "无法核实的工具", path: "/apps/unknown", runtime: { state: "unknown", reason: "进程信息读取不完整" } },
   ];
   renderRuntimeProjects({ container, projects, filter: "running", onSelect: (id) => selected.push(id) });
   assert.match(container.text(), /已打开的工具.*运行中.*外部启动.*5173/);
+  assert.match(container.text(), /托管工具.*运行中.*NEUMA 启动.*由 NEUMA 启动/);
+  assert.doesNotMatch(container.text(), /NUEMA/);
   assert.doesNotMatch(container.text(), /已关闭的工具|无法核实的工具/);
   container.descendants().find((element) => element.tag === "button").events.click();
   assert.deepEqual(selected, ["external"]);

@@ -4,7 +4,9 @@ import { agentDisplayDescription, agentDisplayIcon, agentDisplayName } from "../
 import { blankSession, clearSession, deleteRequirement, hasSavedSession, initializeSession,
   loadSavedRequirements, loadSession, recentUserMessages, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement, appendAgentPreview, deleteAgentPreview, loadAgentPreview,
-  saveAgentPreview, agentConversationSnapshot, loadSavedAgentConversation, normalizeAgentRequirement } from "../public/state.js";
+  saveAgentPreview, agentConversationSnapshot, loadSavedAgentConversation, normalizeAgentRequirement,
+  agentHistorySnapshot, loadAgentConversationBackups, saveAgentConversationBackup, deleteAgentConversationBackup,
+  deleteAgentConversationBackups, loadActiveAgentConversation, saveActiveAgentConversation } from "../public/state.js";
 
 const SAVED_KEY = "neuma.requirements.session.optin.v1";
 const LEGACY_KEY = "neuma.requirements.session.v1";
@@ -263,4 +265,90 @@ test("浏览器待同步标记独立保留，保存和删除其他 Agent 不会�
   saveAgentPreview(local, "pending", [{ role: "user", content: "失败保存" }]);
   assert.equal(loadSavedRequirements(local)[0].pendingSync, undefined);
   assert.equal(loadSavedAgentConversation(local, "pending").pendingSync, undefined);
+});
+
+const historyRecord = (id, overrides = {}) => ({ schemaVersion: 3, id, agentId: "one", title: id,
+  createdAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", saveVersion: 1,
+  mutationId: `mutation-${id}`, messages: [{ role: "user", content: id, delivery: "sent" }], ...overrides });
+
+test("多对话浏览器备份独立排序，保存版本与待同步内容刷新后保留", () => {
+  const local = storage();
+  const first = historyRecord("first"), latest = historyRecord("latest", { updatedAt: "2026-10-09T01:00:00.000Z" });
+  assert.equal(saveAgentConversationBackup(local, "one", first), true);
+  assert.equal(saveAgentConversationBackup(local, "one", latest, { pendingSync: true, expectedVersion: 0, mutationId: "pending-mutation" }), true);
+  const records = loadAgentConversationBackups(local, "one");
+  assert.deepEqual(records.map((item) => item.id), ["latest", "first"]);
+  assert.equal(records[0].pendingSync, true);
+  assert.equal(records[0].expectedVersion, 0);
+  assert.equal(records[0].mutationId, "pending-mutation");
+  assert.equal(records[1].pendingSync, undefined);
+  assert.deepEqual(loadAgentConversationBackups(local, "other"), []);
+  assert.equal(saveActiveAgentConversation(local, "one", "latest"), true);
+  assert.equal(loadActiveAgentConversation(local, "one"), "latest");
+  assert.equal(saveActiveAgentConversation(local, "one", null), true);
+  assert.equal(loadActiveAgentConversation(local, "one"), null);
+});
+
+test("断线备份区分最新聊天与冻结重试请求，刷新后继续使用原幂等请求", () => {
+  const local = storage(), retryRequest = { schemaVersion: 3, expectedVersion: 1, mutationId: "unknown-ack",
+    messages: [{ role: "user", content: "已提交内容", delivery: "sent" }] };
+  const record = historyRecord("pending", { messages: [{ role: "user", content: "最新内容", delivery: "sent" }], retryRequest });
+  assert.equal(saveAgentConversationBackup(local, "one", record, { pendingSync: true }), true);
+  const restored = loadAgentConversationBackups(local, "one")[0];
+  assert.equal(restored.messages[0].content, "最新内容");
+  assert.deepEqual(restored.retryRequest, retryRequest);
+  assert.equal(restored.pendingSync, true);
+  assert.equal(saveAgentConversationBackup(local, "one", historyRecord("pending")), true);
+  assert.equal(loadAgentConversationBackups(local, "one")[0].retryRequest, undefined);
+});
+
+test("完整历史不截断80条和长回复，恢复时停止运行状态并移除运行字段", () => {
+  const messages = Array.from({ length: 90 }, (_, index) => ({ role: "user", content: `第${index}条`, delivery: "sent" }));
+  messages.push({ role: "user", content: "最后任务", delivery: "pending", revision: "2", sessionId: "不保存" },
+    { role: "assistant", content: "字".repeat(40_000), status: "writing", revision: "2", label: "不保存" });
+  const snapshot = agentHistorySnapshot(messages);
+  assert.equal(snapshot.schemaVersion, 3);
+  assert.equal(snapshot.messages.length, 92);
+  assert.equal(snapshot.messages[0].content, "第0条");
+  assert.equal(snapshot.messages.at(-2).delivery, "stopped");
+  assert.equal(snapshot.messages.at(-2).sessionId, undefined);
+  assert.equal(snapshot.messages.at(-1).content.length, 40_000);
+  assert.equal(snapshot.messages.at(-1).status, "stopped");
+  assert.equal(snapshot.messages.at(-1).label, undefined);
+  const local = storage();
+  assert.equal(saveAgentConversationBackup(local, "one", historyRecord("complete", { messages })), true);
+  assert.equal(loadAgentConversationBackups(local, "one")[0].messages.length, 92);
+  assert.equal(agentConversationSnapshot(messages).messages.length, 80);
+});
+
+test("完整历史无效或超过8MiB明确失败，既有完整备份不被裁剪或覆盖", () => {
+  const local = storage(), record = historyRecord("safe");
+  assert.equal(saveAgentConversationBackup(local, "one", record), true);
+  assert.throws(() => agentHistorySnapshot([{ role: "user", content: "字".repeat(4001) }]), /格式无效/);
+  assert.throws(() => agentHistorySnapshot([{ role: "tool", content: "结果" }]), /格式无效/);
+  const oversized = [{ role: "assistant", content: "x".repeat(8 * 1024 * 1024), status: "complete" }];
+  assert.throws(() => agentHistorySnapshot(oversized), /8 MiB/);
+  assert.equal(saveAgentConversationBackup(local, "one", { ...record, messages: oversized }), false);
+  assert.equal(loadAgentConversationBackups(local, "one")[0].messages[0].content, "safe");
+  assert.equal(saveAgentConversationBackup(local, "other", record), false);
+});
+
+test("删除备份只删除所选对话并清选中记录，Agent删除清理全部聊天备份", () => {
+  const local = storage();
+  saveAgentConversationBackup(local, "one", historyRecord("first"));
+  saveAgentConversationBackup(local, "one", historyRecord("second"));
+  saveActiveAgentConversation(local, "one", "first");
+  assert.equal(deleteAgentConversationBackup(local, "one", "first"), true);
+  assert.deepEqual(loadAgentConversationBackups(local, "one").map((item) => item.id), ["second"]);
+  assert.equal(loadActiveAgentConversation(local, "one"), null);
+  saveActiveAgentConversation(local, "one", "second");
+  assert.equal(deleteAgentConversationBackups(local, "one"), true);
+  assert.deepEqual(loadAgentConversationBackups(local, "one"), []);
+  assert.equal(loadActiveAgentConversation(local, "one"), null);
+  const inaccessible = { getItem() { throw new Error("浏览器禁用存储"); }, setItem() { throw new Error("浏览器禁用存储"); }, removeItem() { throw new Error("浏览器禁用存储"); } };
+  assert.deepEqual(loadAgentConversationBackups(inaccessible, "one"), []);
+  assert.equal(loadActiveAgentConversation(inaccessible, "one"), null);
+  assert.equal(saveAgentConversationBackup(inaccessible, "one", historyRecord("first")), false);
+  assert.equal(deleteAgentConversationBackup(inaccessible, "one", "first"), false);
+  assert.equal(saveActiveAgentConversation(inaccessible, "one", "first"), false);
 });

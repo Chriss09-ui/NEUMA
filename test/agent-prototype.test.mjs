@@ -24,8 +24,11 @@ function factory(records, onPrompt = async () => {}) {
     const session = { messages: [], subscribe(fn) { listener = fn; return () => { listener = null; }; },
       async prompt(message) {
         record.prompts.push(message);
-        if (builder) await builder.execute("design", validDesign(JSON.parse(message).requirements, { capabilities: fileCapabilities() }));
-        else if (reviewer) await reviewer.execute("review", passingReview(JSON.parse(message).candidateHash));
+        if (builder) {
+          const payload = JSON.parse(message);
+          await builder.execute("design", validDesign(payload.requirements, { capabilities: fileCapabilities(),
+            instructions: `根据用户提供的材料处理「${payload.requirement.draft.goal.value}」，缺少输入时询问，不执行外部动作。` }));
+        } else if (reviewer) await reviewer.execute("review", passingReview(JSON.parse(message).candidateHash));
         else {
           listener?.({ type: "message_start", message: { role: "assistant" } });
           listener?.({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "private-thought" } });
@@ -180,13 +183,19 @@ test("迭代不打断旧任务，下一轮使用新版本指令和会话", async
   const { agents } = await fixture(t, factory(records, async (record) => {
     if (!record.builder && record.prompts[0].endsWith("用户本轮任务：等待迭代")) { started(); await new Promise((done) => { record.release = done; }); }
   }));
-  await agents.build(input());
+  const first = await agents.build(input());
   const pending = agents.prompt(turn("weekly", "revision-session-12345", "等待迭代")); await waiting;
-  await agents.build(input("weekly", "新版目标"));
+  const updated = await agents.build(input("weekly", "新版目标"));
+  assert.notEqual(updated.agent.instructions, first.agent.instructions);
+  assert.ok(records[1].options.systemPrompt.endsWith(first.agent.instructions));
   assert.equal(records[1].disposed, false); assert.equal(records[1].aborted, false);
   records[1].release(); assert.equal((await pending).status, "complete");
   await agents.prompt(turn("weekly", "revision-session-12345"));
   assert.equal(records[1].disposed, true); assert.equal(agents.sessions.get("revision-session-12345").revision, 2);
+  const current = records.at(-1);
+  assert.notEqual(current.session, records[1].session);
+  assert.ok(current.options.systemPrompt.endsWith(updated.agent.instructions));
+  assert.equal(current.options.systemPrompt.includes(first.agent.instructions), false);
 });
 
 test("独立记忆持久化，编辑与清空在已有会话下一轮生效", async (t) => {
@@ -233,6 +242,30 @@ test("展示资料独立于已确认需求，持久化后恢复侧栏且下一�
   const longAgent = (await agents.build({ ...input("long-name"), name: longName })).agent;
   const iconOnly = await agents.setProfile("long-name", { ...longAgent.profile, icon: "✨" });
   assert.equal(iconOnly.profile.name, longName); assert.equal(iconOnly.profile.icon, "✨");
+});
+
+test("小星核头像组合真实持久化，恢复后保留需求与架构身份且不重复构建", async (t) => {
+  const records = [], { agents, options } = await fixture(t, factory(records));
+  await agents.build(input());
+  const before = await agents.get("weekly"), profile = { ...before.profile, icon: "star:4:7" };
+  assert.deepEqual(await agents.setProfile("weekly", profile), { profile });
+  const after = await agents.get("weekly");
+  assert.deepEqual(after.profile, profile);
+  assert.deepEqual(await agents.getProfiles(), { profiles: [{ id: "weekly", ...profile }] });
+  const stored = JSON.parse(await readFile(join(options.dataDir, "agents/weekly/definition.json"), "utf8"));
+  assert.equal(stored.agent.profile.icon, "star:4:7");
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  const reloaded = await restored.get("weekly");
+  assert.deepEqual(reloaded.profile, profile);
+  assert.deepEqual(await restored.getProfiles(), { profiles: [{ id: "weekly", ...profile }] });
+  const reused = (await restored.build(input())).agent;
+  for (const agent of [after, reloaded, reused]) {
+    assert.equal(agent.id, before.id); assert.equal(agent.name, before.name);
+    assert.deepEqual(agent.draft, before.draft); assert.equal(agent.revision, before.revision);
+    assert.deepEqual(agent.architectureRef, before.architectureRef);
+    assert.equal(agent.instructions, before.instructions); assert.equal(agent.profile.icon, "star:4:7");
+  }
+  assert.equal(records.length, 1); assert.equal(records.reviews.length, 1);
 });
 
 test("构建期间编辑记忆和展示资料，提交新定义不会覆盖最新内容", async (t) => {

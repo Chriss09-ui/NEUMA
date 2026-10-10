@@ -93,14 +93,15 @@ test("从项目详情问助手携带明确项目路径，保留草稿且可取�
   assert.equal(ui.get("project-context").hidden, true);
 });
 
-test("旧服务的识别进度和流式回复显示 NUEMA，保留 API 字样", async () => {
-  const ui = await setup({ turn: () => ({ reply: "NUEMA 已处理", projects: fixture, actions: [] }), progress: [
+test("旧服务的识别进度和流式回复显示 NEUMA，保留 API 字样", async () => {
+  assert.equal(nuemaText("NUEMA 已处理，API 正常。"), "NEUMA 已处理，API 正常。");
+  const ui = await setup({ turn: () => ({ reply: "NEUMA 已处理", projects: fixture, actions: [] }), progress: [
     { type: "status", phase: "tool", label: "PI 正在识别项目…" },
     { type: "text-delta", delta: "让 PI " }, { type: "text-delta", delta: "agent 帮你配置，API 正常。" },
   ] });
   ui.get("project-message").value = "查看项目"; await ui.submit("project-chat-form");
-  assert.ok(ui.replies.some((reply) => reply.label === "NUEMA 正在识别项目…"));
-  assert.ok(ui.replies.some((reply) => reply.content === "让 NUEMA 帮你配置，API 正常。"));
+  assert.ok(ui.replies.some((reply) => reply.label === "NEUMA 正在识别项目…"));
+  assert.ok(ui.replies.some((reply) => reply.content === "让 NEUMA 帮你配置，API 正常。"));
   assert.equal(ui.replies.some((reply) => /\bPI\b/.test(reply.content)), false);
 });
 
@@ -145,7 +146,7 @@ test("停止失败后明确确认仅移除记录，取消时保留项目，成�
   const prompts = [];
   const ui = await setup({ remove, confirm: (message) => { prompts.push(message); return true; } });
   await ui.remove("two");
-  assert.match(prompts[1], /停止脚本不存在/); assert.match(prompts[1], /仅从 NUEMA 中移除/);
+  assert.match(prompts[1], /停止脚本不存在/); assert.match(prompts[1], /仅从 NEUMA 中移除/);
   assert.deepEqual(ui.requests.filter((request) => request.path.endsWith("/remove")).map((request) => request.body),
     [{ confirm: true }, { confirm: true, removeOnly: true }]);
   assert.equal(ui.list().projects.length, 1); assert.match(ui.get("project-feedback").textContent, /服务可能仍在运行/);
@@ -178,7 +179,7 @@ test("添加未配好时保持表单并提示失败，已有项目仍可重新�
   assert.equal(ui.navigations.length, 0);
   ui.select("one"); await ui.renders.at(-1).onAction("inspect");
   assert.ok(ui.requests.some((request) => request.path === "/api/projects/one/inspect"));
-  assert.equal(ui.get("project-feedback").textContent, "NUEMA 已更新启动方式，可以打开项目了。");
+  assert.equal(ui.get("project-feedback").textContent, "NEUMA 已更新启动方式，可以打开项目了。");
 });
 
 test("列表重新识别选中对应项目并立即显示进度，不能重复提交，失败仍可重试", async () => {
@@ -188,11 +189,11 @@ test("列表重新识别选中对应项目并立即显示进度，不能重复�
   const pending = ui.list().onInspect("two");
   assert.equal(ui.renders.at(-1).project.id, "two");
   assert.equal(ui.renders.at(-1).project.setup.status, "checking");
-  assert.match(ui.renders.at(-1).project.setup.summary, /NUEMA/);
+  assert.match(ui.renders.at(-1).project.setup.summary, /NEUMA/);
   await ui.list().onInspect("two");
   assert.equal(ui.requests.filter((request) => request.path.endsWith("/inspect")).length, 1);
   assert.equal(ui.requests.at(-1).path, "/api/projects/two/inspect");
-  release({ project: { ...fixture[1], canLaunch: false, setup: { status: "failed", summary: "NUEMA 尚未确认新的启动入口。" } } });
+  release({ project: { ...fixture[1], canLaunch: false, setup: { status: "failed", summary: "NEUMA 尚未确认新的启动入口。" } } });
   await pending;
   assert.equal(ui.list().removeDisabled, false);
   assert.equal(ui.renders.at(-1).project.setup.status, "failed");

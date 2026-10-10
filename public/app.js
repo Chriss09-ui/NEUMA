@@ -1,8 +1,9 @@
-import { agentDisplayDescription, agentDisplayIcon, agentDisplayName, blankSession, clearSession, deleteAgentPreview, deleteRequirement, initializeSession, loadSavedRequirements,
-  loadSavedAgentConversation, loadSession, normalizeAgentRequirement, recentUserMessages, saveAgentPreview, saveRequirement, saveSession, startNewConversation,
+import { agentDisplayDescription, agentDisplayName, blankSession, clearSession, deleteAgentConversationBackups, deleteAgentPreview, deleteRequirement, initializeSession, loadSavedRequirements,
+  loadSavedAgentConversation, loadSession, normalizeAgentRequirement, recentUserMessages, saveAgentConversationBackup, saveRequirement, saveSession, startNewConversation,
   upsertConfirmedRequirement } from "./state.js";
 import { addUserMessage, createReplyView, mountWelcome, readReply, renderUserMessage } from "./chat-ui.js";
 import { agentSourceKey, createAgentRuntime } from "./agent-runtime.js";
+import { renderAgentAvatar } from "./agent-avatar.js";
 
 let browserStorage;
 try { browserStorage = window.localStorage; } catch { browserStorage = null; }
@@ -113,7 +114,7 @@ function renderMessages(scrollToEnd = true) {
   }
   for (const message of session.messages) {
     if (message.role === "user") { messagesEl.append(renderUserMessage(message, inputEl)); continue; }
-    const view = createReplyView("NUEMA");
+    const view = createReplyView("NEUMA");
     view.update({ ...message, status: message.status || "complete" });
     messagesEl.append(view.row);
     if (message === pendingReply) replyView = view;
@@ -122,7 +123,9 @@ function renderMessages(scrollToEnd = true) {
   if (delivered) {
     const needsSave = delivered.dirty || !delivered.persisted;
     const card = element("div", "delivery-card");
-    card.append(element("span", "agent-avatar", agentDisplayIcon(delivered)),
+    const avatar = element("span", "agent-avatar");
+    renderAgentAvatar(avatar, delivered);
+    card.append(avatar,
       element("span", "agent-type", "独立对话入口"), element("strong", "", agentDisplayName(delivered)),
       element("p", "", agentDisplayDescription(delivered)),
       element("p", "muted-note", "需求已确认。进入助手可查看设计与检查结果；通过并生成后即可对话，未通过时会说明原因。"));
@@ -225,7 +228,9 @@ function renderAgents() {
     const name = agentDisplayName(agent);
     const card = element("article", `card agent-card${agent.id === activeAgentId ? " active" : ""}`);
     const top = element("div", "agent-card-top");
-    top.append(element("span", "agent-avatar", agentDisplayIcon(agent)),
+    const avatar = element("span", "agent-avatar");
+    renderAgentAvatar(avatar, agent);
+    top.append(avatar,
       element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "Agent"));
     const state = agent.dirty && agent.persisted ? ["warn", "修改未保存"]
       : agent.persisted ? ["ok", "已保存到 Agent 文件夹"] : agent.localBackup ? ["warn", "仅浏览器备份"] : ["", "仅当前页"];
@@ -237,7 +242,7 @@ function renderAgents() {
     const actions = element("div", "agent-actions");
     actions.append(button("secondary", "进入对话", () => navigate({ page: "agent", agentId: agent.id }),
       `进入 ${name} 的对话`));
-    actions.append(button("ghost-button", "让 NUEMA 迭代", () => openAgent(agent.id), `让 NUEMA 迭代 ${name}`));
+    actions.append(button("ghost-button", "让 NEUMA 迭代", () => openAgent(agent.id), `让 NEUMA 迭代 ${name}`));
     if (agent.dirty || !agent.persisted) {
       actions.append(button("secondary", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
         `保存 ${name} 的需求`));
@@ -285,11 +290,11 @@ async function loadAgentLibrary() {
       if (removedAgentIds.has(backup.id)) continue;
       if (backup.pendingSync) {
         try {
-          const state = await agentApi.getConversation(backup.id);
+          const state = await agentApi.listConversations(backup.id);
           if (state.deleted) {
             removedAgentIds.add(backup.id);
-            const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id);
-            if (!requirementRemoved || !conversationRemoved) failures.push("已删除条目的浏览器备份未能清理");
+            const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id), historyRemoved = deleteAgentConversationBackups(browserStorage, backup.id);
+            if (!requirementRemoved || !conversationRemoved || !historyRemoved) failures.push("已删除条目的浏览器备份未能清理");
             continue;
           }
         } catch (error) { failures.push(error.message || "未同步条目的删除状态尚未确认"); }
@@ -302,8 +307,8 @@ async function loadAgentLibrary() {
         });
         if (imported.deleted) {
           removedAgentIds.add(backup.id);
-          const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id);
-          if (!requirementRemoved || !conversationRemoved) {
+          const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id), historyRemoved = deleteAgentConversationBackups(browserStorage, backup.id);
+          if (!requirementRemoved || !conversationRemoved || !historyRemoved) {
             failures.push("已删除条目的浏览器备份未能清理");
           }
           continue;
@@ -311,21 +316,47 @@ async function loadAgentLibrary() {
         const requirement = normalizeAgentRequirement(imported.requirement);
         if (!requirement || requirement.id !== backup.id) throw new Error("旧需求迁移尚未确认");
         durable.set(backup.id, requirement);
-        const conversation = loadSavedAgentConversation(browserStorage, backup.id);
-        if (conversation?.pendingSync) pending.push(backup.name);
-        else if (conversation) {
-          const saved = await agentApi.saveConversation(backup.id, { ...conversation, importOnly: true });
-          if (saved.deleted) {
-            removedAgentIds.add(backup.id);
-            continue;
-          }
-          if (saved.conversation?.schemaVersion !== 2 || !Array.isArray(saved.conversation.messages)) {
-            throw new Error("旧对话迁移尚未确认");
-          }
-          saveAgentPreview(browserStorage, backup.id, saved.conversation.messages);
-        }
         saveRequirement(browserStorage, requirement);
       } catch (error) { failures.push(error.message || "旧记录未迁移"); }
+    }
+    for (const [id] of durable) {
+      if (removedAgentIds.has(id)) continue;
+      const legacy = loadSavedAgentConversation(browserStorage, id);
+      if (!legacy) continue;
+      const conversationId = legacy.pendingSync ? "legacy-browser-pending" : "legacy-saved";
+      try {
+        const current = await agentApi.getHistoryConversation(id, conversationId);
+        if (current.deleted) {
+          if (!deleteAgentPreview(browserStorage, id)) failures.push("已删除对话的旧浏览器备份未能清理");
+          continue;
+        }
+        if (legacy.pendingSync && !current.conversation) {
+          const disk = await agentApi.getHistoryConversation(id, "legacy-saved");
+          if (disk.conversation && JSON.stringify(disk.conversation.messages) === JSON.stringify(legacy.messages)) {
+            if (!saveAgentConversationBackup(browserStorage, id, disk.conversation)) failures.push("旧对话已迁入文件夹，但浏览器备份未能保存");
+            if (!deleteAgentPreview(browserStorage, id)) failures.push("旧对话已迁入文件夹，但浏览器旧备份未能清理");
+            continue;
+          }
+        }
+        const saved = current.conversation ? current : await agentApi.saveHistoryConversation(id, conversationId, {
+          schemaVersion: 3, messages: legacy.messages, expectedVersion: 0,
+          mutationId: `import-${conversationId}`, importOnly: true,
+        });
+        if (saved.deleted) {
+          if (!deleteAgentPreview(browserStorage, id)) failures.push("已删除对话的旧浏览器备份未能清理");
+          continue;
+        }
+        if (saved.conversation?.schemaVersion !== 3 || saved.conversation.id !== conversationId
+          || !Array.isArray(saved.conversation.messages)) throw new Error("旧对话迁移尚未确认");
+        if (!saveAgentConversationBackup(browserStorage, id, saved.conversation)) {
+          failures.push("旧对话已迁入文件夹，但浏览器备份未能保存");
+        }
+        if (!deleteAgentPreview(browserStorage, id)) failures.push("旧对话已迁入文件夹，但浏览器旧备份未能清理");
+      } catch (error) {
+        if (error.reason === "conversation_deleted") {
+          if (!deleteAgentPreview(browserStorage, id)) failures.push("已删除对话的旧浏览器备份未能清理");
+        } else failures.push(error.message || "旧对话未迁移");
+      }
     }
     const currentItems = new Map(agents.map((item) => [item.id, item]));
     for (const [id, requirement] of durable) {
@@ -341,7 +372,7 @@ async function loadAgentLibrary() {
       .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
     renderAgents();
     if (failures.length) showAgentsError(`部分旧记录尚未迁移到 Agent 文件夹，浏览器备份保留：${failures[0]}`);
-    else if (pending.length) showAgentsError("浏览器保留上次未同步的需求或对话，请打开对应 Agent，再次点击保存。服务器已有版本暂未更新。");
+    else if (pending.length) showAgentsError("浏览器保留上次未同步的需求，请打开对应 Agent，再次点击保存。服务器已有版本暂未更新。");
   } catch (error) {
     showAgentsError(`Agent 文件夹暂时无法读取，浏览器备份保留：${error.message || "服务未响应"}`);
   }
@@ -411,7 +442,8 @@ async function removeAgent(id) {
     showAgentsError(error.message || "智能体未能删除，请重试");
     return;
   } finally { removingAgentIds.delete(id); }
-  const backupRemoved = deleteRequirement(browserStorage, id);
+  const requirementRemoved = deleteRequirement(browserStorage, id), legacyRemoved = deleteAgentPreview(browserStorage, id), historyRemoved = deleteAgentConversationBackups(browserStorage, id);
+  const backupRemoved = requirementRemoved && legacyRemoved && historyRemoved;
   removedAgentIds.add(id);
   agents = agents.filter((item) => item.id !== id);
   profileMap.delete(id);

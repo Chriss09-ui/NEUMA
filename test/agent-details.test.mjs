@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { agentDisplayDescription, agentDisplayName } from "../public/state.js";
 import * as view from "../public/agent-details-view.js";
+import * as avatar from "../public/agent-avatar.js";
 
 const source = (await readFile(new URL("../public/agent-details.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 const settle = () => new Promise(setImmediate);
@@ -27,7 +28,11 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
     constructor(tag = "div") { super(); this.tag = tag; }
     value = ""; textContent = ""; children = []; disabled = false; open = false; attributes = new Map(); dataset = {};
     classes = new Set();
-    classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) };
+    classList = { add: (...names) => names.forEach((name) => this.classes.add(name)),
+      remove: (...names) => names.forEach((name) => this.classes.delete(name)), contains: (name) => this.classes.has(name),
+      toggle: (name, enabled = !this.classes.has(name)) => enabled ? this.classes.add(name) : this.classes.delete(name) };
+    style = { values: new Map(), setProperty(name, value) { this.values.set(name, value); },
+      removeProperty(name) { this.values.delete(name); }, getPropertyValue(name) { return this.values.get(name) ?? ""; } };
     _hidden = false;
     get hidden() { return this._hidden; }
     set hidden(value) { this._hidden = Boolean(value); }
@@ -44,14 +49,23 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
       return animation;
     }
     focus() { document.activeElement = this; }
-    showModal() { this.open = true; }
+    modalOpens = 0;
+    showModal() {
+      assert.equal([...nodes.values()].some((node) => node !== this && node.open), false, "不能嵌套设置与产物弹窗");
+      this.open = true; this.modalOpens++;
+    }
     close() { this.open = false; return this.dispatchEvent({ type: "close" }); }
+    async cancel() {
+      const event = { type: "cancel", defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+      await this.dispatchEvent(event);
+      if (!event.defaultPrevented) await this.close();
+    }
     click() { if (this.disabled) return; if (this.tag === "a") downloads.push({ href: this.href, download: this.download, parent: this.parent }); return this.dispatchEvent({ type: "click" }); }
   }
   const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   document.getElementById = get;
   document.createElement = (tag) => new Element(tag);
-  get("agent-artifacts-body").append(get("agent-files-refresh"), get("agent-file-list"));
+  get("agent-file-dialog").append(get("agent-files-refresh"), get("agent-file-list"), get("agent-file-content"), get("agent-file-close"));
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
   const dispatch = document.dispatchEvent.bind(document);
   document.dispatchEvent = (event) => { emitted.push({ type: event.type, detail: event.detail }); return dispatch(event); };
@@ -78,7 +92,8 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
     requests.push({ method, args });
     return Promise.resolve(callback?.(...args) ?? fallback);
   };
-  const context = vm.createContext({ ...view, agentDisplayName, agentDisplayDescription, document, Event, CustomEvent: Event, Blob,
+  const context = vm.createContext({ ...view, ...avatar, agentDisplayName, agentDisplayDescription, document, Event, CustomEvent: Event, Blob,
+    renderAgentAvatar: (target, agent, options) => avatar.renderAgentAvatar(target, agent, { ...options, document, motion: false }),
     window: { matchMedia: () => motion, localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) } },
     staticArtifactDocument: (content) => `safe-preview:${content}`,
     URL: { createObjectURL: (blob) => { urls.push(blob); return `blob:${urls.length}`; }, revokeObjectURL: (url) => urls.push(url) },
@@ -101,6 +116,7 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
     broadcast: async (id, overrides = {}) => { const detail = runtimeFor(id, overrides); runtimes.set(id, detail); await emit("neuma:agent-runtime-change", detail); await settle(); },
     item: (id = "one") => vm.runInContext(`states.get(${JSON.stringify(id)})`, context),
     openMemory: async () => { await get("agent-panel-toggle").click(); await get("agent-details-memory-tab").click(); await settle(); },
+    openArtifacts: async () => { await get("agent-artifacts-open").click(); await settle(); },
   };
 }
 
@@ -157,6 +173,107 @@ test("资料草稿跨标签保留，切 Agent 后使用各自草稿并忽略后�
   await ui.route("one"); await ui.click("agent-panel-toggle");
   assert.equal(ui.get("agent-profile-name").value, "会议名称草稿");
   assert.equal(ui.get("agent-profile-description").value, "会议简介草稿");
+});
+
+test("头像编辑器具有独立预览与有标签的选择组，内部组合值不出现在可见输入", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="agent-profile-icon" type="hidden"/);
+  assert.match(html, /id="agent-avatar-preview" class="agent-avatar-preview" role="img" aria-label="头像预览"/);
+  assert.match(html, /id="agent-avatar-shapes"[^>]*role="group" aria-labelledby="agent-avatar-shapes-label"/);
+  assert.match(html, /id="agent-avatar-colors"[^>]*role="group" aria-labelledby="agent-avatar-colors-label"/);
+  assert.match(html, /<details class="agent-avatar-custom">.*id="agent-profile-custom-icon" type="text"/);
+  const ui = await setup(); await ui.click("agent-panel-toggle");
+  const shapes = ui.get("agent-avatar-shapes").children, colors = ui.get("agent-avatar-colors").children;
+  assert.equal(shapes.length, 6); assert.equal(colors.length, 8);
+  assert.equal(shapes.every((button) => button.attributes.has("aria-label") && button.attributes.has("aria-pressed")), true);
+  assert.equal(colors.every((button) => button.attributes.has("aria-label") && button.attributes.has("aria-pressed")), true);
+  assert.equal(shapes.every((button) => button.children[0].dataset.avatarKind === "star"), true);
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarKind, "star");
+  assert.equal(ui.get("agent-profile-custom-icon").value, "");
+});
+
+test("造型和配色各自保留另一维，固定组合沿原资料接口保存", async () => {
+  const ui = await setup(); await ui.click("agent-panel-toggle");
+  const automatic = avatar.resolveAgentAvatar(agents.one);
+  const shape = ui.get("agent-avatar-shapes").children.find((button) => button.dataset.shape === "shield");
+  await shape.click();
+  assert.equal(ui.get("agent-profile-icon").value, avatar.avatarIcon({ shape: "shield", color: automatic.color }));
+  const color = ui.get("agent-avatar-colors").children.find((button) => button.dataset.color === "coral");
+  await color.click();
+  const expected = avatar.avatarIcon({ shape: "shield", color: "coral" });
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, expected);
+  assert.equal(shape.attributes.get("aria-pressed"), "true");
+  assert.equal(color.attributes.get("aria-pressed"), "true");
+  assert.equal(ui.get("agent-avatar-shapes").children.every((button) =>
+    button.children[0].dataset.avatarIcon === avatar.avatarIcon({ shape: button.dataset.shape, color: "coral" })), true);
+  await ui.submit("agent-profile-form");
+  const saved = ui.requests.findLast((request) => request.method === "saveProfile");
+  assert.equal(saved.args[0], "one"); assert.equal(saved.args[1].icon, expected);
+  assert.equal(ui.item().profileDirty, false);
+  await ui.click("agent-details-close"); await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, expected);
+});
+
+test("头像草稿跨智能体和设置标签隔离，保存中编辑保留新组合", async () => {
+  const saved = deferred();
+  const ui = await setup({ saveProfile: () => saved.promise }); await ui.click("agent-panel-toggle");
+  await ui.get("agent-avatar-shapes").children.find((button) => button.dataset.shape === "diamond").click();
+  await ui.get("agent-avatar-colors").children.find((button) => button.dataset.color === "purple").click();
+  const submitted = avatar.avatarIcon({ shape: "diamond", color: "purple" });
+  const pending = ui.submit("agent-profile-form");
+  assert.equal(ui.get("agent-profile-save").disabled, true);
+  assert.equal(ui.get("agent-avatar-colors").children.every((button) => !button.disabled), true);
+  await ui.get("agent-avatar-colors").children.find((button) => button.dataset.color === "rose").click();
+  const current = avatar.avatarIcon({ shape: "diamond", color: "rose" });
+  await ui.click("agent-details-memory-tab"); await ui.click("agent-details-profile-tab");
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, current);
+  await ui.route("two"); await ui.click("agent-panel-toggle");
+  await ui.get("agent-avatar-shapes").children.find((button) => button.dataset.shape === "trapezoid").click();
+  await ui.get("agent-avatar-colors").children.find((button) => button.dataset.color === "orange").click();
+  const other = avatar.avatarIcon({ shape: "trapezoid", color: "orange" });
+  saved.resolve({ profile: { name: "会议助手", description: "整理会议", icon: submitted } }); await pending;
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, other);
+  await ui.route("one"); await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-profile-icon").value, current);
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, current);
+  assert.equal(ui.item("one").profileDirty, true); assert.equal(ui.item("two").profileDirty, true);
+});
+
+test("已有文字和 Emoji 可保留或切换小星核，重置恢复 ID 固定默认组合", async () => {
+  const profile = { name: "会议助手", description: "整理会议", icon: "📚" };
+  const ui = await setup({ initialRuntime: { one: { agent: { ...agents.one, profile } } } });
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarKind, "text");
+  assert.equal(ui.get("agent-profile-custom-icon").value, "📚");
+  assert.equal(ui.get("agent-avatar-shapes").children.every((button) => button.attributes.get("aria-pressed") === "false"), true);
+  const automatic = avatar.resolveAgentAvatar(agents.one);
+  await ui.get("agent-avatar-colors").children.find((button) => button.dataset.color === "blue").click();
+  assert.equal(ui.get("agent-profile-icon").value, avatar.avatarIcon({ shape: automatic.shape, color: "blue" }));
+  assert.equal(ui.get("agent-profile-custom-icon").value, "");
+  await ui.input("agent-profile-custom-icon", "日报");
+  assert.equal(ui.get("agent-profile-icon").value, "日报");
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarKind, "text");
+  await ui.click("agent-avatar-reset");
+  assert.equal(ui.get("agent-profile-icon").value, "");
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, automatic.icon);
+  await ui.input("agent-profile-name", "新的展示名称");
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarIcon, automatic.icon);
+  await ui.submit("agent-profile-form");
+  assert.equal(ui.requests.findLast((request) => request.method === "saveProfile").args[1].icon, "");
+  await ui.get("agent-icon-options").children[0].click();
+  assert.equal(ui.get("agent-profile-custom-icon").value, view.agentIconChoices[0][0]);
+  assert.equal(ui.get("agent-avatar-preview").dataset.avatarKind, "text");
+});
+
+test("未生成智能体的头像控件沿原资料权限全部禁用", async () => {
+  const ui = await setup({ initialRuntime: { one: { definition: null, ready: false, status: "missing" } } });
+  await ui.click("agent-panel-toggle");
+  for (const id of ["agent-profile-custom-icon", "agent-avatar-reset", "agent-profile-save"])
+    assert.equal(ui.get(id).disabled, true);
+  for (const id of ["agent-avatar-shapes", "agent-avatar-colors", "agent-icon-options"])
+    assert.equal(ui.get(id).children.every((button) => button.disabled), true);
+  await ui.get("agent-avatar-shapes").children[0].click();
+  assert.equal(ui.item().profileDirty, false);
 });
 
 test("资料保存中继续编辑不丢新修改，失败保留草稿且能够重试", async () => {
@@ -229,21 +346,21 @@ test("文件与列表迟到响应不覆盖新选择或其他 Agent 的预览", a
   const ui = await setup({ files: (id) => id === "two" ? { files: [{ path: "two.md", size: 20 }] }
     : ++lists === 1 ? firstList.promise : { files: [{ path: "new.md", size: 20 }, { path: "second.md", size: 10 }] },
     file: (_id, path) => ++reads === 1 ? firstFile.promise : { path, content: "新的选择" } });
-  await ui.click("agent-files-refresh");
+  await ui.openArtifacts(); await ui.click("agent-files-refresh");
   firstList.resolve({ files: [{ path: "old.md", size: 10 }] }); await settle();
   assert.equal(ui.get("agent-file-list").children[0].children[0].textContent, "new.md");
   await ui.get("agent-file-list").children[0].click(); await settle();
   await ui.get("agent-file-list").children[1].click(); await settle();
   firstFile.resolve({ path: "new.md", content: "迟到旧文件" }); await settle();
   assert.equal(ui.get("agent-file-name").textContent, "second.md");
-  await ui.route("two"); await settle(); await ui.get("agent-file-list").children[0].click(); await settle();
+  await ui.route("two"); await settle(); await ui.openArtifacts();
   assert.equal(ui.get("agent-file-name").textContent, "two.md");
 });
 
 test("选中文件消失时清空预览并拒绝迟到文件，截断内容不能下载", async () => {
   const pendingFile = deferred(); let available = true;
   const ui = await setup({ files: () => ({ files: available ? [{ path: "removed.txt", size: 20 }] : [] }), file: () => pendingFile.promise });
-  await ui.get("agent-file-list").children[0].click(); await settle();
+  await ui.openArtifacts();
   available = false; await ui.click("agent-files-refresh");
   pendingFile.resolve({ path: "removed.txt", content: "迟到被移除文件" }); await settle();
   assert.equal(ui.item().file, null);
@@ -251,7 +368,7 @@ test("选中文件消失时清空预览并拒绝迟到文件，截断内容不�
   assert.equal(ui.get("agent-file-download").hidden, true);
   const truncated = await setup({ files: () => ({ files: [{ path: "large.html", size: 90_000 }] }),
     file: () => ({ path: "large.html", content: "部分内容", truncated: true }) });
-  await truncated.get("agent-file-list").children[0].click(); await settle();
+  await truncated.openArtifacts();
   assert.equal(truncated.get("agent-file-content").children[0].tag, "pre");
   assert.equal(truncated.get("agent-file-download").hidden, true);
   await truncated.click("agent-file-download");
@@ -261,7 +378,7 @@ test("选中文件消失时清空预览并拒绝迟到文件，截断内容不�
 test("完整网页使用隔离预览，下载文件后释放 URL", async () => {
   const ui = await setup({ files: () => ({ files: [{ path: "报告/page.html", size: 50 }] }),
     file: () => ({ path: "报告/page.html", content: "<p>成果</p>", truncated: false }) });
-  await ui.get("agent-file-list").children[0].click(); await settle();
+  await ui.openArtifacts();
   const frame = ui.get("agent-file-content").children[0];
   assert.equal(frame.tag, "iframe");
   assert.equal(frame.attributes.get("sandbox"), "");
@@ -273,23 +390,76 @@ test("完整网页使用隔离预览，下载文件后释放 URL", async () => {
   assert.equal(ui.urls.at(-1), "blob:1");
 });
 
-test("历史产物栏默认展开，折叠返还焦点并跨 Agent 与刷新保存全局偏好", async () => {
-  const ui = await setup({ files: () => ({ files: [{ path: "成果.md", size: 20 }] }) });
-  assert.equal(ui.get("agent-artifacts-body").inert, false);
-  assert.equal(ui.get("agent-artifacts-toggle").attributes.get("aria-expanded"), "true");
-  ui.get("agent-file-list").children[0].focus();
-  await ui.click("agent-artifacts-toggle");
-  assert.equal(ui.get("agent-artifacts-body").inert, true);
-  assert.equal(ui.get("agent-workspace").classes.has("artifacts-collapsed"), true);
-  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-toggle"));
-  assert.equal(ui.stored.get("neuma-agent-artifacts-collapsed"), "true");
-  await ui.route("two"); await settle();
-  assert.equal(ui.get("agent-artifacts-body").inert, true);
-  const reopened = await setup({ stored: ui.stored });
-  assert.equal(reopened.get("agent-artifacts-body").inert, true);
-  await reopened.click("agent-artifacts-toggle");
-  assert.equal(reopened.get("agent-artifacts-body").inert, false);
-  assert.equal(reopened.stored.get("neuma-agent-artifacts-collapsed"), "false");
+test("产物从顶栏打开，默认预览最新文件，同一弹窗切换并保留各 Agent 的选择", async () => {
+  const ui = await setup({ files: (id) => ({ files: id === "one" ? [
+    { path: "旧产物.md", size: 20, updatedAt: "2026-10-08T10:00:00Z" },
+    { path: "最新产物.md", size: 20, updatedAt: "2026-10-09T10:00:00Z" },
+  ] : [{ path: "周报.md", size: 20 }] }) });
+  assert.equal(ui.get("agent-file-dialog").open, false);
+  assert.equal(ui.get("agent-artifacts-count").textContent, "2");
+  assert.equal(ui.requests.some((request) => request.method === "readFile"), false);
+  await ui.openArtifacts();
+  assert.equal(ui.get("agent-file-name").textContent, "最新产物.md");
+  await ui.get("agent-file-list").children[1].click(); await settle();
+  assert.equal(ui.get("agent-file-name").textContent, "旧产物.md");
+  assert.equal(ui.get("agent-file-dialog").modalOpens, 1);
+  await ui.click("agent-file-close"); await ui.openArtifacts();
+  assert.equal(ui.get("agent-file-name").textContent, "旧产物.md");
+  await ui.route("two"); await ui.openArtifacts();
+  assert.equal(ui.get("agent-file-name").textContent, "周报.md");
+  await ui.route("one"); await ui.openArtifacts();
+  assert.equal(ui.get("agent-file-name").textContent, "旧产物.md");
+  assert.equal(ui.stored.has("neuma-agent-artifacts-collapsed"), false);
+});
+
+test("打开时文件列表仍在读取，返回后在同一弹窗预览最新文件", async () => {
+  const pending = deferred(), ui = await setup({ files: () => pending.promise });
+  await ui.openArtifacts();
+  assert.equal(ui.get("agent-file-dialog").open, true);
+  assert.equal(ui.requests.some((request) => request.method === "readFile"), false);
+  pending.resolve({ files: [
+    { path: "旧.md", size: 20, updatedAt: "2026-10-08T10:00:00Z" },
+    { path: "新.md", size: 20, updatedAt: "2026-10-09T10:00:00Z" },
+  ] }); await settle();
+  assert.equal(ui.get("agent-file-name").textContent, "新.md");
+  assert.equal(ui.get("agent-file-dialog").modalOpens, 1);
+});
+
+test("空产物库可关闭，刷新失败保留旧列表和预览，文件读取失败可重试", async () => {
+  const empty = await setup(); await empty.openArtifacts();
+  assert.equal(empty.get("agent-file-list").children.length, 0);
+  assert.match(empty.get("agent-files-feedback").textContent, /还没有保存的产物/);
+  assert.equal(empty.get("agent-file-download").hidden, true);
+  await empty.click("agent-file-close");
+  assert.equal(empty.document.activeElement, empty.get("agent-artifacts-open"));
+
+  let listFails = false, fileFails = false;
+  const ui = await setup({ files: () => listFails ? Promise.reject(new Error("目录暂时不可读")) : { files: [{ path: "成果.md", size: 20 }] },
+    file: (_id, path) => fileFails ? Promise.reject(new Error("文件暂时不可读")) : { path, content: "已生成的成果" } });
+  await ui.openArtifacts();
+  const selected = ui.get("agent-file-list").children[0]; selected.focus();
+  listFails = true; await ui.click("agent-files-refresh");
+  assert.equal(ui.get("agent-file-list").children.length, 1);
+  assert.match(ui.get("agent-files-feedback").textContent, /目录暂时不可读.*仍显示上次读取的列表/);
+  assert.equal(ui.get("agent-file-content").children[0].textContent, "已生成的成果");
+  assert.equal(ui.document.activeElement.dataset.path, "成果.md");
+  fileFails = true; await ui.get("agent-file-list").children[0].click(); await settle();
+  assert.match(ui.get("agent-file-info").textContent, /文件暂时不可读/);
+  assert.equal(ui.get("agent-file-download").hidden, true);
+  fileFails = false; await ui.get("agent-file-list").children[0].click(); await settle();
+  assert.equal(ui.get("agent-file-content").children[0].textContent, "已生成的成果");
+});
+
+test("产物列表位于独立文件库弹窗，历史对话栏不再承载文件", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const start = html.indexOf('<dialog id="agent-file-dialog"');
+  const library = html.slice(start, html.indexOf("</dialog>", start));
+  assert.match(library, /aria-labelledby="agent-artifacts-title"/);
+  for (const id of ["agent-file-list", "agent-files-refresh", "agent-file-content", "agent-file-download"])
+    assert.ok(library.includes(`id="${id}"`));
+  assert.match(html, /id="agent-history-sidebar"/);
+  assert.match(html, /id="agent-artifacts-open"[^>]*aria-controls="agent-file-dialog"/);
+  assert.doesNotMatch(html, /id="agent-artifacts-sidebar"|id="agent-save-chat"/);
 });
 
 test("进入已生成 Agent 自动读取文件，首次生成和任务结束刷新，资料变化不重复读取", async () => {
@@ -309,33 +479,53 @@ test("进入已生成 Agent 自动读取文件，首次生成和任务结束刷�
   assert.equal(ui.get("agent-panel").open, false);
 });
 
-test("文件点击打开独立预览，关闭回到当前文件按钮或已折叠的可见开关", async () => {
+test("产物关闭和原生 Esc 取消均返回顶栏按钮，设置与文件库不嵌套", async () => {
   const ui = await setup({ files: () => ({ files: [{ path: "成果.md", size: 20 }] }) });
-  await ui.get("agent-file-list").children[0].click(); await settle();
+  await ui.click("agent-panel-toggle"); await ui.openArtifacts();
   assert.equal(ui.get("agent-file-dialog").open, true);
   assert.equal(ui.get("agent-panel").open, false);
   await ui.click("agent-file-close");
-  assert.equal(ui.document.activeElement.dataset.path, "成果.md");
-  await ui.get("agent-file-list").children[0].click(); await settle();
-  await ui.click("agent-artifacts-toggle"); await ui.click("agent-file-close");
-  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-toggle"));
+  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
+  await ui.openArtifacts(); await ui.get("agent-file-dialog").cancel();
+  assert.equal(ui.get("agent-file-dialog").open, false);
+  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
+  await ui.openArtifacts(); await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-file-dialog").open, false);
+  assert.equal(ui.get("agent-panel").open, true);
 });
 
 test("切 Agent 关闭独立预览不抢新页面焦点，迟到读取不覆盖新 Agent 文件", async () => {
   const firstFile = deferred();
   const ui = await setup({ files: (id) => ({ files: [{ path: `${id}.md`, size: 20 }] }),
     file: (id, path) => id === "one" ? firstFile.promise : { path, content: "周报内容" } });
-  await ui.get("agent-file-list").children[0].click(); await settle();
+  await ui.openArtifacts();
   const composer = ui.get("agent-message"); composer.focus();
   await ui.route("two"); await settle();
   assert.equal(ui.get("agent-file-dialog").open, false);
   assert.equal(ui.document.activeElement, composer);
-  await ui.get("agent-file-list").children[0].click(); await settle();
+  await ui.openArtifacts();
   firstFile.resolve({ path: "one.md", content: "迟到会议内容" }); await settle();
   assert.equal(ui.get("agent-file-name").textContent, "two.md");
   assert.equal(ui.get("agent-file-content").children[0].textContent, "周报内容");
   await ui.click("agent-file-close"); await ui.click("agent-panel-toggle");
   composer.focus(); await ui.route("one");
+  assert.equal(ui.document.activeElement, composer);
+});
+
+test("删除 Agent 或离开页面关闭产物库，迟到文件不恢复已删除状态", async () => {
+  const pending = deferred(), ui = await setup({ files: () => ({ files: [{ path: "成果.md", size: 20 }] }), file: () => pending.promise });
+  await ui.openArtifacts();
+  const composer = ui.get("agent-message"); composer.focus();
+  await ui.emit("neuma:agent-removed", { id: "one" });
+  assert.equal(ui.get("agent-file-dialog").open, false);
+  assert.equal(ui.document.activeElement, composer);
+  pending.resolve({ path: "成果.md", content: "迟到文件" }); await settle();
+  await ui.click("agent-file-download");
+  assert.equal(ui.item(), undefined);
+  assert.equal(ui.downloads.length, 0);
+  await ui.route("two"); await ui.openArtifacts();
+  composer.focus(); await ui.route(null);
+  assert.equal(ui.get("agent-file-dialog").open, false);
   assert.equal(ui.document.activeElement, composer);
 });
 

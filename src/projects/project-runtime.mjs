@@ -297,7 +297,7 @@ export function projectRuntimeSnapshot(projects, runs, snapshot) {
     const projectPorts = unique(rows.filter((row) => row.projects.some((item) => item.id === project.id)).map((row) => row.port)
       .concat(own?.serverPort ? [own.serverPort] : []));
     const unknown = !snapshot.complete || uncertain.has(project.id) || project.kind === "desktop" || ["starting", "running", "external"].includes(runs.get(project.id)?.status);
-    const runtime = own ? { state: "running", source: "nuema", reason: "由 NUEMA 启动的项目进程仍在运行。" }
+    const runtime = own ? { state: "running", source: "nuema", reason: "由 NEUMA 启动的项目进程仍在运行。" }
       : pids.length ? { state: "running", source: runs.get(project.id)?.ownsService ? "nuema" : "external", reason: "发现工作目录属于此项目的运行进程。" }
       : unknown ? { state: "unknown", source: "none", reason: project.kind === "desktop" ? "打开过桌面应用，但尚无足够进程信息确认当前状态。" : "当前进程信息不足，无法确认项目是否已经停止。" }
       : { state: "stopped", source: "none", reason: "本次检查未发现属于此项目的运行进程。" };
