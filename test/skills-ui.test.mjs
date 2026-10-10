@@ -36,7 +36,7 @@ async function setup({ onRequest, initialSkills = [fixture("one"), fixture("two"
     replaceChildren(...children) { this._text = ""; this.children = [...children]; }
     setAttribute(key, value) { this.attributes.set(key, String(value)); }
     getAttribute(key) { return this.attributes.get(key) ?? null; }
-    focus() { document.activeElement = this; }
+    focus() { if (!this.disabled) document.activeElement = this; }
     async click() { if (!this.disabled) await this.dispatchEvent({ type: "click" }); }
     showModal() { this.open = true; document.activeElement = this; }
     close() { this.open = false; void this.dispatchEvent({ type: "close" }); }
@@ -89,6 +89,65 @@ async function setup({ onRequest, initialSkills = [fixture("one"), fixture("two"
   return { get, requests, document, window, route, click, input, submit, select };
 }
 
+function assertEditing(ui, editing, canEdit = true) {
+  assert.equal(ui.get("skills-editor").readOnly, !editing);
+  assert.equal(ui.get("skills-edit").hidden, !canEdit || editing);
+  assert.equal(ui.get("skills-save").hidden, !editing);
+  assert.equal(ui.get("skills-edit-cancel").hidden, !editing);
+}
+
+test("可写技能默认查看，点击编辑才开放输入，未修改取消或切换后恢复查看", async () => {
+  const ui = await setup(); await ui.route("skills"); await ui.select("one");
+  assertEditing(ui, false);
+  await ui.input("skills-editor", "查看模式的伪造输入"); await ui.click("skills-save");
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/save")), false);
+  let prevented = false;
+  await ui.window.dispatchEvent({ type: "beforeunload", preventDefault() { prevented = true; } });
+  assert.equal(prevented, false);
+  await ui.click("skills-edit"); assertEditing(ui, true);
+  assert.equal(ui.get("skills-editor").value, fixture("one").content);
+  assert.equal(ui.document.activeElement, ui.get("skills-editor"));
+  assert.equal(ui.get("skills-save").disabled, true);
+  await ui.click("skills-edit-cancel"); assertEditing(ui, false);
+  assert.equal(ui.document.activeElement, ui.get("skills-edit"));
+  assert.equal(ui.get("skills-unsaved-dialog").open, false);
+  await ui.click("skills-edit"); await ui.select("two"); assertEditing(ui, false);
+  assert.equal(ui.get("skills-editor").value, fixture("two").content);
+});
+
+test("保存编辑成功后回到查看，后续修改仍需再次点击编辑", async () => {
+  const ui = await setup(); await ui.route("skills"); await ui.select("one");
+  await ui.click("skills-edit"); await ui.input("skills-editor", "已保存的说明");
+  assert.equal(ui.get("skills-save").disabled, false);
+  await ui.click("skills-save"); assertEditing(ui, false);
+  assert.equal(ui.document.activeElement, ui.get("skills-edit"));
+  const saves = ui.requests.filter((request) => request.path.endsWith("/save"));
+  assert.deepEqual(saves[0].body, { content: "已保存的说明", revision: "revision-one" });
+  assert.equal(ui.get("skills-editor").value, "已保存的说明");
+  await ui.input("skills-editor", "查看模式不能继续修改"); await ui.click("skills-save");
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/save")).length, 1);
+  await ui.click("skills-edit"); assertEditing(ui, true);
+  assert.equal(ui.get("skills-editor").value, "已保存的说明");
+  assert.equal(ui.get("skills-save").disabled, true);
+});
+
+test("取消有修改的编辑先询问，取消保留草稿，放弃或保存后退出编辑", async () => {
+  const ui = await setup(); await ui.route("skills"); await ui.select("one"); await ui.click("skills-edit");
+  await ui.input("skills-editor", "需要确认的修改"); await ui.click("skills-edit-cancel");
+  assert.equal(ui.get("skills-unsaved-dialog").open, true); assertEditing(ui, true);
+  await ui.click("skills-unsaved-cancel");
+  assert.equal(ui.get("skills-unsaved-dialog").open, false); assertEditing(ui, true);
+  assert.equal(ui.get("skills-editor").value, "需要确认的修改");
+  await ui.click("skills-edit-cancel"); await ui.click("skills-unsaved-discard");
+  assertEditing(ui, false); assert.equal(ui.get("skills-editor").value, fixture("one").content);
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/save")), false);
+  await ui.click("skills-edit"); await ui.input("skills-editor", "退出前保存的修改");
+  await ui.click("skills-edit-cancel"); await ui.click("skills-unsaved-save");
+  assertEditing(ui, false); assert.equal(ui.get("skills-unsaved-dialog").open, false);
+  assert.equal(ui.get("skills-editor").value, "退出前保存的修改");
+  assert.equal(ui.requests.find((request) => request.path.endsWith("/save")).body.content, "退出前保存的修改");
+});
+
 test("技能页在进入时读取，重复路由共享请求，搜索与来源筛选不改详情", async () => {
   const pending = deferred(), ui = await setup({ onRequest: ({ path }) => path === "/api/skills" ? pending.promise : undefined });
   assert.equal(ui.requests.length, 0);
@@ -104,17 +163,21 @@ test("技能页在进入时读取，重复路由共享请求，搜索与来源�
 
 test("未保存草稿跨页保留，切换技能有取消、放弃和保存三种选择", async () => {
   const ui = await setup(); await ui.route("skills"); await ui.select("one");
+  await ui.click("skills-edit");
   await ui.input("skills-editor", "本机未保存草稿"); await ui.route("chat"); await ui.route("skills");
   assert.equal(ui.get("skills-editor").value, "本机未保存草稿");
+  assertEditing(ui, true);
   assert.equal(ui.requests.filter((request) => request.path === "/api/skills").length, 1);
   await ui.select("two"); assert.equal(ui.get("skills-unsaved-dialog").open, true);
   await ui.click("skills-unsaved-cancel"); assert.equal(ui.get("skills-detail-name").textContent, "技能 one");
   await ui.select("two"); await ui.click("skills-unsaved-save");
   assert.equal(ui.requests.find((request) => request.path.endsWith("/save")).body.content, "本机未保存草稿");
   assert.equal(ui.get("skills-detail-name").textContent, "技能 two");
+  assertEditing(ui, false); await ui.click("skills-edit");
   await ui.input("skills-editor", "丢弃这条"); await ui.select("one"); await ui.click("skills-unsaved-discard");
   assert.equal(ui.get("skills-detail-name").textContent, "技能 one");
   assert.equal(ui.get("skills-editor").value, "本机未保存草稿");
+  assertEditing(ui, false);
 });
 
 test("保存失败保留草稿并阻止切换，关闭浏览器仅在有草稿时提示", async () => {
@@ -122,10 +185,23 @@ test("保存失败保留草稿并阻止切换，关闭浏览器仅在有草稿�
   await ui.route("skills"); await ui.select("one");
   let prevented = false;
   await ui.window.dispatchEvent({ type: "beforeunload", preventDefault() { prevented = true; } }); assert.equal(prevented, false);
+  await ui.click("skills-edit");
   await ui.input("skills-editor", "仍需保存"); await ui.select("two"); await ui.click("skills-unsaved-save");
   assert.equal(ui.get("skills-detail-name").textContent, "技能 one"); assert.equal(ui.get("skills-editor").value, "仍需保存");
   assert.match(ui.get("skills-unsaved-error").textContent, /磁盘不可写/);
+  assertEditing(ui, true);
   await ui.window.dispatchEvent({ type: "beforeunload", preventDefault() { prevented = true; } }); assert.equal(prevented, true);
+});
+
+test("取消编辑时保存失败仍保留编辑模式和草稿", async () => {
+  const ui = await setup({ onRequest: ({ path }) => path.endsWith("/save") ? Response.json({ error: "磁盘不可写" }, { status: 500 }) : undefined });
+  await ui.route("skills"); await ui.select("one"); await ui.click("skills-edit"); await ui.input("skills-editor", "保留待重试内容");
+  await ui.click("skills-edit-cancel"); await ui.click("skills-unsaved-save");
+  assertEditing(ui, true); assert.equal(ui.get("skills-unsaved-dialog").open, true);
+  assert.equal(ui.get("skills-editor").value, "保留待重试内容");
+  assert.match(ui.get("skills-unsaved-error").textContent, /磁盘不可写/);
+  await ui.click("skills-unsaved-cancel"); assertEditing(ui, true);
+  assert.equal(ui.get("skills-save").disabled, false);
 });
 
 test("迟到详情不能覆盖新选择，正文以原文编辑且不解释 HTML", async () => {
@@ -134,6 +210,7 @@ test("迟到详情不能覆盖新选择，正文以原文编辑且不解释 HTML
   await ui.route("skills"); await ui.select("one"); await ui.select("two");
   pending.resolve(fixture("one")); await settle();
   assert.equal(ui.get("skills-detail-name").textContent, "技能 two"); assert.equal(ui.get("skills-editor").value, content);
+  assertEditing(ui, false);
   assert.equal(ui.window.unwanted, undefined); assert.equal(ui.get("skills-editor").children.length, 0);
 });
 
@@ -143,13 +220,41 @@ test("外部更新在重扫与保存时保留草稿，冲突后只能显式重�
     if (path === "/api/skills/one") return ++detailReads === 1 ? fixture("one") : fixture("one", { content: "磁盘的新版本", revision: "new-disk" });
     if (path.endsWith("/save")) return Response.json({ error: "文件已更新", code: "SKILL_CONFLICT" }, { status: 409 });
   } });
-  await ui.route("skills"); await ui.select("one"); await ui.input("skills-editor", "保留我的编辑"); await ui.click("skills-save");
+  await ui.route("skills"); await ui.select("one"); await ui.click("skills-edit"); await ui.input("skills-editor", "保留我的编辑"); await ui.click("skills-save");
   assert.equal(ui.get("skills-editor").value, "保留我的编辑"); assert.equal(ui.get("skills-conflict").hidden, false);
+  assertEditing(ui, true);
   assert.equal(ui.get("skills-save").disabled, true);
   await ui.click("skills-conflict-view"); assert.equal(ui.get("skills-disk-content").textContent, "磁盘的新版本");
   await ui.click("skills-conflict-reload"); assert.equal(ui.get("skills-editor").value, "磁盘的新版本");
+  assertEditing(ui, false); await ui.click("skills-edit");
   await ui.input("skills-editor", "再编辑"); await ui.click("skills-refresh");
   assert.equal(ui.get("skills-editor").value, "再编辑");
+  assertEditing(ui, true);
+});
+
+test("重扫同一技能保留编辑模式，未修改时更新正文，已修改时保留草稿和冲突", async () => {
+  let detailReads = 0;
+  const ui = await setup({ onRequest: ({ path }) => path === "/api/skills/one"
+    ? fixture("one", { content: `磁盘版本 ${++detailReads}`, revision: `disk-${detailReads}` }) : undefined });
+  await ui.route("skills"); await ui.select("one"); await ui.click("skills-edit"); await ui.click("skills-refresh");
+  assertEditing(ui, true); assert.equal(ui.get("skills-editor").value, "磁盘版本 2");
+  assert.equal(ui.get("skills-save").disabled, true);
+  await ui.input("skills-editor", "重扫不能覆盖的草稿"); await ui.click("skills-refresh");
+  assertEditing(ui, true); assert.equal(ui.get("skills-editor").value, "重扫不能覆盖的草稿");
+  assert.equal(ui.get("skills-conflict").hidden, false); assert.equal(ui.get("skills-save").disabled, true);
+});
+
+test("冲突后重新读取失败不退出编辑或丢弃草稿", async () => {
+  let detailReads = 0;
+  const ui = await setup({ onRequest: ({ path }) => {
+    if (path === "/api/skills/one") return ++detailReads === 1 ? fixture("one") : Response.json({ error: "文件暂不可读取" }, { status: 500 });
+    if (path.endsWith("/save")) return Response.json({ error: "文件已更新", code: "SKILL_CONFLICT" }, { status: 409 });
+  } });
+  await ui.route("skills"); await ui.select("one"); await ui.click("skills-edit"); await ui.input("skills-editor", "等待磁盘恢复的草稿");
+  await ui.click("skills-save"); await ui.click("skills-conflict-reload");
+  assertEditing(ui, true); assert.equal(ui.get("skills-editor").value, "等待磁盘恢复的草稿");
+  assert.equal(ui.get("skills-conflict").hidden, false); assert.equal(ui.get("skills-save").disabled, true);
+  assert.match(ui.get("skills-error").textContent, /暂不可读取/);
 });
 
 test("扫描失败保留已有列表，局部读取诊断和空状态可见", async () => {
@@ -179,6 +284,11 @@ test("只读技能隐藏保存和实体回收，列出共享路径和附带资�
   const locked = fixture("one", { readOnly: true, canEdit: false, canTrash: false, readOnlyReason: "插件缓存只读", content: "只读正文" });
   const ui = await setup({ initialSkills: [locked] }); await ui.route("skills"); await ui.select("one");
   assert.equal(ui.get("skills-editor").readOnly, true); assert.equal(ui.get("skills-save").hidden, true); assert.equal(ui.get("skills-delete").hidden, true);
+  assertEditing(ui, false, false);
+  await ui.click("skills-edit"); await ui.input("skills-editor", "不能编辑的内容"); await ui.click("skills-save");
+  assertEditing(ui, false, false); assert.equal(ui.requests.some((request) => request.path.endsWith("/save")), false);
+  let prevented = false;
+  await ui.window.dispatchEvent({ type: "beforeunload", preventDefault() { prevented = true; } }); assert.equal(prevented, false);
   assert.match(ui.get("skills-shared-note").textContent, /插件缓存只读/); assert.match(ui.get("skills-files").textContent, /references\/help.md/);
 });
 

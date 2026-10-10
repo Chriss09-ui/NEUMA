@@ -116,3 +116,111 @@ export function renderSkillTrash({ container, entries, busy, onRestore }) {
   }
   if (!entries.length) container.append(skillNode("p", "empty-state", "回收站是空的。回收的技能可以在这里恢复。"));
 }
+
+export function initSkillSplitter({ layout, handle, windowRef = window, storage } = {}) {
+  const noop = () => {};
+  if (!layout?.getBoundingClientRect || !handle) return { refresh: noop, cancel: noop, dispose: noop };
+  const key = "neuma-skills-list-width", defaultWidth = 300;
+  let preferredWidth = defaultWidth, renderedWidth = defaultWidth, limits = null, dragging = null, pointerY = null, disposed = false;
+  try {
+    storage ??= windowRef.localStorage;
+    const stored = Number(storage?.getItem(key));
+    if (Number.isFinite(stored) && stored > 0) preferredWidth = Math.min(640, Math.round(stored));
+  } catch { /* Width adjustment remains available when browser storage is blocked. */ }
+  const clamp = (width) => Math.min(limits.max, Math.max(limits.min, width));
+  const persist = () => { try { storage?.setItem(key, String(preferredWidth)); } catch { /* Keep the current layout in memory. */ } };
+  const placeGrip = (clientY) => {
+    if (disposed || !Number.isFinite(clientY)) return;
+    const { top, height, width } = layout.getBoundingClientRect();
+    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0 || !Number.isFinite(width) || width <= 0) return;
+    const inset = Math.min(28, height / 2);
+    const y = Math.min(height - inset, Math.max(inset, clientY - top));
+    layout.style.setProperty("--skills-grip-y", `${Math.round(y)}px`);
+  };
+  const centerGrip = () => {
+    const { top, height, width } = layout.getBoundingClientRect();
+    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0 || !Number.isFinite(width) || width <= 0) return;
+    const viewportBottom = Number.isFinite(windowRef.innerHeight) ? windowRef.innerHeight : top + height;
+    const start = Math.max(0, top), end = Math.min(viewportBottom, top + height);
+    if (end > start) placeGrip((start + end) / 2);
+  };
+  const refreshGrip = () => { if (pointerY === null) centerGrip(); else placeGrip(pointerY); };
+  const followPointer = (event) => {
+    if (disposed || dragging || event.isPrimary === false || !Number.isFinite(event.clientY)) return;
+    pointerY = event.clientY; placeGrip(pointerY);
+  };
+  const leave = () => { if (!dragging) pointerY = null; };
+  const focus = () => { if (!dragging && pointerY === null) centerGrip(); };
+  const apply = () => {
+    if (!limits) return;
+    renderedWidth = clamp(preferredWidth);
+    layout.style.setProperty("--skills-list-width", `${renderedWidth}px`);
+    layout.style.setProperty("--skills-divider-x", `${renderedWidth + limits.gap / 2}px`);
+    handle.setAttribute("aria-valuemin", String(limits.min));
+    handle.setAttribute("aria-valuemax", String(limits.max));
+    handle.setAttribute("aria-valuenow", String(renderedWidth));
+    handle.setAttribute("aria-valuetext", `技能列表 ${renderedWidth} 像素`);
+  };
+  const refresh = () => {
+    if (disposed) return;
+    const width = layout.getBoundingClientRect().width;
+    if (!Number.isFinite(width) || width <= 0) return;
+    const gap = Number.parseFloat(windowRef.getComputedStyle?.(layout)?.columnGap) || 24;
+    const max = Math.max(1, Math.min(640, Math.floor(width - gap - 420)));
+    limits = { min: Math.min(220, max), max, gap };
+    apply(); refreshGrip();
+  };
+  const finish = (commit = false) => {
+    if (!dragging) return;
+    const previous = dragging; dragging = null;
+    if (!commit) preferredWidth = previous.preferredWidth;
+    layout.classList.remove("is-resizing");
+    try { if (handle.hasPointerCapture?.(previous.id)) handle.releasePointerCapture(previous.id); } catch { /* The browser may have released capture already. */ }
+    apply();
+    if (commit) persist();
+  };
+  const down = (event) => {
+    if (disposed || dragging || event.button !== 0 || event.isPrimary === false) return;
+    refresh(); if (!limits) return;
+    followPointer(event);
+    event.preventDefault(); handle.focus({ preventScroll: true });
+    dragging = { id: event.pointerId, x: event.clientX, renderedWidth, preferredWidth };
+    layout.classList.add("is-resizing");
+    try { handle.setPointerCapture?.(event.pointerId); } catch { /* Window listeners still complete or cancel the drag. */ }
+  };
+  const move = (event) => {
+    if (!dragging || event.pointerId !== dragging.id) return;
+    event.preventDefault();
+    if (Number.isFinite(event.clientY)) { pointerY = event.clientY; placeGrip(pointerY); }
+    preferredWidth = clamp(Math.round(dragging.renderedWidth + event.clientX - dragging.x)); apply();
+  };
+  const up = (event) => { if (dragging && event.pointerId === dragging.id) finish(true); };
+  const cancelPointer = (event) => { if (dragging && event.pointerId === dragging.id) finish(false); };
+  const cancel = () => finish(false);
+  const keyboard = (event) => {
+    if (disposed || dragging || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    refresh(); if (!limits) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 48 : 16;
+    preferredWidth = event.key === "Home" ? limits.min : event.key === "End" ? limits.max
+      : clamp(renderedWidth + (event.key === "ArrowRight" ? step : -step));
+    apply(); persist();
+  };
+  const reset = () => { if (!disposed) { cancel(); preferredWidth = defaultWidth; refresh(); persist(); } };
+  handle.setAttribute("role", "separator"); handle.setAttribute("aria-orientation", "vertical");
+  const listeners = [[handle, "pointerenter", followPointer], [handle, "pointermove", followPointer],
+    [handle, "pointerleave", leave], [handle, "focus", focus], [windowRef, "scroll", refreshGrip, true],
+    [handle, "pointerdown", down], [handle, "lostpointercapture", cancelPointer],
+    [handle, "keydown", keyboard], [handle, "dblclick", reset], [windowRef, "pointermove", move],
+    [windowRef, "pointerup", up], [windowRef, "pointercancel", cancelPointer], [windowRef, "blur", cancel]];
+  const Observer = windowRef.ResizeObserver;
+  const observer = typeof Observer === "function" ? new Observer(refresh) : null;
+  if (observer) observer.observe(layout); else listeners.push([windowRef, "resize", refresh]);
+  for (const [target, name, listener, options] of listeners) target.addEventListener(name, listener, options);
+  refresh();
+  return { refresh, cancel, dispose: () => {
+    if (disposed) return;
+    cancel(); disposed = true; observer?.disconnect();
+    for (const [target, name, listener, options] of listeners) target.removeEventListener(name, listener, options);
+  } };
+}
