@@ -1,9 +1,10 @@
-import { renderSkillFiles, renderSkillImpact, renderSkillList, renderSkillLocations, renderSkillOptions, renderSkillSources, renderSkillTrash, renderSkillWarnings } from "./skills-view.js";
+import { initSkillSplitter, renderSkillFiles, renderSkillImpact, renderSkillList, renderSkillLocations, renderSkillOptions, renderSkillSources, renderSkillTrash, renderSkillWarnings } from "./skills-view.js";
 
 const byId = (id) => document.getElementById(id);
+const splitter = initSkillSplitter({ layout: byId("skills-layout"), handle: byId("skills-width-handle") });
 const dialogs = ["unsaved", "sources", "import", "delete", "trash"];
 let snapshot = null, sources = [], selectedId = null, detail = null, draft = "", diskVersion = null;
-let active = false, scanning = false, saving = false, mutating = false, detailLoading = false;
+let active = false, scanning = false, saving = false, mutating = false, detailLoading = false, editing = false;
 let detailSequence = 0, detailController = null, pendingAction = null, importPreview = null, deletePreview = null;
 let importSequence = 0, deleteSequence = 0, sourceSequence = 0, trashSequence = 0, picking = null;
 let trashEntries = [];
@@ -35,18 +36,22 @@ function renderList() {
 
 function renderEditorState() {
   const editable = !!detail?.canEdit;
-  byId("skills-editor").readOnly = !editable; byId("skills-editor").disabled = saving;
-  byId("skills-save").hidden = !editable;
-  byId("skills-save").disabled = !editable || !dirty() || busy() || !!diskVersion;
+  const editingAllowed = editable && editing;
+  byId("skills-editor").readOnly = !editingAllowed; byId("skills-editor").disabled = busy();
+  byId("skills-edit").hidden = !editable || editing;
+  byId("skills-edit").disabled = busy() || detailLoading;
+  byId("skills-edit-cancel").hidden = !editingAllowed; byId("skills-edit-cancel").disabled = busy();
+  byId("skills-save").hidden = !editingAllowed;
+  byId("skills-save").disabled = !editingAllowed || !dirty() || busy() || !!diskVersion;
   byId("skills-save").textContent = saving ? "保存中…" : "保存说明";
   byId("skills-delete").hidden = !detail?.canTrash; byId("skills-delete").disabled = busy();
-  byId("skills-edit-status").textContent = saving ? "正在保存…" : diskVersion ? "原文件已更新，修改尚未保存" : dirty() ? "有未保存的修改" : editable ? "已与磁盘内容同步" : "只读";
+  byId("skills-edit-status").textContent = saving ? "正在保存…" : diskVersion ? "原文件已更新，修改尚未保存" : dirty() ? "有未保存的修改" : editingAllowed ? "编辑中" : editable ? "查看中" : "只读";
   byId("skills-conflict").hidden = !diskVersion;
   byId("skills-conflict-view").disabled = busy(); byId("skills-conflict-reload").disabled = busy();
   for (const name of ["sources", "import", "trash"]) byId(`skills-${name}-open`).disabled = busy();
   byId("skills-refresh").disabled = busy() || scanning;
   for (const name of ["save", "discard", "cancel"]) byId(`skills-unsaved-${name}`).disabled = busy();
-  byId("skills-unsaved-save").disabled = busy() || !!diskVersion || !editable;
+  byId("skills-unsaved-save").disabled = busy() || !!diskVersion || !editingAllowed;
 }
 
 function renderDetail() {
@@ -75,7 +80,8 @@ function renderDetail() {
   renderEditorState();
 }
 
-function applyDetail(result) {
+function applyDetail(result, { preserveEditing = false } = {}) {
+  editing = preserveEditing && editing && !!result.canEdit && result.id === selectedId;
   detail = result; selectedId = result.id; draft = result.content; diskVersion = null;
   byId("skills-disk-content").hidden = true; renderList(); renderDetail();
 }
@@ -90,7 +96,7 @@ async function readDetail(id, preserveDraft = false) {
     if (typeof result.content !== "string" || result.canEdit && !result.revision || result.id !== id) throw new Error("技能详情返回不完整，请重新读取。");
     if (preserveDraft && dirty()) {
       if (result.revision !== detail.revision) diskVersion = result;
-    } else applyDetail(result);
+    } else applyDetail(result, { preserveEditing: preserveDraft });
     errorTarget("skills-error");
   } catch (failure) {
     if (sequence === detailSequence && !request.signal.aborted) errorTarget("skills-error", failure.message);
@@ -110,7 +116,7 @@ function guardDraft(action) {
 function selectSkill(id) {
   if (id === selectedId || busy()) return;
   guardDraft(() => {
-    selectedId = id; detail = null; draft = ""; diskVersion = null; renderList(); return readDetail(id);
+    selectedId = id; detail = null; draft = ""; diskVersion = null; editing = false; renderList(); return readDetail(id);
   });
 }
 
@@ -131,7 +137,7 @@ async function refresh(scan = false) {
     byId("skills-status").textContent = Number.isNaN(checked.getTime()) ? "本次扫描已完成" : `扫描于 ${checked.toLocaleTimeString("zh-CN", { hour12: false })}`;
     if (selectedId && !saving) {
       if (result.skills.some((skill) => skill.id === selectedId)) await readDetail(selectedId, true);
-      else if (!dirty()) { selectedId = null; detail = null; renderDetail(); }
+      else if (!dirty()) { selectedId = null; detail = null; editing = false; renderDetail(); }
       else errorTarget("skills-error", "扫描未找到当前技能。未保存的修改已保留，请检查原目录。");
     }
   } catch (failure) {
@@ -143,14 +149,16 @@ async function refresh(scan = false) {
 }
 
 async function save() {
-  if (!detail?.canEdit || !dirty() || busy() || diskVersion) return false;
+  if (!editing || !detail?.canEdit || !dirty() || busy() || diskVersion) return false;
   const id = selectedId, content = draft, revision = detail.revision;
+  let saved = false;
   detailSequence++; detailController?.abort(); detailLoading = false;
   saving = true; renderList(); renderDetail(); errorTarget("skills-error");
   try {
     const result = await api(`${skillPath(id)}/save`, { content, revision });
     if (selectedId !== id) return false;
-    applyDetail(result); byId("skills-status").textContent = "说明已保存。"; return true;
+    applyDetail(result); saved = true; byId("skills-status").textContent = "说明已保存。";
+    return true;
   } catch (failure) {
     if (failure.code === "SKILL_CONFLICT" || failure.status === 409) {
       diskVersion = { conflict: true }; await readDetail(id, true);
@@ -158,7 +166,10 @@ async function save() {
     errorTarget("skills-error", failure.message);
     if (byId("skills-unsaved-dialog").open) errorTarget("skills-unsaved-error", failure.message);
     return false;
-  } finally { saving = false; renderList(); renderDetail(); }
+  } finally {
+    saving = false; renderList(); renderDetail();
+    if (saved && active && detail?.canEdit && !byId("skills-unsaved-dialog").open) byId("skills-edit").focus({ preventScroll: true });
+  }
 }
 
 async function openSources() {
@@ -232,7 +243,7 @@ async function confirmImport() {
     mutating = true; lockImport(true); renderList(); renderEditorState();
     try {
       const result = await api("/api/skills/import", { ...preview.body, revision: preview.revision });
-      closeDialog("import"); selectedId = null; detail = null;
+      closeDialog("import"); selectedId = null; detail = null; editing = false;
       mutating = false; await refresh(true); applyDetail(result);
       byId("skills-status").textContent = "技能已复制导入。";
     } catch (failure) { invalidateImport(); errorTarget("skills-import-error", failure.message); }
@@ -263,7 +274,7 @@ async function confirmTrash() {
   try {
     await api(`${skillPath(preview.id)}/trash`, { confirm: true, revision: preview.revision, action: preview.action,
       ...(preview.locationId ? { locationId: preview.locationId } : {}) });
-    closeDialog("delete"); detailSequence++; detailController?.abort(); selectedId = null; detail = null; draft = ""; diskVersion = null;
+    closeDialog("delete"); detailSequence++; detailController?.abort(); selectedId = null; detail = null; draft = ""; diskVersion = null; editing = false;
     mutating = false; renderDetail(); await refresh(true); byId("skills-status").textContent = preview.action === "link" ? "入口已移除，可在回收站恢复。" : "技能已移至回收站。";
   } catch (failure) { errorTarget("skills-delete-error", failure.message); deletePreview = null; }
   finally { mutating = false; renderList(); renderEditorState(); }
@@ -295,7 +306,18 @@ function restore(id) {
 
 byId("skills-search").addEventListener("input", renderList);
 byId("skills-source-filter").addEventListener("change", renderList);
-byId("skills-editor").addEventListener("input", () => { draft = byId("skills-editor").value; renderEditorState(); });
+byId("skills-editor").addEventListener("input", () => {
+  if (!editing || !detail?.canEdit || busy()) { byId("skills-editor").value = draft; return; }
+  draft = byId("skills-editor").value; renderEditorState();
+});
+byId("skills-edit").addEventListener("click", () => {
+  if (!detail?.canEdit || editing || busy() || detailLoading) return;
+  editing = true; renderEditorState(); byId("skills-editor").focus({ preventScroll: true });
+});
+byId("skills-edit-cancel").addEventListener("click", () => {
+  if (!editing || busy()) return;
+  guardDraft(() => { editing = false; renderEditorState(); byId("skills-edit").focus({ preventScroll: true }); });
+});
 byId("skills-refresh").addEventListener("click", () => { void refresh(true); });
 byId("skills-save").addEventListener("click", () => { void save(); });
 byId("skills-sources-open").addEventListener("click", () => { void openSources(); });
@@ -354,6 +376,7 @@ for (const name of dialogs) {
 }
 document.addEventListener("neuma:route", (event) => {
   const wasActive = active; active = event.detail.page === "skills";
+  if (active) splitter.refresh(); else splitter.cancel();
   if (!active) for (const name of dialogs) closeDialog(name);
   if (active && !wasActive && !snapshot) void refresh();
 });

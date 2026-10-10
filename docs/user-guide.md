@@ -113,8 +113,6 @@ Pi 复用 `NEUMA_LLM_CHAT_URL`、`NEUMA_LLM_MODEL`、`NEUMA_LLM_API_KEY`；接�
 
 实现依据：[Pi SDK](https://pi.dev/docs/latest/sdk)、[工具示例](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/sdk/05-tools.ts)、[权限说明](https://pi.dev/docs/latest/security)、[MIT 许可证](https://github.com/earendil-works/pi/blob/main/LICENSE)。
 
-## 判断方式
-
 ## 管理本机 Skills
 
 点击左侧“Skill 管理”，搜索本机已有技能并查看来源、路径、`SKILL.md` 正文和配套文件清单。首次进入时扫描通用、Codex、Claude、Pi 用户目录及插件缓存；已登记项目中的标准技能目录也会纳入。其他位置通过“扫描目录”添加，支持系统窗口或手填路径。“重新扫描”更新当前结果，不进行全盘搜索。同名技能的不同副本分别显示，共享目录的入口合并展示；异常格式和失效链接会标明原因。插件缓存表示本机存在该副本，不能据此判断插件是否正在启用。
@@ -128,6 +126,8 @@ Pi 复用 `NEUMA_LLM_CHAT_URL`、`NEUMA_LLM_MODEL`、`NEUMA_LLM_API_KEY`；接�
 此页面是独立的本机文件管理能力，不需要模型连接。NEUMA 的需求、架构、研发、项目助手和工作 Agent 都不加载这些技能，不增加管理工具或文件权限；技能内容不会发送给模型，也不会加载扩展或安装依赖。其他工具何时重新读取已编辑的技能，由该工具自身决定。
 
 接口：`GET /api/skills`、`POST /api/skills/scan` 查询与重新扫描；`GET /api/skills/:id` 读取详情，`POST /api/skills/:id/save` 接收 `{content,revision}` 保存；`GET/POST /api/skills/sources` 查询或添加目录，`POST /api/skills/sources/:id/remove` 移除自选扫描目录（保留文件）；`POST /api/skills/pick-folder` 接收 `{purpose:"source"}` 或 `{purpose:"import"}` 选择文件夹。`POST /api/skills/import/preview` 接收 `{path,targetId,name?}` 预览，`POST /api/skills/import` 额外携带返回的 `revision` 执行复制。`POST /api/skills/:id/trash/preview` 预览回收影响，`POST /api/skills/:id/trash` 接收 `{confirm:true,revision,action,locationId?}` 回收，`action` 为 `skill` 或 `link`。`GET /api/skills/trash` 查询回收站，`POST /api/skills/trash/:id/restore` 恢复。内容或确认范围已变化时返回 HTTP 409 和 `SKILL_CONFLICT`，不自动覆盖原文件。
+
+## 判断方式
 
 兼容模型每轮更新同一份需求草稿，记录目标、场景、输入、核心任务、输出、成功标准、边界和建议调用场景，并区分用户明确说明、直接推导、系统暂定与未明确。Jev 每轮对草稿做一次结构化判断，协助选择最重要的缺口；代码确保目标、场景、输入、核心任务、输出、成功标准和对外动作边界不能凭猜测标为完成。信息足够时页面显示简洁的需求确认说明，等待用户确认；确认后进入正式架构设计与独立评估，通过后生成轻量执行定义，或继续完成代码研发与验收；尚未具备的连接和运行能力明确保留下一步。Jev 失败时可按草稿继续。当前 Jev 阈值只是本地试验参数，中文效果尚未经过产品验收评测。
 

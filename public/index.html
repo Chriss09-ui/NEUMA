@@ -382,23 +382,6 @@
           </div>
         </section>
 
-        <!-- 设置 -->
-        <section id="page-settings" class="page page-narrow" data-page="settings" aria-labelledby="settings-title" hidden>
-          <header class="page-header">
-            <div>
-              <h1 id="settings-title">设置</h1>
-              <p class="page-subtitle">连接模型，让你的工作台准备就绪。密钥仅保存在本机。</p>
-            </div>
-          </header>
-
-          <form id="settings-form" class="settings-form" autocomplete="off">
-            <section class="card form-card">
-              <div class="card-heading">
-                <div>
-                  <h2>模型服务</h2>
-                  <p class="muted-note">需求 Agent 和项目助手共用。接口需兼容 OpenAI，并支持流式回复和工具调用。</p>
-                </div>
-                <span id="settings-llm-status" class="status">检查中</span>
         <!-- 本机技能管理 -->
         <section id="page-skills" class="page page-skills" data-page="skills" aria-labelledby="skills-title" hidden>
           <header class="page-header">
@@ -421,8 +404,8 @@
             <summary id="skills-warning-summary">扫描诊断</summary>
             <div id="skills-warnings" class="skills-warnings" hidden></div>
           </details>
-          <div class="manage-layout skills-layout">
-            <aside class="list-card" aria-label="技能列表">
+          <div id="skills-layout" class="manage-layout skills-layout">
+            <aside id="skills-list-panel" class="list-card" aria-label="技能列表">
               <label class="sr-only" for="skills-search">搜索技能名称、说明或路径</label>
               <input id="skills-search" class="search" type="search" placeholder="搜索技能名称、说明或路径" spellcheck="false">
               <label class="sr-only" for="skills-source-filter">按来源筛选技能</label>
@@ -430,6 +413,7 @@
               <p id="skills-filter-count" class="muted-note small"></p>
               <div id="skills-list" class="item-list" aria-live="polite"></div>
             </aside>
+            <button id="skills-width-handle" class="skills-width-handle" type="button" role="separator" aria-label="调整技能列表与详情的宽度" aria-orientation="vertical" aria-controls="skills-list-panel skills-detail-panel" aria-valuemin="220" aria-valuemax="640" aria-valuenow="300" title="拖动调整左右宽度 · 方向键微调 · 双击恢复默认"><span class="skills-width-grip" aria-hidden="true"><svg viewBox="0 0 8 18"><path d="M2 3v12M6 3v12"/></svg></span></button>
             <section id="skills-detail-panel" class="card detail-card skills-detail" aria-label="技能详情">
               <div id="skills-detail-empty" class="detail-empty"><h2>选择一个技能</h2><p>查看它的说明、所在目录和附带资源。</p></div>
               <div id="skills-detail-content" hidden>
@@ -438,14 +422,14 @@
                 <p id="skills-shared-note" class="muted-note small"></p>
                 <div id="skills-detail-diagnostics" class="skills-warnings" hidden></div>
                 <div id="skills-locations" class="skills-locations"></div>
-                <div class="skills-editor-heading"><label for="skills-editor">SKILL.md</label><span id="skills-edit-status" class="muted-note small" role="status" aria-live="polite"></span></div>
-                <textarea id="skills-editor" class="skills-editor" spellcheck="false" aria-describedby="skills-edit-status"></textarea>
+                <div class="skills-editor-heading"><label for="skills-editor">SKILL.md</label><div class="skills-action-row"><span id="skills-edit-status" class="muted-note small" role="status" aria-live="polite"></span><button id="skills-edit" class="secondary" type="button" aria-controls="skills-editor" hidden>编辑</button></div></div>
+                <textarea id="skills-editor" class="skills-editor" spellcheck="false" aria-describedby="skills-edit-status" readonly></textarea>
                 <div id="skills-conflict" class="skills-conflict" hidden>
                   <p>原文件已更新。你的修改仍保留，请先查看磁盘版本。</p>
                   <div class="skills-action-row"><button id="skills-conflict-view" class="secondary" type="button">查看磁盘版本</button><button id="skills-conflict-reload" class="ghost-button" type="button">放弃修改并重新读取</button></div>
                   <pre id="skills-disk-content" class="skills-raw" hidden></pre>
                 </div>
-                <div class="skills-action-row"><button id="skills-save" class="primary" type="button" disabled>保存说明</button><button id="skills-delete" class="ghost-button danger" type="button" hidden>移至回收站</button></div>
+                <div class="skills-action-row"><button id="skills-save" class="primary" type="button" hidden disabled>保存说明</button><button id="skills-edit-cancel" class="secondary" type="button" hidden>取消编辑</button><button id="skills-delete" class="ghost-button danger" type="button" hidden>移至回收站</button></div>
                 <details class="skills-resources"><summary>附带资源 <span id="skills-files-count"></span></summary><p class="muted-note small">资源仅供查看；此处只编辑 SKILL.md。</p><ul id="skills-files" class="skills-file-list"></ul></details>
               </div>
             </section>
@@ -488,6 +472,23 @@
           </dialog>
         </section>
 
+        <!-- 设置 -->
+        <section id="page-settings" class="page page-narrow" data-page="settings" aria-labelledby="settings-title" hidden>
+          <header class="page-header">
+            <div>
+              <h1 id="settings-title">设置</h1>
+              <p class="page-subtitle">连接模型，让你的工作台准备就绪。密钥仅保存在本机。</p>
+            </div>
+          </header>
+
+          <form id="settings-form" class="settings-form" autocomplete="off">
+            <section class="card form-card">
+              <div class="card-heading">
+                <div>
+                  <h2>模型服务</h2>
+                  <p class="muted-note">需求 Agent 和项目助手共用。接口需兼容 OpenAI，并支持流式回复和工具调用。</p>
+                </div>
+                <span id="settings-llm-status" class="status">检查中</span>
               </div>
               <label class="field">
                 <span class="field-name">接口地址</span>
@@ -547,7 +548,7 @@
     <script type="module" src="/agent-details.js"></script>
     <script type="module" src="/projects.js"></script>
     <script type="module" src="/runtime.js"></script>
+    <script type="module" src="/skills.js"></script>
     <script type="module" src="/settings.js"></script>
   </body>
 </html>
-    <script type="module" src="/skills.js"></script>
