@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createProjectReader, projectScriptFile, validateProjectPlan } from "../projects/project-inspection.mjs";
 import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
+import { knownModelLimits, modelOutputBudget } from "./model-limits.mjs";
 
 const SYSTEM_PROMPT = `你是 NEUMA，当前处于“我的项目”工作区。NEUMA 的核心功能是自然语言创建 Agent；这个工作区帮助用户管理已有本地小项目。
 用户提供路径并要求添加时，调用 add_project；需要选择或查询时先调用 list_projects；用户要求打开、启动或停止时调用对应工具。
@@ -48,19 +49,30 @@ function retryProgress(event, state, onProgress) {
   }
 }
 
-function classifyModelFailure(value = "") {
+export function classifyModelFailure(value = "") {
   const text = String(value);
   if (/^(?:HTTP\s*)?(?:401|403)\b|unauthorized|authentication|invalid api.?key|forbidden/i.test(text))
     return { reason: "api_authentication", message: "模型接口认证失败，请检查 API Key 和访问权限" };
   if (/^(?:HTTP\s*)?429\b|rate.?limit|too many requests/i.test(text))
     return { reason: "api_rate_limit", message: "模型接口请求过于频繁或额度不足，请稍后再试" };
+  if (/^(?:HTTP\s*)?404\b|model.{0,30}not found|model_not_found/i.test(text))
+    return { reason: "api_not_found", message: "模型或接口地址不存在，请检查接口地址和模型名" };
   if (/^(?:HTTP\s*)?5\d\d\b|overloaded|service unavailable/i.test(text))
     return { reason: "api_unavailable", message: "模型服务暂时不可用，请稍后再试" };
+  if (/context.{0,40}(length|window|overflow)|maximum.{0,15}context|too many tokens|prompt.{0,20}too long/i.test(text))
+    return { reason: "api_context", message: "模型接口无法接收当前上下文，请检查模型的上下文配置" };
+  if (/truncated response|output.{0,20}(limit|tokens)|max(?:imum)?.{0,15}(?:completion|output).{0,15}tokens/i.test(text))
+    return { reason: "api_output_limit", message: "模型输出达到上限，完整方案尚未生成，请重试或使用支持更长输出的模型" };
+  if (/finish_reason:\s*content_filter/i.test(text))
+    return { reason: "api_rejected", message: "模型服务未返回可用结果，请检查该模型的内容限制或更换模型后重试" };
+  if (/Stream ended without finish_reason|stream ended before|terminated/i.test(text))
+    return { reason: "api_stream_interrupted", message: "模型响应流提前结束，尚未收到完整结果，请重试" };
+  if (/invalid.{0,20}(?:stream|json)|unexpected.{0,20}(?:json|token)|finish_reason:/i.test(text)
+    && !/finish_reason:\s*network_error/i.test(text))
+    return { reason: "api_protocol", message: "模型接口返回的流式或工具调用格式不兼容，请检查接口是否支持流式工具调用" };
   if (/connection|ECONN|ENOTFOUND|fetch failed|network|socket|terminated|timed?\s*out/i.test(text))
     return { reason: "api_connection", message: "模型接口连接失败或中断，请检查网络和接口地址" };
-  if (/context.{0,20}(length|window)|maximum.{0,15}tokens/i.test(text))
-    return { reason: "api_context", message: "模型接口无法接收当前上下文，请检查模型的上下文配置" };
-  return { reason: "api_error", message: "模型接口请求失败，请检查连接及模型是否支持工具调用" };
+  return { reason: "api_error", message: "模型接口请求未完成，请重试，并确认模型支持工具调用" };
 }
 
 function connectionFailure(retry) {
@@ -173,7 +185,11 @@ function controlledResources(sdk, systemPrompt) {
   };
 }
 
-export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT }) {
+export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT, maxOutputTokens = modelOutputBudget(config) }) {
+  const knownLimits = knownModelLimits(config);
+  const outputLimit = knownLimits?.maxOutputTokens ?? 16_384;
+  if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens > outputLimit)
+    throw new InputError(`模型输出预算应为 256 到 ${outputLimit} 之间的整数`);
   const sdk = await import("@earendil-works/pi-coding-agent");
   // Resolve the adapter and transport shipped with this pinned SDK, rather than another version.
   const sdkUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
@@ -183,6 +199,14 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   const adapterPath = aiManifest.exports["./api/*"].import.replace("*", "openai-completions");
   const { streamSimple } = await import(new URL(adapterPath, pathToFileURL(aiManifestPath)).href);
   const { fetch: transportFetch, EnvHttpProxyAgent } = fromPi("undici");
+  const baseUrl = modelBaseUrl(config.chatUrl);
+  const hostname = new URL(config.chatUrl).hostname;
+  const mimo = /(^|\.)xiaomimimo\.com$/.test(hostname);
+  const contextWindow = knownLimits?.contextWindow ?? 32_768;
+  const reserveTokens = knownLimits ? Math.max(16_384, maxOutputTokens + 4096) : Math.min(16_384, maxOutputTokens + 4096);
+  // The SDK's 20k recent-history default exceeds the 16k threshold of an unknown 32k model.
+  const keepRecentTokens = knownLimits ? 20_000 : Math.max(0, Math.min(20_000,
+    Math.floor((contextWindow - reserveTokens) / 2), contextWindow - reserveTokens - maxOutputTokens - 2048));
   const credentials = new Map();
   const modelRuntime = await sdk.ModelRuntime.create({
     modelsPath: null, allowModelNetwork: false, refreshOnCreate: false,
@@ -201,13 +225,15 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   };
   try {
   modelRuntime.registerProvider("neuma", {
-    baseUrl: modelBaseUrl(config.chatUrl), api: "openai-completions", authHeader: true,
-    streamSimple: (model, context, options) => streamSimple(model, context, { ...options, fetch: fetchModel, maxRetries: 0 }),
-    models: [{ id: config.model, name: config.model, reasoning: false, input: ["text"],
+    baseUrl, api: "openai-completions", authHeader: true,
+    streamSimple: (model, context, options) => streamSimple(model, context, { ...options,
+      maxTokens: maxOutputTokens, fetch: fetchModel, maxRetries: 0 }),
+    // Permit the user's chosen model to receive images; its actual vision support is the user's configuration responsibility.
+    models: [{ id: config.model, name: config.model, reasoning: false, input: ["text", "image"],
       // Pi requires cost metadata. These placeholders do not represent the provider's actual prices.
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 4096,
-      compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" },
-      ...(/(^|\.)xiaomimimo\.com$/.test(new URL(config.chatUrl).hostname)
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow, maxTokens: maxOutputTokens,
+      compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens", ...knownLimits?.compat },
+      ...(mimo
         ? { samplingParams: { thinking: { type: "disabled" } } } : {}) }],
   });
   await modelRuntime.setRuntimeApiKey("neuma", config.apiKey);
@@ -216,7 +242,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
     thinkingLevel: "off", resourceLoader: controlledResources(sdk, systemPrompt),
     tools: customTools.map((item) => item.name), customTools,
     sessionManager: sdk.SessionManager.inMemory(cwd),
-    settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: true }, httpIdleTimeoutMs: 0,
+    settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens, keepRecentTokens }, httpIdleTimeoutMs: 0,
       retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000, maxAgentDelayMs: 8000, provider: { maxRetries: 0 } },
       cacheWarming: "off", enableAnalytics: false, enableInstallTelemetry: false }),
   });
@@ -269,7 +295,9 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
           throw error;
         }
         context.signal.throwIfAborted();
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} };
+        const submitted = name === "submit_launch_plan" && context.plan !== null;
+        if (submitted) context.session?.setAutoCompactionEnabled?.(false);
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: {}, ...(submitted ? { terminate: true } : {}) };
       } });
     const offset = { type: "integer", minimum: 0, description: "续读时使用上次返回的 nextOffset，默认 0" };
     const customTools = [
