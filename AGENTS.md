@@ -7,6 +7,7 @@
 - 架构层采用设计者、独立评估者和程序门槛；检索与最多两个模块子 Agent 按需调用。未通过不能交接，架构通过不等于运行就绪，不恢复旧固定专家 Builder。
 - 研发层遵循 docs/development-layer-design.md：五阶段、开发与独立评审两角色。修改节点、上下文、预算、验收或交付时同步更新该文档与 ARCHITECTURE.md；状态由控制器发布，不能以模型自述通过代替真实验证。macOS 隔离 Node JSON 入口已实际验证；Linux 辅助程序在 Ubuntu 24.04/26.04、x64/ARM64 的云端原生检查通过。Windows 辅助程序已编译，真实隔离启动仍在验证；完整安装与桌面验收尚待完成。缺少能力或探测失败均阻止执行，不提供无隔离回退。
 - 涉及界面时以用户实际使用的桌面端为范围，不主动增加窄屏设计、适配或验证；此项不限制后台架构建设。
+- 页面检查优先使用 Codex 内置浏览器。`npm test` 默认不启动外部浏览器；仅手动设置 `NEUMA_REQUIRE_BROWSER_TESTS=1` 或 `NEUMA_TEST_BROWSER` 时启用外部浏览器测试。macOS 默认选择 Dia，不自动回退到 Edge；Dia 当前尚未通过现有无界面测试参数的兼容验证。
 - 需求澄清逻辑与项目助手继续独立；正式架构在 `src/architecture/architecture*.mjs`，评估后的构建和现有运行/辅助数据在 `src/agents/agent-prototype.mjs`。
 - 前端使用 NEUMA 的接口和消息事件，不依赖 Pi SDK 原生事件或对象。
 - 保留需求、稳定 Agent ID、独立会话、真实失败/取消状态；这些当前约定已写入 ARCHITECTURE.md。

@@ -6,27 +6,26 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export async function testBrowser(t) {
-  const names = process.platform === "win32" ? ["chrome.exe", "msedge.exe"]
+export async function testBrowser(t, { platform = process.platform, env = process.env, checkExecutable = access } = {}) {
+  if (!env.NEUMA_TEST_BROWSER && env.NEUMA_REQUIRE_BROWSER_TESTS !== "1") {
+    t.skip("外部浏览器测试默认关闭；可用 NEUMA_REQUIRE_BROWSER_TESTS=1 手动启用");
+    return null;
+  }
+  const names = platform === "darwin" ? ["dia"] : platform === "win32" ? ["chrome.exe", "msedge.exe"]
     : ["chromium", "chromium-browser", "google-chrome", "microsoft-edge"];
-  const candidates = process.env.NEUMA_TEST_BROWSER ? [process.env.NEUMA_TEST_BROWSER] : [
-    ...(process.platform === "darwin" ? [
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ] : []),
-    ...(process.env.PATH ?? "").split(delimiter).filter(Boolean).flatMap((directory) => names.map((name) => join(directory, name))),
+  const candidates = env.NEUMA_TEST_BROWSER ? [env.NEUMA_TEST_BROWSER] : [
+    ...(platform === "darwin" ? ["/Applications/Dia.app/Contents/MacOS/Dia"] : []),
+    ...(env.PATH ?? "").split(delimiter).filter(Boolean).flatMap((directory) => names.map((name) => join(directory, name))),
   ];
   for (const candidate of candidates) {
-    try { await access(candidate, constants.X_OK); return candidate; }
+    try { await checkExecutable(candidate, constants.X_OK); return candidate; }
     catch (error) { if (!["ENOENT", "ENOTDIR", "EACCES"].includes(error.code)) throw error; }
   }
-  const reason = "未找到 Chromium/Edge；可用 NEUMA_TEST_BROWSER 指定浏览器可执行文件";
-  if (process.env.NEUMA_TEST_BROWSER || process.env.NEUMA_REQUIRE_BROWSER_TESTS === "1") assert.fail(reason);
-  t.skip(reason);
-  return null;
+  const reason = `未找到 ${platform === "darwin" ? "Dia" : "Chromium/Edge"}；可用 NEUMA_TEST_BROWSER 指定浏览器可执行文件`;
+  assert.fail(reason);
 }
 
-export async function browserResult(t, browser, script) {
+export async function browserResult(t, browser, script, { windowSize } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-browser-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const page = join(root, "test.html");
@@ -41,7 +40,8 @@ try {
   writeResult({ ok: false, error: String(error.stack || error) });
 }
 </script>`);
-  const args = ["--headless", "--disable-gpu", "--disable-background-networking",
+  const args = ["--headless", ...(windowSize ? [`--window-size=${windowSize.width},${windowSize.height}`] : []),
+    "--disable-gpu", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
     "--host-resolver-rules=MAP * ~NOTFOUND", `--user-data-dir=${join(root, "profile")}`,
     "--timeout=5000", "--dump-dom", pathToFileURL(page).href];
@@ -56,7 +56,7 @@ try {
         child.stdout.destroy(); child.stderr.destroy();
         reject(failure ?? new Error("浏览器停止后未在2秒内关闭输出管道"));
       }, 2000);
-      // Edge may keep background processes after dump-dom; close only this test's process group.
+      // Chromium browsers may keep background processes after dump-dom; close only this test's process group.
       if (!child.pid) return;
       try { if (grouped) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); }
       catch (error) { if (error.code !== "ESRCH") { failure = error; child.kill("SIGKILL"); } }
