@@ -1,6 +1,10 @@
 import { InputError, ProviderError } from "./requirements/core.mjs";
 import { getProviderConfig } from "./requirements/providers.mjs";
 import { configEnv, settingsUpdates } from "./settings.mjs";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createPiSession, classifyModelFailure } from "./runtime/pi-runtime.mjs";
 
 const OVERRIDE_FIELDS = new Set(["chatUrl", "model", "apiKey"]);
 const JEV_OVERRIDE_FIELDS = new Set(["jevModel", "jevApiKey", "clear"]);
@@ -164,6 +168,99 @@ export async function testModelConnection(config = {}, body = {}, { fetchImpl = 
     request, stage: "llm", validReply: hasReply,
     missingMessage: "模型接口未返回有效的模型回复，请检查模型名和接口配置" },
   { fetchImpl, signal: externalSignal, timeoutMs });
+}
+
+export async function testAgentModelConnection(config = {}, body = {},
+  { sessionFactory = createPiSession, signal: externalSignal, timeoutMs = 30_000 } = {}) {
+  const effective = probeConfig(config, body);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000)
+    throw new InputError("构建能力测试时限应为 1 到 30000 毫秒之间的整数");
+  externalSignal?.throwIfAborted();
+  const controller = new AbortController(), { signal } = controller;
+  const receipt = randomUUID(), started = performance.now();
+  let session, finished = false, unsubscribe = () => {}, turns = 0, toolsCalled = 0, retryWithdrawn = false;
+  let timedOut = false, turnLimit = false, invalidTool = false, streaming = false, finalError = "";
+  const stopSession = (value) => {
+    try { void Promise.resolve(value?.abort()).catch(() => {}); } catch {}
+  };
+  const disposeSession = (value) => {
+    try { void Promise.resolve(value?.dispose()).catch(() => {}); } catch {}
+  };
+  const cancel = () => controller.abort();
+  externalSignal?.addEventListener("abort", cancel, { once: true });
+  let rejectAbort;
+  const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+  const onAbort = () => {
+    stopSession(session);
+    rejectAbort(new DOMException("操作已取消", "AbortError"));
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const tool = { name: "check_agent_connection", label: "检查构建连接", description: "无副作用的连接测试，返回测试回执。",
+    parameters: { type: "object", properties: { challenge: { type: "string", enum: ["neuma-agent-probe"] } },
+      required: ["challenge"], additionalProperties: false }, executionMode: "sequential",
+    execute: async (_id, value) => {
+      signal.throwIfAborted();
+      if (toolsCalled || value?.challenge !== "neuma-agent-probe" || Object.keys(value).length !== 1) {
+        invalidTool = true;
+        throw probeError("模型未按约定完成构建工具测试", "tool_round_trip");
+      }
+      toolsCalled++;
+      return { content: [{ type: "text", text: JSON.stringify({ receipt }) }], details: {} };
+    } };
+  try {
+    // Session creation may finish after cancellation; dispose that late session too.
+    const creating = Promise.resolve().then(() => sessionFactory({ config: effective, cwd: tmpdir(),
+      dataDir: join(tmpdir(), `neuma-agent-model-probe-${randomUUID()}`), customTools: [tool], maxOutputTokens: 512,
+      systemPrompt: "这是无副作用的连接测试。先调用 check_agent_connection 一次，challenge 为 neuma-agent-probe。收到工具结果后，只回复 OK 加一个空格再加工具返回的 receipt，不再调用工具。" }))
+      .then((value) => {
+        if (finished || signal.aborted) { stopSession(value); disposeSession(value); throw new DOMException("操作已取消", "AbortError"); }
+        session = value;
+        return value;
+      });
+    await Promise.race([creating, aborted]);
+    signal.throwIfAborted();
+    session.setAutoCompactionEnabled(false);
+    unsubscribe = session.subscribe((event) => {
+      if (event.type === "turn_start") {
+        retryWithdrawn = false;
+        if (++turns > 4) { turnLimit = true; controller.abort(); }
+      }
+      if (event.type === "auto_retry_start" && !retryWithdrawn && turns > 0) {
+        turns--;
+        retryWithdrawn = true;
+      }
+      if (event.type === "message_update" && ["text_delta", "toolcall_delta"].includes(event.assistantMessageEvent?.type)) streaming = true;
+      if (event.type === "auto_retry_end" && !event.success) finalError = event.finalError || "";
+    });
+    await Promise.race([session.prompt("请开始构建连接测试。"), aborted]);
+    signal.throwIfAborted();
+    const last = session.messages?.findLast((message) => message.role === "assistant");
+    if (["error", "aborted"].includes(last?.stopReason) || finalError) {
+      const mapped = classifyModelFailure(last?.errorMessage || finalError);
+      throw probeError(mapped.message, mapped.reason);
+    }
+    if (last?.stopReason === "length") throw probeError("构建能力测试的模型输出被截断", "output_limit");
+    if (invalidTool || toolsCalled !== 1 || session.getLastAssistantText()?.trim() !== `OK ${receipt}`)
+      throw probeError("模型未完成工具调用与结果回传，暂不能确认构建能力", "tool_round_trip");
+    if (!streaming) throw probeError("模型未返回可验证的流式结果", "missing_stream");
+    return { ok: true, model: effective.model, latencyMs: Math.max(0, Math.round(performance.now() - started)),
+      toolsCalled, streaming: true, toolRoundTrip: true };
+  } catch (error) {
+    if (externalSignal?.aborted) throw new DOMException("操作已取消", "AbortError");
+    if (timedOut) throw probeError("构建能力测试超时，模型未在时限内完成工具往返", "timeout");
+    if (turnLimit) throw probeError("构建能力测试达到模型轮次上限", "turn_limit");
+    if (error instanceof ProbeError) throw error;
+    const mapped = classifyModelFailure(error?.message);
+    throw probeError(mapped.message, mapped.reason);
+  } finally {
+    finished = true;
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", cancel);
+    signal.removeEventListener("abort", onAbort);
+    unsubscribe();
+    disposeSession(session);
+  }
 }
 
 export async function testJevConnection(config = {}, body = {}, { fetchImpl = fetch, signal: externalSignal, timeoutMs = 15_000 } = {}) {

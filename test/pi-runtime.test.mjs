@@ -1,11 +1,238 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PiProjectAgent, createProjectTools, createProjectAnalyzer } from "../src/runtime/pi-runtime.mjs";
+import { PiProjectAgent, createProjectTools, createProjectAnalyzer, createPiSession, classifyModelFailure } from "../src/runtime/pi-runtime.mjs";
 import { ProjectManager } from "../src/projects/projects.mjs";
+import { modelOutputBudget, knownModelLimits } from "../src/runtime/model-limits.mjs";
+
+const mimoConfig = Object.freeze({ chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
+  model: "mimo-v2.6-pro", apiKey: "fixture-only" });
+
+test("模型错误分类区分连接、流协议、上下文和输出上限且不回传原始响应", () => {
+  for (const [raw, reason] of [
+    ["401 Invalid API key Bearer private-key-fixture", "api_authentication"],
+    ["429 too many requests private-key-fixture", "api_rate_limit"],
+    ["404 model_not_found private-key-fixture", "api_not_found"],
+    ["503 Service unavailable private-key-fixture", "api_unavailable"],
+    ["fetch failed private-key-fixture", "api_connection"],
+    ["Provider finish_reason: network_error private-key-fixture", "api_connection"],
+    ["Context overflow recovery failed private-key-fixture", "api_context"],
+    ["Truncated response recovery failed private-key-fixture", "api_output_limit"],
+    ["Stream ended without finish_reason private-key-fixture", "api_stream_interrupted"],
+    ["terminated private-key-fixture", "api_stream_interrupted"],
+    ["invalid stream json private-key-fixture", "api_protocol"],
+    ["Provider finish_reason: content_filter private-key-fixture", "api_rejected"],
+  ]) {
+    const mapped = classifyModelFailure(raw);
+    assert.equal(mapped.reason, reason);
+    assert.doesNotMatch(JSON.stringify(mapped), /private-key|Bearer/);
+  }
+});
+
+test("运行时拒绝无效输出预算，避免把预算错误发送到模型接口", async () => {
+  for (const maxOutputTokens of [0, 255, 16_385, 4096.5, "8192"]) {
+    await assert.rejects(createPiSession({ customTools: [], maxOutputTokens }), /输出预算应为/);
+  }
+  for (const maxOutputTokens of [131_073, 131_072.5, "131072"])
+    await assert.rejects(createPiSession({ config: mimoConfig, customTools: [], maxOutputTokens }), /输出预算应为 256 到 131072/);
+});
+
+test("共享输出预算只对已核实的接口与型号调满，其余保留调用方预算", () => {
+  assert.equal(modelOutputBudget(mimoConfig), 131_072);
+  assert.equal(modelOutputBudget(mimoConfig, 8192), 131_072);
+  assert.equal(knownModelLimits(mimoConfig).contextWindow, 1_048_576);
+  for (const config of [{ ...mimoConfig, model: "mimo-v2.6" },
+    { ...mimoConfig, chatUrl: "https://api.xiaomimimo.com.other.test/v1/chat/completions" },
+    { ...mimoConfig, chatUrl: "https://proxy.example.test/v1/chat/completions" },
+    { ...mimoConfig, chatUrl: "invalid" }, {}, undefined]) {
+    assert.equal(modelOutputBudget(config), 4096);
+    assert.equal(modelOutputBudget(config, 8192), 8192);
+    assert.equal(knownModelLimits(config), null);
+  }
+});
+
+test("MiMo 默认输出调满实际发送 131072，显式短探针仍发送 512", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-max-output-"));
+  const requests = [];
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks)));
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
+      model: "mimo-v2.6-pro", choices: [{ index: 0, delta: { role: "assistant", content: "完成" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  t.after(async () => { await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  for (const maxOutputTokens of [undefined, 512]) {
+    const session = await createPiSession({ config: mimoConfig, cwd: root, dataDir: join(root, "data"),
+      customTools: [], systemPrompt: "fixture", ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }) });
+    try {
+      const expected = maxOutputTokens ?? 131_072;
+      assert.equal(session.model.maxTokens, expected);
+      assert.equal(session.settingsManager.getCompactionSettings(session.model).reserveTokens,
+        maxOutputTokens === undefined ? 135_168 : 16_384);
+      // Exercise the real SDK request with the registered MiMo profile against this local fixture.
+      await session.setModel({ ...session.model, baseUrl: `http://127.0.0.1:${model.address().port}/v1` });
+      await session.prompt("生成方案");
+      const body = requests.at(-1);
+      assert.equal(body.model, "mimo-v2.6-pro");
+      assert.equal(body.max_completion_tokens, expected);
+      assert.equal(body.max_tokens, undefined);
+      assert.deepEqual(body.thinking, { type: "disabled" });
+      assert.equal(session.getLastAssistantText(), "完成");
+    } finally { session.dispose(); }
+  }
+  assert.equal(requests.length, 2);
+});
+
+test("真实 SDK 将直接图片和工具页图传给当前模型，不被 text-only 登记省略", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-images-")), requests = [];
+  const image = { type: "image", mimeType: "image/png", data: (await readFile(new URL("../public/assets/brand/neuma-mark.png", import.meta.url))).toString("base64") };
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const toolCall = body.tools?.length && !body.messages.some((message) => message.role === "tool");
+    const delta = toolCall ? { role: "assistant", tool_calls: [{ index: 0, id: "page-image", type: "function",
+      function: { name: "read_material_image", arguments: JSON.stringify({ page: 3 }) } }] } : { role: "assistant", content: "图像已收到" };
+    response.end(`data: ${JSON.stringify({ id: "image-fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",
+      choices: [{ index: 0, delta, finish_reason: toolCall ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  t.after(async () => { await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  const config = { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" };
+  const direct = await createPiSession({ config, cwd: root, dataDir: join(root, "direct"), customTools: [], systemPrompt: "fixture" });
+  try {
+    assert.deepEqual(direct.model.input, ["text", "image"]);
+    await direct.prompt("查看当前图片", { images: [image] });
+    assert.equal(direct.getLastAssistantText(), "图像已收到");
+    const content = requests[0].messages.findLast((message) => message.role === "user").content;
+    assert.ok(content.some((value) => value.type === "image_url" && value.image_url.url.startsWith("data:image/png;base64,")));
+  } finally { direct.dispose(); }
+  const page = await createPiSession({ config, cwd: root, dataDir: join(root, "page"), systemPrompt: "fixture", customTools: [{
+    name: "read_material_image", label: "读取页图", description: "读取本地材料页图", parameters: { type: "object", properties: { page: { type: "integer" } }, required: ["page"] },
+    execute: async (_id, params) => { assert.equal(params.page, 3); return { content: [{ type: "text", text: "附件 file-1，第 3 页" }, image], details: {} }; },
+  }] });
+  try {
+    await page.prompt("读取第3页图表");
+    assert.equal(page.getLastAssistantText(), "图像已收到");
+    const body = requests.at(-1);
+    assert.ok(body.messages.some((message) => message.role === "tool" && String(message.content).includes("第 3 页")));
+    assert.ok(body.messages.some((message) => message.role === "user" && Array.isArray(message.content)
+      && message.content.some((value) => value.type === "image_url" && value.image_url.url.startsWith("data:image/png;base64,"))));
+    assert.doesNotMatch(JSON.stringify(body.messages), /image omitted/);
+  } finally { page.dispose(); }
+});
+
+test("运行层只对已核实的 MiMo 型号使用真实上下文和接口参数，未知型号保留保守容量", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-limits-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const [chatUrl, model, known] of [
+    ["https://api.xiaomimimo.com/v1/chat/completions", "mimo-v2.6-pro", true],
+    ["https://api.xiaomimimo.com/v1/chat/completions", "unknown-fixture", false],
+    ["http://127.0.0.1:1/v1/chat/completions", "mimo-v2.6-pro", false],
+  ]) {
+    const session = await createPiSession({ config: { chatUrl, model, apiKey: "fixture-only" },
+      cwd: root, dataDir: join(root, "data"), customTools: [], systemPrompt: "fixture", maxOutputTokens: 8192 });
+    try {
+      assert.equal(session.model.contextWindow, known ? 1_048_576 : 32_768);
+      assert.equal(session.model.maxTokens, 8192);
+      assert.equal(session.model.compat.maxTokensField, known ? "max_completion_tokens" : "max_tokens");
+      assert.equal(session.model.compat.requiresReasoningContentOnAssistantMessages, known ? true : undefined);
+      assert.equal(session.model.compat.thinkingFormat, known ? "deepseek" : undefined);
+      const compaction = session.settingsManager.getCompactionSettings(session.model);
+      assert.equal(compaction.reserveTokens, known ? 16_384 : 12_288);
+      assert.equal(compaction.keepRecentTokens, known ? 20_000 : 10_240);
+      assert.ok(compaction.keepRecentTokens + session.model.maxTokens < session.model.contextWindow - compaction.reserveTokens);
+      assert.equal(session.settingsManager.getHttpIdleTimeoutMs(), 0);
+    } finally { session.dispose(); }
+  }
+});
+
+test("32k 未知模型的 18k 输入不会被旧压缩阈值提前摘要或挤占 8192 输出预算", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-input-budget-"));
+  const message = "x".repeat(72_000);
+  const requests = [];
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
+      model: "fixture-model", choices: [{ index: 0, delta: { role: "assistant", content: "完成" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 18_000, completion_tokens: 1, total_tokens: 18_001 } })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  const session = await createPiSession({ config: { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" },
+    cwd: root, dataDir: join(root, "data"), customTools: [], systemPrompt: "fixture", maxOutputTokens: 8192 });
+  t.after(async () => { session.dispose(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  await session.prompt(message);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].max_tokens, 8192);
+  assert.ok(requests[0].messages.some((entry) => entry.role === "user"
+    && (typeof entry.content === "string" ? entry.content : entry.content.map((block) => block.text || "").join("")) === message));
+  assert.equal(session.getLastAssistantText(), "完成");
+});
+
+test("真实 SDK 遇到半截响应会重试当前模型轮，完整提交只执行一次并直接结束", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-stream-retry-"));
+  const requests = [];
+  let submissions = 0;
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks)));
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
+      model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: `submit-${requests.length}`, type: "function",
+      function: { name: "submit_result", arguments: JSON.stringify({ result: requests.length === 1 ? "partial-fixture" : "complete" }) } }] });
+    if (requests.length > 1) chunk({}, "tool_calls");
+    response.end("data: [DONE]\n\n");
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  const session = await createPiSession({ config: { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" },
+    cwd: root, dataDir: join(root, "data"), systemPrompt: "fixture", customTools: [{ name: "submit_result", label: "提交", description: "提交",
+      parameters: { type: "object", properties: { result: { type: "string" } }, required: ["result"] },
+      async execute(_id, args) { submissions++; assert.equal(args.result, "complete"); return { content: [{ type: "text", text: "saved" }], details: {}, terminate: true }; } }] });
+  t.after(async () => { session.dispose(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  const events = []; session.subscribe((event) => events.push(event));
+  await session.prompt("生成方案");
+  assert.equal(requests.length, 2); assert.equal(submissions, 1);
+  assert.equal(JSON.stringify(requests[1].messages).includes("partial-fixture"), false);
+  assert.equal(events.filter((event) => event.type === "auto_retry_start").length, 1);
+  assert.ok(events.some((event) => event.type === "auto_retry_end" && event.success));
+  assert.equal(session.messages.at(-1).role, "toolResult");
+});
+
+test("真实 SDK 对 429 暂时限流重试，对认证错误直接结束，均不叠加底层重试", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-http-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const status of [429, 401]) {
+    let requests = 0;
+    const model = createServer(async (request, response) => {
+      for await (const _chunk of request) {} requests++;
+      if (requests === 1) {
+        response.writeHead(status, { "content-type": "application/json" });
+        return response.end(JSON.stringify({ error: { message: status === 429 ? "rate limit exceeded" : "authentication failed", type: "fixture-error" } }));
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",
+        choices: [{ index: 0, delta: { role: "assistant", content: "完成" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+    });
+    await new Promise((done) => model.listen(0, "127.0.0.1", done));
+    const session = await createPiSession({ config: { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" },
+      cwd: root, dataDir: join(root, "data"), customTools: [], systemPrompt: "fixture" });
+    try {
+      const events = []; session.subscribe((event) => events.push(event));
+      await session.prompt("生成方案");
+      assert.equal(requests, status === 429 ? 2 : 1);
+      assert.equal(events.filter((event) => event.type === "auto_retry_start").length, status === 429 ? 1 : 0);
+      assert.equal(session.messages.at(-1).stopReason, status === 429 ? "stop" : "error");
+    } finally { session.dispose(); await new Promise((done) => model.close(done)); }
+  }
+});
 
 test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-pi-test-"));
@@ -17,6 +244,7 @@ test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", 
     assert.equal(request.url, "/v1/chat/completions");
     assert.equal(request.headers.authorization, "Bearer fixture-only");
     assert.equal(body.messages[0].role, "system");
+    assert.equal(body.max_tokens, 4096);
     assert.deepEqual(body.tools.map((item) => item.function.name).sort(), ["add_project", "get_runtime_status", "inspect_project", "list_ports", "list_project_failures", "list_projects", "remove_project", "start_project", "stop_project"]);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
@@ -232,7 +460,7 @@ test("真实 Pi SDK 检查项目文件、提交方案并自动启用，文件内
   const manager = new ProjectManager({ dataDir: join(root, "data"), analyzeProject: createProjectAnalyzer({ config, dataDir: join(root, "data") }) });
   t.after(async () => { await manager.dispose(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
   const project = await manager.add({ path: app });
-  assert.equal(count, 4); assert.equal(project.canLaunch, true); assert.equal(project.launch.command, "pnpm");
+  assert.equal(count, 3); assert.equal(project.canLaunch, true); assert.equal(project.launch.command, "pnpm");
   assert.deepEqual(project.launch.args, ["run", "dev"]); assert.equal(project.setup.status, "ready");
 });
 
