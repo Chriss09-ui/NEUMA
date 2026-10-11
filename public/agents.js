@@ -57,39 +57,102 @@ async function loadConversation(agent) {
 
 let historyCollapsed = false;
 try { historyCollapsed = storage?.getItem("neuma.agent.history-collapsed.v1") === "true"; } catch {}
+let historyMenu = null;
+const historyActionErrors = new Map();
+
+function closeHistoryMenu(restoreFocus = false) {
+  if (!historyMenu) return;
+  const { trigger, row } = historyMenu;
+  historyMenu = null;
+  byId("agent-history-menu").hidden = true;
+  trigger.setAttribute("aria-expanded", "false");
+  row.classList.remove("has-open-menu");
+  if (restoreFocus) trigger.focus({ preventScroll: true });
+}
+
+function openHistoryMenu(agentId, item, trigger, row, focusItem = false) {
+  const wasOpen = historyMenu?.trigger === trigger;
+  closeHistoryMenu();
+  if (wasOpen || item.deleting) return;
+  const menu = byId("agent-history-menu"), remove = byId("agent-history-delete");
+  historyMenu = { agentId, conversationId: item.id, trigger, row };
+  trigger.setAttribute("aria-expanded", "true");
+  row.classList.add("has-open-menu");
+  remove.setAttribute("aria-label", `删除对话：${item.title}`);
+  menu.setAttribute("aria-label", `对话操作：${item.title}`);
+  menu.hidden = false;
+  const bounds = byId("agent-history-sidebar").getBoundingClientRect(), anchor = trigger.getBoundingClientRect();
+  const height = menu.getBoundingClientRect().height;
+  const below = anchor.bottom - bounds.top + 4;
+  menu.style.top = `${Math.max(8, below + height <= bounds.height - 8 ? below : anchor.top - bounds.top - height - 4)}px`;
+  if (focusItem) remove.focus({ preventScroll: true });
+}
+
+function historyDate(date, today) {
+  if (!Number.isFinite(date.getTime())) return { group: "更早", label: "" };
+  const day = new Date(date); day.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const week = new Date(today); week.setDate(today.getDate() - 6);
+  const group = day.getTime() === today.getTime() ? "今天" : day.getTime() === yesterday.getTime() ? "昨天"
+    : day >= week && day < today ? "近7天"
+      : `${date.getFullYear() === today.getFullYear() ? "" : `${date.getFullYear()}年`}${date.getMonth() + 1}月`;
+  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return { group, label: group === "今天" || group === "昨天" ? time : `${date.getMonth() + 1}/${date.getDate()} ${time}` };
+}
 
 function renderHistory(agent) {
   const list = byId("agent-history-list"), state = history.state(agent.id), selected = conversation(agent.id);
   const focusedId = document.activeElement?.dataset?.conversationId;
-  const focusedDelete = document.activeElement?.className === "agent-history-delete";
+  const focusedAction = document.activeElement?.className === "agent-history-more" ||
+    (!byId("agent-history-menu").hidden && byId("agent-history-menu").contains(document.activeElement));
+  const menuId = historyMenu?.conversationId;
+  closeHistoryMenu();
   list.replaceChildren();
   const records = history.records(agent.id);
   byId("agent-history-count").textContent = String(records.length);
   byId("agent-history-feedback").textContent = state.loading ? "正在读取历史对话…" : state.error
-    || (!records.length ? "还没有历史对话，发送消息开始聊天。" : "按最近更新排列");
+    || historyActionErrors.get(agent.id)
+    || (!records.length ? "还没有对话\n发送第一条消息后，会保存在这里。" : "");
   byId("agent-workspace").classList.toggle("history-collapsed", historyCollapsed);
   byId("agent-history-body").hidden = historyCollapsed;
   const toggle = byId("agent-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
   toggle.setAttribute("aria-expanded", String(!historyCollapsed));
   toggle.setAttribute("aria-label", label); toggle.title = label;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  let previousGroup = null;
   for (const item of records) {
+    const date = new Date(item.updatedAt), stamp = historyDate(date, today);
+    if (stamp.group !== previousGroup) {
+      list.append(element("h3", "agent-history-group-title", stamp.group));
+      previousGroup = stamp.group;
+    }
     const row = element("div", "agent-history-row", "");
     row.classList.toggle("is-current", item === selected);
     const select = element("button", "agent-history-select", "");
     select.type = "button"; select.dataset.conversationId = item.id;
     select.setAttribute("aria-label", `打开对话：${item.title}`);
     if (item === selected) select.setAttribute("aria-current", "true");
-    const date = new Date(item.updatedAt);
+    select.title = item.title;
     select.append(element("span", "agent-history-title", item.title), element("span", "agent-history-time",
-      `${Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""}${item.pendingSync ? " · 待同步" : ""}`));
+      `${stamp.label}${item.pendingSync ? " · 待同步" : ""}`));
     select.disabled = item.deleting;
     select.addEventListener("click", () => selectConversation(agent.id, item.id));
-    const remove = element("button", "agent-history-delete", "删除");
-    remove.type = "button"; remove.dataset.conversationId = item.id;
-    remove.setAttribute("aria-label", `删除对话：${item.title}`); remove.disabled = item.deleting;
-    remove.addEventListener("click", () => deleteConversation(agent.id, item.id));
-    row.append(select, remove); list.append(row);
-    if (focusedId === item.id) (focusedDelete ? remove : select).focus({ preventScroll: true });
+    const more = element("button", "agent-history-more", "");
+    more.type = "button"; more.dataset.conversationId = item.id; more.disabled = item.deleting;
+    more.setAttribute("aria-label", `对话操作：${item.title}`); more.title = "更多操作";
+    more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
+    more.setAttribute("aria-controls", "agent-history-menu");
+    const dots = element("span", "agent-history-more-icon", ""); dots.setAttribute("aria-hidden", "true");
+    more.append(dots);
+    more.addEventListener("click", () => openHistoryMenu(agent.id, item, more, row));
+    more.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      event.preventDefault();
+      if (historyMenu?.trigger === more) byId("agent-history-delete").focus({ preventScroll: true });
+      else openHistoryMenu(agent.id, item, more, row, true);
+    });
+    row.append(select, more); list.append(row);
+    if ((focusedId || (focusedAction && menuId)) === item.id) (item.deleting ? toggle : focusedAction ? more : select).focus({ preventScroll: true });
   }
 }
 
@@ -126,9 +189,16 @@ async function selectConversation(id, cid) {
 async function deleteConversation(id, cid) {
   const item = history.state(id).items.get(cid);
   if (!item || !window.confirm(`删除“${item.title}”？删除后无法恢复对话，已生成的文件仍可在产物中查看。`)) return;
+  historyActionErrors.delete(id);
   const selected = conversation(id) === item;
   await stopConversation(id, item);
-  if (!await history.remove(id, cid)) return;
+  if (!await history.remove(id, cid)) {
+    if (history.state(id).items.get(cid) === item) {
+      historyActionErrors.set(id, `未能删除“${item.title}”：${item.storageError || "删除失败，请重试。"}`);
+      if (visible(id) && current()) renderHistory(current());
+    }
+    return;
+  }
   inputs.delete(cid);
   if (selected && visible(id)) { input.value = inputs.get(conversation(id).id) || ""; input.dispatchEvent(new Event("input")); input.focus(); }
 }
@@ -685,6 +755,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
 });
 document.addEventListener("neuma:route", (event) => {
   clearInspectionTimer();
+  closeHistoryMenu();
   if (route.page === "agent" && current()) inputs.set(conversation(route.agentId).id, input.value);
   const previousPage = route.page, previousId = route.agentId;
   route = event.detail;
@@ -755,6 +826,24 @@ byId("agent-history-toggle").addEventListener("click", () => {
   try { storage?.setItem("neuma.agent.history-collapsed.v1", String(historyCollapsed)); } catch {}
   if (historyCollapsed) byId("agent-history-toggle").focus({ preventScroll: true });
   renderHistory(agent);
+});
+byId("agent-history-delete").addEventListener("click", () => {
+  const target = historyMenu;
+  closeHistoryMenu(true);
+  if (target && visible(target.agentId)) return deleteConversation(target.agentId, target.conversationId);
+});
+byId("agent-history-list").addEventListener("scroll", () => closeHistoryMenu(true));
+window.addEventListener?.("resize", () => closeHistoryMenu(true));
+document.addEventListener("click", (event) => {
+  if (historyMenu && !historyMenu.trigger.contains(event.target) && !byId("agent-history-menu").contains(event.target)) closeHistoryMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (!historyMenu) return;
+  if (event.key === "Escape") { event.preventDefault(); closeHistoryMenu(true); }
+  else if (event.key === "Tab") closeHistoryMenu(true);
+  else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && byId("agent-history-menu").contains(event.target)) {
+    event.preventDefault(); byId("agent-history-delete").focus({ preventScroll: true });
+  }
 });
 byId("agent-new-chat").addEventListener("click", async () => {
   const agent = current();
