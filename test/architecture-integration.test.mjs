@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
-import { designHash } from "../src/architecture/architecture-contract.mjs";
+import { LEGACY_CAPABILITIES, PUBLIC_TOOL_IDS, designHash } from "../src/architecture/architecture-contract.mjs";
 import { createRequestHandler } from "../src/server.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
@@ -193,7 +193,7 @@ test("缺少 mode 的历史定义也不能直跑，重启仍须正式架构评�
   assert.equal(records.length, 0);
 });
 
-test("持久化与重启保持需求、Agent ID、候选哈希和评估绑定，普通对话不装配文件工具", async (t) => {
+test("持久化与重启保持需求、Agent ID、候选哈希和评估绑定，普通对话继承公共材料工具", async (t) => {
   const definition = input();
   const { agents, options, records } = await fixture(t);
   const result = await agents.build(definition);
@@ -213,8 +213,32 @@ test("持久化与重启保持需求、Agent ID、候选哈希和评估绑定，
   const reply = await restored.prompt(turn());
   assert.equal(reply.status, "complete");
   const runtime = records.find((record) => record.role === "runtime");
-  assert.deepEqual(runtime.options.customTools, []);
+  assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), PUBLIC_TOOL_IDS);
   assert.deepEqual((await restored.get("weekly")).toolIds, []);
+});
+
+test("历史正式定义继承公共材料工具，旧目录、指令与执行绑定无需重建", async (t) => {
+  const { agents, options, records } = await fixture(t);
+  const original = await agents.build(input());
+  const legacy = { ...original.architecture, capabilitySnapshot: structuredClone(LEGACY_CAPABILITIES) };
+  delete legacy.capabilityCatalogVersion;
+  await agents.architecture.save(legacy);
+  await agents.close();
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.equal((await restored.prompt(turn())).status, "complete");
+  assert.deepEqual(records.find((record) => record.role === "runtime").options.customTools.map((tool) => tool.name), PUBLIC_TOOL_IDS);
+  const compatible = await restored.build(input());
+  assert.equal(compatible.agent.revision, original.agent.revision);
+  assert.equal(compatible.agent.instructions, original.agent.instructions);
+  assert.deepEqual(compatible.agent.toolIds, original.agent.toolIds);
+  assert.deepEqual(compatible.agent.architectureRef, original.agent.architectureRef);
+  assert.deepEqual(compatible.agent.developmentRef, original.agent.developmentRef);
+  assert.deepEqual(compatible.agent.execution, original.agent.execution);
+  assert.equal(compatible.architecture.candidateHash, original.architecture.candidateHash);
+  assert.equal(compatible.architecture.version, original.architecture.version);
+  assert.deepEqual(compatible.architecture.capabilitySnapshot, LEGACY_CAPABILITIES);
+  assert.equal(compatible.architecture.capabilityCatalogVersion, undefined);
+  assert.deepEqual(records.map((record) => record.role), ["designer", "reviewer", "runtime"]);
 });
 
 test("指令或工具白名单被改变后不能运行或复用，必须重新设计并评估", async (t) => {

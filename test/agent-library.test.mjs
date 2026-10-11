@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentLibrary } from "../src/agents/agent-library.mjs";
+import { AgentLibrary, normalizeAttachmentRefs } from "../src/agents/agent-library.mjs";
 import { InputError } from "../src/requirements/core.mjs";
 
 async function fixture(t) {
@@ -223,4 +223,106 @@ test("deleting an Agent clears conversation bodies and blocks fresh IDs while re
   assert.equal(await library.storage.readJson("weekly", "conversations/records/chat.json"), null);
   await assert.rejects(library.saveConversationRecord("weekly", "fresh-chat", autosave()), { reason: "conversation_deleted" });
   assert.equal(await readFile(join(workspace, "result.md"), "utf8"), "保留产物");
+});
+
+const attached = (ids = ["material-one"], expectedVersion = 0, mutationId = "attached-save") => ({
+  schemaVersion: 4, expectedVersion, mutationId,
+  messages: [{ role: "user", content: "", attachments: ids.map((id) => ({ id })), delivery: "sent", revision: "v1" }],
+});
+
+test("attachment references persist without file payloads, validate ownership and support same-Agent reuse", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  const calls = [];
+  library.validateAttachments = async (id, refs) => {
+    calls.push({ id, refs });
+    if (id !== "weekly" || refs.some((item) => item.id !== "material-one")) throw new InputError("材料不属于当前 Agent");
+  };
+  await library.saveRequirement("weekly", input()); await library.saveRequirement("other", input());
+  const first = await library.saveConversationRecord("weekly", "chat-one", attached());
+  assert.equal(first.conversation.schemaVersion, 4);
+  assert.deepEqual(first.conversation.messages[0].attachments, [{ id: "material-one" }]);
+  assert.equal(first.conversation.messages[0].content, "");
+  assert.deepEqual(calls, [{ id: "weekly", refs: [{ id: "material-one" }] }]);
+  assert.deepEqual(await library.saveConversationRecord("weekly", "chat-one", attached()), first);
+  assert.equal(calls.length, 1, "已保存请求的幂等重试不再次校验材料");
+  const second = await library.saveConversationRecord("weekly", "chat-two", attached());
+  assert.deepEqual(second.conversation.messages[0].attachments, first.conversation.messages[0].attachments);
+  await assert.rejects(library.saveConversationRecord("other", "chat-one", attached()), /不属于/);
+  await assert.rejects(library.saveConversationRecord("weekly", "chat-one", attached(["forged"], 1, "forged-save")), /不属于/);
+  assert.deepEqual(await new AgentLibrary({ dataDir }).getConversationRecord("weekly", "chat-one"), first);
+  const stored = await library.storage.readJson("weekly", "conversations/records/chat-one.json");
+  assert.deepEqual(Object.keys(stored.messages[0].attachments[0]), ["id"]);
+});
+
+test("attachment validation fails closed and rejects malformed, duplicate and oversized reference lists", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  await assert.rejects(library.saveConversationRecord("weekly", "chat", attached()), /归属校验/);
+  for (const refs of [null, [{ id: "../outside" }], [{ id: "a", path: "private.pdf" }], [{ id: "a" }, { id: "a" }],
+    Array.from({ length: 11 }, (_, index) => ({ id: `material-${index}` })), [{ id: "a".repeat(81) }]])
+    assert.throws(() => normalizeAttachmentRefs(refs), InputError);
+  assert.deepEqual(normalizeAttachmentRefs(), []);
+  assert.deepEqual(normalizeAttachmentRefs([{ id: "13bb2df9-238f-481e-af78-53bfa9a6449a" }]), [{ id: "13bb2df9-238f-481e-af78-53bfa9a6449a" }]);
+  for (const payload of [attached([]), { ...attached(), schemaVersion: 3 },
+    { ...attached(), messages: [{ role: "assistant", content: "reply", attachments: [{ id: "material-one" }] }] }])
+    assert.throws(() => library.saveConversationRecord("weekly", "chat", payload), InputError);
+});
+
+test("schema 3 records are read without mutation and upgrade on the next successful save", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  const old = { schemaVersion: 3, id: "chat", agentId: "weekly", title: "整理材料",
+    createdAt: "2026-10-08T00:00:00.000Z", updatedAt: "2026-10-08T00:00:00.000Z", saveVersion: 7,
+    mutationId: "old-save", messages: [{ role: "user", content: "整理材料", delivery: "sent" }] };
+  await library.storage.writeJson("weekly", "conversations/records/chat.json", old);
+  assert.deepEqual((await library.getConversationRecord("weekly", "chat")).conversation, old);
+  assert.deepEqual(await library.storage.readJson("weekly", "conversations/records/chat.json"), old);
+  const updated = await library.saveConversationRecord("weekly", "chat", { schemaVersion: 3, expectedVersion: 7,
+    mutationId: "new-save", messages: old.messages });
+  assert.equal(updated.conversation.schemaVersion, 4);
+  assert.equal(updated.conversation.saveVersion, 8);
+  assert.equal(updated.conversation.createdAt, old.createdAt);
+  assert.deepEqual(updated.conversation.messages, old.messages);
+});
+
+test("attachment-only titles survive restart and earlier generic titles normalize without rewriting records", async (t) => {
+  const { dataDir, library } = await fixture(t); await library.saveRequirement("weekly", input());
+  library.validateAttachments = async () => {};
+  const saved = await library.saveConversationRecord("weekly", "attachment-title", attached());
+  assert.equal(saved.conversation.title, "附件分析");
+  const restored = new AgentLibrary({ dataDir });
+  assert.equal((await restored.getConversationRecord("weekly", "attachment-title")).conversation.title, "附件分析");
+  assert.equal((await restored.listConversations("weekly")).conversations[0].title, "附件分析");
+  const previous = { ...saved.conversation, title: "新对话" };
+  await library.storage.writeJson("weekly", "conversations/records/attachment-title.json", previous);
+  const migrated = new AgentLibrary({ dataDir });
+  assert.equal((await migrated.getConversationRecord("weekly", "attachment-title")).conversation.title, "附件分析");
+  assert.equal((await migrated.listConversations("weekly")).conversations[0].title, "附件分析");
+  assert.equal((await library.storage.readJson("weekly", "conversations/records/attachment-title.json")).title, "新对话");
+});
+
+test("legacy clients cannot silently strip attachments; conflicts, retries and deletion remain protected", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  library.validateAttachments = async () => {};
+  const first = await library.saveConversationRecord("weekly", "legacy-saved", attached());
+  assert.equal((await library.getConversation("weekly")).conversation.schemaVersion, 4);
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", autosave("旧客户端", 1, "old-client")),
+    { reason: "conversation_schema_upgrade_required" });
+  await assert.rejects(library.saveConversation("weekly", snapshot("旧兼容入口")), { reason: "conversation_schema_upgrade_required" });
+  assert.deepEqual(await library.saveConversationRecord("weekly", "legacy-saved", { ...autosave(), importOnly: true }), first);
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", attached(["material-two"], 1)), { reason: "conversation_conflict" });
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", attached(["material-one"], 0, "stale-save")), { reason: "conversation_conflict" });
+  assert.deepEqual(await library.getConversationRecord("weekly", "legacy-saved"), first);
+  await library.removeConversation("weekly", "legacy-saved");
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", attached()), { reason: "conversation_deleted" });
+  assert.deepEqual(await library.getConversationRecord("weekly", "legacy-saved"), { conversation: null, deleted: true });
+});
+
+test("long attachment histories validate unique references in bounded batches", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  const batches = []; library.validateAttachments = async (id, refs) => { batches.push(refs); };
+  const refs = Array.from({ length: 12 }, (_, index) => `material-${index}`);
+  await library.saveConversationRecord("weekly", "chat", { ...attached(), messages: [
+    attached(refs.slice(0, 10)).messages[0], attached(refs.slice(9)).messages[0],
+  ] });
+  assert.deepEqual(batches.map((items) => items.length), [10, 2]);
+  assert.deepEqual(batches.flat().map((item) => item.id), refs);
 });

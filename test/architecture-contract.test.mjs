@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { InputError, emptyDraft } from "../src/requirements/core.mjs";
-import { ARCHITECTURE_VERSION, CAPABILITIES, requirementItems, validateDesign,
-  validateReview, checkDesign, designHash } from "../src/architecture/architecture-contract.mjs";
+import { ARCHITECTURE_VERSION, CAPABILITY_CATALOG_VERSION, CAPABILITIES, LEGACY_CAPABILITIES, PUBLIC_TOOL_IDS,
+  capabilitySnapshotCompatible, requirementItems, validateDesign, validateReview, checkDesign, designHash } from "../src/architecture/architecture-contract.mjs";
 
 function readyDraft() {
   const draft = emptyDraft();
@@ -58,7 +58,66 @@ test("有效设计返回独立副本，轻量真实能力才能直接运行", ()
   result.instructions = "已修改";
   assert.notEqual(result.instructions, original.instructions);
   assert.deepEqual(checkDesign(original, context), { issues: [], runnable: true });
-  assert.deepEqual(CAPABILITIES.map((item) => item.id), ["conversation", "list_workspace_files", "read_workspace_file", "write_workspace_file"]);
+  assert.deepEqual(CAPABILITIES.map((item) => item.id), ["conversation", "list_workspace_files", "read_workspace_file", "write_workspace_file",
+    "list_materials", "read_material", "read_material_image"]);
+  assert.deepEqual(PUBLIC_TOOL_IDS, ["list_materials", "read_material", "read_material_image"]);
+});
+
+test("历史目录仅接受完整精确的四项快照，仍核对实际已使用能力", () => {
+  const legacy = { design: design(), capabilitySnapshot: structuredClone(LEGACY_CAPABILITIES) };
+  assert.equal(capabilitySnapshotCompatible(legacy), true);
+  assert.equal(capabilitySnapshotCompatible({ ...legacy, capabilityCatalogVersion: 1 }), true);
+  for (const mutate of [
+    (record) => { record.capabilitySnapshot.pop(); },
+    (record) => { record.capabilitySnapshot[0].scope = "可读取其他 Agent"; },
+    (record) => { record.capabilitySnapshot[0].version = 1; },
+    (record) => { record.capabilitySnapshot.push({ id: "web_search", status: "available", scope: "联网" }); },
+    (record) => { record.design.capabilities.push({ id: "read_material", status: "available", reason: "伪装旧目录能力" }); },
+    (record) => { record.capabilityCatalogVersion = 999; },
+  ]) {
+    const record = structuredClone(legacy); mutate(record);
+    assert.equal(capabilitySnapshotCompatible(record), false);
+  }
+  const changed = CAPABILITIES.map((item) => item.id === "conversation" ? { ...item, scope: "扩大权限" } : item);
+  assert.equal(capabilitySnapshotCompatible(legacy, changed), false);
+  assert.equal(Object.isFrozen(LEGACY_CAPABILITIES), true);
+  assert.ok(LEGACY_CAPABILITIES.every(Object.isFrozen));
+});
+
+test("版本化目录按已使用能力校验，新添无关能力不废弃已有方案", () => {
+  const record = { capabilityCatalogVersion: CAPABILITY_CATALOG_VERSION, capabilitySnapshot: structuredClone(CAPABILITIES), design: design() };
+  record.design.capabilities.push({ id: "read_material", status: "available", reason: "读取上传文档" });
+  assert.equal(capabilitySnapshotCompatible(record), true);
+  const future = [...CAPABILITIES, { id: "future_tool", version: 1, status: "available", scope: "未来工具" }];
+  assert.equal(capabilitySnapshotCompatible(record, future), true);
+  const unusedChanged = future.map((item) => item.id === "write_workspace_file" ? { ...item, version: 2, scope: "新权限" } : item);
+  assert.equal(capabilitySnapshotCompatible(record, unusedChanged), true);
+  for (const field of [{ version: 2 }, { scope: "任意路径" }, { status: "needs_connection" }]) {
+    const changed = CAPABILITIES.map((item) => item.id === "read_material" ? { ...item, ...field } : item);
+    assert.equal(capabilitySnapshotCompatible(record, changed), false);
+  }
+  assert.equal(capabilitySnapshotCompatible(record, CAPABILITIES.filter((item) => item.id !== "read_material")), false);
+  for (const mutate of [
+    (value) => { value.capabilitySnapshot = value.capabilitySnapshot.filter((item) => item.id !== "read_material"); },
+    (value) => { value.capabilitySnapshot[0].version = 2; },
+    (value) => { value.capabilitySnapshot[0].scope = "任意路径"; },
+    (value) => { value.capabilitySnapshot.push(value.capabilitySnapshot[0]); },
+    (value) => { value.capabilitySnapshot[0].approved = true; },
+    (value) => { value.design.capabilities.push({ id: "forged", status: "available", reason: "伪造工具" }); },
+  ]) {
+    const forged = structuredClone(record); mutate(forged);
+    assert.equal(capabilitySnapshotCompatible(forged), false);
+  }
+  assert.equal(capabilitySnapshotCompatible(null), false);
+});
+
+test("材料读取任务复用公共目录，可保持轻量并保留工具失败验收", () => {
+  const value = design();
+  value.capabilities.push({ id: "read_material", status: "available", reason: "读取上传的 PDF 提取文本" });
+  value.acceptance.push({ id: "material_failure", kind: "tool_failure", requirementIds: ["inputSource"],
+    input: "材料提取失败", expected: "说明读取未完成，请求补充可读文本，不编造内容" });
+  assert.equal(checkDesign(value, context).runnable, true);
+  assert.equal(CAPABILITIES.some((item) => item.id === "web_search"), false);
 });
 
 test("空字段、额外字段、重复 ID 和超长指令不能通过", () => {

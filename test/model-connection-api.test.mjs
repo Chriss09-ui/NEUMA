@@ -6,7 +6,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequestHandler } from "../src/server.mjs";
-import { InputError } from "../src/requirements/core.mjs";
+import { InputError, ProviderError } from "../src/requirements/core.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const handler = (options = {}) => createRequestHandler({ config: {}, providers: {}, projects: {}, skillManager: {}, projectAgent: {}, prototypeAgents: {}, ...options });
@@ -257,4 +257,73 @@ test("服务关闭取消活动 Jev 测试并等待退出", async () => {
   assert.equal(signal.aborted, true);
   assert.equal(response.text, "");
   assert.equal(response.status, undefined);
+});
+
+test("构建能力测试独立转发配置，不保存配置或重建 Agent", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "neuma-agent-model-test-api-")), envPath = join(dir, "fixture-config.txt");
+  const original = "NEUMA_LLM_MODEL=saved-model\n"; await writeFile(envPath, original);
+  const config = { model: "saved-model", apiKey: "synthetic-saved-key" }, before = { ...config };
+  let seen;
+  const app = handler({ config, envPath,
+    modelConnectionTester: () => assert.fail("构建能力测试不走短文字探针"),
+    agentModelConnectionTester: async (active, input, options) => {
+      seen = { active, input, signal: options.signal };
+      return { ok: true, model: input.model, latencyMs: 120, toolsCalled: 1, streaming: true, toolRoundTrip: true };
+    } });
+  t.after(async () => { await app.dispose(); await rm(dir, { recursive: true, force: true }); });
+  const result = await invoke(app, "POST", "/api/settings/test-agent-model", body);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.json, { ok: true, model: body.model, latencyMs: 120, toolsCalled: 1, streaming: true, toolRoundTrip: true });
+  assert.deepEqual(seen.active, before); assert.deepEqual(seen.input, body); assert.equal(seen.signal.aborted, false);
+  assert.deepEqual(config, before); assert.equal(await readFile(envPath, "utf8"), original);
+  assert.deepEqual(await readdir(dir), ["fixture-config.txt"]);
+  assert.doesNotMatch(result.text, /synthetic-(?:new|saved)-key/);
+});
+
+test("构建能力测试继承本机来源、JSON 与请求大小保护，仅 POST 触发", async (t) => {
+  let calls = 0;
+  const app = handler({ agentModelConnectionTester: () => { calls++; assert.fail("被拒请求不能执行构建能力测试"); } });
+  t.after(() => app.dispose());
+  const path = "/api/settings/test-agent-model";
+  for (const headers of [{ host: "127.0.0.1:3000", origin: "https://elsewhere.example.test" },
+    { host: "elsewhere.example.test:3000" }, { host: "127.0.0.1:3000", "sec-fetch-site": "cross-site" }])
+    assert.equal((await invoke(app, "POST", path, body, headers)).status, 403);
+  for (const method of ["GET", "PUT", "DELETE"]) assert.equal((await invoke(app, method, path, body)).status, 404);
+  for (const invalid of [undefined, null, [], "text", { model: "x".repeat(8192) }])
+    assert.equal((await invoke(app, "POST", path, invalid)).status, 400);
+  assert.equal(calls, 0);
+});
+
+test("构建能力测试返回安全诊断，内部错误不泄漏", async (t) => {
+  let calls = 0;
+  const app = handler({ agentModelConnectionTester: () => {
+    if (++calls === 1) throw new ProviderError("模型未完成工具回传", { stage: "llm", reason: "tool_round_trip" });
+    throw new Error("synthetic-private-agent-probe-payload");
+  } });
+  t.after(() => app.dispose());
+  const failure = await invoke(app, "POST", "/api/settings/test-agent-model", body);
+  assert.equal(failure.status, 502); assert.equal(failure.json.diagnostic.reason, "tool_round_trip");
+  const internal = await invoke(app, "POST", "/api/settings/test-agent-model", body);
+  assert.equal(internal.status, 500); assert.doesNotMatch(internal.text, /synthetic-private-agent-probe-payload/);
+});
+
+test("断开页面或关闭服务取消活动构建能力测试，迟到结果不发送成功", async () => {
+  for (const mode of ["disconnect", "shutdown"]) {
+    const entered = deferred(), finish = deferred(); let signal;
+    const app = handler({ agentModelConnectionTester: async (_config, _body, options) => {
+      signal = options.signal; entered.resolve();
+      if (mode === "shutdown") {
+        await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+        signal.throwIfAborted();
+      }
+      return await finish.promise;
+    } });
+    const response = new Response(), running = app(request("POST", "/api/settings/test-agent-model", body), response);
+    await entered.promise;
+    if (mode === "disconnect") {
+      response.emit("close"); finish.resolve({ ok: true, model: "late-model", latencyMs: 99 });
+      await running; await app.dispose();
+    } else await Promise.all([app.dispose(), running]);
+    assert.equal(signal.aborted, true); assert.equal(response.text, ""); assert.equal(response.status, undefined);
+  }
 });

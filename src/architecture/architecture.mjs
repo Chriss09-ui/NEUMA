@@ -1,6 +1,7 @@
 import { InputError, ProviderError } from "../requirements/core.mjs";
-import { createPiSession } from "../runtime/pi-runtime.mjs";
-import { ARCHITECTURE_VERSION, CAPABILITIES, DESIGN_SCHEMA, REVIEW_SCHEMA,
+import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
+import { modelOutputBudget } from "../runtime/model-limits.mjs";
+import { ARCHITECTURE_VERSION, CAPABILITY_CATALOG_VERSION, CAPABILITIES, DESIGN_SCHEMA, REVIEW_SCHEMA,
   requirementItems, validateDesign, validateReview, checkDesign, designHash } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, REVIEW_PROMPT, SPECIALIST_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
@@ -16,13 +17,25 @@ const toolResult = (result) => ({ content: [{ type: "text", text: JSON.stringify
 const issue = (id, description, remedy) => ({ id, blocking: true, description, remedy });
 const runtimeEvidence = {
   id: "neuma-runtime-v1", title: "当前 NEUMA 执行能力清单", kind: "local",
-  versionScope: "NEUMA architecture v1 / @earendil-works/pi-coding-agent 1.0.0",
-  excerpt: "当前可复用 Node 运行容器和 Pi 会话；可对话并操作专属目录文本文件。不支持外部服务、后台调度、任意代码执行、工作流恢复。SDK 接入不证明存在这些能力。",
+  versionScope: "NEUMA architecture v1 / capability catalog v2 / @earendil-works/pi-coding-agent 1.0.0",
+  excerpt: "当前可复用 Node 运行容器和 Pi 会话；可对话并操作专属目录文本文件。正式可运行 Agent 共享上传材料目录、文档提取文本和图片/PDF 页面读取工具，图片理解取决于实际模型支持。普通材料读取与分析无需逐个 Agent 开发解析器。不支持工作 Agent 联网检索、正式外部服务或后台调度；专用程序仍需独立研发验收。",
 };
 
-function failure(reason = "request_failed") {
-  return new ProviderError(reason === "cancelled" ? "架构设计已停止，已有有效定义和文件会保留"
-    : "架构设计或评估未完成，请检查模型连接后重试", { stage: "architecture", reason });
+class ArchitectureError extends ProviderError {}
+
+function failure(reason = "request_failed", details = {}) {
+  const messages = {
+    cancelled: "架构设计已停止，已有有效定义和文件会保留",
+    turn_limit: "架构设计达到本阶段的模型轮次上限，完整方案尚未提交，请重试",
+    output_limit: "模型输出达到上限，完整架构方案尚未生成，请重试或使用支持更长输出的模型",
+    request_failed: "架构设计或评估未完成，请重试；已有有效定义保留",
+  };
+  return new ArchitectureError(messages[reason], { stage: "architecture", reason, ...details });
+}
+
+function modelFailure(value, details) {
+  const mapped = classifyModelFailure(value);
+  return new ArchitectureError(mapped.message, { stage: "architecture", reason: mapped.reason, ...details });
 }
 
 function checkedModule(value) {
@@ -95,33 +108,50 @@ export class ArchitectureDesigner {
   }
 
   async role({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress }) {
-    let result, session, unsubscribe = () => {}, failed = false, turns = 0;
+    let result, session, unsubscribe = () => {}, failed = false, turns = 0, retries = 0, retryError = "", turnLimit = false, truncated = false;
+    const details = () => ({ role, phase: role === "reviewer" ? "evaluating" : "designing", retries });
     const abort = () => { void session?.abort().catch(() => {}); };
     const submit = { name: submitName, label: "提交检查结果", description: "提交本阶段的结构化结果；提交不代表整体通过。",
       parameters, executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
         if (result !== undefined) throw new InputError("本阶段已经提交，请结束本轮");
         result = validate(value);
-        return toolResult({ submitted: true });
+        session?.setAutoCompactionEnabled?.(false);
+        return { ...toolResult({ submitted: true }), terminate: true };
       } };
     try {
       signal?.throwIfAborted();
       signal?.addEventListener("abort", abort, { once: true });
       session = await this.sessionFactory({ config: this.config, cwd: this.cwd,
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
-        systemPrompt, customTools: [...tools, submit] });
+        systemPrompt, customTools: [...tools, submit], maxOutputTokens: modelOutputBudget(this.config, role === "designer" ? 8192 : 4096) });
       signal?.throwIfAborted();
       unsubscribe = session.subscribe?.((event) => {
-        if (event.type === "auto_retry_end" && !event.success) failed = true;
-        if (event.type === "auto_retry_start") onProgress({ type: "status", phase: role, label: "模型连接异常，正在重连…" });
-        if (event.type === "turn_end" && ++turns > 12) { failed = true; abort(); }
+        if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "length") truncated = true;
+        if (event.type === "auto_retry_end" && !event.success) { failed = true; retryError = event.finalError || retryError; }
+        if (event.type === "auto_retry_start") {
+          retries = Number.isInteger(event.attempt) && event.attempt >= 0 && event.attempt <= 5 ? event.attempt : retries;
+          retryError = event.errorMessage || retryError;
+          onProgress({ type: "status", phase: role, label: "模型请求未完成，正在重试…" });
+        }
+        if (event.type === "turn_end" && ++turns > 12) { failed = true; turnLimit = true; abort(); }
       }) ?? (() => {});
       await session.prompt(JSON.stringify(payload));
       signal?.throwIfAborted();
       const last = session.messages?.findLast((message) => message.role === "assistant");
-      if (failed || ["error", "aborted"].includes(last?.stopReason)) throw failure();
+      if (turnLimit) throw failure("turn_limit", details());
+      if (failed || ["error", "aborted"].includes(last?.stopReason)) throw modelFailure(last?.errorMessage || retryError, details());
+      if (last?.stopReason === "length" || truncated && result === undefined) throw failure("output_limit", details());
       if (result === undefined) throw new InputError("本阶段尚未提交完整结果，不能继续");
       return result;
+    } catch (error) {
+      if (signal?.aborted) throw failure("cancelled", details());
+      if (error instanceof ArchitectureError) throw error;
+      if (error instanceof InputError) {
+        error.diagnostic = { stage: "architecture", reason: "invalid_result", ...details() };
+        throw error;
+      }
+      throw modelFailure(retryError || error?.message, details());
     } finally { signal?.removeEventListener("abort", abort); unsubscribe(); session?.dispose(); }
   }
 
@@ -132,7 +162,8 @@ export class ArchitectureDesigner {
     const record = { agentId: definition.id, name: definition.name, draft: structuredClone(definition.draft),
       version: (previous?.version ?? 0) + 1, contractVersion: ARCHITECTURE_VERSION,
       sourceFingerprint: definition.fingerprint, status: "designing", delivery: "blocked", summary: "正在设计方案",
-      requirements, capabilitySnapshot: structuredClone(CAPABILITIES), evidence: [structuredClone(runtimeEvidence)],
+      requirements, capabilityCatalogVersion: CAPABILITY_CATALOG_VERSION,
+      capabilitySnapshot: structuredClone(CAPABILITIES), evidence: [structuredClone(runtimeEvidence)],
       researchGaps: [], modules: [], attempts: [], issues: [], design: null, review: null, candidateHash: null,
       createdAt: new Date().toISOString() };
     await this.save(record);
@@ -232,10 +263,12 @@ export class ArchitectureDesigner {
     } catch (error) {
       record.status = signal?.aborted ? "cancelled" : "failed"; record.delivery = "blocked";
       record.summary = signal?.aborted ? "设计已停止，可重新发起；已有定义和文件保留。"
-        : error instanceof InputError ? error.message : "架构设计或评估未完成，请重试；已有有效定义保留。";
+        : error instanceof InputError || error instanceof ArchitectureError ? error.message : "架构设计或评估未完成，请重试；已有有效定义保留。";
+      if (error instanceof ArchitectureError || error instanceof InputError && error.diagnostic?.stage === "architecture")
+        record.diagnostic = error.diagnostic;
       await this.save(record);
       if (signal?.aborted) throw failure("cancelled");
-      if (error instanceof InputError) throw error;
+      if (error instanceof InputError || error instanceof ArchitectureError) throw error;
       throw failure();
     }
   }

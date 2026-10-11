@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
-import { createPiSession } from "../runtime/pi-runtime.mjs";
+import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
+import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { designHash, ARCHITECTURE_VERSION } from "../architecture/architecture-contract.mjs";
 import { PLAN_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
@@ -17,13 +18,21 @@ const toolResult = (value) => ({ content: [{ type: "text", text: JSON.stringify(
 const clone = (value) => structuredClone(value);
 
 class Stop extends Error {
-  constructor(message, status = "blocked") { super(message); this.status = status; }
+  constructor(message, status = "blocked", diagnostic) { super(message); this.status = status; this.diagnostic = diagnostic; }
+}
+
+function modelStop(ctx, handle, value) {
+  const failure = handle.failure ?? classifyModelFailure(value);
+  return new Stop(`${failure.message}。研发进度已保存，可继续。`, "failed", {
+    stage: "model", phase: ctx.record.phase, role: handle.kind, reason: failure.reason, retries: handle.retries ?? 0,
+  });
 }
 
 export function developmentSummary(record) {
   if (!record) return null;
   return clone({ id: record.id, agentId: record.agentId, name: record.name, version: record.version,
     architectureRef: record.architectureRef, status: record.status, phase: record.phase, summary: record.summary,
+    diagnostic: record.diagnostic ?? null,
     delivery: record.delivery, currentTaskId: record.currentTaskId, budgets: record.budgets,
     tasks: (record.tasks ?? []).map(({ id, title, status, attempts, repairs, summary }) => ({ id, title, status, attempts, repairs, summary })),
     package: record.package ? { codeHash: record.package.codeHash, planHash: record.package.planHash, entrypoint: record.package.entrypoint } : null,
@@ -117,7 +126,8 @@ export class DevelopmentController {
         if (!handle.accepting || handle.submitted) throw new InputError("本阶段已提交，请结束本轮");
         const result = validate(value);
         handle.result = result; handle.submitted = true;
-        return toolResult({ submitted: true });
+        handle.session?.setAutoCompactionEnabled?.(false);
+        return { ...toolResult({ submitted: true }), terminate: true };
       } };
     const guardedTools = [...tools, createContextReadTool(() => handle.payload)].map((tool) => ({ ...tool, execute: async (...args) => {
       this.guard(ctx);
@@ -128,12 +138,18 @@ export class DevelopmentController {
     handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
       systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind],
-      customTools: [...guardedTools, submit] });
+      customTools: [...guardedTools, submit], maxOutputTokens: modelOutputBudget(this.config, { planner: 8192, developer: 16384, reviewer: 4096 }[kind]) });
     if (kind === "developer") handle.session.setAutoCompactionEnabled?.(false);
     ctx.handles.add(handle);
     if (ctx.signal.aborted) { await handle.session.abort?.(); this.dispose(ctx, handle); this.guard(ctx); }
     handle.unsubscribe = handle.session.subscribe?.((event) => {
-      if (event.type === "auto_retry_end" && !event.success) handle.failed = true;
+      if (event.type === "auto_retry_start") {
+        if (Number.isInteger(event.attempt) && event.attempt >= 0 && event.attempt <= 5) handle.retries = event.attempt;
+        handle.failure = classifyModelFailure(event.errorMessage);
+      }
+      if (event.type === "auto_retry_end" && !event.success) {
+        handle.failed = true; handle.failure = event.finalError ? classifyModelFailure(event.finalError) : handle.failure ?? classifyModelFailure();
+      }
       if (event.type === "turn_end" && ++handle.turnsInPrompt > 1) {
         counter.turns++;
         if (counter.turns > limit) { handle.failed = true; void handle.session.abort?.(); }
@@ -155,7 +171,9 @@ export class DevelopmentController {
 
   async ask(ctx, handle, payload) {
     this.guard(ctx);
-    if (handle.counter.turns >= handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed");
+    if (handle.counter.turns >= handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
+      stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
+    });
     handle.counter.turns++;
     await this.save(ctx);
     Object.assign(handle, { accepting: true, submitted: false, result: undefined, turnsInPrompt: 0, rotate: false });
@@ -163,14 +181,23 @@ export class DevelopmentController {
     try {
       const maxChars = Math.min(16_000, Math.max(4096, Math.floor((handle.session.model?.contextWindow ?? 32768) / 2)));
       try { await handle.session.prompt(JSON.stringify(compactDevelopmentContext(handle.payload, maxChars))); }
-      catch (error) { if (!handle.rotate || ctx.signal.aborted || handle.failed) throw error; }
+      catch (error) {
+        if (ctx.signal.aborted || error instanceof InputError) throw error;
+        if (!handle.rotate || handle.failed) throw modelStop(ctx, handle, error?.message);
+      }
       await ctx.writes;
       this.guard(ctx);
       if (handle.rotate && !handle.failed) return validateWork({ summary: "已保存当前代码，正在按检查点续接上下文。",
         changedFiles: [], knownIssues: [], nextAction: "读取当前任务、代码和最近失败证据，继续未完成的实现。", continue: true });
       const last = handle.session.messages?.findLast((message) => message.role === "assistant");
+      if (handle.counter.turns > handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
+        stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
+      });
       if (handle.failed || ["error", "aborted"].includes(last?.stopReason))
-        throw new Stop("模型调用未完成，研发进度已保存，请检查连接后继续", "failed");
+        throw modelStop(ctx, handle, last?.errorMessage);
+      if (last?.stopReason === "length") throw new Stop("模型输出达到上限，本阶段结果尚未完整提交，进度已保存，可继续。", "failed", {
+        stage: "model", phase: ctx.record.phase, role: handle.kind, reason: "output_limit", retries: handle.retries ?? 0,
+      });
       if (!handle.submitted) throw new Stop("本阶段没有提交有效的结构化结果，不能推进", "failed");
       return handle.result;
     } finally { handle.accepting = false; }
@@ -325,7 +352,7 @@ export class DevelopmentController {
           throw new InputError("没有与当前架构版本对应的可恢复研发记录");
         ctx.record = previous;
         if (previous.status === "completed" && previous.delivery === "ready") return clone(previous);
-        Object.assign(ctx.record, { status: "running", delivery: "blocked", summary: "正在核对检查点并继续研发…" });
+        Object.assign(ctx.record, { status: "running", delivery: "blocked", diagnostic: null, summary: "正在核对检查点并继续研发…" });
         await this.save(ctx);
       } else {
         ctx.record = await this.store.create({ id: `dev_${randomUUID().replaceAll("-", "")}`, agentId, name: architecture.name,
@@ -391,7 +418,7 @@ export class DevelopmentController {
           await this.integrationRepair(ctx, { report, review }, "修复交付启动问题");
           continue;
         }
-        Object.assign(ctx.record, { status: "completed", delivery: delivery.delivery, summary: delivery.summary,
+        Object.assign(ctx.record, { status: "completed", delivery: delivery.delivery, diagnostic: null, summary: delivery.summary,
           runtimeCheck: delivery.runtimeCheck ?? null, currentTaskId: null });
         Object.assign(ctx.record.deliveries.at(-1), { status: delivery.delivery === "ready" ? "activated" : "verified",
           runtimeCheck: delivery.runtimeCheck ?? null });
@@ -404,7 +431,10 @@ export class DevelopmentController {
       if (!ctx.record) throw error;
       Object.assign(ctx.record, { status: ctx.signal.aborted ? "cancelled" : error instanceof Stop ? error.status : "failed",
         delivery: "blocked", summary: ctx.signal.aborted ? "研发已停止，已保存代码与交接记录，可继续。"
-          : error instanceof Stop || error instanceof InputError ? error.message : "研发未完成，检查点已保留，请检查执行环境或模型连接后继续。" });
+          : error instanceof Stop || error instanceof InputError ? error.message : "研发未完成，检查点已保留，可继续并核实当前步骤。" });
+      ctx.record.diagnostic = ctx.signal.aborted ? { stage: "development", phase: ctx.record.phase, reason: "cancelled" }
+        : error instanceof Stop && error.diagnostic ? error.diagnostic
+          : { stage: "development", phase: ctx.record.phase, reason: error instanceof InputError ? "invalid_result" : "execution_failed" };
       await this.save(ctx);
       return clone(ctx.record);
     } finally {

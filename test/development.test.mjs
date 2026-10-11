@@ -20,7 +20,11 @@ function modelFactory(records, onPrompt) {
     assert.ok(role, "模拟模型会话必须有当前职责的结构化提交工具");
     const record = { role, options, tools, prompts: [], disposed: false, aborted: false, usagePercent: 10 };
     let listener;
-    const submit = (value) => tools[submissionNames[role]].execute("fixture-submit", value);
+    const submit = async (value) => {
+      const result = await tools[submissionNames[role]].execute("fixture-submit", value);
+      record.lastSubmission = result;
+      return result;
+    };
     const session = {
       messages: [],
       subscribe(fn) { listener = fn; return () => { listener = null; }; },
@@ -39,10 +43,12 @@ function modelFactory(records, onPrompt) {
         };
         if (onPrompt) await onPrompt({ record, session, payload, submit, respond, write, emit: (event) => listener?.(event) });
         else await respond();
-        session.messages.push({ role: "assistant", stopReason: "stop", content: "模拟回复，完成状态由提交工具决定" });
+        session.messages.push({ role: "assistant", stopReason: record.stopReason ?? "stop", errorMessage: record.errorMessage,
+          content: "模拟回复，完成状态由提交工具决定" });
         listener?.({ type: "turn_end" });
       },
       getContextUsage() { return { percent: record.usagePercent }; },
+      setAutoCompactionEnabled(value) { record.autoCompactionEnabled = value; },
       async abort() { record.aborted = true; record.release?.(); },
       dispose() { record.disposed = true; },
     };
@@ -108,6 +114,8 @@ test("两个任务使用独立会话，交接保留结果，评审均为全新�
   const dataRoot = await realpath(dataDir);
   assert.equal(result.status, "completed"); assert.equal(result.delivery, "needs_development");
   assert.deepEqual(sessions.map((item) => item.role), ["planner", "reviewer", "developer", "reviewer", "developer", "reviewer", "reviewer"]);
+  assert.ok(sessions.every((item) => item.options.maxOutputTokens === { planner: 8192, developer: 16384, reviewer: 4096 }[item.role]));
+  assert.ok(sessions.every((item) => item.lastSubmission?.terminate === true && item.autoCompactionEnabled === false));
   assert.ok(sessions.every((session) => session.options.dataDir === join(dataRoot, "agents", architecture.agentId)));
   assert.ok(sessions.every((session) => session.options.cwd === join(dataRoot, "agents", architecture.agentId, "development", "workspaces", result.id, "code")));
   assert.equal(result.package.snapshot.agentId, architecture.agentId);
@@ -129,6 +137,36 @@ test("两个任务使用独立会话，交接保留结果，评审均为全新�
   assert.equal(result.package.planHash, hashValue(result.plan));
   assert.equal(result.package.verificationId, result.reports.at(-1).id);
   assert.deepEqual(result.tasks.map((item) => item.status), ["verified", "verified"]);
+});
+
+test("当前MiMo研发的规划、开发和评审统一使用完整输出额度", async (t) => {
+  const { controller, architecture, sessions } = await fixture(t);
+  controller.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
+    model: "mimo-v2.6-pro", apiKey: "fixture-only" };
+  assert.equal((await controller.run(architecture)).status, "completed");
+  assert.ok(sessions.length > 0);
+  assert.ok(sessions.every((item) => item.options.maxOutputTokens === 131072));
+});
+
+test("研发模型重试、截断和半截流保存各自原因，不再统称连接失败", async (t) => {
+  for (const [outcome, reason] of [["retry", "api_unavailable"], ["truncated", "output_limit"], ["stream", "api_stream_interrupted"]])
+    await t.test(outcome, async (child) => {
+      const { controller, architecture } = await fixture(child, { onPrompt: async ({ record, emit }) => {
+        assert.equal(record.role, "planner");
+        if (outcome === "stream") throw new Error("Stream ended without finish_reason private-key-fixture");
+        if (outcome === "truncated") { record.stopReason = "length"; return; }
+        emit({ type: "auto_retry_start", attempt: 5, errorMessage: "503 Service unavailable private-key-fixture" });
+        emit({ type: "auto_retry_end", success: false, finalError: "503 Service unavailable private-key-fixture" });
+      } });
+      const result = await controller.run(architecture);
+      assert.equal(result.status, "failed");
+      assert.equal(result.diagnostic.reason, reason);
+      assert.equal(result.diagnostic.role, "planner");
+      assert.equal(result.diagnostic.phase, "planning");
+      assert.doesNotMatch(result.summary, /检查连接/);
+      assert.doesNotMatch(JSON.stringify(result), /private-key-fixture/);
+      assert.deepEqual((await controller.get(architecture.agentId)).diagnostic, result.diagnostic);
+    });
 });
 
 test("同一任务失败修复保留开发会话，原始测试证据完整进入修复输入", async (t) => {

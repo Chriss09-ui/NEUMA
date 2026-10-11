@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
 import { PiProjectAgent } from "../src/runtime/pi-runtime.mjs";
 import { ProviderError } from "../src/requirements/core.mjs";
+import { AgentScheduler } from "../src/runtime/agent-scheduler.mjs";
 
 const turn = { agentId: "alpha", sessionId: "shutdown-session-12345", message: "处理当前任务" };
 const cancelled = (error) => error instanceof ProviderError && error.diagnostic.reason === "cancelled";
@@ -29,13 +30,15 @@ async function agentFixture(t, sessionFactory) {
   t.after(() => rm(root, { recursive: true, force: true }));
   // Exercise the real prompt and close methods without model construction or storage recovery.
   const agents = Object.assign(Object.create(PrototypeAgents.prototype), {
-    config: { llmConfigured: true }, ready: Promise.resolve(), closing: null,
+    config: { llmConfigured: true }, ready: Promise.resolve(), closing: null, runtimeEpoch: 0,
     agents: new Map([["alpha", { id: "alpha", name: "助手", revision: 1, instructions: "处理材料",
       draft: { goal: { value: "处理材料" } }, toolIds: [] }]]),
-    sessions: new Map(), removing: new Set(), builds: new Map(),
+    sessions: new Map(), collaborationSessions: new Map(), removing: new Set(), builds: new Map(), scheduler: new AgentScheduler(),
+    activities: { start: async () => ({ id: "test-activity" }), update: async () => {}, persistence: Promise.resolve() },
     configured() {}, prune() {}, approvedDefinition: () => true,
     getArchitecture: async () => ({ delivery: "ready" }), workspace: async () => root,
-    storage: { directory: async () => root }, development: { close: async () => {} }, sessionFactory,
+    storage: { directory: async () => root }, development: { close: async () => {} },
+    materials: { resolve: async () => [], tools: () => [], close: async () => {} }, sessionFactory,
   });
   return agents;
 }

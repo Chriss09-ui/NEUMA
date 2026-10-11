@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
-import { designHash } from "../src/architecture/architecture-contract.mjs";
+import { createPiSession } from "../src/runtime/pi-runtime.mjs";
+import { CAPABILITY_CATALOG_VERSION, CAPABILITIES, capabilitySnapshotCompatible, designHash } from "../src/architecture/architecture-contract.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 
@@ -61,7 +63,11 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   const result = await designer.design(definition());
   assert.equal(result.status, "passed"); assert.equal(result.buildable, true); assert.equal(result.delivery, "blocked");
   assert.equal(result.candidateHash, designHash(result.design));
+  assert.equal(result.capabilityCatalogVersion, CAPABILITY_CATALOG_VERSION);
+  assert.deepEqual(result.capabilitySnapshot, CAPABILITIES);
+  assert.equal(capabilitySnapshotCompatible(result), true);
   assert.deepEqual(sessions.map((item) => item.role), ["designer", "reviewer"]);
+  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [8192, 4096]);
   assert.notEqual(sessions[0].session, sessions[1].session);
   assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "submit_architecture"]);
   assert.deepEqual(Object.keys(sessions[1].tools), ["submit_architecture_review"]);
@@ -302,4 +308,110 @@ test("模型与 provider 错误不泄露原始敏感载荷", async (t) => {
     assert.doesNotMatch(JSON.stringify(await designer.get("weekly")), /private-key|Bearer/);
     assert.doesNotMatch(JSON.stringify(progress), /private-key|Bearer/);
   }
+});
+
+test("当前MiMo架构的设计与评估角色统一使用完整输出额度", async (t) => {
+  const { designer, sessions } = await fixture(t);
+  designer.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
+    model: "mimo-v2.6-pro", apiKey: "fixture-only" };
+  assert.equal((await designer.design(definition())).status, "passed");
+  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [131072, 131072]);
+});
+
+test("架构失败保留安全的模型原因、失败阶段和重试数", async (t) => {
+  for (const role of ["designer", "reviewer"]) {
+    const { designer } = await fixture(t, { onPrompt: async ({ record, session, submit, emit }) => {
+      if (record.role !== role) return submit(validDesign(record.payload.requirements));
+      emit({ type: "auto_retry_start", attempt: 5, errorMessage: "503 Service unavailable Bearer private-key-fixture" });
+      emit({ type: "auto_retry_end", success: false, finalError: "503 Service unavailable Bearer private-key-fixture" });
+      session.messages.push({ role: "assistant", stopReason: "error", errorMessage: "503 Service unavailable Bearer private-key-fixture" });
+    } });
+    await assert.rejects(designer.design(definition()), (error) => {
+      assert.equal(error.diagnostic.reason, "api_unavailable");
+      assert.equal(error.diagnostic.role, role);
+      assert.equal(error.diagnostic.phase, role === "reviewer" ? "evaluating" : "designing");
+      assert.equal(error.diagnostic.retries, 5);
+      assert.doesNotMatch(error.message + JSON.stringify(error.diagnostic), /private-key|Bearer/);
+      return true;
+    });
+    const saved = await designer.get("weekly");
+    assert.equal(saved.status, "failed");
+    assert.equal(saved.diagnostic.reason, "api_unavailable");
+    assert.match(saved.summary, /服务暂时不可用/);
+    assert.doesNotMatch(JSON.stringify(saved), /private-key|Bearer/);
+  }
+});
+
+test("未完成的架构工具参数被截断时不会误报模型连接失败", async (t) => {
+  const { designer } = await fixture(t, { onPrompt: async ({ session, emit }) => {
+    const truncated = { role: "assistant", stopReason: "length", content: [] };
+    session.messages.push(truncated);
+    emit({ type: "message_end", message: truncated });
+    session.messages.push({ role: "assistant", stopReason: "stop", content: [] });
+  } });
+  await assert.rejects(designer.design(definition()), (error) => error instanceof ProviderError && error.diagnostic.reason === "output_limit");
+  const saved = await designer.get("weekly");
+  assert.equal(saved.diagnostic.phase, "designing");
+  assert.match(saved.summary, /输出达到上限/);
+  assert.doesNotMatch(saved.summary, /连接/);
+});
+
+test("角色轮次耗尽显示本阶段预算失败并保留正确原因", async (t) => {
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ emit }) => {
+    for (let turn = 0; turn < 13; turn++) emit({ type: "turn_end" });
+  } });
+  await assert.rejects(designer.design(definition()), (error) => error instanceof ProviderError && error.diagnostic.reason === "turn_limit");
+  assert.equal(sessions[0].aborted, true);
+  assert.equal((await designer.get("weekly")).diagnostic.reason, "turn_limit");
+});
+
+test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完整流", async (t) => {
+  for (const outcome of ["complete", "truncated", "protocol"]) await t.test(outcome, { timeout: 10_000 }, async (child) => {
+    const root = await mkdtemp(join(tmpdir(), "neuma-architecture-sdk-"));
+    const requests = [], counts = new Map();
+    const model = createServer(async (request, response) => {
+      const chunks = []; for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks));
+      const role = body.tools.some((tool) => tool.function.name === "submit_architecture") ? "designer" : "reviewer";
+      const count = (counts.get(role) ?? 0) + 1; counts.set(role, count);
+      requests.push({ role, maxTokens: body.max_tokens });
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk",
+        model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+      if (count === 1) {
+        const content = body.messages.findLast((message) => message.role === "user").content;
+        const payload = JSON.parse(typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join(""));
+        const value = role === "designer" ? validDesign(payload.requirements, {
+          instructions: "依据用户本轮材料完成任务，缺少输入先询问，保留可核对结果。".repeat(180),
+        }) : passingReview(payload.candidateHash);
+        const args = JSON.stringify(value);
+        if (role === "designer") assert.ok(args.length > 4096, "完整多字段候选不能依赖短文本回复预算");
+        chunk({ role: "assistant", tool_calls: [{ index: 0, id: `submit_${role}`, type: "function",
+          function: { name: role === "designer" ? "submit_architecture" : "submit_architecture_review",
+            arguments: outcome === "truncated" ? args.slice(0, 120) : args } }] });
+        if (outcome !== "protocol") chunk({}, outcome === "truncated" ? "length" : "tool_calls");
+      } else { chunk({ role: "assistant", content: "本阶段提交已结束。" }); chunk({}, "stop"); }
+      response.end("data: [DONE]\n\n");
+    });
+    await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));
+    const designer = new ArchitectureDesigner({ config: { llmConfigured: true,
+      chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" },
+      cwd: root, dataDir: join(root, "data"),
+      sessionFactory: async (options) => {
+        const session = await createPiSession(options);
+        session.setAutoCompactionEnabled(false); session.setAutoRetryEnabled(false);
+        return session;
+      } });
+    child.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
+    if (outcome === "complete") {
+      assert.equal((await designer.design(definition())).status, "passed");
+      assert.deepEqual([...counts.keys()], ["designer", "reviewer"]);
+      assert.equal(requests.length, 2, "通过校验的阶段提交后无需额外模型回执");
+    } else {
+      await assert.rejects(designer.design(definition()), (error) => error instanceof ProviderError
+        && error.diagnostic.reason === (outcome === "truncated" ? "output_limit" : "api_stream_interrupted"));
+      assert.equal((await designer.get("weekly")).diagnostic.phase, "designing");
+    }
+    assert.ok(requests.every((request) => request.maxTokens === (request.role === "designer" ? 8192 : 4096)));
+  });
 });
