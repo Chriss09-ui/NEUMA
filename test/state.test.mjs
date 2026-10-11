@@ -307,7 +307,7 @@ test("完整历史不截断80条和长回复，恢复时停止运行状态并移
   messages.push({ role: "user", content: "最后任务", delivery: "pending", revision: "2", sessionId: "不保存" },
     { role: "assistant", content: "字".repeat(40_000), status: "writing", revision: "2", label: "不保存" });
   const snapshot = agentHistorySnapshot(messages);
-  assert.equal(snapshot.schemaVersion, 3);
+  assert.equal(snapshot.schemaVersion, 4);
   assert.equal(snapshot.messages.length, 92);
   assert.equal(snapshot.messages[0].content, "第0条");
   assert.equal(snapshot.messages.at(-2).delivery, "stopped");
@@ -331,6 +331,26 @@ test("完整历史无效或超过8MiB明确失败，既有完整备份不被裁�
   assert.equal(saveAgentConversationBackup(local, "one", { ...record, messages: oversized }), false);
   assert.equal(loadAgentConversationBackups(local, "one")[0].messages[0].content, "safe");
   assert.equal(saveAgentConversationBackup(local, "other", record), false);
+});
+
+test("schema4只持久化附件ID，兼容旧版备份并拒绝重复、跨路径和超量引用", () => {
+  const message = { role: "user", content: "", delivery: "sent", attachments: [{ id: "material-one", data: "不保存二进制", name: "仅元数据查询显示" }] };
+  const snapshot = agentHistorySnapshot([message]);
+  assert.equal(snapshot.schemaVersion, 4);
+  assert.deepEqual(snapshot.messages[0].attachments, [{ id: "material-one" }]);
+  for (const attachments of [[{ id: "../other" }], [{ id: "material-one" }, { id: "material-one" }],
+    Array.from({ length: 11 }, (_, index) => ({ id: `material-${index}` }))]) {
+    assert.throws(() => agentHistorySnapshot([{ ...message, attachments }]), /附件引用格式无效/);
+  }
+  assert.throws(() => agentHistorySnapshot([{ role: "user", content: "", attachments: [] }]), /消息格式无效/);
+  const local = storage();
+  for (const schemaVersion of [2, 3, 4]) {
+    assert.equal(saveAgentConversationBackup(local, "one", historyRecord(`version-${schemaVersion}`, { schemaVersion })), true);
+  }
+  assert.equal(saveAgentConversationBackup(local, "one", historyRecord("image", { ...snapshot })), true);
+  const restored = loadAgentConversationBackups(local, "one");
+  assert.equal(restored.length, 4);
+  assert.deepEqual(restored.find((entry) => entry.id === "image").messages[0].attachments, [{ id: "material-one" }]);
 });
 
 test("删除备份只删除所选对话并清选中记录，Agent删除清理全部聊天备份", () => {

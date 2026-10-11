@@ -1,8 +1,8 @@
 import { agentHistorySnapshot, loadAgentConversationBackups, saveAgentConversationBackup,
   deleteAgentConversationBackup, loadActiveAgentConversation, saveActiveAgentConversation } from "./state.js";
 
-const titleFor = (messages) => Array.from((messages.find((entry) => entry.role === "user")?.content || "新对话")
-  .replace(/\s+/g, " ").trim()).slice(0, 30).join("");
+const titleFor = (messages) => Array.from(messages.find((entry) => entry.role === "user")?.content.replace(/\s+/g, " ").trim()
+  || (messages.some((entry) => entry.role === "user" && entry.attachments?.length) ? "附件分析" : "新对话")).slice(0, 30).join("");
 
 export class AgentConversationHistory {
   constructor({ api, storage, onChange = () => {}, exists = () => true }) {
@@ -15,7 +15,7 @@ export class AgentConversationHistory {
   }
 
   item(agentId, record = {}) {
-    return { ...record, id: record.id || crypto.randomUUID(), agentId, schemaVersion: 3,
+    return { ...record, id: record.id || crypto.randomUUID(), agentId, schemaVersion: 4,
       messages: record.messages ? agentHistorySnapshot(record.messages).messages : [],
       title: record.title || titleFor(record.messages || []), saveVersion: record.saveVersion || 0,
       mutationId: record.mutationId || crypto.randomUUID(),
@@ -50,7 +50,7 @@ export class AgentConversationHistory {
 
   backup(id, item) {
     try {
-      const record = { schemaVersion: 3, id: item.id, agentId: id, title: item.title,
+      const record = { schemaVersion: 4, id: item.id, agentId: id, title: item.title,
         createdAt: item.createdAt, updatedAt: item.updatedAt, saveVersion: item.saveVersion,
         messages: agentHistorySnapshot(item.messages).messages,
         ...(item.retryRequest ? { retryRequest: item.retryRequest } : {}) };
@@ -121,7 +121,7 @@ export class AgentConversationHistory {
         if (!valid()) return;
         const record = result.conversation;
         if (result.deleted) { const error = new Error("这条对话已删除，可以把本机内容另存为新对话。"); error.reason = "conversation_deleted"; throw error; }
-        if (record?.id !== item.id || record.agentId !== id || record.schemaVersion !== 3
+        if (record?.id !== item.id || record.agentId !== id || ![2, 3, 4].includes(record.schemaVersion)
           || !Number.isSafeInteger(record.saveVersion) || record.saveVersion < 1 || !Array.isArray(record.messages))
           throw new Error("对话保存尚未确认，请重试。");
         item.saveVersion = record.saveVersion;
@@ -214,7 +214,7 @@ export class AgentConversationHistory {
         if (item.sequence !== loading.sequence || item.saveVersion !== loading.version || item.pendingSync) return;
         if (!result.conversation || result.deleted) throw new Error("这条对话已删除，请打开其他记录。");
         const record = result.conversation;
-        if (record.id !== item.id || record.agentId !== id || record.schemaVersion !== 3) throw new Error("对话身份尚未确认");
+        if (record.id !== item.id || record.agentId !== id || ![2, 3, 4].includes(record.schemaVersion)) throw new Error("对话身份尚未确认");
         Object.assign(item, record, { messages: agentHistorySnapshot(record.messages).messages, loaded: true, saved: true, storageError: "" });
         applied = true;
         this.backup(id, item);

@@ -322,14 +322,14 @@ test("当前展示头像的造型和配色同步管理卡、交付卡，继续�
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "test-agent", profile } });
   for (const avatar of [managementAvatar(ui), deliveryAvatar(ui)]) {
     assertStarAvatar(avatar, profile.icon, { shape: "diamond", color: "rose" });
-    assert.match(avatar.children[0].children[0].children[0].attributes.get("style"), /--avatar-shell: #df7caa;/);
+    assert.match(avatar.children[0].children[0].children[0].attributes.get("style"), /--avatar-shell: #eb167e;/);
   }
   const next = { ...profile, icon: "star:2:0" };
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "test-agent", profile: next } });
   await ui.submit("继续迭代需求");
   for (const avatar of [managementAvatar(ui), deliveryAvatar(ui)]) {
     assertStarAvatar(avatar, next.icon, { shape: "trapezoid", color: "mint" });
-    assert.match(avatar.children[0].children[0].children[0].attributes.get("style"), /--avatar-shell: #24b89a;/);
+    assert.match(avatar.children[0].children[0].children[0].attributes.get("style"), /--avatar-shell: #00b894;/);
   }
   assert.equal(ui.agents()[0].profile.icon, next.icon);
   assert.equal(ui.agents()[0].name, "会议助手");

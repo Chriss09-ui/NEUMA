@@ -1,11 +1,18 @@
-const PAGES = ["chat", "projects", "agents", "agent", "skills", "settings"];
-const route = { page: "chat", projectView: "assistant", agentId: null };
+const PAGES = ["chat", "groups", "group", "projects", "agents", "agent", "skills", "settings"];
+const route = { page: "chat", projectView: "assistant", agentId: null, groupId: null };
 const byId = (id) => document.getElementById(id);
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const compactLayout = window.matchMedia("(max-width: 1100px)");
 let panelsOpen = !compactLayout.matches;
 let renderedRoute = "";
 let projectBaseView = "assistant";
+let modulesReady = false, pendingRequirements = false;
+byId("page-create").hidden = true;
+byId("page-create").inert = true;
+function requestRequirements() {
+  if (!modulesReady) { pendingRequirements = true; return; }
+  document.dispatchEvent(new CustomEvent("neuma:main-requirements"));
+}
 const PROJECT_LIBRARY_KEY = "neuma-project-library-collapsed";
 let projectLibraryCollapsed = false;
 try { projectLibraryCollapsed = localStorage.getItem(PROJECT_LIBRARY_KEY) === "true"; } catch { /* Storage can be unavailable in private browser contexts. */ }
@@ -63,7 +70,7 @@ for (const id of ["chat-panel-toggle"]) {
   });
 }
 document.addEventListener("keydown", (event) => {
-  const activeToggle = route.page === "chat" ? "chat-panel-toggle" : null;
+  const activeToggle = route.page === "create" ? "chat-panel-toggle" : null;
   if (event.key !== "Escape" || !panelsOpen || !activeToggle) return;
   const toggle = byId(activeToggle);
   panelsOpen = false;
@@ -78,23 +85,30 @@ function parse(hash) {
   if (page === "add") return { page: "projects", projectView: "add" };
   if (page === "manage") return sub === "agents" ? { page: "agents" } : { page: "projects", projectView: "list" };
   if (page === "chat" && sub === "projects") return { page: "projects", projectView: "assistant" };
+  if (page === "create" || (page === "chat" && sub === "requirements")) return { page: "chat", requirements: true };
   if (page === "projects") return { page, projectView: ["list", "assistant", "add"].includes(sub) ? sub : "assistant" };
   if (!PAGES.includes(page)) return { page: "chat" };
   if (page === "agent") {
     try { return { page, agentId: decodeURIComponent(sub ?? "") }; }
     catch { return { page, agentId: null }; }
   }
+  if (page === "group") {
+    try { return { page, groupId: decodeURIComponent(sub ?? "") }; }
+    catch { return { page: "groups", groupId: null }; }
+  }
   return { page };
 }
 
 function canonical() {
   if (route.page === "agent") return `#agent/${encodeURIComponent(route.agentId ?? "")}`;
+  if (route.page === "group") return `#group/${encodeURIComponent(route.groupId ?? "")}`;
   if (route.page === "projects") return `#projects/${route.projectView}`;
   return `#${route.page}`;
 }
 
 function focusComposer() {
-  if (route.page === "chat") byId("message").focus({ preventScroll: true });
+  if (route.page === "chat") byId("main-message").focus({ preventScroll: true });
+  if (route.page === "group") byId("group-message").focus({ preventScroll: true });
   if (route.page === "projects" && route.projectView === "assistant") byId("project-message").focus({ preventScroll: true });
   if (route.page === "projects" && route.projectView === "add") byId("project-path").focus({ preventScroll: true });
   if (route.page === "agent") byId("agent-message").focus({ preventScroll: true });
@@ -104,7 +118,7 @@ function focusComposer() {
 function apply(focusInput = false) {
   for (const page of PAGES) byId(`page-${page}`).hidden = page !== route.page;
   for (const link of document.querySelectorAll(".nav-item, .sidebar-manage")) {
-    if (link.dataset.page === route.page) link.setAttribute("aria-current", "page");
+    if (link.dataset.page === route.page || (route.page === "group" && link.dataset.page === "groups")) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
   if (route.page === "projects" && route.projectView !== "add") projectBaseView = route.projectView;
@@ -134,14 +148,19 @@ function renderRoute(focusInput = false) {
 }
 
 function fromLocation() {
-  Object.assign(route, parse(location.hash));
+  const { requirements, ...next } = parse(location.hash);
+  Object.assign(route, next);
   renderRoute(route.page === "projects" && route.projectView === "add");
+  if (requirements) requestRequirements();
 }
 
 function navigate(next, focusInput = false) {
+  const requirements = next.page === "create";
+  if (requirements) next = { ...next, page: "chat" };
   Object.assign(route, next);
   if (location.hash !== canonical()) history.pushState(null, "", canonical());
   renderRoute(focusInput);
+  if (requirements) requestRequirements();
 }
 
 document.addEventListener("neuma:navigate", (event) => navigate(event.detail ?? {}, true));
@@ -155,26 +174,17 @@ function dismissProjectDialog() {
 byId("project-add-panel").addEventListener("cancel", (event) => { event.preventDefault(); dismissProjectDialog(); });
 for (const id of ["project-add-close", "project-add-cancel"]) byId(id).addEventListener("click", dismissProjectDialog);
 
-function setService(name, tone, label) {
-  byId(`${name}-dot`).className = `dot ${tone}`;
-  byId(`${name}-state`).textContent = label;
-}
-
 async function checkHealth() {
   const banners = [byId("setup-banner"), byId("project-setup-banner")];
   try {
     const response = await fetch("/api/health");
     if (!response.ok) throw new Error();
     const health = await response.json();
-    setService("llm", health.llmConfigured ? "ok" : "off", health.llmConfigured ? "已配置" : "未配置");
-    setService("jev", health.jevConfigured ? "ok" : "", health.jevConfigured ? "已配置" : "未启用");
     for (const banner of banners) {
       banner.firstElementChild.textContent = "模型服务尚未配置，对话暂时无法使用。";
       banner.hidden = health.llmConfigured;
     }
   } catch {
-    setService("llm", "off", "未连接");
-    setService("jev", "off", "未连接");
     for (const banner of banners) {
       banner.firstElementChild.textContent = "本地服务未连接，请确认 npm start 正在运行。";
       banner.hidden = false;
@@ -201,6 +211,8 @@ for (const textarea of document.querySelectorAll(".composer textarea")) {
 fromLocation();
 // Later module scripts register their route listeners after this one runs.
 document.addEventListener("DOMContentLoaded", () => {
+  modulesReady = true;
   document.dispatchEvent(new CustomEvent("neuma:route", { detail: { ...route } }));
+  if (pendingRequirements) { pendingRequirements = false; requestRequirements(); }
 });
 void checkHealth();

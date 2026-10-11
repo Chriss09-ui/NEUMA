@@ -173,6 +173,27 @@ test("构建流先交付状态，构建结束才发送完成定义", async (t) =
   assert.equal(response.listenerCount("close"), 0);
 });
 
+test("终止生成使用路径Agent身份，只返回服务端持久状态，不取消普通聊天", async () => {
+  const seen = [], result = { cancelled: true, agent, architecture: { agentId: agent.id, status: "cancelled", delivery: "blocked" }, development: null };
+  const handler = makeHandler({ cancelBuild: async (id) => { seen.push(id); return result; },
+    build: async () => assert.fail("终止生成不能重新构建"), cancel: async () => assert.fail("终止生成不能取消聊天") });
+  const path = `/api/agents/${agent.id}/build/cancel`;
+  const response = await invoke(handler, "POST", path, {});
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.text), result);
+  assert.deepEqual(seen, [agent.id]);
+  assert.equal((await invoke(handler, "GET", path)).status, 404);
+  assert.equal((await invoke(handler, "POST", "/api/agents/one%2Ftwo/build/cancel", {})).status, 404);
+  for (const body of [null, [], { id: "other" }, { sessionId: "runtime" }, { resume: true }]) {
+    assert.equal((await invoke(handler, "POST", path, body)).status, 400);
+  }
+  const external = request("POST", path, {});
+  Object.assign(external.headers, { host: "127.0.0.1:3000", origin: "https://outside.example" });
+  const denied = new StreamingResponse(); await handler(external, denied);
+  assert.equal(denied.status, 403);
+  assert.deepEqual(seen, [agent.id]);
+});
+
 test("资料、记忆和产物 API 使用独立 Agent 身份，只交付 JSON 数据", async () => {
   const seen = [], profile = { name: "我的周报", description: "显示简介", icon: "📝" }, files = [{ path: "pages/result.html", size: 42, updatedAt: "2026-10-04T00:00:00.000Z" }];
   const handler = makeHandler({
@@ -355,8 +376,10 @@ test("更新模型设置释放旧 Agent 会话，服务销毁同时释放三类�
 });
 
 test("用户 Agent 运行前端资源可加载", async () => {
-  const response = await invoke(makeHandler({}), "GET", "/agent-runtime.js");
-  assert.equal(response.status, 200);
-  assert.match(response.headers["content-type"], /javascript/);
-  assert.ok(response.text.trim());
+  for (const path of ["/agent-runtime.js", "/agent-build-view.js"]) {
+    const response = await invoke(makeHandler({}), "GET", path);
+    assert.equal(response.status, 200);
+    assert.match(response.headers["content-type"], /javascript/);
+    assert.ok(response.text.trim());
+  }
 });

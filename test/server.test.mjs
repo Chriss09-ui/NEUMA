@@ -63,7 +63,12 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(page.text, /id="agent-send"[^>]*disabled/);
   assert.match(page.text, /id="agent-build"[^>]*disabled/);
   assert.match(page.text, /让 NEUMA 帮我迭代/);
-  assert.match(page.text, /<h1 id="chat-title">NEUMA<\/h1>/);
+  assert.match(page.text, /<h1 id="main-agent-title">NEUMA<\/h1>/);
+  assert.match(page.text, /<h1 id="chat-title">创建智能体<\/h1>/);
+  assert.match(page.text, /id="page-create"[^>]*data-page="legacy-create"[^>]*hidden inert/);
+  assert.match(page.text, /id="main-context-panel"[^>]*hidden inert/);
+  assert.match(page.text, /id="main-history-toggle"[^>]*aria-expanded="true"/);
+  assert.doesNotMatch(page.text, /id="main-activity"/);
   assert.doesNotMatch(page.text, /主\s*Agent|NUEMA/);
   const agentUi = await invoke(handler, "GET", "/agents.js");
   assert.equal(agentUi.status, 200);
