@@ -141,7 +141,8 @@ test("真实Pi研发链执行规划、独立评审、文件写入与结构化交
     ["submit_development_plan", "submit_development_review", "submit_development_work", "submit_development_review", "submit_development_review"]);
   for (const session of fixture.sessions) {
     const markers = JSON.stringify(session.messages).match(/[a-z-]+_PRIVATE_SESSION_FINISH/g) ?? [];
-    assert.equal(new Set(markers).size, 1, "每个角色只保留自己的对话收尾");
+    assert.equal(markers.length, 0, "有效提交后不再请求额外的模型对话收尾");
+    assert.equal(session.messages.filter((message) => message.role === "user").length, 1, "每个角色从自己的独立输入开始");
   }
   const firstRequests = fixture.requests.filter(({ body }) => body.messages.every((message) => ["system", "user"].includes(message.role)));
   assert.deepEqual(firstRequests.map(({ key }) => key), ["planner", "reviewer-plan", "developer", "reviewer-task", "reviewer-integration"]);

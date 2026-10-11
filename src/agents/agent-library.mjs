@@ -3,11 +3,37 @@ import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "./agent-storage.mjs";
 
 export const CONVERSATION_BYTES = 8 * 1024 * 1024;
+export const CONVERSATION_SCHEMA_VERSION = 4;
 const LEGACY_CONVERSATION = "legacy-saved";
 const recordPath = (id) => `conversations/records/${agentId(id)}.json`;
-const conversationTitle = (messages) => Array.from(messages.find((item) => item.role === "user")?.content.replace(/\s+/gu, " ").trim() || "新对话").slice(0, 30).join("");
+const conversationTitle = (messages) => Array.from(messages.find((item) => item.role === "user")?.content.replace(/\s+/gu, " ").trim()
+  || (messages.some((item) => item.role === "user" && item.attachments?.length) ? "附件分析" : "新对话")).slice(0, 30).join("");
 const validDate = (value) => typeof value === "string" && Number.isFinite(Date.parse(value));
 const validMutation = (value) => typeof value === "string" && /^[\w-]{1,120}$/.test(value);
+
+export function normalizeAttachmentRefs(value = []) {
+  if (!Array.isArray(value) || value.length > 10) throw new InputError("每条消息最多附加 10 个有效材料引用");
+  const ids = new Set();
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item) || Object.keys(item).length !== 1
+      || !Object.hasOwn(item, "id") || typeof item.id !== "string" || !/^[\w-]{1,80}$/.test(item.id) || ids.has(item.id))
+      throw new InputError("材料引用必须是唯一且有效的材料 ID");
+    ids.add(item.id);
+    return { id: item.id };
+  });
+}
+
+const hasAttachments = (record) => record?.messages?.some((item) => item.attachments?.length > 0);
+const compatibilitySnapshot = (record) => ({ schemaVersion: hasAttachments(record) ? CONVERSATION_SCHEMA_VERSION : 2,
+  messages: record.messages });
+
+function rejectLegacyAttachmentOverwrite(input, previous) {
+  if (input.schemaVersion < CONVERSATION_SCHEMA_VERSION && hasAttachments(previous)) {
+    const error = new InputError("旧版对话格式不能覆盖包含附件的记录，请刷新后重试");
+    error.reason = "conversation_schema_upgrade_required";
+    throw error;
+  }
+}
 
 function conversationFailure(reason) {
   const error = new InputError(reason === "conversation_deleted" ? "这份对话已删除，不能再次保存" : "这份对话已在其他窗口更新，当前修改请另存为新对话");
@@ -32,13 +58,18 @@ function requirement(id, value) {
 }
 
 function conversation(value, legacy = true) {
-  if (value?.schemaVersion !== (legacy ? 2 : 3) || !Array.isArray(value.messages) || (legacy && value.messages.length > 80)
+  if (!(legacy ? value?.schemaVersion === 2 : [3, CONVERSATION_SCHEMA_VERSION].includes(value?.schemaVersion))
+    || !Array.isArray(value.messages) || (legacy && value.messages.length > 80)
     || (value.importOnly !== undefined && typeof value.importOnly !== "boolean")) throw new InputError("保存对话格式无效");
   const messages = value.messages.map((item) => {
+    const attachments = normalizeAttachmentRefs(item?.attachments);
     if (!item || !["user", "assistant"].includes(item.role) || typeof item.content !== "string"
       || (item.role === "user" ? item.content.length > 4000 : legacy && item.content.length > 32000)
-      || (item.role === "user" && !item.content.trim())) throw new InputError("保存对话内容无效");
+      || (item.role === "user" && !item.content.trim() && !attachments.length)
+      || (attachments.length && (item.role !== "user" || value.schemaVersion !== CONVERSATION_SCHEMA_VERSION)))
+      throw new InputError("保存对话内容无效");
     const result = { role: item.role, content: item.content };
+    if (attachments.length) result.attachments = attachments;
     if (typeof item.revision === "string" && item.revision.length <= 120) result.revision = item.revision;
     if (item.role === "user" && ["sent", "failed", "stopped", "pending"].includes(item.delivery))
       result.delivery = item.delivery === "pending" ? "stopped" : item.delivery;
@@ -48,12 +79,12 @@ function conversation(value, legacy = true) {
     }
     return result;
   });
-  return { schemaVersion: 2, messages };
+  return { schemaVersion: legacy ? 2 : CONVERSATION_SCHEMA_VERSION, messages };
 }
 
 export function validateConversationRecord(agent, id, value) {
   agentId(agent); agentId(id);
-  if (!value || value.schemaVersion !== 3 || value.id !== id || value.agentId !== agent)
+  if (!value || ![3, CONVERSATION_SCHEMA_VERSION].includes(value.schemaVersion) || value.id !== id || value.agentId !== agent)
     throw new InputError("对话身份与文件夹不一致");
   if (value.deletedAt !== undefined) {
     if (!validDate(value.deletedAt) || Object.keys(value).some((key) => !["schemaVersion", "id", "agentId", "deletedAt"].includes(key)))
@@ -61,17 +92,21 @@ export function validateConversationRecord(agent, id, value) {
     return structuredClone(value);
   }
   const messages = conversation(value, false).messages;
+  const title = conversationTitle(messages);
+  const oldAttachmentTitle = value.schemaVersion === CONVERSATION_SCHEMA_VERSION && value.title === "新对话" && title === "附件分析";
   if (!validDate(value.createdAt) || !validDate(value.updatedAt) || !Number.isSafeInteger(value.saveVersion) || value.saveVersion < 1
-    || !validMutation(value.mutationId) || value.title !== conversationTitle(messages)) throw new InputError("保存对话元数据无效");
-  const result = { schemaVersion: 3, id, agentId: agent, title: value.title, createdAt: value.createdAt,
+    || !validMutation(value.mutationId) || (value.title !== title && !oldAttachmentTitle)) throw new InputError("保存对话元数据无效");
+  const result = { schemaVersion: value.schemaVersion, id, agentId: agent, title, createdAt: value.createdAt,
     updatedAt: value.updatedAt, saveVersion: value.saveVersion, mutationId: value.mutationId, messages };
   conversationSize(value);
   return result;
 }
 
 export class AgentLibrary {
-  constructor({ dataDir, storage = new AgentStorage({ dataDir }) }) {
+  constructor({ dataDir, storage = new AgentStorage({ dataDir }), validateAttachments }) {
+    if (validateAttachments !== undefined && typeof validateAttachments !== "function") throw new InputError("材料引用校验器无效");
     this.storage = storage;
+    this.validateAttachments = validateAttachments;
     this.pending = new Map();
   }
 
@@ -122,7 +157,7 @@ export class AgentLibrary {
 
   async getConversation(id) {
     const result = await this.getConversationRecord(id, LEGACY_CONVERSATION);
-    return { ...result, conversation: result.conversation ? { schemaVersion: 2, messages: result.conversation.messages } : null };
+    return { ...result, conversation: result.conversation ? compatibilitySnapshot(result.conversation) : null };
   }
 
   saveConversation(id, input) {
@@ -139,7 +174,8 @@ export class AgentLibrary {
         if (input.importOnly) return { conversation: null, deleted: true };
         throw conversationFailure("conversation_deleted");
       }
-      if (input.importOnly && previous) return { conversation: { schemaVersion: 2, messages: previous.messages } };
+      if (input.importOnly && previous) return { conversation: compatibilitySnapshot(previous) };
+      rejectLegacyAttachmentOverwrite(input, previous);
       const next = this.newConversationRecord(id, LEGACY_CONVERSATION, value.messages, previous, randomUUID());
       const oldSource = await this.storage.readJson(id, "conversations/saved.json");
       await this.storage.writeJson(id, "conversations/saved.json", value);
@@ -155,7 +191,7 @@ export class AgentLibrary {
 
   newConversationRecord(id, cid, messages, previous, mutationId) {
     const now = new Date().toISOString();
-    const value = { schemaVersion: 3, id: cid, agentId: id, title: conversationTitle(messages),
+    const value = { schemaVersion: CONVERSATION_SCHEMA_VERSION, id: cid, agentId: id, title: conversationTitle(messages),
       createdAt: previous?.createdAt ?? now, updatedAt: now, saveVersion: (previous?.saveVersion ?? 0) + 1, mutationId, messages };
     conversationSize(value);
     return value;
@@ -217,6 +253,7 @@ export class AgentLibrary {
         throw conversationFailure("conversation_deleted");
       }
       if (input.importOnly && previous) return { conversation: previous };
+      rejectLegacyAttachmentOverwrite(input, previous);
       if (previous?.mutationId === input.mutationId) {
         if (JSON.stringify(previous.messages) !== JSON.stringify(value.messages)) throw conversationFailure("conversation_conflict");
         return { conversation: previous };
@@ -224,6 +261,9 @@ export class AgentLibrary {
       if (input.expectedVersion !== (previous?.saveVersion ?? 0)) throw conversationFailure("conversation_conflict");
       if (!await this.storage.readJson(id, "requirements.json") && !await this.storage.readJson(id, "definition.json"))
         throw new InputError("请先保存这个 Agent 的需求");
+      const refs = [...new Map(value.messages.flatMap((item) => item.attachments ?? []).map((item) => [item.id, item])).values()];
+      if (refs.length && !this.validateAttachments) throw new InputError("材料引用尚未接入归属校验，不能保存附件对话");
+      for (let offset = 0; offset < refs.length; offset += 10) await this.validateAttachments(id, refs.slice(offset, offset + 10));
       const record = this.newConversationRecord(id, cid, value.messages, previous, input.mutationId);
       await this.storage.writeJson(id, recordPath(cid), record);
       return { conversation: structuredClone(record) };
@@ -235,7 +275,7 @@ export class AgentLibrary {
     return this.queue(id, async () => {
       if (!await this.deleted(id)) {
         const previous = await this.readConversationRecord(id, cid);
-        if (!previous?.deletedAt) await this.storage.writeJson(id, recordPath(cid), { schemaVersion: 3, id: cid, agentId: id, deletedAt: new Date().toISOString() });
+        if (!previous?.deletedAt) await this.storage.writeJson(id, recordPath(cid), { schemaVersion: CONVERSATION_SCHEMA_VERSION, id: cid, agentId: id, deletedAt: new Date().toISOString() });
       }
       return { deleted: true, id: cid };
     });

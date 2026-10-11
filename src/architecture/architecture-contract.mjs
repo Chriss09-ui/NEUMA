@@ -2,12 +2,55 @@ import { createHash } from "node:crypto";
 import { InputError, normalizeDraft, decideNext } from "../requirements/core.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
-export const CAPABILITIES = Object.freeze([
+export const CAPABILITY_CATALOG_VERSION = 2;
+export const LEGACY_CAPABILITIES = Object.freeze([
   { id: "conversation", status: "available", scope: "基于用户提供的文本进行对话与生成；不包含联网检索、外部动作或定时运行。" },
   { id: "list_workspace_files", status: "available", scope: "仅列出当前 Agent 专属工作目录内允许访问的文件。" },
   { id: "read_workspace_file", status: "available", scope: "仅读取当前 Agent 专属工作目录内的 UTF-8 文本；不访问外部目录、隐藏文件或凭据。" },
   { id: "write_workspace_file", status: "available", scope: "仅在当前 Agent 专属工作目录保存文本文件；不包含部署、发送、任意代码执行或外部系统写入。" },
 ].map(Object.freeze));
+export const PUBLIC_CAPABILITIES = Object.freeze([
+  { id: "list_materials", version: 1, status: "available", scope: "仅列出当前 Agent 的上传材料及其实际处理状态；材料在同一 Agent 的不同对话间共享。" },
+  { id: "read_material", version: 1, status: "available", scope: "仅按材料 ID 分页读取当前 Agent 上传文档、表格、演示文稿或 PDF 中实际提取的文本及来源位置；不访问任意本地路径。" },
+  { id: "read_material_image", version: 1, status: "available", scope: "仅按材料 ID 读取当前 Agent 上传的图片或 PDF 页面图像；图片理解取决于实际模型支持，不包含独立 OCR 服务或联网检索。" },
+].map(Object.freeze));
+export const PUBLIC_TOOL_IDS = Object.freeze(PUBLIC_CAPABILITIES.map((item) => item.id));
+export const CAPABILITIES = Object.freeze([
+  ...LEGACY_CAPABILITIES.map((item) => Object.freeze({ ...item, version: 1 })), ...PUBLIC_CAPABILITIES,
+]);
+
+export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES) {
+  try {
+    const declared = record?.design?.capabilities;
+    if (!Array.isArray(declared) || !declared.length || new Set(declared.map((item) => item?.id)).size !== declared.length
+      || declared.some((item) => !item || typeof item.id !== "string"
+        || !["available", "needs_connection", "needs_development", "unverified"].includes(item.status))) return false;
+    const used = declared.filter((item) => item.status === "available");
+    if (record.capabilityCatalogVersion === undefined || record.capabilityCatalogVersion === 1) {
+      return designHash(record.capabilitySnapshot) === designHash(LEGACY_CAPABILITIES)
+        && Array.isArray(capabilities) && used.every((item) => {
+          const legacy = LEGACY_CAPABILITIES.find((entry) => entry.id === item.id);
+          const current = capabilities.find((entry) => entry?.id === item.id);
+          return legacy && current && designHash(current) === designHash({ ...legacy, version: 1 });
+        });
+    }
+    if (record.capabilityCatalogVersion !== CAPABILITY_CATALOG_VERSION || !Array.isArray(record.capabilitySnapshot)
+      || !Array.isArray(capabilities)) return false;
+    const validEntry = (item) => item && typeof item === "object" && !Array.isArray(item)
+      && Object.keys(item).length === 4 && ["id", "version", "status", "scope"].every((key) => Object.hasOwn(item, key))
+      && typeof item.id === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(item.id)
+      && Number.isSafeInteger(item.version) && item.version > 0
+      && ["available", "needs_connection", "needs_development", "unverified"].includes(item.status)
+      && typeof item.scope === "string" && Boolean(item.scope.trim()) && !item.scope.includes("\0");
+    if (record.capabilitySnapshot.some((item) => !validEntry(item)) || capabilities.some((item) => !validEntry(item))
+      || new Set(record.capabilitySnapshot.map((item) => item.id)).size !== record.capabilitySnapshot.length
+      || new Set(capabilities.map((item) => item.id)).size !== capabilities.length) return false;
+    const snapshot = new Map(record.capabilitySnapshot.map((item) => [item.id, item]));
+    const current = new Map(capabilities.map((item) => [item.id, item]));
+    return used.every(({ id }) => snapshot.get(id)?.status === "available" && current.get(id)?.status === "available"
+      && designHash(snapshot.get(id)) === designHash(current.get(id)));
+  } catch { return false; }
+}
 
 const text = (maxLength = 2000) => ({ type: "string", minLength: 1, maxLength });
 const identifier = { ...text(80), pattern: "^[A-Za-z][A-Za-z0-9_-]*$" };

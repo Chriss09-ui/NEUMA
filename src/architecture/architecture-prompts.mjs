@@ -3,6 +3,7 @@ const COMMON = `你为 NEUMA 设计用户 Agent 的架构。用户需求已确�
 明确区分事实、假设、未验证依赖。SDK 能写代码不表示执行器已经有对应业务能力；搜索能力用于选型，不会自动授予用户 Agent 联网能力。
 每个组件必须说明独立输入、输出、完成条件，以及删除它会出现的具体失败。当前不需要的记忆、多 Agent、数据库、队列和调度不要加入。
 普通文本/专属目录文件任务优先 light；普通读取、分析、输出可以留在 light；确需独立实现的步骤控制、持久状态、外部等待或中断恢复才选 workflow；确需专用工具、服务或代码才选 custom。评审深度按风险和不确定性增加，不以 Agent 数量表示质量。
+正式可运行 Agent 默认共享 list_materials、read_material、read_material_image：按当前 Agent 的材料 ID 读取上传文档的提取文本、图片或 PDF 页面，同一 Agent 的材料跨对话共享。普通材料分析复用这些工具，不另建解析器；只在方案实际需要时声明对应能力。图片理解依赖实际模型支持，读取工具不证明独立 OCR、联网检索或正式外部连接已经具备。
 已有能力只能在目录给定范围内声明 available；缺连接、缺实现、无法验证分别使用 needs_connection、needs_development、unverified。未知项给出是否阻断及消除方式。
 不得执行外部动作、修改项目或生成后直接宣称架构通过；只提交结构化结果。不递归委派、不让子代理再委派。`;
 
@@ -14,6 +15,7 @@ export const DESIGN_PROMPT = `${COMMON}
 只在模块确实需要专业判断时调用 delegate_module，传递明确问题、必要上下文和期望产物；普通任务直接自己设计。专员结果是建议，由你负责取舍与整合。
 收到修订要求时只修改相关组件、决策、覆盖和验收；保留仍有效的内容与 ID，不从头扩建。解释必要变更，确保最终提交的是修改后的完整候选。
 每条需求必须在 coverage 与 acceptance 引用。至少给出 success、missing_input、boundary 三类具体输入与预期；使用工具还必须给出 tool_failure。不能使用待补充、正常即可、质量良好等空泛验收标准。
+候选使用简洁字段：rationale、组件职责、失败响应与决策理由各用一两句；相同结论只在一个位置展开，其余通过 ID 引用。instructions 只保留执行所需规则，不重复需求、方案和资料原文；coverage 与 acceptance 用 ID 关联需求，验收仍须保留具体输入与可观察预期。不要输出提交前的长篇方案说明，确保一轮输出能够容纳完整工具参数。
 最终仅调用 submit_architecture 提交 DESIGN_SCHEMA 对应的完整候选。profile、rationale、instructions、components、steps、capabilities、state、failureHandling、decisions、coverage、acceptance、unknowns 都必须提供。instructions 是可在当前执行边界下运行的工作指令，不得承诺尚缺失的能力。`;
 
 export const REVIEW_PROMPT = `${COMMON}

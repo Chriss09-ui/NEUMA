@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
-import { readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readFile, realpath } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputError, ProviderError, processTurn } from "./requirements/core.mjs";
@@ -9,10 +11,13 @@ import { createProjectFolderPicker } from "./projects/project-folder-picker.mjs"
 import { PiProjectAgent, createProjectAnalyzer } from "./runtime/pi-runtime.mjs";
 import { PrototypeAgents } from "./agents/agent-prototype.mjs";
 import { configEnv, settingsUpdates, settingsView, writeEnvFile } from "./settings.mjs";
-import { testJevConnection, testModelConnection } from "./model-connection.mjs";
+import { testAgentModelConnection, testJevConnection, testModelConnection } from "./model-connection.mjs";
 import { APP_VERSION } from "./app-metadata.mjs";
 import { SkillManager } from "./skills/skill-manager.mjs";
 import { routeSkills } from "./skills/skill-api.mjs";
+import { CollaborationService } from "./collaboration/groups.mjs";
+import { routeCollaboration } from "./collaboration/collaboration-api.mjs";
+import { MainAgent } from "./main/main-agent.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = new Map([
@@ -21,6 +26,8 @@ const PUBLIC = new Map([
   ["/agents.js", ["agents.js", "text/javascript; charset=utf-8"]],
   ["/agent-conversations.js", ["agent-conversations.js", "text/javascript; charset=utf-8"]],
   ["/agent-runtime.js", ["agent-runtime.js", "text/javascript; charset=utf-8"]],
+  ["/agent-attachments.js", ["agent-attachments.js", "text/javascript; charset=utf-8"]],
+  ["/agent-build-view.js", ["agent-build-view.js", "text/javascript; charset=utf-8"]],
   ["/agent-details.js", ["agent-details.js", "text/javascript; charset=utf-8"]],
   ["/agent-details-view.js", ["agent-details-view.js", "text/javascript; charset=utf-8"]],
   ["/agent-avatar.js", ["agent-avatar.js", "text/javascript; charset=utf-8"]],
@@ -39,6 +46,7 @@ const PUBLIC = new Map([
   ["/runtime.js", ["runtime.js", "text/javascript; charset=utf-8"]],
   ["/runtime-view.js", ["runtime-view.js", "text/javascript; charset=utf-8"]],
   ["/chat-ui.js", ["chat-ui.js", "text/javascript; charset=utf-8"]],
+  ...["collaboration-api", "group-view", "group-materials", "groups", "main-agent", "main-context", "main-materials"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -48,8 +56,8 @@ function sendJson(response, status, value) {
 }
 
 function safeFailure(error, config) {
-  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted"].includes(error.reason) ? error.reason : null;
-  const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason);
+  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required"].includes(error.reason) ? error.reason : null;
+  const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason || error.reason === "collaboration_conflict" || error.reason === "main_conflict");
   const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";
   const diagnostic = error instanceof ProviderError || (error instanceof InputError && error.code === "PROJECT_ADD_FAILED" && error.diagnostic) ? error.diagnostic : error instanceof InputError
@@ -57,6 +65,26 @@ function safeFailure(error, config) {
   return { status, payload: { error: message, diagnostic: { ...diagnostic, providerModel: config.model || null },
     ...(conversationReason ? { reason: conversationReason } : {}),
     ...(error instanceof InputError && ["PROJECT_REMOVE_STOP_FAILED", "SKILL_CONFLICT"].includes(error.code) ? { code: error.code } : {}) } };
+}
+
+const inlineMaterialTypes = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp", "image/gif", "image/tiff"]);
+const binaryHeaders = (name, mimeType, download = false) => ({
+  "content-type": inlineMaterialTypes.has(mimeType) ? mimeType : "application/octet-stream",
+  "content-disposition": `${download || !inlineMaterialTypes.has(mimeType) ? "attachment" : "inline"}; filename="attachment"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+  "cache-control": "no-store", "x-content-type-options": "nosniff",
+  "content-security-policy": "sandbox; default-src 'none'",
+});
+
+async function sendMaterialFile(response, file, download, signal) {
+  const handle = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.size !== file.size || info.size > 50 * 1024 * 1024)
+      throw new InputError("材料原文件已改变或无法读取，请重新上传");
+    signal?.throwIfAborted();
+    response.writeHead(200, { ...binaryHeaders(file.name, file.mimeType, download), "content-length": info.size });
+    await pipeline(handle.createReadStream({ autoClose: false }), response, { signal });
+  } finally { await handle.close(); }
 }
 
 async function streamProjectReply(response, agent, body, config, signal) {
@@ -226,10 +254,16 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   skillManager = new SkillManager({ dataDir, getProjects: () => projects.list?.() ?? [] }),
   pickSkillFolder = createProjectFolderPicker(),
   modelConnectionTester = testModelConnection,
+  agentModelConnectionTester = testAgentModelConnection,
   jevConnectionTester = testJevConnection,
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
-  prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }) } = {}) {
+  prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }),
+  collaboration: injectedCollaboration, mainAgent: injectedMainAgent } = {}) {
   let providers = injectedProviders ?? makeProviders(config);
+  let collaboration = injectedCollaboration, mainAgent = injectedMainAgent;
+  const getCollaboration = () => collaboration ??= new CollaborationService({ dataDir, agents: prototypeAgents });
+  const getMainAgent = () => mainAgent ??= new MainAgent({ config, dataDir, agents: prototypeAgents,
+    collaboration: getCollaboration(), getRequirementProviders: () => providers });
   let settingsQueue = Promise.resolve();
   let state = "starting";
   const activeRequests = new Map();
@@ -243,6 +277,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     const result = settingsQueue.then(async () => {
       try { await writeEnvFile(envPath, updates); }
       catch { throw new InputError("无法写入本机 .env 文件，请检查文件权限"); }
+      await mainAgent?.close({ permanent: false });
+      await collaboration?.close({ permanent: false });
       Object.assign(config, getProviderConfig({ ...configEnv(config), ...updates }));
       if (!injectedProviders) providers = makeProviders(config);
       // Keep the file, active config and session reset in the same save order.
@@ -284,6 +320,11 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         });
       }
       await handler.ready;
+      // A model change closes several runtimes in sequence. New API work waits
+      // until every runtime has released the old connection.
+      if (path.startsWith("/api/")) { await settingsQueue; requestController.signal.throwIfAborted(); }
+      if (await routeCollaboration({ request, response, address, getCollaboration, getMainAgent,
+        readBody: (maxBytes) => readJson(request, maxBytes), sendJson, sendMaterialFile, safeFailure, config, signal: requestController.signal })) return;
       if (path === "/api/skills" || path.startsWith("/api/skills/")) {
         const result = await routeSkills({ method: request.method, path, manager: skillManager,
           readBody: (maxBytes) => readJson(request, maxBytes), signal: requestController.signal,
@@ -302,6 +343,11 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       if (request.method === "POST" && path === "/api/settings/test-model") {
         const result = await modelConnectionTester(config, await readJson(request, 8_192), { signal: requestController.signal });
+        if (!requestController.signal.aborted) return sendJson(response, 200, result);
+        return;
+      }
+      if (request.method === "POST" && path === "/api/settings/test-agent-model") {
+        const result = await agentModelConnectionTester(config, await readJson(request, 8_192), { signal: requestController.signal });
         if (!requestController.signal.aborted) return sendJson(response, 200, result);
         return;
       }
@@ -334,6 +380,11 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       if (request.method === "POST" && path === "/api/agents/build") {
         return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config, false, requestController.signal);
+      }
+      const buildCancellation = path.match(/^\/api\/agents\/([\w-]+)\/build\/cancel$/);
+      if (request.method === "POST" && buildCancellation) {
+        if (Object.keys(await readJson(request)).length) throw new InputError("终止生成请求不接受额外参数");
+        return sendJson(response, 200, await prototypeAgents.cancelBuild(buildCancellation[1]));
       }
       if (request.method === "POST" && path === "/api/agents/turn") {
         const body = await readJson(request);
@@ -368,6 +419,45 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const agentMemory = path.match(/^\/api\/agents\/([\w-]+)\/memory$/);
       if (request.method === "GET" && agentMemory) return sendJson(response, 200, await prototypeAgents.getMemory(agentMemory[1]));
       if (request.method === "POST" && agentMemory) return sendJson(response, 200, await prototypeAgents.setMemory(agentMemory[1], (await readJson(request)).memory));
+      const attachments = path.match(/^\/api\/agents\/([\w-]+)\/attachments$/);
+      if (attachments) {
+        const id = attachments[1];
+        if (request.method === "GET") return sendJson(response, 200, await prototypeAgents.listAttachments(id));
+        if (request.method === "POST") {
+          const length = request.headers["content-length"];
+          if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > 50 * 1024 * 1024))
+            throw new InputError("单个上传文件不能超过 50 MB");
+          const result = await prototypeAgents.uploadAttachment(id, { name: address.searchParams.get("name"),
+            mimeType: address.searchParams.get("mimeType") || request.headers["content-type"], source: request, signal: requestController.signal });
+          if (!requestController.signal.aborted) return sendJson(response, 200, result);
+          return;
+        }
+      }
+      const attachment = path.match(/^\/api\/agents\/([\w-]+)\/attachments\/([\w-]+)(?:\/(raw|preview|image))?$/);
+      if (attachment && request.method === "GET") {
+        const [, id, attachmentId, action] = attachment;
+        if (!action) return sendJson(response, 200, await prototypeAgents.getAttachment(id, attachmentId));
+        if (action === "raw") return await sendMaterialFile(response, await prototypeAgents.attachmentRaw(id, attachmentId),
+          address.searchParams.get("download") === "1", requestController.signal);
+        const offset = address.searchParams.get("offset"), page = address.searchParams.get("page");
+        const number = (value, fallback) => {
+          if (value === null) return fallback;
+          if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InputError("材料读取位置无效");
+          return Number(value);
+        };
+        if (action === "preview") {
+          const result = await prototypeAgents.attachmentPreview(id, attachmentId, { offset: number(offset, 0), signal: requestController.signal });
+          if (!requestController.signal.aborted) return sendJson(response, 200, result);
+          return;
+        }
+        const result = await prototypeAgents.attachmentImage(id, attachmentId, { page: number(page, 1),
+          ...(address.searchParams.has("imageId") ? { imageId: address.searchParams.get("imageId") } : {}), signal: requestController.signal });
+        requestController.signal.throwIfAborted();
+        response.writeHead(200, { ...binaryHeaders("material.png", result.mimeType),
+          ...(Number.isSafeInteger(result.pageCount) && result.pageCount > 0 ? { "x-material-page-count": String(result.pageCount) } : {}),
+          ...(Number.isSafeInteger(result.page) && result.page > 0 ? { "x-material-page": String(result.page) } : {}) });
+        response.end(Buffer.from(result.data, "base64")); return;
+      }
       const agentFiles = path.match(/^\/api\/agents\/([\w-]+)\/files$/);
       if (request.method === "GET" && agentFiles) return sendJson(response, 200, await prototypeAgents.files(agentFiles[1]));
       const agentFile = path.match(/^\/api\/agents\/([\w-]+)\/file$/);
@@ -463,6 +553,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       return sendJson(response, 404, { error: "页面不存在" });
     } catch (error) {
       if (requestController.signal.aborted || response.destroyed) return;
+      if (response.headersSent) { response.destroy?.(); return; }
       const { status, payload } = safeFailure(error, config);
       return sendJson(response, status, payload);
     } finally {
@@ -472,7 +563,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     }
   };
   const initialization = [prototypeAgents.ready, prototypeAgents.storage?.ready,
-    prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready];
+    prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready, collaboration?.ready, mainAgent?.ready];
   if (projects.load) initialization.push(projects.load());
   if (initialization.every((item) => item === undefined)) state = "ready";
   handler.ready = Promise.all(initialization).then(() => { if (state === "starting") state = "ready"; });
@@ -484,7 +575,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       for (const controller of activeRequests.keys()) controller.abort();
       await handler.ready.catch(() => {});
       const failures = [];
-      const cancelled = [() => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.(), () => skillManager.dispose?.()]
+      const cancelled = [() => mainAgent?.close(), () => collaboration?.close(), () => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.(), () => skillManager.dispose?.()]
         .map((close) => { try { return close(); } catch (error) { return Promise.reject(error); } });
       for (const result of await Promise.allSettled(cancelled)) if (result.status === "rejected") failures.push(result.reason);
       for (const close of [() => settingsQueue, () => prototypeAgents.persistence,

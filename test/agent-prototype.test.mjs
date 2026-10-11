@@ -35,7 +35,7 @@ function factory(records, onPrompt = async () => {}) {
           listener?.({ type: "tool_execution_start", toolName: "list_workspace_files", args: { secret: "private-input" } });
           listener?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "这是周报。" } });
         }
-        await onPrompt(record, session);
+        await onPrompt(record, session, { emit: (event) => listener?.(event) });
       },
       getLastAssistantText: () => "这是周报。", async abort() { record.aborted = true; record.release?.(); },
       dispose() { record.disposed = true; },
@@ -85,7 +85,7 @@ test("构建失败保留已有定义，模型错误不泄露原始载荷", async
   await agents.build(input());
   agents.sessionFactory = async () => { throw new Error("Bearer private-key-fixture"); };
   await assert.rejects(agents.build(input("weekly", "新目标")), (error) => error instanceof ProviderError
-    && error.diagnostic.reason === "request_failed" && !error.message.includes("private-key"));
+    && error.diagnostic.reason === "api_error" && !error.message.includes("private-key"));
   assert.equal((await agents.get("weekly")).revision, 1);
   await assert.rejects(agents.build(input("new-agent")), ProviderError);
   assert.equal(await agents.get("new-agent"), null);
@@ -106,7 +106,7 @@ test("运行会话隔离，成功历史仅首次恢复，流式进度不暴露�
   const runtime = records[2];
   assert.match(runtime.prompts[0], /之前的材料.*之前的周报/s);
   assert.doesNotMatch(runtime.prompts[0], /失败材料|已停止材料|偷偷替换|旧版本材料|旧版本指令/);
-  assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), ["list_workspace_files", "read_workspace_file", "write_workspace_file"]);
+  assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), ["list_workspace_files", "read_workspace_file", "write_workspace_file", "list_materials", "read_material", "read_material_image"]);
   assert.equal(runtime.options.manager, undefined); assert.match(runtime.options.cwd, /agents\/weekly\/workspace$/);
   assert.equal(progress.some((event) => event.type === "text-delta" && event.delta === "这是周报。"), true);
   assert.doesNotMatch(JSON.stringify(progress), /private-/);
@@ -151,9 +151,12 @@ test("并发轮次拒绝，停止只影响指定会话；清理后可以重新�
   const pending = agents.prompt(turn("weekly", "stopping-session-12345", "等待取消"));
   await waiting;
   await assert.rejects(agents.prompt(turn("weekly", "stopping-session-12345")), /当前任务正在处理/);
-  await agents.prompt(turn());
+  const queued = agents.prompt(turn());
+  await new Promise((done) => setImmediate(done));
+  assert.equal(records.length, 2, "同 Agent 的另一会话等待，不能同时开始工作");
   assert.deepEqual(await agents.cancel("stopping-session-12345"), { cancelled: true });
   await assert.rejects(pending, (error) => error instanceof ProviderError && error.diagnostic.reason === "cancelled");
+  await queued;
   assert.equal(records[1].disposed, true); assert.equal(records[2].aborted, false);
   assert.deepEqual(await agents.cancel("missing-session-12345"), { cancelled: false });
   await agents.close(); assert.equal(agents.sessions.size, 0);
@@ -175,6 +178,76 @@ test("构建中止不会保存定义，删除保留文件且释放隔离会话",
   assert.deepEqual(await agents.remove("weekly"), { id: "weekly", removed: true, filesKept: true });
   assert.equal(await agents.get("weekly"), null); assert.equal(agents.sessions.size, 0);
   assert.equal(await readFile(file, "utf8"), "保留产物");
+});
+
+test("按Agent身份终止架构生成等待持久化，保留旧定义和正在运行的普通聊天", async (t) => {
+  let designStarted, chatStarted;
+  const designing = new Promise((resolve) => { designStarted = resolve; });
+  const chatting = new Promise((resolve) => { chatStarted = resolve; });
+  const records = [], { agents, options } = await fixture(t, factory(records, async (record) => {
+    if (record.builder && record.prompts[0].includes("等待终止生成")) {
+      designStarted(); await new Promise((resolve) => { record.release = resolve; });
+    } else if (!record.builder && !record.reviewer && record.prompts[0].endsWith("用户本轮任务：聊天继续运行")) {
+      chatStarted(); await new Promise((resolve) => { record.release = resolve; });
+    }
+  }));
+  const initial = await agents.build(input());
+  const runtime = agents.prompt(turn("weekly", "chat-while-building", "聊天继续运行")); await chatting;
+  const pending = agents.build(input("weekly", "等待终止生成"));
+  const rejection = assert.rejects(pending, (error) => error instanceof ProviderError && error.diagnostic.reason === "cancelled");
+  await designing;
+  const cancelled = await agents.cancelBuild("weekly"); await rejection;
+  assert.equal(cancelled.cancelled, true);
+  assert.equal(cancelled.architecture.status, "cancelled"); assert.equal(cancelled.architecture.delivery, "blocked");
+  assert.equal(cancelled.development, null); assert.equal(cancelled.agent.revision, initial.agent.revision);
+  assert.equal(cancelled.agent.instructions, initial.agent.instructions);
+  assert.equal(records[1].aborted, false, "构建取消不能影响已有工作对话");
+  assert.equal(records[2].aborted, true); assert.equal(agents.builds.size, 0);
+  records[1].release(); assert.equal((await runtime).status, "complete");
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.equal((await restored.getArchitecture("weekly")).status, "cancelled");
+  assert.equal((await restored.getRequirements()).requirements.find((item) => item.id === "weekly").draft.goal.value, "等待终止生成");
+  assert.equal((await agents.cancelBuild("weekly")).cancelled, false);
+  assert.deepEqual(await agents.cancelBuild("missing"), { cancelled: false, agent: null, architecture: null, development: null });
+  await assert.rejects(agents.cancelBuild("../weekly"), InputError);
+});
+
+test("统一终止生成可中止自动研发，保留通过的架构与可恢复研发记录", async (t) => {
+  let planningStarted, release;
+  const planning = new Promise((resolve) => { planningStarted = resolve; }), sessions = [];
+  const { agents, options } = await fixture(t, async (options) => {
+    const tools = Object.fromEntries(options.customTools.map((tool) => [tool.name, tool]));
+    const record = { aborted: false, disposed: false }; sessions.push(record);
+    return { messages: [], subscribe: () => () => {}, setAutoCompactionEnabled() {}, getContextUsage: () => ({ percent: 0 }),
+      async prompt(message) {
+        const payload = JSON.parse(message);
+        if (tools.submit_architecture) await tools.submit_architecture.execute("design", validDesign(payload.requirements, {
+          profile: "workflow", capabilities: [{ id: "workflow_execution", status: "needs_development", reason: "需要独立Node流程" }],
+        }));
+        else if (tools.submit_architecture_review) await tools.submit_architecture_review.execute("review", passingReview(payload.candidateHash));
+        else { planningStarted(); await new Promise((resolve) => { release = resolve; }); }
+      },
+      async abort() { record.aborted = true; release?.(); }, dispose() { record.disposed = true; },
+    };
+  });
+  agents.development.executor.probe = async ({ signal }) => { signal.throwIfAborted(); return { available: true }; };
+  const pending = agents.build(input("workflow")); await planning;
+  const cancelled = await agents.cancelBuild("workflow"), result = await pending;
+  assert.equal(cancelled.cancelled, true); assert.equal(cancelled.agent, null);
+  assert.equal(cancelled.architecture.status, "passed", "停止研发不撤销已经通过的架构评估");
+  assert.equal(cancelled.development.status, "cancelled"); assert.equal(cancelled.development.delivery, "blocked");
+  assert.equal(result.development.status, "cancelled"); assert.equal(agents.builds.size, 0);
+  assert.equal(sessions.at(-1).aborted, true); assert.ok(sessions.every((record) => record.disposed));
+  const resuming = new Promise((resolve) => { planningStarted = resolve; });
+  const resumed = agents.develop("workflow", { resume: true }); await resuming;
+  const stoppedAgain = await agents.cancelBuild("workflow");
+  assert.equal(stoppedAgain.cancelled, true); assert.equal(stoppedAgain.architecture.status, "passed");
+  assert.equal(stoppedAgain.development.id, cancelled.development.id);
+  assert.equal(stoppedAgain.development.status, "cancelled"); assert.equal((await resumed).development.status, "cancelled");
+  assert.equal(agents.builds.size, 0);
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.equal((await restored.getDevelopment("workflow")).status, "cancelled");
+  assert.equal((await restored.getArchitecture("workflow")).status, "passed");
 });
 
 test("迭代不打断旧任务，下一轮使用新版本指令和会话", async (t) => {
@@ -306,6 +379,29 @@ test("产物只列出自己的文本，内容隐藏凭据，拒绝越界和符�
   const capped = await agents.files("weekly"); assert.equal(capped.files.length, 120); assert.equal(capped.truncated, true);
 });
 
+test("工作Agent按实际模型失败分类，截断和重试耗尽不伪装完成", async (t) => {
+  for (const [outcome, reason] of [["stream", "api_stream_interrupted"], ["length", "api_output_limit"], ["retry", "api_unavailable"]])
+    await t.test(outcome, async (child) => {
+      const records = [], progress = [];
+      const { agents } = await fixture(child, factory(records, async (record, session, { emit }) => {
+        if (record.builder || record.reviewer) return;
+        if (outcome === "retry") {
+          emit({ type: "auto_retry_start", attempt: 5, errorMessage: "503 Service unavailable private-key-fixture" });
+          emit({ type: "auto_retry_end", success: false, finalError: "503 Service unavailable private-key-fixture" });
+        }
+        session.messages.push({ role: "assistant", stopReason: outcome === "length" ? "length" : "error",
+          errorMessage: "Stream ended without finish_reason private-key-fixture" });
+      }));
+      await agents.build(input());
+      await assert.rejects(agents.prompt(turn(), (event) => progress.push(event)), (error) => {
+        assert.equal(error.diagnostic.reason, reason);
+        assert.doesNotMatch(error.message + JSON.stringify(error.diagnostic), /private-key-fixture/);
+        return true;
+      });
+      assert.doesNotMatch(JSON.stringify(progress), /private-key-fixture|模型连接异常/);
+    });
+});
+
 test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可以连续运行", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-agent-sdk-")), requests = [];
   const model = createServer(async (request, response) => {
@@ -313,7 +409,7 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
     const names = body.tools.map((tool) => tool.function.name), builder = names.includes("submit_architecture"), reviewer = names.includes("submit_architecture_review");
     const expectedTools = builder ? ["delegate_module", "search_technical_sources", "submit_architecture"]
-      : reviewer ? ["submit_architecture_review"] : ["list_workspace_files", "read_workspace_file", "write_workspace_file"];
+      : reviewer ? ["submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "write_workspace_file"];
     assert.deepEqual(names.sort(), expectedTools);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",
@@ -344,7 +440,7 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
   assert.equal((await agents.prompt(turn())).reply, "周报已保存。");
   assert.equal(await readFile(join(root, "data/agents/weekly/workspace/weekly.md"), "utf8"), "真实工具产物");
   assert.equal((await agents.prompt(turn())).status, "complete");
-  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture")).length, 2);
-  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture_review")).length, 2);
+  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture")).length, 1);
+  assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "submit_architecture_review")).length, 1);
   assert.equal(requests.filter((request) => request.tools.some((tool) => tool.function.name === "write_workspace_file")).length, 4);
 });
