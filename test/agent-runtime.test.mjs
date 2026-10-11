@@ -206,3 +206,43 @@ test("历史保存冲突和删除错误保留HTTP状态与原因供界面保留�
       && error.reason === reason && error.message === "对话已更新");
   }
 });
+
+test("材料上传保持二进制body并编码Agent和文件名，预览与下载限制在同一Agent", async () => {
+  const requests = [], file = new File(["fixture"], "论文 与图.pdf", { type: "application/pdf" });
+  const api = createAgentRuntime(async (path, options = {}) => {
+    requests.push({ path, ...options }); return Response.json({ attachment: { id: "material-one" }, text: "正文", nextOffset: null });
+  });
+  await api.uploadAttachment("one/two", file);
+  assert.equal(requests[0].body, file);
+  assert.equal(requests[0].headers["content-type"], "application/octet-stream");
+  assert.equal(requests[0].path, `/api/agents/one%2Ftwo/attachments?name=${encodeURIComponent(file.name)}&mimeType=application%2Fpdf`);
+  await api.previewAttachment("one/two", "material-one", 100);
+  assert.equal(requests[1].path, "/api/agents/one%2Ftwo/attachments/material-one/preview?offset=100");
+  assert.equal(api.attachmentRawUrl("one/two", "material-one", true), "/api/agents/one%2Ftwo/attachments/material-one/raw?download=1");
+  assert.equal(api.attachmentImageUrl("one", "material-one", 2, "figure/one"), "/api/agents/one/attachments/material-one/image?page=2&imageId=figure%2Fone");
+});
+
+test("成功的纯附件问答恢复ID引用，失败和无效引用不能进入模型历史", () => {
+  const pair = (attachments) => [{ role: "user", content: "", attachments, delivery: "sent", revision: "1" },
+    { role: "assistant", content: "已分析", status: "complete", revision: "1" }];
+  assert.deepEqual(agentHistory(pair([{ id: "material-one", data: "不应保存" }]), 1), [
+    { role: "user", content: "", attachments: [{ id: "material-one" }], revision: "1" },
+    { role: "assistant", content: "已分析", revision: "1" },
+  ]);
+  assert.deepEqual(agentHistory(pair([{ id: "../other" }]), 1), []);
+});
+
+test("PDF页图读取二进制及页数响应头，取消不交付迟到页图", async () => {
+  const requests = [], controller = new AbortController();
+  const api = createAgentRuntime(async (path, options) => {
+    requests.push({ path, ...options }); return new Response(Uint8Array.of(1, 2, 3), {
+      headers: { "content-type": "image/png", "x-material-page": "2", "x-material-page-count": "3" },
+    });
+  });
+  const result = await api.readAttachmentImage("one/two", "material-one", 2);
+  assert.equal(result.page, 2); assert.equal(result.pageCount, 3);
+  assert.equal(result.blob.type, "image/png"); assert.equal(result.blob.size, 3);
+  assert.equal(requests[0].path, "/api/agents/one%2Ftwo/attachments/material-one/image?page=2");
+  controller.abort();
+  await assert.rejects(api.readAttachmentImage("one", "material-one", 1, { signal: controller.signal }), { name: "AbortError" });
+});

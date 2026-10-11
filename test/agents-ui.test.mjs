@@ -3,12 +3,117 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import * as state from "../public/state.js";
-import { installAvatarMotion, renderAgentAvatar } from "../public/agent-avatar.js";
+import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar } from "../public/agent-avatar.js";
 
-const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-conversations.js", "agents.js"].map((file) =>
+const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-build-view.js", "agent-conversations.js", "agent-attachments.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
   text.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "")).join("\n");
 const settle = () => new Promise(setImmediate);
+
+test("上传材料后可仅发送附件，消息和后续成功历史保存同一ID引用", async () => {
+  const ui = await setup();
+  ui.get("agent-attachment-input").files = [new File(["fixture"], "论文.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })];
+  await ui.get("agent-attachment-input").dispatchEvent({ type: "change" });
+  assert.equal(ui.get("agent-send").disabled, false);
+  await ui.submit("");
+  const request = ui.requests.find((entry) => entry.path === "/api/agents/turn");
+  assert.equal(request.body.message, "");
+  assert.equal(request.body.attachments.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.item().messages[0].attachments)), request.body.attachments);
+  assert.equal(ui.item().title, "附件分析");
+  assert.equal(ui.get("agent-attachment-list").hidden, true);
+  await ui.submit("继续分析");
+  const next = ui.requests.filter((entry) => entry.path === "/api/agents/turn").at(-1);
+  assert.deepEqual(next.body.history[0].attachments, request.body.attachments);
+});
+
+test("上传忙碌阻止发送，新对话和切换Agent不接收旧上传的迟到标签", async () => {
+  let release;
+  const ui = await setup({ attachmentRequest: (path, body) => body
+    ? new Promise((done) => { release = done; }) : undefined });
+  const original = ui.item();
+  ui.get("agent-attachment-input").files = [new File(["fixture"], "原对话.pdf")];
+  const uploading = ui.get("agent-attachment-input").dispatchEvent({ type: "change" });
+  await settle(); assert.equal(ui.get("agent-send").disabled, true);
+  await ui.get("agent-new-chat").click();
+  assert.equal(ui.get("agent-attachment-list").hidden, true);
+  await ui.route("two");
+  release(Response.json({ attachment: { id: "material-late", name: "原对话.pdf", size: 7, mimeType: "application/pdf", kind: "pdf", status: "uploaded" } }));
+  await uploading;
+  assert.equal(ui.get("agent-attachment-list").hidden, true);
+  assert.equal(ui.get("agent-send").disabled, false);
+  assert.equal(ui.attachments().refs("one", original.id)[0].id, "material-late");
+  assert.equal(ui.attachments().refs("two", ui.item("two").id).length, 0);
+});
+
+test("纯附件任务失败后恢复原材料，重发复用失败消息并保留文件名", async () => {
+  let requests = 0;
+  const ui = await setup({ turn: (body) => ++requests === 1
+    ? Response.json({ error: "模型暂时无法读取图片" }, { status: 502 }) : Response.json(completed(body)) });
+  ui.get("agent-attachment-input").files = [new File(["fixture"], "现场照片.png", { type: "image/png" })];
+  await ui.get("agent-attachment-input").dispatchEvent({ type: "change" });
+  await ui.submit("");
+  assert.equal(ui.item().messages[0].delivery, "failed");
+  assert.match(treeText(ui.get("agent-attachment-list")), /现场照片\.png/);
+  const original = ui.item().messages[0];
+  await ui.submit("");
+  assert.equal(ui.item().messages.length, 2);
+  assert.equal(ui.item().messages[0], original);
+  assert.equal(original.delivery, "sent");
+});
+
+test("拖放上传后可从当前Agent已有材料再次选择，预览和下载使用只读地址", async () => {
+  const ui = await setup();
+  await ui.get("agent-chat-form").dispatchEvent({ type: "drop", preventDefault() {}, dataTransfer: { files: [new File(["fixture"], "资料.docx")] } });
+  await ui.submit("分析资料");
+  await ui.get("agent-attachment-pick").click();
+  assert.match(treeText(ui.get("agent-material-list")), /资料\.docx/);
+  const row = ui.get("agent-material-list").children[0];
+  await row.children[0].click();
+  assert.match(treeText(ui.get("agent-material-preview")), /材料正文/);
+  assert.match(ui.get("agent-material-download").href, /^\/api\/agents\/one\/attachments\/[A-Za-z0-9_-]+\/raw\?download=1$/);
+  await row.children[1].click();
+  assert.equal(ui.attachments().refs("one", ui.item().id).length, 1);
+  assert.equal(ui.get("agent-material-dialog").open, false);
+});
+
+test("附件和文字一起发送时，文件卡片始终位于文字气泡上方", async () => {
+  const ui = await setup();
+  ui.get("agent-attachment-input").files = [new File(["fixture"], "阅读材料.docx")];
+  await ui.get("agent-attachment-input").dispatchEvent({ type: "change" });
+  await ui.submit("请分析材料");
+  const row = ui.get("agent-messages").children[0];
+  assert.equal(row.children[0].className, "message-attachments");
+  assert.equal(row.children[1].className, "bubble");
+  const card = row.children[0].children[0]; assert.match(card.className, /attachment-card/);
+  assert.match(treeText(card), /阅读材料\.docx/);
+  const preview = treeNodes(card).find((node) => node.className.includes("attachment-card-open"));
+  await preview.click();
+  assert.equal(ui.get("agent-material-dialog").open, true);
+});
+
+test("历史附件元数据迟到后更新当前文件卡片，切换Agent时不会串入名称", async () => {
+  const record = () => ({ schemaVersion: 4, id: "restored-attachment", agentId: "one", title: "请阅读", saveVersion: 1,
+    mutationId: "saved-material", createdAt: "2026-10-10T00:00:00.000Z", updatedAt: "2026-10-10T00:00:00.000Z",
+    messages: [{ role: "user", content: "请阅读", delivery: "sent", revision: "1", attachments: [{ id: "material-saved" }] },
+      { role: "assistant", content: "已分析", status: "complete", revision: "1" }] });
+  for (const switchAgent of [false, true]) {
+    let release;
+    const ui = await setup({ records: new Map([["one/restored-attachment", record()]]), attachmentRequest: (path) =>
+      path === "/api/agents/one/attachments/material-saved" ? new Promise((done) => { release = done; }) : undefined });
+    assert.equal(typeof release, "function");
+    if (switchAgent) await ui.route("two");
+    release(Response.json({ attachment: { id: "material-saved", name: "恢复的研究材料.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "document", size: 512 } }));
+    await settle();
+    if (switchAgent) assert.doesNotMatch(treeText(ui.get("agent-messages")), /恢复的研究材料/);
+    else {
+      const row = ui.get("agent-messages").children[0];
+      assert.equal(row.children[0].className, "message-attachments");
+      assert.match(treeText(row.children[0]), /恢复的研究材料\.docx/);
+      assert.match(treeText(row.children[0]), /512\s*(?:B|bytes|字节)/);
+    }
+  }
+});
 let ids = 0;
 const requirements = ["one", "two"].map((id, index) => ({ id, name: index ? "日报助手" : "会议助手", persisted: true,
   draft: { goal: { value: index ? "生成日报" : "整理会议", source: "user" } } }));
@@ -32,8 +137,9 @@ function stream() {
   };
 }
 
-async function setup({ turn, build, develop, cancelDevelopment, inspect, profiles, conversationRequest, historyRequest,
-  savedConversations = new Map(), records = new Map(), stored = new Map(), clock, confirm = () => true } = {}) {
+async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, inspect, profiles, conversationRequest, historyRequest, attachmentRequest,
+  savedConversations = new Map(), records = new Map(), stored = new Map(), clock, confirm = () => true,
+  initialItems = requirements, initialAgentId = "one" } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -79,7 +185,7 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
     focus() { if (!this.disabled) document.activeElement = this; }
     click() { return this.dispatchEvent({ type: "click", bubbles: true }); }
   }
-  const nodes = new Map(), requests = [], runtimeEvents = [], profileEvents = [], timers = new Map(), confirmations = [];
+  const nodes = new Map(), requests = [], runtimeEvents = [], profileEvents = [], timers = new Map(), materials = new Map(), confirmations = [];
   let timerId = 0;
   const get = (id) => {
     if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(), { id, ...(id === "agent-history-menu" ? { hidden: true } : {}) }));
@@ -97,7 +203,7 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
     static now() { return new Date(clock).getTime(); }
   };
   const context = vm.createContext({ ...state, document, Date: Clock, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
-    renderAgentAvatar: (target, agent) => renderAgentAvatar(target, agent, { document }), installAvatarMotion,
+    renderAgentAvatar: (target, agent) => renderAgentAvatar(target, agent, { document }), avatarColors, resolveAgentAvatar, installAvatarMotion,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: (id) => timers.delete(id),
     window: { confirm: (message) => { confirmations.push(message); return confirm(message); }, localStorage: {
@@ -106,12 +212,25 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
     crypto: { randomUUID: () => `session-${++ids}` },
     node: (_tag, className = "", textContent = "") => Object.assign(new Element(), { className, textContent }),
     fetch: async (path, options = {}) => {
-      const body = options.body ? JSON.parse(options.body) : undefined;
+      const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
       requests.push({ path, body, signal: options.signal, headers: options.headers });
+      if (path.includes("/attachments")) {
+        if (attachmentRequest) { const response = await attachmentRequest(path, body, options); if (response) return response; }
+        const id = decodeURIComponent(path.split("/")[3]);
+        if (body) {
+          const attachment = { id: `attachment-${++ids}`, name: body.name, size: body.size, mimeType: body.type, kind: "document", status: "uploaded" };
+          materials.set(`${id}/${attachment.id}`, attachment); return Response.json({ attachment });
+        }
+        if (path.includes("/preview?")) return Response.json({ text: "材料正文", nextOffset: null });
+        if (path.endsWith("/attachments")) return Response.json({ attachments: [...materials].filter(([key]) => key.startsWith(`${id}/`)).map(([, value]) => value) });
+        return Response.json({ attachment: materials.get(`${id}/${path.split("/").at(-1)}`) });
+      }
       if (path === "/api/agent-profiles") return profiles?.() ?? Response.json({ profiles: [] });
       if (path === "/api/agents/turn") return turn?.(body, options) ?? Response.json(completed(body));
       if (path === "/api/agents/build") return build?.(body, options) ?? Response.json(readyResult({ ...definition(body.id, 2), ...body }));
       if (path === "/api/agents/cancel") return Response.json({ cancelled: true });
+      if (path.endsWith("/build/cancel")) return cancelBuild?.(path) ?? cancelDevelopment?.(path) ?? Response.json({ cancelled: true,
+        agent: definition(decodeURIComponent(path.split("/")[3])), architecture: architecture({ status: "cancelled", delivery: "blocked", summary: "生成已终止。" }), development: null });
       if (path.includes("/conversations")) {
         if (historyRequest) { const response = await historyRequest(path, body, options); if (response) return response; }
         const [, , , id, , cid, remove] = path.split("/");
@@ -148,27 +267,76 @@ async function setup({ turn, build, develop, cancelDevelopment, inspect, profile
   });
   vm.runInContext(source, context);
   const emit = (type, detail) => document.dispatchEvent(new Event(type, { detail }));
-  await emit("neuma:agents-changed", { items: requirements, busy: false });
+  await emit("neuma:agents-changed", { items: initialItems, busy: false });
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
-  await route("one");
+  await route(initialAgentId);
   return { get, requests, savedConversations, records, stored, emit, route, document, runtimeEvents, profileEvents, confirmations,
     timers, poll: async () => { const pending = [...timers.values()]; timers.clear(); await Promise.all(pending.map((callback) => callback())); await settle(); },
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context),
     history: (id = "one") => vm.runInContext(`history.records(${JSON.stringify(id)})`, context),
     select: (cid, id = "one") => vm.runInContext(`selectConversation(${JSON.stringify(id)}, ${JSON.stringify(cid)})`, context),
-    remove: async (cid, id = "one") => {
-      if (vm.runInContext("route.agentId", context) !== id) await route(id);
-      const row = get("agent-history-list").children.find((entry) => entry.matches(".agent-history-row")
-        && entry.children[0]?.dataset.conversationId === cid);
-      if (!row) throw new Error("找不到待删除的历史对话");
-      await row.children[1].click();
-      return get("agent-history-delete").click();
-    },
+    remove: (cid, id = "one") => vm.runInContext(`deleteConversation(${JSON.stringify(id)}, ${JSON.stringify(cid)})`, context),
     readCurrent: (id = "one") => vm.runInContext(`history.read(${JSON.stringify(id)}, conversation(${JSON.stringify(id)}))`, context),
     runtime: (id = "one") => vm.runInContext(`runtimes.get(${JSON.stringify(id)})`, context),
+    attachments: () => vm.runInContext("attachments", context),
     submit: (text) => { get("agent-message").value = text; return get("agent-chat-form").dispatchEvent({ type: "submit", preventDefault() {} }); },
   };
 }
+
+test("主聊首次加载核实全部侧栏状态，最多两个只读请求且重复列表不重新查询", async () => {
+  const items = [...requirements, ...["three", "four"].map((id) => ({ ...requirements[0], id, name: id }))];
+  const pending = new Map(); let active = 0, maximum = 0;
+  const ui = await setup({ initialItems: items, initialAgentId: null, inspect: (path) => {
+    const id = path.split("/").at(-1); active++; maximum = Math.max(maximum, active);
+    return new Promise((resolve) => pending.set(id, () => { active--; resolve(Response.json(readyResult({ ...definition(), ...items.find((item) => item.id === id) }))); }));
+  } });
+  await settle();
+  assert.deepEqual([...pending.keys()], ["one", "two"]);
+  assert.match(treeText(ui.get("sidebar-agent-list")), /正在读取状态/);
+  await ui.emit("neuma:agents-changed", { items, busy: false });
+  assert.equal(pending.size, 2);
+  pending.get("one")(); await settle();
+  assert.equal(pending.has("three"), true);
+  pending.get("two")(); await settle();
+  assert.equal(pending.has("four"), true);
+  pending.get("three")(); pending.get("four")(); await settle();
+  assert.equal(maximum, 2); assert.equal(ui.timers.size, 0);
+  for (const item of items) assert.equal(ui.runtime(item.id).status, "ready");
+  assert.equal(ui.get("sidebar-agent-list").children.every((link) => treeText(link).includes("可以运行")), true);
+  assert.deepEqual(ui.requests.map((entry) => entry.path).sort(), ["/api/agent-profiles", ...items.map((item) => `/api/agents/${item.id}`)].sort());
+  await ui.emit("neuma:agents-changed", { items, busy: false });
+  await ui.emit("neuma:agents-changed", { items: items.map((item) => ({ ...item, profile: { name: `${item.name} 新名字` } })), busy: false });
+  await settle(); assert.equal(ui.requests.filter((entry) => /^\/api\/agents\/[^/]+$/.test(entry.path)).length, 4);
+});
+
+test("主聊初始状态读取失败明确提示，重复列表或路由不会无限重试", async () => {
+  const ui = await setup({ initialAgentId: null, inspect: () => Response.json({ error: "状态文件暂时不可读取" }, { status: 503 }) });
+  await settle();
+  assert.match(treeText(ui.get("sidebar-agent-list")), /状态读取失败/);
+  assert.doesNotMatch(treeText(ui.get("sidebar-agent-list")), /待生成/);
+  assert.equal(ui.runtime().status, "error"); assert.match(ui.runtime().error, /状态文件/);
+  const count = ui.requests.length;
+  await ui.emit("neuma:agents-changed", { items: requirements, busy: false }); await ui.route(null); await settle();
+  assert.equal(ui.requests.length, count); assert.equal(ui.timers.size, 0);
+});
+
+test("初始状态查询忽略已修改需求和移除成员，移除的排队项不发请求", async () => {
+  const items = [...requirements, ...["three", "four"].map((id) => ({ ...requirements[0], id, name: id }))], pending = new Map();
+  const ui = await setup({ initialItems: items, initialAgentId: null, inspect: (path) => new Promise((resolve) => pending.set(path.split("/").at(-1), resolve)) });
+  await settle();
+  const updated = items.filter((item) => item.id !== "two" && item.id !== "three").map((item) => item.id === "one"
+    ? { ...item, draft: { goal: { value: "更新后的需求", source: "user" } } } : item);
+  await ui.emit("neuma:agents-changed", { items: updated, busy: false });
+  pending.get("one")(Response.json(readyResult())); await settle();
+  assert.equal(ui.runtime().status, "stale"); assert.equal(ui.runtime().definition, null);
+  assert.equal(pending.has("three"), false); assert.equal(pending.has("four"), true);
+  pending.get("two")(Response.json(readyResult(definition("two"))));
+  pending.get("four")(Response.json(readyResult({ ...definition(), ...items.find((item) => item.id === "four") }))); await settle();
+  assert.equal(ui.get("sidebar-agent-list").children.length, 2);
+  assert.doesNotMatch(treeText(ui.get("sidebar-agent-list")), /日报助手|three/);
+  assert.equal(ui.runtime("four").status, "ready");
+  assert.equal(ui.requests.some((entry) => entry.path === "/api/agents/three"), false);
+});
 
 const developmentRecord = (overrides = {}) => ({ id: "dev-one", agentId: "one", status: "running", phase: "implementing",
   architectureRef: { version: 2, candidateHash: "candidate-2" }, codeHash: "code-2", planHash: "plan-2",
@@ -177,7 +345,7 @@ const developmentRecord = (overrides = {}) => ({ id: "dev-one", agentId: "one", 
 const developmentResult = (record, overrides = {}) => ({ agent: null, architecture: architecture({ delivery: "needs_development" }),
   development: record, ...overrides });
 const treeText = (node) => [node.textContent, ...node.children.map(treeText)].join(" ");
-const developmentButton = (ui) => ui.get("agent-development").children[0].children.at(-1).children[0];
+const developmentButton = (ui) => ui.get("agent-making-content").children[0]?.children.at(-1).children.at(-1);
 const avatarTargets = (ui) => [ui.get("sidebar-agent-list").children[0].children[0],
   ui.get("agent-messages").children[0].children[0], ui.get("agent-icon")];
 const treeNodes = (node) => [node, ...node.children.flatMap(treeNodes)];
@@ -236,6 +404,58 @@ test("头像展示资料变更同步侧栏、欢迎区和标题，不改变智�
     assert.notDeepEqual(rendered, selected);
     assert.equal(target.children.length, 1);
   }
+});
+
+test("用户气泡使用当前头像的全部配色，保存变更同时更新已有消息", async () => {
+  const ui = await setup();
+  await ui.submit("气泡跟随头像配色");
+  const avatar = resolveAgentAvatar(requirements[0]);
+  const style = ui.get("agent-messages").style;
+  assert.equal(style.getPropertyValue("--user-bubble-background"), avatarColors.find((color) => color.id === avatar.color).hex);
+  for (const color of avatarColors) {
+    const profile = { name: "会议助手", icon: avatarIcon({ shape: "cut", color: color.id }) };
+    await ui.emit("neuma:agent-profile-changed", { id: "one", profile });
+    await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one" ? { ...agent, profile } : agent), busy: false });
+    assert.equal(style.getPropertyValue("--user-bubble-background"), color.hex);
+    assert.equal(style.getPropertyValue("--user-bubble-color"), "var(--surface)");
+    assert.equal(ui.item().messages[0].content, "气泡跟随头像配色");
+    assert.equal(ui.runtime().definition.revision, 1);
+  }
+});
+
+test("切换智能体使用各自气泡颜色，文字头像与缺失智能体回退黑白", async () => {
+  const ui = await setup();
+  const items = requirements.map((agent, index) => ({ ...agent,
+    profile: { name: agent.name, icon: avatarIcon({ shape: "disc", color: index ? "blue" : "orange" }) } }));
+  await ui.emit("neuma:agents-changed", { items, busy: false });
+  const style = ui.get("agent-messages").style;
+  assert.equal(style.getPropertyValue("--user-bubble-background"), "#ff7a00");
+  await ui.route("two");
+  assert.equal(style.getPropertyValue("--user-bubble-background"), "#1677ff");
+  await ui.route("one");
+  assert.equal(style.getPropertyValue("--user-bubble-background"), "#ff7a00");
+  await ui.emit("neuma:agents-changed", { items: items.map((agent) => agent.id === "one"
+    ? { ...agent, profile: { name: agent.name, icon: "📝" } } : agent), busy: false });
+  assert.equal(style.getPropertyValue("--user-bubble-background"), "var(--text)");
+  assert.equal(style.getPropertyValue("--user-bubble-color"), "var(--surface)");
+  await ui.route("missing");
+  assert.equal(style.getPropertyValue("--user-bubble-background"), "var(--text)");
+});
+
+test("回复流期间修改配色不会清除用户消息或中断回复", async () => {
+  const reply = stream(), ui = await setup({ turn: () => reply.response });
+  const pending = ui.submit("正在执行的任务");
+  await settle();
+  const profile = { name: "会议助手", icon: avatarIcon({ shape: "shield", color: "purple" }) };
+  await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one" ? { ...agent, profile } : agent), busy: false });
+  assert.equal(ui.get("agent-messages").style.getPropertyValue("--user-bubble-background"), "#7c3aed");
+  reply.send({ type: "text-delta", delta: "继续生成回复" });
+  reply.send({ type: "done", result: completed(ui.requests.find((request) => request.path.endsWith("/turn")).body, "继续生成回复") }); reply.close();
+  await pending;
+  assert.equal(ui.item().messages[0].content, "正在执行的任务");
+  assert.equal(ui.item().messages[1].content, "继续生成回复");
+  assert.equal(ui.item().messages[1].status, "complete");
+  assert.equal(ui.get("agent-messages").style.getPropertyValue("--user-bubble-background"), "#7c3aed");
 });
 
 test("找不到智能体时标题头像清空旧图层与展示状态", async () => {
@@ -335,7 +555,8 @@ test("后台状态轮询保留聊天气泡和用户阅读位置，完成后停�
 
 test("停止后台研发后，之前发出的迟到轮询不能恢复运行中状态", async () => {
   let saved = developmentResult(developmentRecord()), release, reads = 0;
-  const ui = await setup({ inspect: () => ++reads === 2 ? new Promise((done) => { release = done; }) : Response.json(saved),
+  const ui = await setup({ inspect: (path) => path.endsWith("/two") ? Response.json(readyResult(definition("two")))
+    : ++reads === 2 ? new Promise((done) => { release = done; }) : Response.json(saved),
     cancelDevelopment: () => {
       saved = developmentResult(developmentRecord({ status: "cancelled" }));
       return Response.json({ cancelled: true, development: saved.development });
@@ -365,7 +586,7 @@ test("生成智能体自动贯穿研发五阶段，停止后续接且旧研发�
   await settle();
   assert.equal(ui.get("agent-development").hidden, false);
   assert.match(treeText(ui.get("agent-development")), /接收设计.*拆分任务.*开发任务.*检查验收.*整理交付/s);
-  assert.equal(developmentButton(ui).textContent, "停止研发");
+  assert.equal(developmentButton(ui).textContent, "终止生成");
   assert.equal(ui.get("agent-build").disabled, true);
   assert.equal(ui.get("agent-send").disabled, true);
   assert.equal(ui.requests.filter((request) => request.path === "/api/agents/build").length, 1);
@@ -408,7 +629,7 @@ test("当前方案可以开始研发并显示五阶段与任务进度，完成�
   partial.send({ type: "status", phase: "verifying", label: "正在验收当前任务", development: developmentRecord({ phase: "verifying" }) });
   await settle();
   assert.match(treeText(ui.get("agent-development")), /接收设计.*拆分任务.*开发任务.*检查验收.*整理交付.*正在验收当前任务/s);
-  assert.equal(developmentButton(ui).textContent, "停止研发");
+  assert.equal(developmentButton(ui).textContent, "终止生成");
   partial.send({ type: "done", result: developmentResult(developmentRecord({ status: "completed", phase: "packaging", delivery: "needs_connection" })) });
   partial.close(); await pending;
   assert.match(treeText(ui.get("agent-development")), /研发已完成.*待连接/);
@@ -783,7 +1004,7 @@ test("历史记录按本地日期分组，近7天含前6天并按年月展示更
     ["year", "去年记录", stamp(2025, 9, 20)], ["invalid", "无日期记录", "invalid-date"],
   ];
   const records = new Map(entries.map(([id, title, updatedAt]) => [`one/${id}`, { id, title, updatedAt, agentId: "one",
-    schemaVersion: 3, createdAt: stamp(2025, 9, 20), saveVersion: 1, mutationId: `saved-${id}`,
+    schemaVersion: 4, createdAt: stamp(2025, 9, 20), saveVersion: 1, mutationId: `saved-${id}`,
     ...(id === "recent" ? { pendingSync: true } : {}),
     messages: [{ role: "user", content: title, delivery: "sent", revision: "1" },
       { role: "assistant", content: "已完成", status: "complete", revision: "1" }] }]));
@@ -967,6 +1188,7 @@ test("对话保存失败保留浏览器备份并提示，不能显示已经写�
   const ui = await setup({ historyRequest: (_path, body) => body && failing
     ? Response.json({ error: "磁盘不可写" }, { status: 503 }) : undefined });
   assert.equal(ui.get("agent-chat-save-status").hidden, true);
+  assert.equal(ui.get("agent-save-actions").hidden, true);
   await ui.submit("需要保留的任务");
   assert.equal(ui.item().saved, false);
   assert.equal(ui.item().localBackup, true);
@@ -974,6 +1196,7 @@ test("对话保存失败保留浏览器备份并提示，不能显示已经写�
   assert.match(ui.get("agent-error").textContent, /磁盘不可写.*本机备份已保留/);
   assert.equal(ui.get("agent-chat-save-status").textContent, "待同步");
   assert.equal(ui.get("agent-chat-save-status").hidden, false);
+  assert.equal(ui.get("agent-save-actions").hidden, false);
   assert.equal(ui.get("agent-chat-retry").hidden, false);
   assert.equal(ui.get("agent-send").disabled, false);
   failing = false;
@@ -981,6 +1204,7 @@ test("对话保存失败保留浏览器备份并提示，不能显示已经写�
   assert.equal(ui.item().saved, true);
   assert.equal(ui.get("agent-chat-save-status").textContent, "已保存");
   assert.equal(ui.get("agent-chat-save-status").hidden, true);
+  assert.equal(ui.get("agent-save-actions").hidden, true);
   assert.equal(ui.get("agent-chat-retry").hidden, true);
 });
 
@@ -1043,12 +1267,99 @@ test("服务器已有旧对话时，失败保存的新对话刷新后仍可恢�
 test("重新生成取消后不把迟到结果设为可运行，旧定义仍可见且可重试", async () => {
   const partial = stream(), ui = await setup({ build: () => partial.response });
   const pending = ui.get("agent-build").click(); await settle();
-  await ui.get("agent-cancel-reply").click();
+  await developmentButton(ui).click();
   partial.send({ type: "done", result: readyResult(definition("one", 2)) }); partial.close(); await pending;
   assert.equal(ui.runtime().definition.revision, 1);
   assert.equal(ui.get("agent-send").disabled, true);
   assert.equal(ui.get("agent-build").disabled, false);
-  assert.match(ui.get("agent-error").textContent, /生成已停止/);
+  assert.equal(ui.runtime().status, "cancelled");
+  assert.match(treeText(ui.get("agent-making-content")), /生成已终止/);
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/build/cancel")).length, 1);
+});
+
+test("终止旧构建后的状态查询迟到失败，不能污染已重新开始的生成", async () => {
+  const previous = stream(), next = stream();
+  let reads = 0, builds = 0, releaseCancellation, releaseStopInspection, rejectBuildInspection;
+  const cancelled = { agent: definition(), architecture: architecture({ status: "cancelled", delivery: "blocked", summary: "生成已终止。" }), development: null };
+  const ui = await setup({ build: () => ++builds === 1 ? previous.response : next.response,
+    cancelBuild: () => new Promise((resolve) => { releaseCancellation = resolve; }),
+    inspect: (path) => {
+      if (path.endsWith("/two")) return Response.json(readyResult(definition("two")));
+      if (++reads === 1) return Response.json(readyResult());
+      if (reads === 2) return new Promise((resolve) => { releaseStopInspection = resolve; });
+      return new Promise((_resolve, reject) => { rejectBuildInspection = reject; });
+    } });
+  const previousBuild = ui.get("agent-build").click(); await settle();
+  const stopping = developmentButton(ui).click();
+  previous.fail(new Error("取消中的旧构建请求已结束")); await settle();
+  releaseCancellation(Response.json({ cancelled: true })); await settle();
+  assert.equal(reads, 3, "终止与构建收尾各自核实状态，旧构建查询仍未返回");
+  releaseStopInspection(Response.json(cancelled)); await stopping;
+  assert.equal(ui.runtime().status, "cancelled");
+  const nextBuild = ui.get("agent-build").click(); await settle();
+  assert.equal(ui.runtime().status, "building"); assert.equal(ui.runtime().error, "");
+  rejectBuildInspection(new Error("迟到的旧构建状态查询失败")); await previousBuild;
+  assert.equal(ui.runtime().status, "building"); assert.equal(ui.runtime().error, "");
+  assert.equal(ui.runtime().operation.kind, "build");
+  assert.doesNotMatch(treeText(ui.get("agent-making-content")), /状态尚未确认|迟到/);
+  next.send({ type: "done", result: readyResult(designedDefinition()) }); next.close(); await nextBuild;
+  assert.equal(ui.runtime().status, "ready");
+});
+
+test("构建只切换指定工作区，按真实阶段展示制作并在就绪后恢复对话", async () => {
+  const partial = stream(), ui = await setup({ build: () => partial.response });
+  ui.get("agent-message").value = "保留下一项任务草稿";
+  const pending = ui.get("agent-build").click(); await settle();
+  assert.equal(ui.get("agent-making-panel").hidden, false);
+  assert.equal(ui.get("agent-history-sidebar").hidden, true);
+  assert.equal(ui.get("agent-conversation").hidden, true);
+  assert.equal(ui.get("agent-conversation-actions").hidden, true);
+  assert.equal(ui.get("agent-title").textContent, requirements[0].name);
+  assert.match(treeText(ui.get("agent-making-content")), /需求确认.*架构设计.*独立评估.*按需研发.*运行交付/s);
+  partial.send({ type: "status", phase: "researching", label: "正在核实技术资料…" }); await settle();
+  assert.match(treeText(ui.get("agent-making-content")), /正在核实技术资料/);
+  const stage = () => treeNodes(ui.get("agent-making-content")).find((node) => node.attributes.get("aria-current") === "step");
+  partial.send({ type: "status", phase: "reviewer", label: "正在独立评估…" }); await settle();
+  assert.match(treeText(stage()), /独立评估/);
+  partial.send({ type: "status", phase: "designing", label: "正在修订方案…" }); await settle();
+  assert.match(treeText(stage()), /架构设计/);
+  partial.send({ type: "done", result: readyResult(designedDefinition()) }); partial.close(); await pending;
+  assert.equal(ui.get("agent-making-panel").hidden, true);
+  assert.equal(ui.get("agent-history-sidebar").hidden, false);
+  assert.equal(ui.get("agent-conversation").hidden, false);
+  assert.equal(ui.get("agent-conversation-actions").hidden, false);
+  assert.equal(ui.get("agent-message").value, "保留下一项任务草稿");
+  assert.equal(ui.get("agent-send").disabled, false);
+});
+
+test("刷新后可终止没有本地请求的后台架构，迟到轮询不能覆盖取消结果", async () => {
+  let release, reads = 0;
+  const cancelled = { agent: definition(), architecture: architecture({ status: "cancelled", delivery: "blocked", summary: "生成已终止。" }) };
+  const ui = await setup({ inspect: (path) => path.endsWith("/two") ? Response.json(readyResult(definition("two"))) : ++reads === 1
+    ? Response.json({ agent: definition(), architecture: architecture({ status: "evaluating", delivery: "blocked" }) })
+    : new Promise((done) => { release = done; }), cancelBuild: () => Response.json({ cancelled: true, ...cancelled }) });
+  assert.equal(developmentButton(ui).textContent, "终止生成");
+  const polling = ui.poll(); await settle();
+  await developmentButton(ui).click();
+  assert.equal(ui.runtime().status, "cancelled");
+  release(Response.json(readyResult(designedDefinition()))); await polling;
+  assert.equal(ui.runtime().status, "cancelled");
+  assert.equal(ui.runtime().definition.revision, 1);
+  assert.equal(ui.get("agent-send").disabled, true);
+  assert.equal(developmentButton(ui).textContent, "重新生成");
+});
+
+test("制作失败展示保存的实际原因与阶段，继续停留在制作界面", async () => {
+  const failed = architecture({ status: "failed", delivery: "blocked", summary: "模型输出达到长度上限，方案尚未完整提交。",
+    diagnostic: { phase: "evaluating", reason: "output_limit" } });
+  const ui = await setup({ inspect: () => Response.json({ agent: definition(), architecture: failed }) });
+  assert.equal(ui.get("agent-conversation").hidden, true);
+  const content = treeText(ui.get("agent-making-content"));
+  assert.match(content, /制作暂未完成.*模型输出达到长度上限/s);
+  const blocked = treeNodes(ui.get("agent-making-content")).find((node) => node.dataset.state === "blocked");
+  assert.match(treeText(blocked), /独立评估/);
+  assert.equal(developmentButton(ui).textContent, "重新生成");
+  assert.equal(ui.get("agent-send").disabled, true);
 });
 
 test("任务期间确认更新先排队，旧任务完成后仅生成一次最新需求", async () => {

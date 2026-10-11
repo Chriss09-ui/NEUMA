@@ -133,6 +133,7 @@ function renderMessages(scrollToEnd = true) {
       if (needsSave && !await saveAgent(delivered.id)) return;
       navigate({ page: "agent", agentId: delivered.id });
     }));
+    card.append(button("secondary", "回到主助理", () => navigate({ page: "chat" })));
     messagesEl.append(card);
   }
   messagesEl.scrollTop = scrollToEnd ? messagesEl.scrollHeight : scrollTop;
@@ -260,8 +261,6 @@ function openAgent(id) {
   if (busy) return;
   const agent = agents.find((item) => item.id === id);
   if (!agent) return;
-  if (agent.id !== activeAgentId && (session.draft || session.messages.length)
-    && !window.confirm(`打开“${agentDisplayName(agent)}”会替换当前对话和草稿。继续吗？`)) return;
   if (agent.id !== activeAgentId) {
     session = blankSession();
     diagnosticTurns = [];
@@ -277,7 +276,7 @@ function openAgent(id) {
   showError("");
   showAgentsError("");
   render();
-  navigate({ page: "chat" });
+  document.dispatchEvent(new CustomEvent("neuma:main-requirements", { detail: { agentId: id } }));
 }
 
 async function loadAgentLibrary() {
@@ -362,7 +361,9 @@ async function loadAgentLibrary() {
     for (const [id, requirement] of durable) {
       if (removedAgentIds.has(id)) continue;
       const current = currentItems.get(id);
-      if (current?.dirty) currentItems.set(id, { ...current, persisted: true });
+      if (current?.dirty || (current?.persisted && String(current.updatedAt || "") > String(requirement.updatedAt || ""))) {
+        currentItems.set(id, { ...current, persisted: true });
+      }
       else {
         const localBackup = saveRequirement(browserStorage, requirement);
         currentItems.set(id, { ...requirement, localBackup, ...(profileMap.has(id) ? { profile: profileMap.get(id) } : {}) });
@@ -581,7 +582,7 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     if (buildId) {
       if (await saveAgent(buildId)) document.dispatchEvent(new CustomEvent("neuma:agent-build", { detail: { id: buildId } }));
     }
-    if (!document.getElementById("page-chat").hidden) inputEl.focus({ preventScroll: true });
+    if (!document.getElementById("page-create").hidden) inputEl.focus({ preventScroll: true });
   }
 });
 
@@ -695,8 +696,7 @@ resetEl.addEventListener("click", () => {
 });
 
 document.getElementById("agents-create").addEventListener("click", () => {
-  navigate({ page: "chat" });
-  if (session.draft || session.messages.length) resetEl.click();
+  document.dispatchEvent(new CustomEvent("neuma:main-requirements"));
 });
 
 function mergeProfiles(profiles, onlyMissing = false) {
@@ -720,6 +720,17 @@ document.addEventListener("neuma:agent-profile-changed", (event) => {
 });
 document.addEventListener("neuma:agent-profiles-loaded", (event) => mergeProfiles(event.detail?.profiles, true));
 document.addEventListener("neuma:agents-request", renderAgents);
+document.addEventListener("neuma:main-requirement-saved", (event) => {
+  const requirement = normalizeAgentRequirement(event.detail?.requirement);
+  if (!requirement || removedAgentIds.has(requirement.id)) return;
+  const previous = agents.find((item) => item.id === requirement.id);
+  const profile = profileMap.get(requirement.id) || requirement.profile || previous?.profile;
+  const item = { ...requirement, ...(profile ? { profile } : {}) };
+  item.localBackup = saveRequirement(browserStorage, item);
+  agents = [item, ...agents.filter((entry) => entry.id !== item.id)];
+  renderAgents();
+  if (event.detail.build) document.dispatchEvent(new CustomEvent("neuma:agent-build", { detail: { id: item.id } }));
+});
 document.addEventListener("neuma:agent-action", (event) => {
   const { action, id } = event.detail ?? {};
   if (action === "edit") openAgent(id);

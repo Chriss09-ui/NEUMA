@@ -31,7 +31,8 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     removeAttribute(name) { this.attributes.delete(name); }
     querySelector() { return get(`${this.id}-span`); }
     querySelectorAll(selector) {
-      return this.id === "page-chat" ? inputs.slice(0, 1) : this.id === "page-projects" ? inputs.slice(1, 2) : this.id === "page-agent" ? inputs.slice(2) : [];
+      const composer = { "page-chat": "main-message", "page-create": "message", "page-projects": "project-message", "page-agent": "agent-message", "page-group": "group-message" }[this.id];
+      return composer ? [get(composer)] : [];
     }
     closest() { return this.hidden ? this : null; }
     contains(element) {
@@ -48,11 +49,11 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     if (!nodes.has(id)) nodes.set(id, new Element(id));
     return nodes.get(id);
   };
-  const inputs = ["message", "project-message", "agent-message"].map(get);
-  const links = ["chat", "projects", "agents", "skills", "settings"].map((page) => {
+  const inputs = ["message", "project-message", "agent-message", "main-message", "group-message"].map(get);
+  const links = ["chat", "groups", "projects", "agents", "skills", "settings"].map((page) => {
     const link = get(`nav-${page}`); link.dataset.page = page; return link;
   });
-  document.getElementById = get;
+  document.getElementById = (id) => ["llm-dot", "llm-state", "jev-dot", "jev-state"].includes(id) ? null : get(id);
   document.querySelectorAll = (selector) => selector === ".nav-item, .sidebar-manage" ? links : inputs;
   get("setup-banner").firstElementChild = get("banner-text");
   get("project-setup-banner").firstElementChild = get("project-banner-text");
@@ -101,6 +102,26 @@ test("Skills 支持直接访问、导航焦点和折叠侧栏后的页面切换"
   assert.equal(get("nav-skills").getAttribute("aria-current"), null);
   location.hash = "#skills"; window.dispatchEvent({ type: "hashchange" });
   assert.equal(get("page-skills").hidden, false);
+});
+
+test("旧创建入口统一到主聊天，群详情保持群导航选中且主草稿保留", () => {
+  const { get, navigate, location, document } = setup({ hash: "#chat" });
+  get("main-message").value = "主助理下一条草稿";
+  get("message").value = "正在整理创建需求";
+  navigate({ page: "create" });
+  assert.equal(get("page-create").hidden, true);
+  assert.equal(get("page-create").inert, true);
+  assert.equal(location.hash, "#chat");
+  assert.equal(document.activeElement.id, "main-message");
+  navigate({ page: "group", groupId: "group-one" });
+  assert.equal(location.hash, "#group/group-one");
+  assert.equal(get("page-group").hidden, false);
+  assert.equal(get("nav-groups").getAttribute("aria-current"), "page");
+  assert.equal(document.activeElement.id, "group-message");
+  navigate({ page: "chat" });
+  assert.equal(get("main-message").value, "主助理下一条草稿");
+  assert.equal(get("message").value, "正在整理创建需求");
+  assert.equal(document.activeElement.id, "main-message");
 });
 
 test("主导航折叠保留页面与草稿，隐藏控件归还焦点，露出智能体图标入口", () => {
@@ -231,7 +252,9 @@ test("浏览器返回和前进恢复面板，重复路由事件只通知一次",
   assert.equal(get("page-chat").hidden, true);
   location.hash = "#chat/requirements";
   window.dispatchEvent({ type: "popstate" });
+  assert.equal(get("page-create").hidden, true);
   assert.equal(get("page-chat").hidden, false);
+  assert.equal(location.hash, "#chat");
 });
 
 test("辅助面板的收起不再影响项目列表，项目工作区的 Escape 不隐藏列表", () => {
@@ -270,8 +293,8 @@ test("减少动态效果时展开辅助信息使用即时滚动，切换仍聚�
 test("在当前页面再次请求创建时仍然聚焦输入框", () => {
   const { get, navigate, document } = setup();
   get("chat-panel-toggle").focus();
-  navigate({ page: "chat" });
-  assert.equal(document.activeElement.id, "message");
+  navigate({ page: "create" });
+  assert.equal(document.activeElement.id, "main-message");
 });
 
 test("快速切换立即显示最后请求的页面，不等待浏览器快照动画", () => {
@@ -326,7 +349,8 @@ test("旧导航链接保持可用，未知项目子路由回到助手", () => {
     ["#manage", "#projects/list", "projects", "manage-projects"],
     ["#add", "#projects/add", "projects", "project-add-panel"],
     ["#manage/agents", "#agents", "agents", "page-agents"],
-    ["#chat/requirements", "#chat", "chat", "chat-requirements"],
+    ["#chat/requirements", "#chat", "chat", "page-chat"],
+    ["#create", "#chat", "chat", "page-chat"],
     ["#projects/unknown", "#projects/assistant", "projects", "chat-projects"],
   ]) {
     const { get, location } = setup({ hash });
@@ -334,6 +358,28 @@ test("旧导航链接保持可用，未知项目子路由回到助手", () => {
     assert.equal(get(`page-${page}`).hidden, false, hash);
     assert.equal(get(panel).hidden, false, hash);
   }
+});
+
+test("旧创建书签在模块加载后激活需求，重复创建入口在同一主页面继续生效", () => {
+  const { get, location, document, navigate } = setup({ hash: "#create" });
+  let activated = 0; document.addEventListener("neuma:main-requirements", () => activated++);
+  assert.equal(location.hash, "#chat"); assert.equal(get("page-create").hidden, true);
+  document.dispatchEvent({ type: "DOMContentLoaded" }); assert.equal(activated, 1);
+  navigate({ page: "create" }); navigate({ page: "create" }); assert.equal(activated, 3);
+  assert.equal(document.activeElement.id, "main-message");
+});
+
+test("侧栏移除服务状态和本机说明后，模型健康检查仍正常更新配置提示", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const sidebar = html.match(/<aside class="sidebar">[\s\S]*?<\/aside>/)[0];
+  assert.doesNotMatch(sidebar, /service-status|模型服务|Jev 判断|仅在本机运行/);
+  const { get, document } = setup();
+  await new Promise(setImmediate);
+  assert.equal(get("setup-banner").hidden, true);
+  assert.equal(get("project-setup-banner").hidden, true);
+  document.dispatchEvent({ type: "neuma:settings-changed" });
+  await new Promise(setImmediate);
+  assert.equal(get("setup-banner").hidden, true);
 });
 
 test("未配置模型时主 Agent 和项目助手都显示配置提示", async () => {

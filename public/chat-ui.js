@@ -1,38 +1,90 @@
 import { node } from "./project-view.js";
 
+const attachmentTypes = {
+  pdf: ["PDF", "PDF 文档", "pdf"], doc: ["DOC", "Word 文档", "document"], docx: ["DOCX", "Word 文档", "document"],
+  rtf: ["RTF", "文本文档", "document"], xls: ["XLS", "Excel 表格", "table"], xlsx: ["XLSX", "Excel 表格", "table"],
+  csv: ["CSV", "数据表格", "table"], tsv: ["TSV", "数据表格", "table"], ppt: ["PPT", "演示文稿", "slides"], pptx: ["PPTX", "演示文稿", "slides"],
+  md: ["MD", "Markdown 文档", "text"], markdown: ["MD", "Markdown 文档", "text"], txt: ["TXT", "文本文档", "text"],
+  py: ["PY", "Python 文件", "code"], js: ["JS", "JavaScript 文件", "code"], ts: ["TS", "TypeScript 文件", "code"],
+  png: ["PNG", "图片", "image"], jpg: ["JPG", "图片", "image"], jpeg: ["JPG", "图片", "image"],
+  webp: ["WEBP", "图片", "image"], gif: ["GIF", "图片", "image"], tif: ["TIFF", "图片", "image"], tiff: ["TIFF", "图片", "image"],
+};
+
+export function createAttachmentCard(document, attachment = {}, { className = "", status = "", statusText = "", onOpen } = {}) {
+  const element = (tag, className, text = "") => {
+    const value = document.createElement(tag); value.className = className; value.textContent = text; return value;
+  };
+  const name = attachment.name || "已保存的附件", extension = name.split(".").at(-1).toLowerCase();
+  const [symbol, type, tone] = attachmentTypes[extension] || (/^[a-z\d]{1,8}$/i.test(extension)
+    ? [extension.toUpperCase(), "文件", "file"] : ["FILE", "附件", "file"]);
+  const details = [type];
+  if (Number.isSafeInteger(attachment.size) && attachment.size > 0) {
+    const unit = Math.min(3, Math.floor(Math.log(attachment.size) / Math.log(1024)));
+    details.push(`${Number((attachment.size / 1024 ** unit).toFixed(1))} ${["B", "KB", "MB", "GB"][unit]}`);
+  }
+  const card = element("div", `attachment-card ${className}`.trim());
+  card.dataset.tone = tone;
+  if (status) card.dataset.status = status;
+  const open = element("button", "attachment-card-open"); open.type = "button"; open.disabled = !onOpen; open.title = name;
+  open.setAttribute("aria-label", onOpen ? `预览 ${name}` : name);
+  if (onOpen) open.addEventListener("click", onOpen);
+  const icon = element("span", "attachment-card-icon", symbol); icon.setAttribute("aria-hidden", "true");
+  const body = element("span", "attachment-card-body");
+  body.append(element("span", "attachment-card-name", name), element("span", "attachment-card-meta", details.join(" · ")));
+  if (statusText) {
+    const state = element("span", "attachment-card-status", statusText); state.setAttribute("role", "status"); body.append(state);
+  }
+  open.append(icon, body); card.append(open);
+  return card;
+}
+
 export function mountWelcome(container, welcome, hasMessages) {
   if (!hasMessages) container.append(welcome);
 }
 
-export function addUserMessage(messages, content) {
+export function addUserMessage(messages, content, attachments = []) {
   const last = messages.at(-1);
   const previous = last?.role === "assistant" && ["error", "stopped"].includes(last.status) ? messages.at(-2) : last;
-  if (previous?.role === "user" && ["failed", "stopped"].includes(previous.delivery) && previous.content === content) {
+  if (previous?.role === "user" && ["failed", "stopped"].includes(previous.delivery) && previous.content === content
+    && JSON.stringify(previous.attachments || []) === JSON.stringify(attachments)) {
     if (last !== previous) messages.pop();
     previous.delivery = "pending";
     return previous;
   }
-  const message = { role: "user", content, delivery: "pending" };
+  const message = { role: "user", content, delivery: "pending", ...(attachments.length ? { attachments: attachments.map(({ id }) => ({ id })) } : {}) };
   messages.push(message);
   return message;
 }
 
 export function recoverInput(input, content) {
-  if (!input.value.trim()) input.value = content;
-  else if (input.value.trim() !== content) input.value += `\n\n${content}`;
+  if (content.trim()) {
+    if (!input.value.trim()) input.value = content;
+    else if (input.value.trim() !== content) input.value += `\n\n${content}`;
+  }
   input.dispatchEvent(new Event("input"));
   input.focus();
 }
 
-export function renderUserMessage(message, input) {
+export function renderUserMessage(message, input, { attachmentLabel = () => "已保存的附件", attachmentInfo, onAttachment, onRecover } = {}) {
   const row = node("div", "message user");
   row.setAttribute("role", "group");
   row.setAttribute("aria-label", "发送的消息");
-  row.append(node("div", "bubble", message.content));
+  if (message.attachments?.length) {
+    const files = node("div", "message-attachments");
+    files.setAttribute("role", "group"); files.setAttribute("aria-label", "发送的附件");
+    for (const attachment of message.attachments) {
+      const file = createAttachmentCard(document, attachmentInfo?.(attachment) || { name: attachmentLabel(attachment) }, {
+        className: "message-attachment", onOpen: onAttachment ? () => onAttachment(attachment) : undefined,
+      });
+      files.append(file);
+    }
+    row.append(files);
+  }
+  if (message.content) row.append(node("div", "bubble", message.content));
   if (["failed", "stopped"].includes(message.delivery)) {
     const footer = node("div", "message-recovery");
     const edit = node("button", "link-button", "重新编辑"); edit.type = "button";
-    edit.addEventListener("click", () => recoverInput(input, message.content));
+    edit.addEventListener("click", () => { recoverInput(input, message.content); onRecover?.(message); });
     footer.append(node("span", "", message.delivery === "stopped" ? "回复已停止" : "本轮未完成"), edit);
     row.append(footer);
   }

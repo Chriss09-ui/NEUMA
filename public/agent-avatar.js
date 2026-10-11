@@ -18,10 +18,10 @@ export function avatarFaceLayout(shape) {
 }
 
 export const avatarColors = Object.freeze([
-  { id: "mint", label: "青绿", hex: "#24b89a" }, { id: "blue", label: "天蓝", hex: "#4299ef" },
-  { id: "orange", label: "杏橙", hex: "#f7a552" }, { id: "purple", label: "浅紫", hex: "#a789eb" },
-  { id: "coral", label: "珊瑚", hex: "#ec6f78" }, { id: "yellow", label: "金黄", hex: "#efbe45" },
-  { id: "lime", label: "草绿", hex: "#a6c65e" }, { id: "rose", label: "玫瑰", hex: "#df7caa" },
+  { id: "mint", label: "青绿", hex: "#00b894" }, { id: "blue", label: "天蓝", hex: "#1677ff" },
+  { id: "orange", label: "亮橙", hex: "#ff7a00" }, { id: "purple", label: "鲜紫", hex: "#7c3aed" },
+  { id: "coral", label: "珊瑚", hex: "#f5224b" }, { id: "yellow", label: "金黄", hex: "#ffbf00" },
+  { id: "lime", label: "草绿", hex: "#76c900" }, { id: "rose", label: "玫瑰", hex: "#eb167e" },
 ].map(Object.freeze));
 
 export function avatarIcon({ shape, color } = {}) {

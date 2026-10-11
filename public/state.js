@@ -195,15 +195,27 @@ function previewMessages(messages) {
     .slice(-80).map((item) => ({ role: "user", content: item.content }));
 }
 
+export function agentAttachmentRefs(value = []) {
+  if (!Array.isArray(value) || value.length > 10 || value.some((ref) => !ref || typeof ref.id !== "string"
+    || !/^[A-Za-z0-9_-]{1,120}$/.test(ref.id)) || new Set(value.map((ref) => ref.id)).size !== value.length) {
+    throw new Error("附件引用格式无效，每条消息最多添加 10 份材料。");
+  }
+  return value.map(({ id }) => ({ id }));
+}
+
 function conversationMessages(messages, { complete = false } = {}) {
   if (!Array.isArray(messages)) return [];
   const valid = (item) => item && ["user", "assistant"].includes(item.role)
     && typeof item.content === "string" && (item.role === "user" ? item.content.length <= 4000 : complete || item.content.length <= 32_000)
-    && (item.content.trim() || item.role === "assistant");
+    && (item.content.trim() || item.role === "assistant" || (Array.isArray(item.attachments) && item.attachments.length));
   if (complete && messages.some((item) => !valid(item))) throw new Error("对话消息格式无效，完整内容未保存。");
   const selected = complete ? messages : messages.filter(valid).slice(-80);
   return selected.map((item) => {
     const result = { role: item.role, content: item.content };
+    if (item.role === "user" && item.attachments !== undefined) {
+      const attachments = agentAttachmentRefs(item.attachments);
+      if (attachments.length) result.attachments = attachments;
+    }
     if (typeof item.revision === "string" && item.revision.length <= 120) result.revision = item.revision;
     if (item.role === "user" && ["sent", "failed", "stopped", "pending"].includes(item.delivery)) {
       result.delivery = item.delivery === "pending" ? "stopped" : item.delivery;
@@ -222,7 +234,7 @@ export function agentConversationSnapshot(messages) {
 
 export function agentHistorySnapshot(messages) {
   if (!Array.isArray(messages)) throw new Error("对话消息格式无效，完整内容未保存。");
-  const snapshot = { schemaVersion: 3, messages: conversationMessages(messages, { complete: true }) };
+  const snapshot = { schemaVersion: 4, messages: conversationMessages(messages, { complete: true }) };
   if (new TextEncoder().encode(JSON.stringify(snapshot)).length > AGENT_HISTORY_MAX_BYTES) {
     throw new Error("单条对话超过 8 MiB，完整内容未保存；请保留当前内容并开启新对话。");
   }
@@ -230,7 +242,7 @@ export function agentHistorySnapshot(messages) {
 }
 
 function agentConversationBackup(agentId, record, options = {}) {
-  if (!record || record.schemaVersion !== 3 || typeof record.id !== "string" || !record.id
+  if (!record || ![2, 3, 4].includes(record.schemaVersion) || typeof record.id !== "string" || !record.id
     || record.agentId !== agentId || typeof record.title !== "string"
     || typeof record.createdAt !== "string" || typeof record.updatedAt !== "string"
     || !Number.isSafeInteger(record.saveVersion) || record.saveVersion < 0) {
@@ -249,7 +261,7 @@ function agentConversationBackup(agentId, record, options = {}) {
   }
   const retryRequest = options.retryRequest ?? record.retryRequest;
   if (retryRequest !== undefined) {
-    if (retryRequest?.schemaVersion !== 3 || !Number.isSafeInteger(retryRequest.expectedVersion)
+    if (![2, 3, 4].includes(retryRequest?.schemaVersion) || !Number.isSafeInteger(retryRequest.expectedVersion)
       || retryRequest.expectedVersion < 0 || typeof retryRequest.mutationId !== "string" || !retryRequest.mutationId) {
       throw new Error("待同步对话请求无效。");
     }

@@ -14,6 +14,19 @@ const messages = (content = "已经整理") => [
   { role: "user", content: "整理工作记录", delivery: "sent" },
   { role: "assistant", content, status: "complete" },
 ];
+
+test("schema4附件消息保存、备份与重建保留ID引用，纯附件对话有可读标题", async (t) => {
+  const remote = server(), storage = memoryStorage(), history = historyFor(t, remote.api, storage), item = history.current("one");
+  item.messages = [{ role: "user", content: "", attachments: [{ id: "material-one" }], delivery: "sent" },
+    { role: "assistant", content: "已分析", status: "complete" }];
+  await history.changed("one", item, { immediate: true });
+  assert.equal(item.saved, true);
+  assert.equal(item.title, "附件分析");
+  assert.equal(remote.get("one", item.id).schemaVersion, 4);
+  assert.deepEqual(loadAgentConversationBackups(storage, "one")[0].messages[0].attachments, [{ id: "material-one" }]);
+  const next = historyFor(t, remote.api, storage);
+  assert.deepEqual(next.current("one").messages[0].attachments, [{ id: "material-one" }]);
+});
 const memoryStorage = () => {
   const values = new Map();
   return { getItem: (key) => values.get(key) ?? null,

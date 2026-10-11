@@ -462,6 +462,21 @@ test("产物列表位于独立文件库弹窗，历史对话栏不再承载文�
   assert.doesNotMatch(html, /id="agent-artifacts-sidebar"|id="agent-save-chat"/);
 });
 
+test("产物和新对话位于标题栏，隐藏对话说明且保存恢复位于错误提示下", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const headerStart = html.indexOf('<header class="page-header agent-chat-header">');
+  const header = html.slice(headerStart, html.indexOf("</header>", headerStart));
+  assert.deepEqual([...header.matchAll(/<button id="([^"]+)"/g)].map((match) => match[1]),
+    ["agent-identity-edit", "agent-artifacts-open", "agent-new-chat", "agent-panel-toggle"]);
+  const start = html.indexOf('<section id="agent-conversation"');
+  const conversation = html.slice(start, html.indexOf("</section>", start));
+  assert.doesNotMatch(conversation, /class="conversation-bar"|id="agent-artifacts-open"|id="agent-new-chat"/);
+  assert.match(conversation, /id="agent-conversation-title"[^>]*\bhidden\b/);
+  assert.match(conversation, /class="agent-status-line" hidden/);
+  assert.ok(conversation.indexOf('id="agent-error"') < conversation.indexOf('id="agent-save-actions"'));
+  assert.ok(conversation.indexOf('id="agent-save-actions"') < conversation.indexOf('id="agent-chat-form"'));
+});
+
 test("进入已生成 Agent 自动读取文件，首次生成和任务结束刷新，资料变化不重复读取", async () => {
   const ui = await setup({ initialRuntime: { one: { definition: null, ready: false, status: "missing" } },
     files: (id) => ({ files: [{ path: `${id}.md`, size: 20 }] }) });

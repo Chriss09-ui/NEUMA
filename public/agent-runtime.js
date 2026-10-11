@@ -1,4 +1,5 @@
 import { readReply } from "./chat-ui.js";
+import { agentAttachmentRefs } from "./state.js";
 
 export function agentSourceKey(agent) {
   return JSON.stringify({ name: agent.name, draft: agent.draft });
@@ -97,8 +98,11 @@ export function agentHistory(messages, revision) {
     const user = messages[index], reply = messages[index + 1];
     if (user.role !== "user" || user.delivery !== "sent" || user.revision !== String(revision)
       || reply.role !== "assistant" || reply.status !== "complete" || reply.revision !== String(revision)
-      || [user, reply].some((entry) => typeof entry.content !== "string" || !entry.content.trim() || entry.content.length > 12_000)) continue;
-    history.push({ role: "user", content: user.content, revision: String(revision) },
+      || [user, reply].some((entry) => typeof entry.content !== "string" || entry.content.length > 12_000)
+      || (!user.content.trim() && !user.attachments?.length) || !reply.content.trim()) continue;
+    let attachments;
+    try { attachments = agentAttachmentRefs(user.attachments); } catch { continue; }
+    history.push({ role: "user", content: user.content, revision: String(revision), ...(attachments.length ? { attachments } : {}) },
       { role: "assistant", content: reply.content, revision: String(revision) });
     index++;
   }
@@ -139,6 +143,31 @@ export function createAgentRuntime(request = fetch) {
   }
 
   return {
+    uploadAttachment: async (id, file, { signal } = {}) => {
+      const path = `/api/agents/${encodeURIComponent(id)}/attachments?name=${encodeURIComponent(file.name)}&mimeType=${encodeURIComponent(file.type || "")}`;
+      const response = await request(path, { method: "POST", headers: { "content-type": "application/octet-stream" }, body: file, signal });
+      const result = await response.json(); signal?.throwIfAborted();
+      if (!response.ok) throw new Error(result.error || "材料上传失败，请重试。");
+      return result;
+    },
+    listAttachments: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/attachments`, undefined, options),
+    getAttachment: (id, attachmentId, options) => json(`/api/agents/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`, undefined, options),
+    readAttachmentImage: async (id, attachmentId, page = 1, { signal } = {}) => {
+      const response = await request(`/api/agents/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}/image?page=${page}`, { signal });
+      signal?.throwIfAborted();
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.error || "材料页图预览失败，可以下载原文件。");
+      }
+      const blob = await response.blob(); signal?.throwIfAborted();
+      const headerNumber = (name) => {
+        const value = Number(response.headers.get(name)); return Number.isSafeInteger(value) && value > 0 ? value : null;
+      };
+      return { blob, page: headerNumber("x-material-page") || page, pageCount: headerNumber("x-material-page-count") };
+    },
+    previewAttachment: (id, attachmentId, offset = 0, options) => json(`/api/agents/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}/preview?offset=${offset}`, undefined, options),
+    attachmentRawUrl: (id, attachmentId, download = false) => `/api/agents/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}/raw${download ? "?download=1" : ""}`,
+    attachmentImageUrl: (id, attachmentId, page = 1, imageId) => `/api/agents/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}/image?page=${page}${imageId ? `&imageId=${encodeURIComponent(imageId)}` : ""}`,
     inspect: (id) => json(`/api/agents/${encodeURIComponent(id)}`),
     listRequirements: (options) => json("/api/agent-requirements", undefined, options),
     saveRequirements: (id, requirement, options) => json(`/api/agents/${encodeURIComponent(id)}/requirements`, requirement, options),
@@ -161,6 +190,7 @@ export function createAgentRuntime(request = fetch) {
       incompleteMessage: "研发连接中断，完成情况尚未确认；正在核实已保存的进度。",
     }),
     cancelDevelopment: (id) => json(`/api/agents/${encodeURIComponent(id)}/development/cancel`, {}),
+    cancelBuild: (id) => json(`/api/agents/${encodeURIComponent(id)}/build/cancel`, {}),
     build: (agent, options) => stream("/api/agents/build", { id: agent.id, name: agent.name, draft: agent.draft }, options, {
       isComplete: (result) => result?.architecture
         ? result.architecture.agentId === agent.id && (result.architecture.status === "passed"

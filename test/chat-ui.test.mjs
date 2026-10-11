@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addUserMessage, mountWelcome, readReply, recoverInput } from "../public/chat-ui.js";
+import { addUserMessage, createAttachmentCard, mountWelcome, readReply, recoverInput, renderUserMessage } from "../public/chat-ui.js";
 import { recentUserMessages } from "../public/state.js";
 
 function streamResponse(parts) {
@@ -98,4 +98,77 @@ test("首条消息发出即移除欢迎区，失败也不恢复，开启空白�
   messages.length = 0;
   render();
   assert.deepEqual(container.children, [welcome]);
+});
+
+test("仅附件发送和失败重试复用同一组材料，不混淆相同文字的其他附件", () => {
+  const messages = [], refs = [{ id: "material-one" }];
+  const user = addUserMessage(messages, "", refs); user.delivery = "failed";
+  messages.push({ role: "assistant", content: "", status: "error" });
+  assert.equal(addUserMessage(messages, "", refs), user);
+  assert.deepEqual(user.attachments, refs);
+  user.delivery = "failed";
+  const other = addUserMessage(messages, "", [{ id: "material-two" }]);
+  assert.notEqual(other, user);
+});
+
+function messageDocument(t) {
+  const document = { activeElement: null };
+  class Element {
+    children = []; attributes = new Map(); listeners = new Map(); dataset = {}; className = ""; _textContent = "";
+    classList = { add: (...names) => { this.className += ` ${names.join(" ")}`; }, toggle() {} };
+    get textContent() { return this._textContent; }
+    set textContent(value) { this._textContent = value; this.children = []; }
+    set innerHTML(_value) { throw new Error("文件卡片必须通过DOM节点呈现文件名"); }
+    append(...nodes) { this.children.push(...nodes); }
+    setAttribute(name, value) { this.attributes.set(name, value); }
+    addEventListener(name, handler) { this.listeners.set(name, handler); }
+    click() { return this.listeners.get("click")?.({}); }
+    focus() { document.activeElement = this; }
+  }
+  document.createElement = (tag) => Object.assign(new Element(), { tagName: tag.toUpperCase(), ownerDocument: document });
+  const previous = globalThis.document; globalThis.document = document;
+  t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous; });
+  return document;
+}
+const allMessageNodes = (node) => [node, ...node.children.flatMap(allMessageNodes)];
+const messageText = (node) => [node.textContent, ...node.children.map(messageText)].join(" ");
+
+test("已发送附件使用独立文件卡片，先显示文件再显示文字并可预览", (t) => {
+  messageDocument(t);
+  const ref = { id: "material-one" }, material = { ...ref, name: "季度报告.pdf", mimeType: "application/pdf", kind: "pdf", size: 512 };
+  let opened;
+  const row = renderUserMessage({ role: "user", content: "请分析这份材料", delivery: "sent", attachments: [ref] }, {}, {
+    attachmentInfo: () => material, onAttachment: (selected) => { opened = selected; },
+  });
+  assert.equal(row.children[0].className, "message-attachments");
+  assert.equal(row.children[1].className, "bubble");
+  const card = row.children[0].children[0];
+  assert.match(card.className, /attachment-card/); assert.match(card.className, /message-attachment/);
+  assert.equal(card.tagName, "DIV");
+  assert.match(messageText(card), /PDF/); assert.match(messageText(card), /512\s*(?:B|bytes|字节)/);
+  const preview = allMessageNodes(card).find((node) => node.className.includes("attachment-card-open"));
+  assert.equal(preview.attributes.get("aria-label"), "预览 季度报告.pdf");
+  preview.click(); assert.deepEqual(opened, ref);
+});
+
+test("仅附件消息没有空文字气泡，未知大小不伪造零字节", (t) => {
+  messageDocument(t);
+  const row = renderUserMessage({ role: "user", content: "", delivery: "sent", attachments: [{ id: "material-one" }] }, {}, {
+    attachmentInfo: () => ({ name: "材料.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", kind: "document" }),
+  });
+  assert.equal(row.children.length, 1);
+  assert.equal(row.children[0].className, "message-attachments");
+  assert.match(messageText(row), /DOCX|Word|WORD/);
+  assert.doesNotMatch(messageText(row), /(?:^|\s)0\s*(?:B|bytes|字节)/);
+});
+
+test("文件卡片保留长文件名与完整可访问标题，将不安全名称作为普通文本呈现", (t) => {
+  const document = messageDocument(t), name = `<img src=x onerror=alert(1)>${"非常长的研究报告".repeat(20)}.pdf`;
+  const card = createAttachmentCard(document, { name, kind: "pdf", mimeType: "application/pdf", size: 512 }, { onOpen() {} });
+  const nodes = allMessageNodes(card);
+  const preview = nodes.find((node) => node.className.includes("attachment-card-open"));
+  assert.equal(preview.title, name);
+  assert.equal(preview.attributes.get("aria-label"), `预览 ${name}`);
+  assert.ok(nodes.some((node) => node.textContent === name));
+  assert.equal(nodes.some((node) => ["IMG", "SCRIPT"].includes(node.tagName)), false);
 });

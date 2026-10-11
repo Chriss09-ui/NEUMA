@@ -1,9 +1,11 @@
 import { agentDisplayDescription, agentDisplayName, deleteAgentPreview } from "./state.js";
 import { AgentConversationHistory } from "./agent-conversations.js";
+import { AgentAttachments, createAgentAttachmentView } from "./agent-attachments.js";
 import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js";
 import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime, developmentPhases } from "./agent-runtime.js";
 import { createDevelopmentView } from "./agent-details-view.js";
-import { installAvatarMotion, renderAgentAvatar } from "./agent-avatar.js";
+import { createAgentMakingView } from "./agent-build-view.js";
+import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar } from "./agent-avatar.js";
 
 installAvatarMotion(document, window);
 
@@ -16,8 +18,16 @@ const runtimes = new Map(), inputs = new Map();
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
 let developmentView = null;
+let makingView = null;
 let inspectionTimer = null;
+let activeInspections = 0;
+const inspectionWaiters = [];
 const api = createAgentRuntime();
+const attachments = new AgentAttachments({ api, onChange(id, cid) {
+  if (!visible(id) || !current() || (cid && conversation(id).id !== cid)) return;
+  if (!cid) renderMessages(current());
+  renderControls(current());
+} });
 const history = new AgentConversationHistory({ api, storage, exists: (id) => agents.some((agent) => agent.id === id),
   onChange(id, messagesChanged = false) {
     if (!visible(id) || !current()) return;
@@ -35,6 +45,9 @@ const input = byId("agent-message");
 const current = () => agents.find((item) => item.id === route.agentId);
 const visible = (id, conversation) => route.page === "agent" && route.agentId === id
   && (!conversation || conversations.get(id) === conversation);
+const attachmentView = createAgentAttachmentView({ document, api, attachments, onChange(id) {
+  if (visible(id) && current()) renderMessages(current());
+} });
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -163,7 +176,7 @@ async function stopConversation(id, item = conversation(id)) {
   operation.reply.status = "stopped";
   operation.reply.error = "本轮任务未完成，已显示的内容保留。";
   const user = item.messages[item.messages.indexOf(operation.reply) - 1];
-  if (user?.role === "user") user.delivery = "stopped";
+  if (user?.role === "user") { user.delivery = "stopped"; attachments.restore(id, item.id, user.attachments); }
   item.turn = item.replyView = null;
   void history.changed(id, item, { immediate: true });
   if (visible(id, item) && current()) { renderMessages(current()); renderControls(current()); }
@@ -200,13 +213,14 @@ async function deleteConversation(id, cid) {
     return;
   }
   inputs.delete(cid);
+  attachments.clear(id, cid);
   if (selected && visible(id)) { input.value = inputs.get(conversation(id).id) || ""; input.dispatchEvent(new Event("input")); input.focus(); }
 }
 
 function runtime(agent) {
   if (!runtimes.has(agent.id)) runtimes.set(agent.id, {
     status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, architecture: null, development: null, operation: null, inspection: null, sequence: 0,
-    error: "", label: "", rebuildRequested: false,
+    error: "", label: "", inspectionError: false, rebuildRequested: false,
   });
   return runtimes.get(agent.id);
 }
@@ -235,7 +249,8 @@ function renderSidebar() {
     const statusLabel = { building: "正在设计与检查", designing: "正在设计", evaluating: "正在评估", developing: "研发进行中",
       needs_changes: "方案待调整", needs_evidence: "待补充依据", needs_connection: "待连接能力",
       needs_development: "需要研发", infeasible: "方案不可行", failed: "处理失败", cancelled: "已停止",
-      blocked: "尚未就绪", stale: "需求已更新 · 待生成" };
+      blocked: "尚未就绪", stale: "需求已更新 · 待生成", unchecked: "正在读取状态", checking: "正在读取状态",
+      error: state.inspectionError ? "状态读取失败" : "处理失败" };
     label.append(element("strong", "", name), element("small", "", state.status === "ready"
       ? "可以运行" : statusLabel[state.status] || "待生成"));
     link.append(mark, label);
@@ -248,6 +263,7 @@ function renderMessages(agent) {
   container.replaceChildren();
   item.replyView = null;
   item.userRows = new Map();
+  attachments.hydrate(agent.id, item.messages.flatMap((message) => message.role === "user" ? message.attachments || [] : []));
   if (!item.messages.length) {
     const welcome = element("div", "welcome", "");
     const mark = element("span", "welcome-mark", "");
@@ -261,7 +277,7 @@ function renderMessages(agent) {
   }
   for (const message of item.messages) {
     if (message.role === "user") {
-      const row = renderUserMessage(message, input);
+      const row = userRow(agent.id, item, message);
       item.userRows.set(message, row);
       container.append(row);
     }
@@ -275,11 +291,20 @@ function renderMessages(agent) {
   container.scrollTop = container.scrollHeight;
 }
 
+function userRow(id, item, message) {
+  return renderUserMessage(message, input, {
+    attachmentLabel: (ref) => attachments.material(id, ref.id)?.name || "已保存的附件",
+    attachmentInfo: (ref) => attachments.material(id, ref.id),
+    onAttachment: (ref) => { if (visible(id, item)) return attachmentView.showPreview(id, ref.id); },
+    onRecover: (user) => { if (visible(id, item)) attachments.restore(id, item.id, user.attachments); },
+  });
+}
+
 function renderControls(agent) {
   const state = runtime(agent), item = conversation(agent.id), operation = state.operation || item.turn;
   const development = agentDevelopmentState(agent, state);
   const library = history.state(agent.id);
-  const busy = Boolean(operation || development.active || item.loading
+  const busy = Boolean(operation || serverOperationPending(agent, state) || item.loading
     || (library.loading && library.selection === library.loading.selection) || item.deleting
     || (!item.loaded && item.saveVersion));
   byId("agent-runtime-status").textContent = state.status === "building" ? state.label || "正在设计与检查…"
@@ -291,7 +316,8 @@ function renderControls(agent) {
   byId("agent-build").disabled = busy || state.status === "checking";
   byId("agent-build").textContent = state.status === "building" ? "正在生成…" : state.definition ? "重新生成智能体" : "生成智能体";
   byId("agent-send").hidden = Boolean(operation);
-  byId("agent-send").disabled = state.status !== "ready" || busy;
+  byId("agent-send").disabled = state.status !== "ready" || busy || attachments.blocked(agent.id, item.id);
+  attachmentView.setContext({ agentId: agent.id, conversationId: item.id, disabled: state.status !== "ready" || busy });
   byId("agent-cancel-reply").hidden = !operation || Boolean(operation.kind?.startsWith("development") || operation.development);
   byId("agent-cancel-reply").disabled = Boolean(operation?.controller.signal.aborted);
   byId("agent-chat-form").setAttribute("aria-busy", String(busy));
@@ -303,11 +329,40 @@ function renderControls(agent) {
   byId("agent-chat-retry").disabled = Boolean(item.saving || item.loading || library.loading || item.conflict);
   byId("agent-chat-fork").hidden = !item.conflict;
   byId("agent-chat-fork").disabled = Boolean(item.turn || item.deleting);
+  byId("agent-save-actions").hidden = !item.storageError && !library.error && !item.conflict;
   byId("agent-new-chat").disabled = Boolean(item.deleting);
   showError(item.error || item.storageError || state.error);
   renderDevelopment(agent, development);
+  renderMaking(agent);
   broadcastRuntime(agent);
   scheduleInspection(agent);
+}
+
+function renderMaking(agent) {
+  const state = runtime(agent), making = state.status !== "ready" && !conversation(agent.id).turn;
+  byId("agent-making-panel").hidden = !making;
+  byId("agent-history-sidebar").hidden = making;
+  byId("agent-conversation").hidden = making;
+  byId("agent-conversation-actions").hidden = making;
+  byId("agent-workspace").classList.toggle("is-making", making);
+  if (!making) { byId("agent-making-content").replaceChildren(); makingView = null; return; }
+  const focused = makingView?.agentId === agent.id
+    ? ["stop", "start", "details"].find((key) => makingView[key] === document.activeElement) : null;
+  makingView = { ...createAgentMakingView(agent, state, {
+    onStop: () => stopMaking(agent.id),
+    onStart: () => {
+      const development = agentDevelopmentState(agent, state);
+      return development.canStart || development.canResume ? developAgent(agent.id) : buildAgent(agent.id);
+    },
+    onDetails: () => {
+      byId("agent-panel-toggle").click();
+      byId("agent-details-profile-tab").click();
+      const details = byId("agent-brief").closest?.("details");
+      if (details) details.open = true;
+    },
+  }), agentId: agent.id };
+  byId("agent-making-content").replaceChildren(makingView.root);
+  if (focused) (makingView[focused] || makingView.start || makingView.details).focus({ preventScroll: true });
 }
 
 function clearInspectionTimer() {
@@ -345,6 +400,7 @@ function renderDevelopment(agent, development = agentDevelopmentState(agent, run
   const tasksOpen = developmentView?.agentId === agent.id ? developmentView.taskDetails?.open : undefined;
   developmentView = { ...createDevelopmentView(development, { phase: operation?.phase, label: operation?.label, tasksOpen,
     busy: Boolean(operation), stopping: Boolean(operation?.stopping || operation?.controller.signal.aborted),
+    showActions: false,
     onStart: () => developAgent(agent.id), onStop: () => operation?.kind === "build" ? stopAgent(agent.id) : stopDevelopment(agent.id) }), agentId: agent.id };
   container.replaceChildren(developmentView.root);
   if (focusedAction) (developmentView[focusedAction] || developmentView.start || developmentView.stop || developmentView.root).focus({ preventScroll: true });
@@ -422,9 +478,15 @@ function renderWorkspace({ renderConversation = true } = {}) {
   const agent = current();
   byId("agent-missing").hidden = Boolean(agent);
   byId("agent-workspace").hidden = !agent;
+  byId("agent-conversation-actions").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
   byId("agent-title").textContent = agent ? agentDisplayName(agent) : "找不到智能体";
   renderAgentAvatar(byId("agent-icon"), agent);
+  const avatar = agent && resolveAgentAvatar(agent);
+  const color = avatar?.type === "star" ? avatarColors.find((item) => item.id === avatar.color) : null;
+  const messageStyle = byId("agent-messages").style;
+  messageStyle.setProperty("--user-bubble-background", color?.hex || "var(--text)");
+  messageStyle.setProperty("--user-bubble-color", "var(--surface)");
   byId("agent-subtitle").textContent = agent ? agentDisplayDescription(agent) : "请回到 NEUMA 创建或确认需求。";
   if (!agent) return;
   byId("agent-conversation-title").textContent = conversation(agent.id).messages.length || conversation(agent.id).saveVersion
@@ -456,37 +518,57 @@ function renderStorageNote(agent) {
       : item.localBackup ? "当前对话的本机备份已保留。" : "发送消息后，对话会自动保存。"}`;
 }
 
-async function inspectAgent(agent, refresh = false) {
+function acquireInspectionSlot() {
+  return new Promise((resolve) => {
+    const start = () => {
+      activeInspections++;
+      resolve(() => { activeInspections--; inspectionWaiters.shift()?.(); });
+    };
+    if (activeInspections < 2) start(); else inspectionWaiters.push(start);
+  });
+}
+
+function inspectAgent(agent, refresh = false) {
   const state = runtime(agent);
-  if (state.inspection || state.operation || conversations.get(agent.id)?.turn || (!refresh && state.status !== "unchecked")) return;
+  if (state.inspection) return state.inspection.sequence === state.sequence && state.inspection.sourceKey === state.sourceKey
+    ? state.inspection.promise : undefined;
+  if (state.operation || conversations.get(agent.id)?.turn || (!refresh && state.status !== "unchecked")) return;
   const sequence = ++state.sequence;
-  const sourceKey = state.sourceKey, inspection = { sequence };
+  const sourceKey = state.sourceKey, inspection = { sequence, sourceKey };
   const valid = () => state.sequence === sequence && runtimes.get(agent.id) === state && state.sourceKey === sourceKey
     && !state.operation && !conversations.get(agent.id)?.turn && agents.some((item) => item.id === agent.id);
   state.inspection = inspection;
+  state.inspectionError = false;
   const profileVersion = profileVersions.get(agent.id) || 0;
   if (!refresh || state.status === "unchecked") state.status = "checking";
+  renderSidebar();
   if (visible(agent.id)) renderControls(agent);
-  try {
-    const result = await api.inspect(agent.id);
-    if (!valid()) return;
-    state.definition = result.agent ?? null;
-    state.architecture = result.architecture ?? null;
-    state.development = result.development ?? null;
-    state.error = "";
-    Object.assign(state, agentBuildState(agent, result));
-    syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
-  } catch (error) {
-    if (!valid()) return;
-    state.status = "error";
-    state.error = error.message || "无法读取智能体，请重新生成。";
-  } finally {
-    if (state.inspection === inspection) state.inspection = null;
-    if (valid()) {
-      renderSidebar();
-      if (visible(agent.id)) renderWorkspace({ renderConversation: !refresh });
-    } else if (visible(agent.id)) scheduleInspection(current());
-  }
+  inspection.promise = (async () => {
+    const release = await acquireInspectionSlot();
+    try {
+      if (!valid()) return;
+      const result = await api.inspect(agent.id);
+      if (!valid()) return;
+      state.definition = result.agent ?? null;
+      state.architecture = result.architecture ?? null;
+      state.development = result.development ?? null;
+      state.error = "";
+      Object.assign(state, agentBuildState(agent, result));
+      syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
+    } catch (error) {
+      if (!valid()) return;
+      state.status = "error"; state.inspectionError = true;
+      state.error = error.message || "智能体状态暂时无法读取，请刷新后重试。";
+    } finally {
+      release();
+      if (state.inspection === inspection) state.inspection = null;
+      if (valid()) {
+        renderSidebar();
+        if (visible(agent.id)) renderWorkspace({ renderConversation: !refresh });
+      } else if (visible(agent.id)) scheduleInspection(current());
+    }
+  })();
+  return inspection.promise;
 }
 
 async function buildAgent(id, queueIfBusy = false) {
@@ -499,7 +581,7 @@ async function buildAgent(id, queueIfBusy = false) {
     return;
   }
   state.rebuildRequested = false;
-  const operation = { kind: "build", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
+  const operation = { kind: "build", controller: new AbortController(), sourceKey: agentSourceKey(agent), phase: "designing", label: "正在设计与检查…" };
   const profileVersion = profileVersions.get(id) || 0;
   state.sequence++;
   state.operation = operation;
@@ -507,13 +589,17 @@ async function buildAgent(id, queueIfBusy = false) {
   state.architecture = null;
   state.development = null;
   state.error = item.error = "";
+  state.inspectionError = false;
   state.label = "正在设计与检查…";
   renderSidebar();
-  if (visible(id)) renderWorkspace();
+  if (visible(id)) renderControls(agent);
   try {
     const result = await api.build(agent, { signal: operation.controller.signal, onProgress(progress) {
       if (operation.controller.signal.aborted || state.operation !== operation) return;
-      if (progress.type === "status") state.label = progress.label || "正在设计与检查…";
+      if (progress.type === "status") {
+        operation.phase = progress.phase || operation.phase;
+        state.label = operation.label = progress.label || "正在设计与检查…";
+      }
       if (progress.architecture?.agentId === id && agentSourceKey(progress.architecture) === operation.sourceKey) state.architecture = progress.architecture;
       if (agentDevelopmentState(agent, { architecture: state.architecture, development: progress.development }).record) {
         state.development = progress.development; operation.development = true;
@@ -522,7 +608,7 @@ async function buildAgent(id, queueIfBusy = false) {
       if (visible(id)) renderControls(agent);
     } });
     operation.controller.signal.throwIfAborted();
-    if (state.sourceKey !== operation.sourceKey) return;
+    if (state.sourceKey !== operation.sourceKey || state.operation !== operation) return;
     state.definition = result.agent ?? null;
     state.architecture = result.architecture ?? null;
     state.development = result.development ?? null;
@@ -530,18 +616,21 @@ async function buildAgent(id, queueIfBusy = false) {
     if (state.status === "ready") item.sessionId = crypto.randomUUID();
     syncProfile(id, result.profile || result.agent?.profile, profileVersion);
   } catch (error) {
-    if (state.sourceKey !== operation.sourceKey) return;
+    if (state.sourceKey !== operation.sourceKey || state.operation !== operation) return;
     state.status = "error";
     state.error = operation.controller.signal.aborted || error.reason === "cancelled" ? "生成已停止，可以重新生成。" : error.message || "生成失败，请重试。";
-    if (operation.development) {
-      try {
-        if (operation.controller.signal.aborted) await api.cancelDevelopment(id);
-        const snapshot = await api.inspect(id);
-        if (state.operation === operation && state.sourceKey === operation.sourceKey) {
-          applyDevelopmentResult(agent, state, snapshot);
-          if (snapshot.development?.status !== "completed") state.error = "研发进度已保存，可以继续。";
-        }
-      } catch { state.error = "研发连接已结束，进度尚未确认，请刷新后核实。"; }
+    try {
+      if (operation.cancelPromise) await operation.cancelPromise;
+      if (state.operation !== operation || state.sourceKey !== operation.sourceKey) return;
+      const snapshot = await api.inspect(id);
+      if (state.operation === operation && state.sourceKey === operation.sourceKey) {
+        applyDevelopmentResult(agent, state, snapshot);
+        if (operation.stopping && !serverOperationPending(agent, state)) state.error = "";
+        else if (operation.development && snapshot.development?.status !== "completed") state.error = "研发进度已保存，可以继续。";
+      }
+    } catch {
+      if (state.operation === operation && state.sourceKey === operation.sourceKey && operation.stopping)
+        state.error = "生成状态尚未确认，请刷新后核实已保存的进度。";
     }
   } finally {
     if (state.operation === operation) state.operation = null;
@@ -660,29 +749,56 @@ async function stopAgent(id) {
   const state = runtime(agent), item = conversation(id), operation = state.operation || item.turn;
   if (operation?.kind?.startsWith("development")) return stopDevelopment(id);
   if (item.turn) return stopConversation(id, item);
-  if (!operation || operation.controller.signal.aborted) return;
-  if (item.turn) { item.turn.reply.status = "stopping"; updateReply(id, item); }
+  return stopMaking(id);
+}
+
+async function stopMaking(id) {
+  const agent = agents.find((entry) => entry.id === id);
+  if (!agent) return;
+  const state = runtime(agent);
+  if (state.operation?.kind?.startsWith("development") || (!state.operation && agentDevelopmentState(agent, state).active))
+    return stopDevelopment(id);
+  if (state.operation?.stopping || (!state.operation && !serverOperationPending(agent, state))) return;
+  const operation = state.operation || { kind: "build-stop", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
+  const valid = () => runtimes.get(id) === state && state.operation === operation && state.sourceKey === operation.sourceKey
+    && agents.some((entry) => entry.id === id);
+  operation.stopping = true; state.sequence++; state.rebuildRequested = false; state.operation = operation;
+  operation.cancelPromise = api.cancelBuild(id);
   operation.controller.abort();
   if (visible(id)) renderControls(agent);
-  if (!item.turn) return;
-  try { await api.cancel(item.sessionId); }
-  catch (error) {
-    item.error = error.message || "停止请求未确认，请稍后重试。";
-    if (visible(id, item)) showError(item.error);
+  try {
+    const result = await operation.cancelPromise;
+    if (!valid()) return;
+    const snapshot = Object.hasOwn(result, "architecture") ? result : await api.inspect(id);
+    if (!valid()) return;
+    applyDevelopmentResult(agent, state, snapshot);
+    state.error = serverOperationPending(agent, state) ? "终止请求尚未完成，正在核实后台状态。" : "";
+  } catch (error) {
+    if (!valid()) return;
+    state.error = error.message || "终止请求未确认，请稍后重试。";
+    try {
+      const snapshot = await api.inspect(id);
+      if (valid()) applyDevelopmentResult(agent, state, snapshot);
+    } catch {}
+  } finally {
+    if (state.operation === operation) state.operation = null;
+    renderSidebar(); if (visible(id)) renderWorkspace();
   }
 }
 
 async function sendMessage() {
   const agent = current(), message = input.value.trim();
-  if (!agent || !message) return;
+  if (!agent) return;
   const state = runtime(agent), item = conversation(agent.id);
+  const attachmentRefs = attachments.refs(agent.id, item.id);
+  if ((!message && !attachmentRefs.length) || attachments.blocked(agent.id, item.id)) return;
   const library = history.state(agent.id);
   if (state.status !== "ready" || state.operation || item.turn || item.loading
     || (library.loading && library.selection === library.loading.selection)
     || item.deleting || (!item.loaded && item.saveVersion)) return;
   if (message.length > 4000) return showError("任务输入需为 1～4000 字。");
   const turnHistory = agentHistory(item.messages, state.definition.revision);
-  const user = addUserMessage(item.messages, message);
+  const user = addUserMessage(item.messages, message, attachmentRefs);
   user.revision = String(state.definition.revision);
   const reply = { role: "assistant", content: "", status: "thinking", label: "正在处理任务…", revision: user.revision };
   const operation = { controller: new AbortController(), reply };
@@ -691,13 +807,15 @@ async function sendMessage() {
   item.messages.push(reply);
   item.saved = false;
   item.error = "";
+  attachments.consume(agent.id, item.id);
   input.value = "";
   inputs.delete(item.id);
   input.dispatchEvent(new Event("input"));
   renderWorkspace();
   void history.changed(agent.id, item, { immediate: true });
   try {
-    const result = await api.turn({ agentId: agent.id, sessionId: item.sessionId, message, history: turnHistory }, {
+    const result = await api.turn({ agentId: agent.id, sessionId: item.sessionId, message, history: turnHistory,
+      ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, {
       signal: operation.controller.signal, onProgress(progress) {
         if (operation.controller.signal.aborted) return;
         if (progress.type === "text-start") { reply.content = ""; reply.status = "thinking"; }
@@ -716,6 +834,8 @@ async function sendMessage() {
     reply.status = stopped ? "stopped" : "error";
     reply.error = stopped ? "本轮任务未完成，已显示的内容保留。" : error.message || "任务失败，请重试。";
     item.error = stopped ? item.error : reply.error;
+    if (item.turn === operation && history.states.get(agent.id)?.items.get(item.id) === item)
+      attachments.restore(agent.id, item.id, attachmentRefs);
     if (!stopped && conversations.get(agent.id) === item) {
       if (visible(agent.id, item) && !input.value.trim()) { input.value = message; input.dispatchEvent(new Event("input")); }
       else if (!visible(agent.id, item) && !inputs.get(item.id)?.trim()) inputs.set(item.id, message);
@@ -723,7 +843,7 @@ async function sendMessage() {
   } finally {
     if (visible(agent.id, item)) {
       updateReply(agent.id, item);
-      if (user.delivery !== "sent") item.userRows.get(user)?.replaceWith(renderUserMessage(user, input));
+      if (user.delivery !== "sent") item.userRows.get(user)?.replaceWith(userRow(agent.id, item, user));
     }
     if (item.turn === operation) item.turn = item.replyView = null;
     await history.changed(agent.id, item, { immediate: true });
@@ -748,17 +868,21 @@ document.addEventListener("neuma:agents-changed", (event) => {
     state.status = "stale";
     state.label = "";
     state.error = "";
+    state.inspectionError = false;
   }
   renderSidebar();
   renderWorkspace();
+  for (const agent of agents) if (runtime(agent).status === "unchecked") void inspectAgent(agent);
   if (route.page === "agent" && current()) return Promise.all([inspectAgent(current()), loadConversation(current())]);
 });
 document.addEventListener("neuma:route", (event) => {
   clearInspectionTimer();
+  attachmentView.close();
   closeHistoryMenu();
   if (route.page === "agent" && current()) inputs.set(conversation(route.agentId).id, input.value);
   const previousPage = route.page, previousId = route.agentId;
   route = event.detail;
+  if (route.page !== "agent") attachmentView.setContext(null);
   if (route.page === "agent" && previousId !== route.agentId) {
     input.value = inputs.get(conversation(route.agentId).id) ?? "";
     input.dispatchEvent(new Event("input"));
@@ -766,7 +890,7 @@ document.addEventListener("neuma:route", (event) => {
   renderSidebar();
   renderWorkspace();
   if (route.page === "agent" && current()) {
-    if (previousPage !== "agent" || previousId !== route.agentId) input.focus();
+    if ((previousPage !== "agent" || previousId !== route.agentId) && runtime(current()).status === "ready") input.focus();
     return Promise.all([inspectAgent(current(), serverOperationPending(current())), loadConversation(current())]);
   }
 });
@@ -790,6 +914,7 @@ document.addEventListener("neuma:agent-removed", (event) => {
   if (item?.turn) { item.turn.controller.abort(); api.cancel(item.sessionId).catch(() => {}); }
   for (const entry of history.state(id).items.values()) inputs.delete(entry.id);
   history.clear(id);
+  attachments.clear(id);
   runtimes.delete(id);
   inputs.delete(id);
   profileVersions.delete(id);

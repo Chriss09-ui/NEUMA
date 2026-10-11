@@ -2,7 +2,7 @@ import { developmentPhases } from "./agent-runtime.js";
 
 export const agentIconChoices = [["📚", "书籍"], ["✍️", "写作"], ["🔎", "研究"], ["💼", "工作"], ["🧩", "工具"], ["💡", "灵感"]];
 
-export function createDevelopmentView(state, { phase, label, busy = false, stopping = false, tasksOpen, onStart, onStop } = {}, documentRef = document) {
+export function createDevelopmentView(state, { phase, label, busy = false, stopping = false, tasksOpen, onStart, onStop, showActions = true } = {}, documentRef = document) {
   const make = (tag, className, text = "") => {
     const element = documentRef.createElement(tag); element.className = className; element.textContent = text; return element;
   };
@@ -42,10 +42,10 @@ export function createDevelopmentView(state, { phase, label, busy = false, stopp
   }
   const actions = make("div", "development-actions");
   let start = null, stop = null;
-  if (busy || state.active) {
+  if (showActions && (busy || state.active)) {
     stop = make("button", "secondary", stopping ? "正在停止…" : "停止研发"); stop.type = "button"; stop.disabled = stopping;
     stop.addEventListener("click", onStop); actions.append(stop);
-  } else if (state.canStart || state.canResume) {
+  } else if (showActions && (state.canStart || state.canResume)) {
     start = make("button", "primary", state.actionLabel); start.type = "button";
     start.addEventListener("click", onStart); actions.append(start);
   }
