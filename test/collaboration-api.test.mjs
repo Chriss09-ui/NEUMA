@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { CollaborationService } from "../src/collaboration/groups.mjs";
 import { GroupStorage, GroupStore } from "../src/collaboration/group-store.mjs";
 import { createRequestHandler } from "../src/server.mjs";
+import { MainAgent } from "../src/main/main-agent.mjs";
 
 class Response extends EventEmitter {
   text = ""; writableEnded = false; destroyed = false;
@@ -19,7 +20,7 @@ class Response extends EventEmitter {
 const req = (method, url, body, headers = {}) => Object.assign(Readable.from(body === undefined ? [] : [Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body))]), {
   method, url, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers },
 });
-async function fixture(t) {
+async function fixture(t, { durableMain = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-collaboration-api-"));
   const cards = [{ id: "analyst", name: "分析", ready: true, revision: 1, description: "分析资料", task: "分析", input: "资料", output: "报告", boundaries: [] }];
   const agents = { ready: Promise.resolve(), close: async () => {}, capabilityCards: async () => ({ agents: cards }), activitySnapshot: async () => ({ activities: [] }),
@@ -31,7 +32,8 @@ async function fixture(t) {
       return { reply: "", turns: 1 };
     } };
   const collaboration = new CollaborationService({ dataDir: root, agents });
-  const mainAgent = { ready: Promise.resolve(), close: async () => {}, getConversation: async (id) => ({ conversation: { id, messages: [] } }),
+  const mainAgent = durableMain ? new MainAgent({ config: { llmConfigured: false }, dataDir: root, agents, collaboration })
+    : { ready: Promise.resolve(), close: async () => {}, getConversation: async (id) => ({ conversation: { id, messages: [] } }),
     listConversations: async () => ({ conversations: [] }), createConversation: async () => ({ conversation: { id: "main-test", messages: [] } }),
     activateRequirements: async ({ conversationId, agentId }) => ({ conversation: { id: conversationId }, context: { type: "requirements", agentId: agentId ?? "new-agent" } }),
     prompt: async ({ conversationId }, progress) => {
@@ -44,7 +46,7 @@ async function fixture(t) {
   await handler.ready;
   t.after(async () => { await handler.dispose(); await rm(root, { recursive: true, force: true }); });
   const invoke = async (method, url, body, headers) => { const response = new Response(); await handler(req(method, url, body, headers), response); return response; };
-  return { root, handler, collaboration, invoke };
+  return { root, handler, collaboration, mainAgent, invoke };
 }
 
 test("群API提供独立持久任务、能力卡、事件续读和全局活动，群外主Agent可使用相同事实", async (t) => {
@@ -95,6 +97,41 @@ test("主对话在原会话中打开创建或迭代需求，保留本机来源�
   assert.equal(edit.json().context.agentId, "analyst");
   const outside = await invoke("POST", "/api/main/conversations/main-test/requirements", {}, { host: "127.0.0.1:3000", origin: "https://outside.invalid" });
   assert.equal(outside.status, 403);
+});
+
+test("主历史删除 API 校验确认与版本，幂等删除后拒绝所有旧会话入口和材料访问", async (t) => {
+  const { invoke, mainAgent } = await fixture(t, { durableMain: true });
+  const created = (await invoke("POST", "/api/main/conversations", { mutationId: "create_delete_test" })).json().conversation;
+  const path = `/api/main/conversations/${created.id}`;
+  const input = { confirm: true, expectedVersion: created.version, mutationId: "delete_test" };
+  assert.equal((await invoke("POST", `${path}/remove`, { ...input, confirm: false })).status, 400);
+  assert.equal((await invoke("POST", `${path}/remove`, { ...input, expectedVersion: 0 })).status, 400);
+  assert.equal((await invoke("POST", `${path}/remove`, input, { host: "localhost:3000", origin: "https://outside.invalid" })).status, 403);
+  const activated = await invoke("POST", `${path}/requirements`, { mutationId: "changed_in_another_window" });
+  assert.equal(activated.status, 200);
+  const conflict = await invoke("POST", `${path}/remove`, input);
+  assert.equal(conflict.status, 409); assert.equal(conflict.json().reason, "conversation_conflict");
+  const upload = await invoke("POST", `${path}/materials`, Buffer.from("保留原材料"), {
+    "x-file-name": encodeURIComponent("历史资料.txt"), "content-type": "text/plain",
+  });
+  assert.equal(upload.status, 200);
+  const attachment = upload.json().attachment, raw = await mainAgent.materials.materials.raw(created.id, attachment.id);
+  const current = (await mainAgent.getConversation(created.id)).conversation;
+  const removal = { ...input, expectedVersion: current.version };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const removed = await invoke("POST", `${path}/remove`, removal);
+    assert.equal(removed.status, 200); assert.deepEqual(removed.json(), { removed: true, conversationId: created.id });
+  }
+  assert.deepEqual((await invoke("GET", "/api/main/conversations")).json().conversations, []);
+  assert.equal(await readFile(raw.path, "utf8"), "保留原材料");
+  for (const [method, url, body] of [["GET", path], ["POST", `${path}/messages`, { message: "迟到消息", mutationId: "late_turn" }],
+    ["POST", `${path}/requirements`, { mutationId: "late_activation" }], ["GET", `${path}/materials`],
+    ["GET", `${path}/materials/${attachment.id}/raw`], ["GET", `${path}/materials/${attachment.id}/preview`],
+    ["POST", `${path}/materials`, {}], ["POST", "/api/main/conversations", { mutationId: "create_delete_test" }]]) {
+    const result = await invoke(method, url, body);
+    assert.equal(result.status, 409); assert.equal(result.json().reason, "conversation_deleted");
+  }
+  assert.equal((await invoke("GET", `${path}/remove`)).status, 404);
 });
 
 test("群管理保留本机来源保护和版本冲突，过期保存不覆盖成员", async (t) => {

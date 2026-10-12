@@ -11,18 +11,20 @@ const mainSource = (await Promise.all(["chat-ui.js", "agent-runtime.js", "collab
 const settle = async () => { for (let index = 0; index < 4; index++) await new Promise(setImmediate); };
 const copy = structuredClone;
 
-function setup(source, request, initialStorage = []) {
+function setup(source, request, initialStorage = [], { confirm = () => false } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, listener) { this.listeners.set(type, [...(this.listeners.get(type) || []), listener]); }
     dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) || []).map((listener) => listener(event))); }
   }
-  const document = new Events(), nodes = new Map(), timers = new Map(), stored = new Map(initialStorage), renderedReplies = [];
+  const document = new Events(), nodes = new Map(), timers = new Map(), stored = new Map(initialStorage), renderedReplies = [], confirmations = [];
   class Element extends Events {
     constructor(tag = "div") { super(); this.tagName = tag.toUpperCase(); }
     children = []; attributes = new Map(); dataset = {}; hidden = false; open = false; disabled = false; checked = false;
     className = ""; textContent = ""; contentValue = ""; scrollHeight = 300; clientHeight = 300; scrollTop = 0; style = {};
-    classes = new Set(); classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) };
+    classes = new Set(); classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name),
+      add: (...names) => names.forEach((name) => this.classes.add(name)), remove: (...names) => names.forEach((name) => this.classes.delete(name)),
+      contains: (name) => this.classes.has(name) || this.className.split(/\s+/).includes(name) };
     get value() { return this.contentValue || (this.tagName === "SELECT" ? this.children[0]?.value || "" : ""); }
     set value(value) { this.contentValue = value; }
     append(...children) { this.children.push(...children); }
@@ -35,21 +37,27 @@ function setup(source, request, initialStorage = []) {
     querySelectorAll(selector) {
       const all = this.children.flatMap((child) => child instanceof Element ? [child, ...child.querySelectorAll("*")] : []);
       return selector === "input:checked" ? all.filter((item) => item.tagName === "INPUT" && item.checked)
-        : selector === "button" ? all.filter((item) => item.tagName === "BUTTON") : all;
+        : selector === "button" ? all.filter((item) => item.tagName === "BUTTON")
+          : selector.startsWith(".") ? all.filter((item) => item.classList.contains(selector.slice(1)))
+            : selector.startsWith("#") ? all.filter((item) => item.id === selector.slice(1)) : all;
     }
     showModal() { this.open = true; }
     close() { this.open = false; }
     focus() { document.activeElement = this; }
     click() { return this.dispatchEvent({ type: "click", target: this }); }
+    getBoundingClientRect() { return { left: 42, top: 100, right: 300, bottom: 132, width: 258, height: 32 }; }
   }
   const get = (id) => {
-    if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(["group-task-filter", "group-recipient", "group-share-agent"].includes(id) ? "select" : "div"), { id }));
+    if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(["group-task-filter", "group-recipient", "group-share-agent"].includes(id) ? "select" : "div"), {
+      id, ...(id === "main-history-menu" ? { hidden: true } : {}), ...(id === "main-history-delete" ? { textContent: "删除对话" } : {}),
+    }));
     return nodes.get(id);
   };
   document.hidden = false; document.getElementById = get; document.createElement = (tag) => new Element(tag);
   class Event { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } }
   let serial = 0;
   const context = vm.createContext({ document, Event, CustomEvent: Event, crypto: { randomUUID: () => `mutation-${++serial}` },
+    window: { innerWidth: 1440, innerHeight: 900, addEventListener() {}, confirm(message) { confirmations.push(message); return confirm(message); } },
     renderRichText(container, content) { renderedReplies.push({ container, content }); container.textContent = content;
       container.classes.add("rich-text"); container.className = [...new Set([...container.className.split(/\s+/).filter(Boolean), "rich-text"])].join(" "); },
     fetch: request, Response, ReadableStream, TextDecoder, TextEncoder, AbortController, structuredClone, URL, Blob, setTimeout, clearTimeout,
@@ -57,11 +65,15 @@ function setup(source, request, initialStorage = []) {
     setInterval(callback) { const id = ++serial; timers.set(id, callback); return id; }, clearInterval(id) { timers.delete(id); },
   });
   vm.runInContext(source, context);
-  return { get, document, timers, stored, context, renderedReplies, route: (detail) => document.dispatchEvent(new Event("neuma:route", { detail })),
+  return { get, document, timers, stored, context, renderedReplies, confirmations, route: (detail) => document.dispatchEvent(new Event("neuma:route", { detail })),
     submit: (id) => get(id).dispatchEvent({ type: "submit", preventDefault() {} }), text: (id) => textOf(get(id)) };
 }
 const textOf = (node) => `${node.textContent || ""}${(node.children || []).map(textOf).join("")}`;
 const isBubble = (node) => node.className.split(/\s+/).includes("bubble");
+const mainHistoryItems = (ui) => ui.get("main-history-list").querySelectorAll(".collaboration-history-item");
+const mainHistoryMore = (ui, id) => ui.get("main-history-list").children
+  .find((row) => row.dataset.conversationId === id)?.querySelector(".main-history-more");
+const removeMainHistory = async (ui, id) => { await mainHistoryMore(ui, id).click(); await ui.get("main-history-delete").click(); await settle(); };
 const assertDisclosure = (element, visible) => {
   assert.equal(element.getAttribute("aria-hidden"), String(!visible), element.id);
   assert.equal(element.inert, !visible, element.id);
@@ -381,6 +393,9 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "整理材料";
   await ui.submit("main-chat-form"); await settle();
   assert.equal(ui.get("main-new-chat").disabled, true); assert.equal(ui.get("main-new-chat").hidden, false);
+  assert.equal(mainHistoryMore(ui, conversation.id).disabled, true);
+  await mainHistoryMore(ui, conversation.id).click();
+  assert.equal(ui.get("main-history-menu").hidden, true); assert.equal(ui.confirmations.length, 0);
   let reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   assert.equal(reply.children.find(isBubble).textContent, "正在处理…");
   assert.equal(reply.children.some((item) => item.className === "collaboration-message-heading"), false);
@@ -478,15 +493,248 @@ test("主对话历史保留完整标题提示，选中状态随切换更新", as
   const ui = setup(mainSource, async (path) => Response.json(path === "/api/main/conversations" ? { conversations }
     : { conversation: conversations.find((record) => path.endsWith(record.id)) }));
   await ui.route({ page: "chat" }); await settle();
-  let items = ui.get("main-history-list").children;
+  let items = mainHistoryItems(ui);
   assert.equal(items[0].title, conversations[0].title); assert.equal(items[0].textContent, conversations[0].title);
   assert.equal(items[0].getAttribute("aria-current"), "true"); assert.equal(items[1].getAttribute("aria-current"), "false");
   assert.equal(items[1].title, "新对话"); assert.equal(items[1].textContent, "新对话");
-  await items[1].click(); await settle(); items = ui.get("main-history-list").children;
+  await items[1].click(); await settle(); items = mainHistoryItems(ui);
   assert.equal(items[0].getAttribute("aria-current"), "false"); assert.equal(items[1].getAttribute("aria-current"), "true");
   ui.get("main-history-body").append(ui.get("main-history-list"));
   items[1].focus(); await ui.get("main-history-toggle").click();
   assert.equal(ui.document.activeElement, ui.get("main-history-toggle"));
+});
+
+test("主历史删除菜单标识完整对话，键盘关闭归还焦点，取消确认不写入", async () => {
+  const conversation = { id: "main-one", title: "完整的历史对话标题", version: 4, messages: [] }, requests = [];
+  const ui = setup(mainSource, async (path, options = {}) => {
+    requests.push({ path, method: options.method || "GET" });
+    return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+  });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "尚未发送的草稿";
+  const more = mainHistoryMore(ui, conversation.id), menu = ui.get("main-history-menu"), remove = ui.get("main-history-delete");
+  assert.equal(more.getAttribute("aria-label"), `对话操作：${conversation.title}`);
+  assert.equal(more.getAttribute("aria-haspopup"), "menu");
+  await more.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() {} });
+  assert.equal(menu.hidden, false); assert.equal(ui.document.activeElement, remove);
+  assert.equal(remove.textContent, "删除对话");
+  await ui.document.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
+  assert.equal(menu.hidden, true); assert.equal(ui.document.activeElement, more);
+  await removeMainHistory(ui, conversation.id);
+  assert.equal(ui.confirmations.length, 1); assert.match(ui.confirmations[0], /完整的历史对话标题/);
+  assert.equal(requests.some(({ method }) => method !== "GET"), false);
+  assert.equal(mainHistoryItems(ui).length, 1); assert.equal(ui.get("main-message").value, "尚未发送的草稿");
+});
+
+test("删除非当前主历史只移除指定身份，保留当前消息和草稿", async () => {
+  let conversations = [{ id: "main-current", title: "当前工作", version: 2,
+    messages: [{ role: "assistant", content: "当前工作内容", status: "complete" }] },
+  { id: "history/to-remove", title: "要删除的旧工作", version: 7, messages: [] }];
+  const requests = [], ui = setup(mainSource, async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path.endsWith("/remove")) { conversations = conversations.filter((item) => item.id !== "history/to-remove");
+      return Response.json({ removed: true, conversationId: "history/to-remove" }); }
+    return Response.json(path === "/api/main/conversations" ? { conversations } : { conversation: conversations[0] });
+  }, [], { confirm: () => true });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "当前草稿";
+  await removeMainHistory(ui, "history/to-remove");
+  const writes = requests.filter(({ options }) => options.method === "POST");
+  assert.equal(writes.length, 1); assert.equal(writes[0].path, "/api/main/conversations/history%2Fto-remove/remove");
+  const body = JSON.parse(writes[0].options.body);
+  assert.equal(body.confirm, true); assert.equal(body.expectedVersion, 7); assert.ok(body.mutationId);
+  assert.match(ui.confirmations[0], /要删除的旧工作/);
+  assert.deepEqual(mainHistoryItems(ui).map((item) => item.textContent), ["当前工作"]);
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "main-current");
+  assert.match(ui.text("main-messages"), /当前工作内容/); assert.equal(ui.get("main-message").value, "当前草稿");
+});
+
+test("删除当前主历史恢复另一会话草稿，删除最后一项回到欢迎页且不创建新记录", async () => {
+  let conversations = [{ id: "main-a", title: "工作 A", version: 1,
+    messages: [{ role: "assistant", content: "A 的历史", status: "complete" }] },
+  { id: "main-b", title: "工作 B", version: 3,
+    messages: [{ role: "assistant", content: "B 的历史", status: "complete" }] }];
+  const writes = [], ui = setup(mainSource, async (path, options = {}) => {
+    if (options.method === "POST") {
+      writes.push(path); const id = decodeURIComponent(path.split("/").at(-2));
+      conversations = conversations.filter((item) => item.id !== id);
+      return Response.json({ removed: true, conversationId: id });
+    }
+    return Response.json(path === "/api/main/conversations" ? { conversations }
+      : { conversation: conversations.find((item) => path.endsWith(item.id)) });
+  }, [], { confirm: () => true });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "A 的草稿";
+  await mainHistoryItems(ui)[1].click(); await settle(); ui.get("main-message").value = "B 的草稿";
+  await mainHistoryItems(ui)[0].click(); await settle(); assert.equal(ui.get("main-message").value, "A 的草稿");
+  await removeMainHistory(ui, "main-a");
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "main-b");
+  assert.match(ui.text("main-messages"), /B 的历史/); assert.doesNotMatch(ui.text("main-messages"), /A 的历史/);
+  assert.equal(ui.get("main-message").value, "B 的草稿");
+  await removeMainHistory(ui, "main-b");
+  assert.equal(mainHistoryItems(ui).length, 0); assert.match(ui.text("main-messages"), /今天，想先完成什么/);
+  assert.equal(ui.get("main-message").value, ""); assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "");
+  assert.deepEqual(writes, ["/api/main/conversations/main-a/remove", "/api/main/conversations/main-b/remove"]);
+  assert.equal(ui.get("main-send").disabled, false); assert.equal(ui.get("main-new-chat").disabled, false);
+});
+
+test("主历史删除失败保留记录和草稿，未知结果重试复用同一删除操作", async () => {
+  const conversation = { id: "main-one", title: "保留直到删除确认", version: 5,
+    messages: [{ role: "assistant", content: "仍应保留的正文", status: "complete" }] };
+  let attempts = 0, conversations = [conversation]; const writes = [];
+  const ui = setup(mainSource, async (path, options = {}) => {
+    if (path.endsWith("/remove")) {
+      writes.push(JSON.parse(options.body));
+      if (++attempts === 1) throw new Error("删除响应中断");
+      conversations = []; return Response.json({ removed: true, conversationId: conversation.id });
+    }
+    return Response.json(path === "/api/main/conversations" ? { conversations } : { conversation });
+  }, [], { confirm: () => true });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "不能丢失的草稿";
+  await removeMainHistory(ui, conversation.id);
+  assert.match(ui.text("main-history-status"), /删除响应中断/); assert.equal(mainHistoryItems(ui).length, 1);
+  assert.equal(ui.get("main-message").value, "不能丢失的草稿"); assert.match(ui.text("main-messages"), /仍应保留的正文/);
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), conversation.id);
+  await removeMainHistory(ui, conversation.id); assert.deepEqual(writes[1], writes[0]);
+  assert.equal(mainHistoryItems(ui).length, 0); assert.match(ui.text("main-messages"), /今天，想先完成什么/);
+});
+
+test("主历史服务端拒绝或身份未确认时不能伪造删除成功", async () => {
+  for (const outcome of ["busy", "identity"]) {
+    const conversation = { id: "main-one", title: "不可误删的历史", version: 2,
+      messages: [{ role: "assistant", content: "原消息", status: "complete" }] }, requests = [];
+    const ui = setup(mainSource, async (path, options = {}) => {
+      requests.push(path);
+      if (path.endsWith("/remove")) return outcome === "busy"
+        ? Response.json({ error: "请先停止当前任务", reason: "busy" }, { status: 409 })
+        : Response.json({ removed: true, conversationId: "other" });
+      return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+    }, [], { confirm: () => true });
+    await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "原草稿";
+    await removeMainHistory(ui, conversation.id);
+    assert.equal(mainHistoryItems(ui).length, 1, outcome); assert.equal(ui.get("main-message").value, "原草稿", outcome);
+    assert.match(ui.text("main-messages"), /原消息/); assert.equal(requests.some((path) => path.endsWith("/cancel")), false);
+    assert.equal(ui.get("main-send").disabled, false); assert.ok(ui.text("main-history-status"));
+  }
+});
+
+test("主历史删除待确认期间锁定发送、切换、材料和需求激活，不重复提交", async () => {
+  const conversations = [{ id: "main-a", title: "当前工作", version: 1, messages: [] },
+    { id: "main-b", title: "删除中的旧工作", version: 2, messages: [] }];
+  let finish; const requests = [], ui = setup(mainSource, async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path.endsWith("/remove")) return new Promise((resolve) => { finish = () => resolve(Response.json({ removed: true, conversationId: "main-b" })); });
+    return Response.json(path === "/api/main/conversations" ? { conversations } : { conversation: conversations[0] });
+  }, [], { confirm: () => true });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "删除期间保留的草稿";
+  await mainHistoryMore(ui, "main-b").click(); const removal = ui.get("main-history-delete").click(); await settle();
+  assert.equal(typeof finish, "function");
+  for (const id of ["main-send", "main-new-chat", "main-refresh", "main-upload", "main-materials-open", "main-history-delete"])
+    assert.equal(ui.get(id).disabled, true, id);
+  for (const item of mainHistoryItems(ui)) assert.equal(item.disabled, true);
+  for (const item of ui.get("main-history-list").querySelectorAll(".main-history-more")) assert.equal(item.disabled, true);
+  await ui.submit("main-chat-form"); await ui.get("main-new-chat").click(); await mainHistoryItems(ui)[1].click();
+  await ui.get("main-create-agent").click(); await ui.get("main-history-delete").click(); await settle();
+  assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
+  assert.equal(ui.get("main-message").value, "删除期间保留的草稿");
+  finish(); await removal; await settle(); assert.equal(ui.get("main-send").disabled, false); assert.equal(mainHistoryItems(ui).length, 1);
+  assert.equal(ui.get("main-message").value, "删除期间保留的草稿");
+});
+
+test("主历史删除后迟到的旧列表不能复活历史或替换当前会话", async () => {
+  const conversation = { id: "main-one", title: "将被删除的旧历史", version: 1, messages: [] };
+  let reads = 0, release, removed = false;
+  const ui = setup(mainSource, async (path) => {
+    if (path.endsWith("/remove")) { removed = true; return Response.json({ removed: true, conversationId: conversation.id }); }
+    if (path === "/api/main/conversations") {
+      if (++reads === 2) return new Promise((resolve) => { release = () => resolve(Response.json({ conversations: [conversation] })); });
+      return Response.json({ conversations: removed ? [] : [conversation] });
+    }
+    return Response.json({ conversation });
+  }, [], { confirm: () => true });
+  await ui.route({ page: "chat" }); await settle();
+  vm.runInContext("void list()", ui.context); await settle(); assert.equal(typeof release, "function");
+  await mainHistoryMore(ui, conversation.id).click(); const removal = ui.get("main-history-delete").click(); await settle();
+  release(); await removal; await settle();
+  assert.equal(mainHistoryItems(ui).length, 0); assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "");
+  assert.match(ui.text("main-messages"), /今天，想先完成什么/);
+  assert.equal(ui.get("main-send").disabled, false);
+});
+
+test("主历史详情读取和材料上传期间不能打开删除菜单", async () => {
+  const conversation = { id: "main-one", title: "安全保存的对话", version: 1, messages: [] };
+  let finishDetail, finishUpload;
+  const writes = [], ui = setup(mainSource, async (path, options = {}) => {
+    if (options.method === "POST") writes.push(path);
+    if (path === "/api/main/conversations/main-one") return new Promise((resolve) => { finishDetail = () => resolve(Response.json({ conversation })); });
+    if (path.endsWith("/materials")) return new Promise((resolve) => { finishUpload = () => resolve(Response.json({ attachment: { id: "file", name: "资料.txt" } })); });
+    return Response.json({ conversations: [conversation] });
+  }, [], { confirm: () => true });
+  await ui.route({ page: "chat" }); await settle();
+  assert.equal(mainHistoryMore(ui, conversation.id).disabled, true);
+  await mainHistoryMore(ui, conversation.id).click(); assert.equal(ui.get("main-history-menu").hidden, true);
+  finishDetail(); await settle(); assert.equal(mainHistoryMore(ui, conversation.id).disabled, false);
+  const file = Object.assign(new Blob(["资料"], { type: "text/plain" }), { name: "资料.txt" });
+  await ui.get("main-file-input").dispatchEvent({ type: "change", target: { files: [file] } }); await settle();
+  assert.equal(mainHistoryMore(ui, conversation.id).disabled, true);
+  await mainHistoryMore(ui, conversation.id).click(); assert.equal(ui.get("main-history-menu").hidden, true);
+  assert.equal(ui.confirmations.length, 0); assert.deepEqual(writes, ["/api/main/conversations/main-one/materials"]);
+  finishUpload(); await settle(); assert.equal(mainHistoryMore(ui, conversation.id).disabled, false);
+});
+
+test("当前主历史删除使用详情的最新版本，缺少版本时提示重新读取而不提交", async () => {
+  for (const version of [9, undefined]) {
+    const record = { id: "main-one", title: "版本受保护的对话", version: 1, messages: [] }, writes = [];
+    const conversation = { ...record, version };
+    const ui = setup(mainSource, async (path, options = {}) => {
+      if (path.endsWith("/remove")) { writes.push(JSON.parse(options.body)); return Response.json({ removed: true, conversationId: record.id }); }
+      return Response.json(path === "/api/main/conversations" ? { conversations: [record] } : { conversation });
+    }, [], { confirm: () => true });
+    await ui.route({ page: "chat" }); await settle(); await removeMainHistory(ui, record.id);
+    if (version === undefined) {
+      assert.equal(writes.length, 0); assert.match(ui.text("main-history-status"), /版本尚未确认/);
+      assert.equal(mainHistoryItems(ui).length, 1);
+    } else assert.equal(writes[0].expectedVersion, version);
+  }
+});
+
+test("创建主对话等待旧列表后重新读取，新增记录不会被迟到结果漏掉", async () => {
+  const original = { id: "main-old", title: "已有工作", version: 1, messages: [] }, created = { id: "main-new", title: "新工作", version: 1, messages: [] };
+  let conversations = [original], reads = 0, release;
+  const ui = setup(mainSource, async (path, options = {}) => {
+    if (path === "/api/main/conversations" && options.method === "POST") { conversations = [created, original]; return Response.json({ conversation: created }); }
+    if (path === "/api/main/conversations") {
+      if (++reads === 2) return new Promise((resolve) => { release = () => resolve(Response.json({ conversations: [original] })); });
+      return Response.json({ conversations });
+    }
+    return Response.json({ conversation: original });
+  });
+  await ui.route({ page: "chat" }); await settle();
+  vm.runInContext("void list()", ui.context); await settle(); await ui.get("main-new-chat").click(); await settle();
+  release(); await settle();
+  assert.equal(reads, 3); assert.deepEqual(mainHistoryItems(ui).map((item) => item.textContent), ["新工作", "已有工作"]);
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), created.id);
+  assert.equal(mainHistoryItems(ui)[0].getAttribute("aria-current"), "true"); assert.equal(ui.get("main-new-chat").disabled, false);
+});
+
+test("另一页面删除当前主历史后刷新切换，不把旧会话草稿带入剩余会话", async () => {
+  const original = { id: "main-a", title: "已在另一页删除", version: 1, messages: [] }, remaining = { id: "main-b", title: "仍存在的工作", version: 1,
+    messages: [{ role: "assistant", content: "B 的历史记录", status: "complete" }] };
+  let conversations = [original, remaining];
+  const ui = setup(mainSource, async (path) => Response.json(path === "/api/main/conversations" ? { conversations }
+    : { conversation: path.endsWith(original.id) ? original : remaining }));
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "A 的未发送草稿";
+  conversations = [remaining]; await vm.runInContext("list()", ui.context); await settle();
+  assert.equal(ui.get("main-message").value, ""); assert.match(ui.text("main-messages"), /B 的历史记录/);
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), remaining.id);
+  assert.deepEqual(mainHistoryItems(ui).map((item) => item.textContent), [remaining.title]);
+});
+
+test("主历史菜单被列表刷新关闭时焦点回到仍存在的对应操作按钮", async () => {
+  const conversation = { id: "main-one", title: "可继续操作的历史", version: 1, messages: [] };
+  const ui = setup(mainSource, async (path) => Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation }));
+  await ui.route({ page: "chat" }); await settle();
+  await mainHistoryMore(ui, conversation.id).dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() {} });
+  assert.equal(ui.document.activeElement, ui.get("main-history-delete"));
+  await vm.runInContext("list()", ui.context); await settle();
+  assert.equal(ui.get("main-history-menu").hidden, true); assert.equal(ui.document.activeElement, mainHistoryMore(ui, conversation.id));
 });
 
 test("主助理失败后保留输入并复用消息操作，群外联系不会伪造群成员", async () => {
@@ -562,7 +810,7 @@ test("历史折叠后顶部新对话仍能创建空白会话，旧草稿按会�
     }
     return Response.json(path === "/api/main/conversations" ? { conversations } : { conversation: conversations.find((item) => path.endsWith(item.id)) });
   });
-  const choose = async (title) => { await ui.get("main-history-list").children.find((item) => item.textContent === title).click(); await settle(); };
+  const choose = async (title) => { await mainHistoryItems(ui).find((item) => item.textContent === title).click(); await settle(); };
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "草稿 A";
   assert.equal(ui.get("main-conversation-title").hidden, false);
   await ui.get("main-history-toggle").click(); assertDisclosure(ui.get("main-history-body"), false);
@@ -587,7 +835,7 @@ test("创建或选择主对话失败保留当前输入，首次自动建对话�
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "仍属于 A 的草稿";
   await ui.get("main-new-chat").click(); await settle(); assert.equal(ui.get("main-message").value, "仍属于 A 的草稿");
   assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
-  await ui.get("main-history-list").children[1].click(); await settle(); assert.equal(ui.get("main-message").value, "仍属于 A 的草稿");
+  await mainHistoryItems(ui)[1].click(); await settle(); assert.equal(ui.get("main-message").value, "仍属于 A 的草稿");
   assert.equal(ui.text("main-conversation-title"), "对话 A");
   const writes = []; let created = false;
   const first = setup(mainSource, async (path, options = {}) => {
@@ -793,7 +1041,7 @@ test("旧群进度迟到不会覆盖新会话上下文，关闭中的响应不�
     return Response.json({ conversation: conversations.find((item) => path.endsWith(item.id)) });
   });
   await ui.route({ page: "chat" }); await settle();
-  await ui.get("main-history-list").children[1].click(); await settle(); release(); await settle();
+  await mainHistoryItems(ui)[1].click(); await settle(); release(); await settle();
   assert.equal(ui.text("main-context-title"), "新的工作群"); assert.equal(ui.text("main-context-content").includes("研究小组"), false);
   await ui.get("main-context-close").click(); await settle(); assertDisclosure(ui.get("main-context-panel"), false); assert.equal(ui.timers.size, 0);
 });

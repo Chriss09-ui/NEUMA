@@ -53,6 +53,7 @@
 .main-agent-layout.history-collapsed { grid-template-columns: 40px minmax(364px, 1fr) 0px; }
 .main-agent-layout.history-collapsed.context-open { grid-template-columns: 40px minmax(364px, 1fr) 324px; }
 .main-agent-layout > .conversation { width: auto; margin-left: 24px; }
+#main-history { position: relative; }
 .main-history-heading { position: relative; flex-shrink: 0; min-height: 40px; border-bottom: 1px solid var(--border); }
 .main-history-heading h2 { position: absolute; top: 7px; left: 12px; right: 40px; overflow: hidden; white-space: nowrap; color: var(--text-2); font-size: 12px; line-height: 1.5; font-weight: 600; }
 .main-history-heading > button { position: absolute; top: 0; }
@@ -63,6 +64,15 @@
 #main-history-body { display: flex; flex-direction: column; flex: 1; width: calc(var(--main-history-width) - 12px - 1px); min-height: 0; overflow: hidden; padding-top: 12px; }
 .main-history-heading h2, #main-history-body { opacity: 1; visibility: visible; transform: translateX(0); }
 #main-history-list { display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding: 4px; }
+.main-history-row { display: grid; grid-template-columns: minmax(0, 1fr) 32px; align-items: center; flex-shrink: 0; border-radius: 6px; }
+.main-history-row:hover, .main-history-row.has-open-menu { background: var(--surface-2); }
+.main-history-row.is-current { background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--border); }
+.main-history-row .collaboration-history-item { min-width: 0; }
+.main-history-row .collaboration-history-item[aria-current="true"] { background: transparent; box-shadow: none; }
+.main-history-more { display: grid; place-items: center; width: 28px; height: 32px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; opacity: 0; }
+.main-history-row:hover .main-history-more, .main-history-row:focus-within .main-history-more, .main-history-row.has-open-menu .main-history-more { opacity: 1; }
+.main-history-more:hover:not(:disabled), .main-history-more[aria-expanded="true"] { color: var(--text); background: var(--surface-3); }
+#main-history .main-history-menu { right: 12px; }
 #main-history-status { flex-shrink: 0; margin: 12px 12px 0; font-size: 11px; line-height: 1.8; }
 #main-history-status:empty { display: none; }
 .history-collapsed .collaboration-history { padding-right: 0; }

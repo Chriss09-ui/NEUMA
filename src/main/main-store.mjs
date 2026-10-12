@@ -12,6 +12,12 @@ export function mainId(value, label = "对话") {
   return value;
 }
 
+export function mainConversationFailure(reason, message) {
+  const error = new InputError(message ?? (reason === "conversation_deleted"
+    ? "这份主对话已删除，请新建对话" : "这份主对话已在其他窗口更新，请刷新后重试"));
+  error.reason = reason; return error;
+}
+
 async function directory(path) {
   try { await mkdir(path, { mode: 0o700 }); } catch (error) { if (error.code !== "EEXIST") throw error; }
   const info = await lstat(path);
@@ -37,6 +43,14 @@ function checked(value) {
     || typeof value.title !== "string" || value.title.length > 200 || !Array.isArray(value.messages) || !Array.isArray(value.requests)
     || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt))) throw new InputError("主 Agent 对话记录格式无效");
   mainId(value.id);
+  if (value.creationMutationId !== undefined) mainId(value.creationMutationId, "创建请求");
+  if (value.deletedAt !== undefined) {
+    mainId(value.deletionMutationId, "删除请求");
+    if (!Number.isFinite(Date.parse(value.deletedAt)) || !Number.isSafeInteger(value.deletionExpectedVersion) || value.deletionExpectedVersion < 1
+      || value.version !== value.deletionExpectedVersion + 1 || value.messages.length || value.requests.length
+      || Object.keys(value).some((key) => !["schemaVersion", "id", "title", "version", "messages", "requests", "createdAt", "updatedAt",
+        "creationMutationId", "deletedAt", "deletionMutationId", "deletionExpectedVersion"].includes(key))) throw new InputError("主对话删除记录格式无效");
+  }
   if (value.requirements !== undefined && !Array.isArray(value.requirements)) throw new InputError("主对话需求目录无效");
   const requirementIds = new Set();
   for (const requirement of value.requirements ?? []) {
@@ -125,6 +139,7 @@ export class MainStore {
     if (typeof title !== "string" || !title.trim() || title.length > 200) throw new InputError("对话标题不能超过 200 字");
     return this.queue(async () => {
       const existing = mutationId && [...this.records.values()].find((item) => item.creationMutationId === mutationId);
+      if (existing?.deletedAt) throw mainConversationFailure("conversation_deleted");
       if (existing) return structuredClone(existing);
       const now = new Date().toISOString();
       const record = checked({ schemaVersion: 1, id: `main_${randomUUID()}`, title: title.trim(), version: 1,
@@ -135,22 +150,52 @@ export class MainStore {
 
   async get(id) {
     mainId(id); await this.ready; await this.persistence;
+    this.assertAvailable(id); return structuredClone(this.records.get(id));
+  }
+
+  assertAvailable(id) {
+    mainId(id);
     const record = this.records.get(id); if (!record) throw new InputError("主 Agent 对话不存在，请新建对话");
-    return structuredClone(record);
+    if (record.deletedAt) throw mainConversationFailure("conversation_deleted");
   }
 
   update(id, operation) {
     mainId(id);
     return this.queue(async () => {
-      const current = this.records.get(id); if (!current) throw new InputError("主 Agent 对话不存在");
+      this.assertAvailable(id); const current = this.records.get(id);
       const next = structuredClone(current); operation(next); next.version = current.version + 1; next.updatedAt = new Date().toISOString();
       const saved = checked(next); await this.write(saved); this.records.set(id, saved); return structuredClone(saved);
     });
   }
 
+  remove(id, { confirm, expectedVersion, mutationId } = {}, assertIdle = () => {}) {
+    mainId(id); mainId(mutationId, "删除请求");
+    if (confirm !== true) throw new InputError("请确认删除这份主对话");
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new InputError("删除主对话需要当前记录版本，请刷新后重试");
+    return this.queue(async () => {
+      const current = this.records.get(id);
+      if (!current) throw new InputError("主 Agent 对话不存在，请刷新后重试");
+      if (current.deletedAt) {
+        if (current.deletionMutationId !== mutationId) throw mainConversationFailure("conversation_deleted");
+        if (current.deletionExpectedVersion !== expectedVersion) throw mainConversationFailure("conversation_conflict");
+        return { removed: true, conversationId: id };
+      }
+      assertIdle();
+      if (current.requests.some((request) => request.status === "running"))
+        throw mainConversationFailure("conversation_conflict", "这份主对话仍在回复，请停止或等待完成后再删除");
+      if (current.version !== expectedVersion) throw mainConversationFailure("conversation_conflict");
+      const now = new Date().toISOString();
+      const tombstone = checked({ schemaVersion: 1, id, title: "已删除对话", version: current.version + 1, messages: [], requests: [],
+        createdAt: current.createdAt, updatedAt: now, deletedAt: now, deletionMutationId: mutationId, deletionExpectedVersion: expectedVersion,
+        ...(current.creationMutationId ? { creationMutationId: current.creationMutationId } : {}) });
+      await this.write(tombstone); this.records.set(id, tombstone);
+      return { removed: true, conversationId: id };
+    });
+  }
+
   async list() {
     await this.ready; await this.persistence;
-    return [...this.records.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, title, version, createdAt, updatedAt, messages }) => ({
+    return [...this.records.values()].filter((record) => !record.deletedAt).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, title, version, createdAt, updatedAt, messages }) => ({
       id, title, version, createdAt, updatedAt, messageCount: messages.length, status: messages.at(-1)?.status ?? "empty",
       preview: messages.at(-1)?.content.slice(0, 120) ?? "",
     }));

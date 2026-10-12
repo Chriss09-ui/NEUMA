@@ -82,10 +82,11 @@ export async function routeCollaboration({ request, response, address, getCollab
       if (method === "GET") return send(await main.listConversations());
       if (method === "POST") return send(await main.createConversation(await readBody()));
     }
-    const conversation = path.match(/^\/api\/main\/conversations\/([\w-]+)(?:\/(messages|cancel|requirements))?$/);
+    const conversation = path.match(/^\/api\/main\/conversations\/([\w-]+)(?:\/(messages|cancel|requirements|remove))?$/);
     if (conversation) {
       const [, conversationId, action] = conversation;
       if (method === "GET" && !action) return send(await main.getConversation(conversationId));
+      if (method === "POST" && action === "remove") return send(await main.removeConversation(conversationId, await readBody()));
       if (method === "POST" && action === "cancel") { await readBody(); return send(await main.cancel(conversationId)); }
       if (method === "POST" && action === "requirements") {
         return send(await main.activateRequirements({ ...await readBody(), conversationId }, { signal }));

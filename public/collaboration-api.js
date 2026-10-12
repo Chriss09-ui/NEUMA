@@ -43,6 +43,7 @@ export function createCollaborationApi(request = fetch) {
     conversations: () => json("/api/main/conversations"),
     createConversation: () => json("/api/main/conversations", { mutationId: crypto.randomUUID() }),
     conversation: (id) => json(`/api/main/conversations/${part(id)}`),
+    removeConversation: (id, body) => json(`/api/main/conversations/${part(id)}/remove`, body),
     activateRequirements: (id, body) => json(`/api/main/conversations/${part(id)}/requirements`, body),
     inspectAgent: (id, options) => json(`/api/agents/${part(id)}`, undefined, options),
     mainMaterials: (id) => json(`/api/main/conversations/${part(id)}/materials`),
