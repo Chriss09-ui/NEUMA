@@ -1,4 +1,4 @@
-const COLLAPSE_PAUSE_MS = 450, COLLAPSE_PULL_PX = 24;
+const COLLAPSE_PAUSE_MS = 350, COLLAPSE_PULL_PX = 24;
 
 export function initPanelResize({ layout, handle, variable, storageKey, label, defaultWidth, minWidth, maxWidth,
   getMax = () => maxWidth, isEnabled = () => true, isCollapsed = () => false, collapsedWidth = 0,

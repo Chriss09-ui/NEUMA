@@ -6,3 +6,7 @@ node_modules/
 coverage/
 .neuma/
 dist/
+
+# Keep development Markdown local; publish only the root README.
+*.[mM][dD]
+!/README.md
