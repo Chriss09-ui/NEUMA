@@ -36,6 +36,21 @@ function review(candidateHash = designHash(design())) {
     .map((id) => ({ id, passed: true, evidence: `已核对候选中的 ${id} 相关字段和需求映射` })), issues: [], summary: "设计在现有文本能力范围内可执行" };
 }
 
+function interactionFixture(interaction, { schemaVersion, page = false, operations = false } = {}) {
+  const draft = readyDraft();
+  draft.interaction = { defaultEntry: "conversation", page: false, operations: [],
+    inputs: "会议记录", results: "中文摘要", persistentData: "无", ...interaction };
+  const requirements = requirementItems(draft);
+  const value = design();
+  value.coverage = requirements.map((item) => ({ requirementId: item.id, componentIds: ["summarize"], verification: `核对：${item.text}` }));
+  value.acceptance[0].requirementIds = requirements.map((item) => item.id);
+  if (schemaVersion === 2) Object.assign(value, { schemaVersion, connections: [], interaction: {
+    defaultEntry: page ? "application" : "conversation", page, operations,
+    inputs: "会议记录", results: "中文摘要", persistentData: "无",
+  } });
+  return { value, context: { draft, requirements } };
+}
+
 test("需求交接使用现有 ready 门禁，保留约束、触发与外部边界", () => {
   assert.equal(ARCHITECTURE_VERSION, 1);
   assert.throws(() => requirementItems(emptyDraft()), InputError);
@@ -61,6 +76,46 @@ test("有效设计返回独立副本，轻量真实能力才能直接运行", ()
   assert.deepEqual(CAPABILITIES.map((item) => item.id), ["conversation", "list_workspace_files", "read_workspace_file", "write_workspace_file",
     "list_materials", "read_material", "read_material_image"]);
   assert.deepEqual(PUBLIC_TOOL_IDS, ["list_materials", "read_material", "read_material_image"]);
+});
+
+test("已确认托管页面或应用操作不能由旧候选结构绕过研发交付", () => {
+  const page = interactionFixture({ defaultEntry: "application", page: true });
+  const operation = interactionFixture({ operations: ["整理会议记录"] });
+  for (const fixture of [page, operation]) {
+    assert.doesNotThrow(() => validateDesign(fixture.value, fixture.context), "旧结构继续支持历史读取");
+    const checked = checkDesign(fixture.value, fixture.context);
+    assert.equal(checked.runnable, false);
+    const issue = checked.issues.find((entry) => entry.id === "confirmed_interaction");
+    assert.equal(issue.blocking, true);
+    assert.equal(issue.source, "program");
+    assert.deepEqual(issue.candidateFields, ["schemaVersion", "interaction", "profile", "steps", "coverage", "acceptance"]);
+    assert.match(issue.remedy, /schemaVersion:2.*interaction\.page\/operations.*研发/);
+  }
+});
+
+test("新版候选必须保留已确认的页面和操作字段，实际实现仍进入研发", () => {
+  const page = interactionFixture({ defaultEntry: "application", page: true }, { schemaVersion: 2 });
+  const operation = interactionFixture({ operations: ["整理会议记录"] }, { schemaVersion: 2 });
+  for (const fixture of [page, operation]) {
+    const checked = checkDesign(fixture.value, fixture.context);
+    assert.equal(checked.runnable, false);
+    assert.ok(checked.issues.some((entry) => entry.id === "confirmed_interaction" && entry.blocking));
+  }
+  page.value.interaction.page = true;
+  page.value.interaction.defaultEntry = "application";
+  operation.value.interaction.operations = true;
+  for (const fixture of [page, operation]) assert.deepEqual(checkDesign(fixture.value, fixture.context), { issues: [], runnable: false });
+});
+
+test("仅下载本地打开的 HTML 文件不被误判为托管页面，旧轻量文本路径保持兼容", () => {
+  const fixture = interactionFixture({ results: "下载自包含 HTML，用户在本地浏览器打开" });
+  for (const schemaVersion of [1, 2]) {
+    if (schemaVersion === 2) Object.assign(fixture.value, { schemaVersion, connections: [], interaction: {
+      defaultEntry: "conversation", page: false, operations: false,
+      inputs: "会议记录", results: "下载 HTML", persistentData: "无",
+    } });
+    assert.deepEqual(checkDesign(fixture.value, fixture.context), { issues: [], runnable: true });
+  }
 });
 
 test("历史目录仅接受完整精确的四项快照，仍核对实际已使用能力", () => {
@@ -200,6 +255,21 @@ test("已知待实现与未经验证分开，任何缺失能力都不能进入�
   }
   assert.throws(() => validateDesign(design(), { ...context, capabilities: [] }), /未被工具目录证实/);
   assert.throws(() => validateDesign(design(), { ...context, evidence: [null] }), InputError);
+});
+
+test("程序能力问题的 ID 满足评测契约，包括合法下划线与最长能力名", () => {
+  const value = design();
+  value.capabilities.push(...["dynamic_geometry_rendering", "external_visualization_embed", "a".repeat(80)]
+    .map((id) => ({ id, status: "needs_development", reason: "实际执行依赖尚待实现" })));
+  value.acceptance.push({ id: "dependency_failure", kind: "tool_failure", requirementIds: ["task"],
+    input: "能力尚未实现", expected: "说明不能完成，不编造结果" });
+  const checked = checkDesign(value, context);
+  assert.equal(checked.runnable, false);
+  const evaluation = { ...review(designHash(value)), verdict: "revise", issues: checked.issues };
+  assert.doesNotThrow(() => validateReview(evaluation, { candidateHash: designHash(value) }));
+  assert.equal(checked.issues[0].id, "capability_dynamic_geometry_rendering");
+  assert.equal(checked.issues[1].id, "capability_external_visualization_embed");
+  assert.equal(new Set(checked.issues.map((entry) => entry.id)).size, 3);
 });
 
 test("候选 hash 不受对象键序影响，任何实际变更使旧评估失效", () => {

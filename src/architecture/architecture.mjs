@@ -7,6 +7,8 @@ import { DESIGN_PROMPT, REVIEW_PROMPT, SPECIALIST_PROMPT } from "./architecture-
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
 import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
 import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT } from "../runtime/web-capabilities.mjs";
+import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence,
+  validatePlatformMetadata } from "./platform-contract.mjs";
 
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const text = (maxLength = 2000) => ({ type: "string", minLength: 1, maxLength });
@@ -16,11 +18,15 @@ const moduleResultSchema = object({ proposal: text(8000), interfaces: text(4000)
   unknowns: { type: "array", items: text(), maxItems: 12 } });
 const toolResult = (result) => ({ content: [{ type: "text", text: JSON.stringify(result) }], details: {} });
 const issue = (id, description, remedy) => ({ id, blocking: true, description, remedy });
-const runtimeEvidence = {
-  id: "neuma-runtime-v1", title: "当前 NEUMA 执行能力清单", kind: "local",
-  versionScope: "NEUMA architecture v1 / capability catalog v2 / @earendil-works/pi-coding-agent 1.0.0",
-  excerpt: "当前可复用 Node 运行容器和 Pi 会话；可对话并操作专属目录文本文件。正式可运行 Agent 共享上传材料目录、文档提取文本和图片/PDF 页面读取工具，图片理解取决于实际模型支持。普通材料读取与分析无需逐个 Agent 开发解析器。平台提供公开网页搜索与读取，可配置专属搜索、模型和固定 HTTP JSON 业务连接。托管页面与 Node 操作经独立研发验收交付，不直接访问网络或监听端口；后台定时和外部事件触发尚未支持。连接方式受支持不表示具体服务已经验证。",
-};
+
+function programIssue(entry) {
+  const candidateFields = entry.candidateFields ?? (entry.id.startsWith("capability_")
+    ? ["capabilities", "decisions", "steps", "coverage", "acceptance"]
+    : entry.id.startsWith("unknown_") ? ["unknowns", "decisions", "acceptance"]
+      : entry.id === "persistent_state" ? ["profile", "state", "steps"]
+        : ["profile", "interaction", "connections", "steps", "acceptance"]);
+  return { ...entry, source: "program", candidateFields };
+}
 
 class ArchitectureError extends ProviderError {}
 
@@ -69,6 +75,7 @@ export class ArchitectureDesigner {
         if (!record || !/^[\w-]{1,80}$/.test(record.agentId) || !Number.isSafeInteger(record.version) || record.version < 1)
           throw new InputError("架构记录格式无效，请保留原文件");
         if (record.agentId !== id || records.has(id + ":" + record.version)) throw new InputError("架构记录身份或版本无效");
+        validatePlatformMetadata(record);
         if (["designing", "evaluating"].includes(record.status)) {
           record.status = "failed"; record.delivery = "blocked";
           record.summary = "上次设计在完成前中断，请重新设计；已有定义和文件保留。";
@@ -86,6 +93,7 @@ export class ArchitectureDesigner {
 
   save(record) {
     agentId(record.agentId);
+    validatePlatformMetadata(record);
     const snapshot = structuredClone({ ...record, updatedAt: new Date().toISOString() });
     const task = this.persistence.then(async () => {
       await this.ready;
@@ -158,20 +166,25 @@ export class ArchitectureDesigner {
   }
 
   async design(definition, { signal, onProgress = () => {} } = {}) {
+    definition = structuredClone(definition);
     await this.ready; signal?.throwIfAborted();
     const requirements = requirementItems(definition.draft);
     const previous = await this.get(definition.id);
+    const platformSnapshot = createPlatformSnapshot({ allowNetwork: networkAllowed(definition.draft) });
+    const platformContext = Object.freeze({ platformContractVersion: PLATFORM_CONTRACT_VERSION,
+      platformSnapshot, platformHash: designHash(platformSnapshot) });
+    const platformRules = renderPlatformRules(platformSnapshot);
     const record = { agentId: definition.id, name: definition.name, draft: structuredClone(definition.draft),
       version: (previous?.version ?? 0) + 1, contractVersion: ARCHITECTURE_VERSION,
       sourceFingerprint: definition.fingerprint, status: "designing", delivery: "blocked", summary: "正在设计方案",
       requirements, capabilityCatalogVersion: CAPABILITY_CATALOG_VERSION,
-      capabilitySnapshot: structuredClone(CAPABILITIES), evidence: [structuredClone(runtimeEvidence)],
+      capabilitySnapshot: structuredClone(CAPABILITIES), ...platformContext, evidence: [platformEvidence(platformSnapshot)],
       researchGaps: [], modules: [], attempts: [], issues: [], design: null, review: null, candidateHash: null,
       createdAt: new Date().toISOString() };
     await this.save(record);
     let searches = 0, delegates = 0;
     const webTools = createWebTools({ web: this.web, agentId: definition.id, scope: `architecture:${record.version}`, signal,
-      allowNetwork: networkAllowed(definition.draft) }).map((tool) => ({ ...tool, execute: async (...args) => {
+      allowNetwork: platformSnapshot.network.allowNetwork }).map((tool) => ({ ...tool, execute: async (...args) => {
       signal?.throwIfAborted();
       if (++searches > 3) throw new InputError("本次检索预算已用完，请明确保留未知项");
       onProgress({ type: "status", phase: "researching", label: "正在核实公开资料…" });
@@ -191,7 +204,7 @@ export class ArchitectureDesigner {
         signal?.throwIfAborted();
         if (++searches > 3) throw new InputError("本次检索预算已用完，请明确保留未知项");
         onProgress({ type: "status", phase: "researching", label: "正在核实技术资料…" });
-        if (!networkAllowed(definition.draft)) throw new InputError("需求明确不联网，本次未请求外部资料");
+        if (!platformSnapshot.network.allowNetwork) throw new InputError("需求明确不联网，本次未请求外部资料");
         const result = await this.research.search(query, { signal });
         for (const source of result.sources) {
           const index = record.evidence.findIndex((item) => item.id === source.id);
@@ -211,8 +224,8 @@ export class ArchitectureDesigner {
         delegates += modules.length;
         onProgress({ type: "status", phase: "designing", label: "正在检查局部设计…" });
         const settled = await Promise.allSettled(modules.map(async (assignment) => {
-          const result = await this.role({ role: "specialist", agentId: definition.id, systemPrompt: SPECIALIST_PROMPT,
-            payload: { assignment, requirements, capabilities: CAPABILITIES, evidence: record.evidence },
+          const result = await this.role({ role: "specialist", agentId: definition.id, systemPrompt: `${SPECIALIST_PROMPT}\n${platformRules}`,
+            payload: { assignment, requirements, capabilities: record.capabilitySnapshot, evidence: record.evidence, ...platformContext },
             submitName: "submit_module_design", parameters: moduleResultSchema, validate: (value) => {
               const checked = checkedModule(value);
               if (checked.evidenceIds.some((id) => !record.evidence.some((entry) => entry.id === id))) throw new InputError("模块引用了未核实的证据");
@@ -231,8 +244,8 @@ export class ArchitectureDesigner {
         record.status = "designing"; record.summary = attempt ? "正在修正未通过的问题" : "正在选择合适的实现方式";
         await this.save(record);
         onProgress({ type: "status", phase: "designing", label: record.summary + "…" });
-        const context = () => ({ requirements, capabilities: CAPABILITIES, evidence: record.evidence });
-        const design = await this.role({ role: "designer", agentId: definition.id, systemPrompt: [DESIGN_PROMPT, WEB_RUNTIME_PROMPT].join("\n"),
+        const context = () => ({ draft: definition.draft, requirements, capabilities: record.capabilitySnapshot, evidence: record.evidence, ...platformContext });
+        const design = await this.role({ role: "designer", agentId: definition.id, systemPrompt: `${DESIGN_PROMPT}\n${WEB_RUNTIME_PROMPT}\n${platformRules}`,
           payload: { requirement: { name: definition.name, draft: definition.draft }, ...context(),
             previousDesign: record.design, issues: record.issues, modules: record.modules,
             researchGaps: record.researchGaps, remaining: { revisions: 1 - attempt, searches: 3 - searches, modules: 2 - delegates } },
@@ -245,21 +258,29 @@ export class ArchitectureDesigner {
             "选择明确包含待连接或待研发能力的方案，不得把普通对话当作已实现"));
           checks.runnable = false;
         }
+        if (requiresDevelopment(design) && ["scheduled", "event"].includes(definition.draft.usage?.mode)) {
+          checks.issues.push(issue("unsupported_trigger", "当前平台没有定时或外部事件触发适配，现有研发通道不能补出后台调度能力。",
+            "保留触发缺口；向需求方提出按需手动发起的替代方案，确认调整前不能声称可交付。"));
+          checks.runnable = false;
+        }
+        checks.issues = checks.issues.map(programIssue);
         record.design = design; record.contractVersion = design.schemaVersion ?? 1; record.candidateHash = designHash(design);
+        record.reviewContext = { candidateHash: record.candidateHash, platformHash: platformContext.platformHash };
         record.review = null; record.issues = checks.issues;
         record.status = "evaluating"; record.summary = "正在独立检查方案";
         await this.save(record);
         onProgress({ type: "status", phase: "evaluating", label: "正在独立检查方案…" });
-        const review = await this.role({ role: "reviewer", agentId: definition.id, systemPrompt: REVIEW_PROMPT,
+        const review = await this.role({ role: "reviewer", agentId: definition.id, systemPrompt: `${REVIEW_PROMPT}\n${platformRules}`,
           payload: { requirement: definition.draft, ...context(), candidateHash: record.candidateHash,
-            design, deterministicIssues: checks.issues, researchGaps: record.researchGaps },
+            design, reviewContext: structuredClone(record.reviewContext), deterministicIssues: checks.issues, researchGaps: record.researchGaps },
           submitName: "submit_architecture_review", parameters: REVIEW_SCHEMA,
           validate: (value) => validateReview(value, { candidateHash: record.candidateHash }), signal, onProgress });
         record.review = review;
-        record.issues = [...checks.issues, ...review.issues];
+        record.issues = [...checks.issues, ...review.issues.map((entry) => ({ ...entry, source: "model" }))];
         for (const check of review.checks.filter((entry) => !entry.passed))
-          record.issues.push(issue("review_" + check.id, check.evidence, "修正此检查项后重新评估"));
+          record.issues.push({ ...issue("review_" + check.id, check.evidence, "修正此检查项后重新评估"), source: "model" });
         record.attempts.push({ candidateHash: record.candidateHash, design: structuredClone(design),
+          platformHash: platformContext.platformHash, reviewContext: structuredClone(record.reviewContext),
           review: structuredClone(review), issues: structuredClone(record.issues) });
         if (review.verdict === "pass" && !record.issues.some((entry) => entry.blocking)) {
           record.status = "passed";
@@ -273,7 +294,10 @@ export class ArchitectureDesigner {
           await this.save(record); signal?.throwIfAborted(); return structuredClone(record);
         }
         record.status = review.verdict === "infeasible" ? "infeasible" : review.verdict === "insufficient" ? "needs_evidence" : "needs_changes";
-        record.summary = review.summary;
+        const programBlockers = checks.issues.filter((entry) => entry.blocking);
+        record.summary = review.verdict === "pass" && programBlockers.length
+          ? `模型评测通过，但程序检查仍阻断：${programBlockers.map((entry) => entry.description).join("；").slice(0, 1200)}`
+          : review.summary;
         await this.save(record);
         if (record.status !== "needs_changes") break;
       }

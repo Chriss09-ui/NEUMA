@@ -11,7 +11,7 @@ export const TEST_LAYERS = Object.freeze({
     "application-ui.test.mjs", "web-capabilities.test.mjs", "agent-connections.test.mjs",
     "agent-api.test.mjs", "agent-attachments.test.mjs", "agent-avatar.test.mjs", "agent-conversations.test.mjs",
     "agent-details.test.mjs", "agent-library.test.mjs", "agent-runtime.test.mjs", "agent-scheduler.test.mjs",
-    "agents-ui.test.mjs", "architecture-contract.test.mjs", "architecture-research.test.mjs", "browser-selection.test.mjs",
+    "agents-ui.test.mjs", "architecture-contract.test.mjs", "architecture-platform.test.mjs", "platform-contract.test.mjs", "architecture-research.test.mjs", "browser-selection.test.mjs",
     "chat-ui.test.mjs", "collaboration-api.test.mjs", "collaboration-ui.test.mjs", "core.test.mjs",
     "development-api.test.mjs", "development-context.test.mjs", "development-contract.test.mjs", "development-store.test.mjs",
     "development-ui.test.mjs", "development-workspace.test.mjs", "development.test.mjs", "group-question.test.mjs",
