@@ -12,7 +12,7 @@ export const TEST_LAYERS = Object.freeze({
     "agent-api.test.mjs", "agent-attachments.test.mjs", "agent-avatar.test.mjs", "agent-conversations.test.mjs",
     "agent-details.test.mjs", "agent-library.test.mjs", "agent-runtime.test.mjs", "agent-scheduler.test.mjs",
     "agents-ui.test.mjs", "architecture-contract.test.mjs", "architecture-platform.test.mjs", "platform-contract.test.mjs", "architecture-research.test.mjs", "browser-selection.test.mjs",
-    "chat-ui.test.mjs", "collaboration-api.test.mjs", "collaboration-ui.test.mjs", "core.test.mjs",
+    "chat-ui.test.mjs", "rich-text.test.mjs", "collaboration-api.test.mjs", "collaboration-ui.test.mjs", "core.test.mjs",
     "development-api.test.mjs", "development-context.test.mjs", "development-contract.test.mjs", "development-store.test.mjs",
     "development-ui.test.mjs", "development-workspace.test.mjs", "development.test.mjs", "group-question.test.mjs",
     "groups.test.mjs", "installation-migration.test.mjs", "isolation-native.test.mjs", "jev-connection.test.mjs",
@@ -32,7 +32,7 @@ export const TEST_LAYERS = Object.freeze({
     "architecture-integration.test.mjs", "architecture.test.mjs", "development-delivery.test.mjs",
     "development-executor.test.mjs", "development-integration.test.mjs", "groups-integration.test.mjs",
     "installation.test.mjs", "main-context-integration.test.mjs", "materials-runner.test.mjs", "materials.test.mjs",
-    "model-connection.test.mjs", "pi-runtime.test.mjs", "prepare-package.test.mjs", "project-platform.test.mjs",
+    "model-connection.test.mjs", "pi-runtime.test.mjs", "prepare-package.test.mjs", "rich-text-assets.test.mjs", "project-platform.test.mjs",
     "project-script-runtime.test.mjs", "projects.test.mjs", "skills-boundaries.test.mjs",
   ]),
   // The build-view file also has two state checks, and is intentionally present in integration.

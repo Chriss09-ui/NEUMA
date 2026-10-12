@@ -203,6 +203,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
     static now() { return new Date(clock).getTime(); }
   };
   const context = vm.createContext({ ...state, document, Date: Clock, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
+    renderRichText: (container, content) => { container.textContent = String(content || ""); },
     renderAgentAvatar: (target, agent) => renderAgentAvatar(target, agent, { document }), avatarColors, resolveAgentAvatar, installAvatarMotion,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: (id) => timers.delete(id),

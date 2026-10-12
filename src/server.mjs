@@ -22,6 +22,21 @@ import { MAX_MATERIAL_BYTES } from "./materials/material-formats.mjs";
 import { routeApplication } from "./applications/application-api.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const KATEX_ROOT = dirname(fileURLToPath(import.meta.resolve("katex")));
+const VENDOR = new Map([
+  ["/vendor/marked.mjs", [fileURLToPath(import.meta.resolve("marked")), "text/javascript; charset=utf-8"]],
+  ["/vendor/katex/katex.mjs", [resolve(KATEX_ROOT, "katex.mjs"), "text/javascript; charset=utf-8"]],
+  ["/vendor/katex/katex.min.css", [resolve(KATEX_ROOT, "katex.min.css"), "text/css; charset=utf-8"]],
+]);
+const FONT_TYPES = { woff2: "font/woff2", woff: "font/woff", ttf: "font/ttf" };
+
+function vendorAsset(path) {
+  const fixed = VENDOR.get(path);
+  if (fixed) return fixed;
+  const font = /^\/vendor\/katex\/fonts\/(KaTeX_[A-Za-z0-9_-]+\.(woff2|woff|ttf))$/.exec(path);
+  return font ? [resolve(KATEX_ROOT, "fonts", font[1]), FONT_TYPES[font[2]]] : null;
+}
+
 const PUBLIC = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
@@ -49,6 +64,7 @@ const PUBLIC = new Map([
   ["/runtime.js", ["runtime.js", "text/javascript; charset=utf-8"]],
   ["/runtime-view.js", ["runtime-view.js", "text/javascript; charset=utf-8"]],
   ["/chat-ui.js", ["chat-ui.js", "text/javascript; charset=utf-8"]],
+  ["/rich-text.js", ["rich-text.js", "text/javascript; charset=utf-8"]],
   ...["collaboration-api", "group-view", "group-materials", "groups", "main-agent", "main-context", "main-materials"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
   ...["application-api", "application-bridge", "application-tasks", "application-workspace", "agent-connections"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
@@ -552,6 +568,18 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         } catch (error) { if (!controller.signal.aborted) throw error; }
         finally { response.removeListener?.("close", disconnected); release(); }
         return;
+      }
+      const vendor = request.method === "GET" ? vendorAsset(path) : null;
+      if (vendor) {
+        const [file, contentType] = vendor;
+        let content;
+        try { content = await readFile(file); }
+        catch (error) {
+          if (error.code === "ENOENT") return sendJson(response, 404, { error: "页面不存在" });
+          throw error;
+        }
+        response.writeHead(200, { "content-type": contentType, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        return response.end(content);
       }
       const asset = request.method === "GET" ? PUBLIC.get(path) : null;
       if (asset) {

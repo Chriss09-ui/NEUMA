@@ -1,3 +1,5 @@
+import { renderRichText } from "./rich-text.js";
+
 export const taskLabels = { queued: "等待认领", pending: "等待认领", running: "协作中", discussing: "正在讨论", planning: "正在分工",
   working: "正在处理", completed: "已完成", complete: "已完成", partial: "部分交付", failed: "失败", blocked: "等待处理", cancelled: "已停止", interrupted: "已中断",
   negotiating: "正在协商", negotiation: "成员协商", execution: "执行任务", integration: "整合成果", delivery: "交付成果",
@@ -50,7 +52,10 @@ export function messageRow(message, { attachmentUrl, bubble = false } = {}) {
     }
     row.append(attachments);
   }
-  const body = node("div", bubble ? "bubble" : "collaboration-message-body", content || (message.status === "running" ? "正在处理…" : ""));
+  const body = node("div", bubble ? "bubble" : "collaboration-message-body");
+  const displayedContent = content || (message.status === "running" ? "正在处理…" : "");
+  if (isUser) body.textContent = displayedContent;
+  else renderRichText(body, displayedContent);
   if (bubble) {
     body.hidden = !content && message.status !== "running";
     body.classList.toggle("streaming", message.status === "running" && Boolean(content));

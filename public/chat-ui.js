@@ -1,4 +1,5 @@
 import { node } from "./project-view.js";
+import { renderRichText } from "./rich-text.js";
 
 const attachmentTypes = {
   pdf: ["PDF", "PDF 文档", "pdf"], doc: ["DOC", "Word 文档", "document"], docx: ["DOCX", "Word 文档", "document"],
@@ -102,10 +103,15 @@ export function createReplyView(label) {
   const error = node("p", "reply-error");
   activity.append(indicator, caption);
   row.append(bubble, activity, error);
+  let previousContent;
   return {
     row,
     update(message) {
-      if (bubble.textContent !== message.content) bubble.textContent = message.content || "";
+      const content = message.content || "";
+      if (previousContent !== content) {
+        renderRichText(bubble, content);
+        previousContent = content;
+      }
       bubble.hidden = !message.content;
       const pending = !["complete", "error", "stopped"].includes(message.status);
       bubble.classList.toggle("streaming", pending && Boolean(message.content));
