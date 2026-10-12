@@ -66,7 +66,8 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(page.text, /<h1 id="main-agent-title">NEUMA<\/h1>/);
   assert.match(page.text, /<h1 id="chat-title">创建智能体<\/h1>/);
   assert.match(page.text, /id="page-create"[^>]*data-page="legacy-create"[^>]*hidden inert/);
-  assert.match(page.text, /id="main-context-panel"[^>]*hidden inert/);
+  assert.match(page.text, /class="main-context-slot"/);
+  assert.match(page.text, /id="main-context-panel"[^>]*aria-hidden="true" inert/);
   assert.match(page.text, /id="main-history-toggle"[^>]*aria-expanded="true"/);
   assert.doesNotMatch(page.text, /id="main-activity"/);
   assert.doesNotMatch(page.text, /主\s*Agent|NUEMA/);

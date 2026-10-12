@@ -26,17 +26,21 @@ export function internalLinks(content, actions = []) {
   for (const [href, label] of links) { const link = node("a", "text-link", label); link.href = href; row.append(link); }
   return row;
 }
-export function messageRow(message, { attachmentUrl } = {}) {
+export function messageRow(message, { attachmentUrl, bubble = false } = {}) {
   const isUser = message.sender?.type === "user" || message.role === "user";
-  const row = node("article", `collaboration-message ${isUser ? "is-user" : ""}`);
+  const row = node("article", bubble ? `message ${isUser ? "user" : "assistant"}` : `collaboration-message ${isUser ? "is-user" : ""}`);
   row.dataset.messageId = message.id || "";
-  const identity = node("div", "collaboration-message-heading");
-  identity.append(node("span", "collaboration-message-avatar", isUser ? "我" : Array.from(message.sender?.name || "NEUMA")[0]),
-    node("strong", "", isUser ? "你" : message.sender?.name || "NEUMA"));
-  if (message.recipientId) identity.append(node("span", "muted-note small", `→ ${message.recipientId}`));
-  if (message.createdAt) { const time = node("time", "muted-note small", new Date(message.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })); time.dateTime = message.createdAt; identity.append(time); }
+  if (bubble) {
+    row.setAttribute("role", "group"); row.setAttribute("aria-label", isUser ? "发送的消息" : "助理的回复");
+  } else {
+    const identity = node("div", "collaboration-message-heading");
+    identity.append(node("span", "collaboration-message-avatar", isUser ? "我" : Array.from(message.sender?.name || "NEUMA")[0]),
+      node("strong", "", isUser ? "你" : message.sender?.name || "NEUMA"));
+    if (message.recipientId) identity.append(node("span", "muted-note small", `→ ${message.recipientId}`));
+    if (message.createdAt) { const time = node("time", "muted-note small", new Date(message.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })); time.dateTime = message.createdAt; identity.append(time); }
+    row.append(identity);
+  }
   const content = (isUser ? String(message.content || "") : String(message.content || "").replace(/#(?:group|agent)\/[\w-]+/g, "")).trim();
-  row.append(identity);
   if (message.attachments?.length) {
     const attachments = node("div", "collaboration-links");
     for (const attachment of message.attachments) {
@@ -46,7 +50,12 @@ export function messageRow(message, { attachmentUrl } = {}) {
     }
     row.append(attachments);
   }
-  row.append(node("div", "collaboration-message-body", content || (message.status === "running" ? "正在处理…" : "")));
+  const body = node("div", bubble ? "bubble" : "collaboration-message-body", content || (message.status === "running" ? "正在处理…" : ""));
+  if (bubble) {
+    body.hidden = !content && message.status !== "running";
+    body.classList.toggle("streaming", message.status === "running" && Boolean(content));
+  }
+  row.append(body);
   if (["failed", "error", "cancelled", "interrupted"].includes(message.status)) row.append(node("p", "muted-note small", taskLabels[message.status] || "回复未完成"));
   row.append(internalLinks(message.content, [...(message.actions || []), ...(message.sources || [])]));
   return row;

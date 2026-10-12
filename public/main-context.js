@@ -10,12 +10,14 @@ export function createMainContext({ api, current, submit, edit, build }) {
   function layout() {
     const visible = Boolean(open && context && page === "chat");
     const isRequirement = context?.type === "requirements";
-    byId("main-context-panel").hidden = !visible; byId("main-context-panel").inert = !visible;
-    byId("main-context-panel").classList.toggle("side-panel", isRequirement);
-    byId("main-context-panel").classList.toggle("main-requirements-panel", isRequirement);
+    const panel = byId("main-context-panel"), opener = byId("main-context-open");
+    opener.hidden = !context || visible;
+    if (!visible && page === "chat" && panel.contains?.(document.activeElement)) byId(context ? "main-context-open" : "main-message").focus();
+    panel.inert = !visible; panel.setAttribute("aria-hidden", String(!visible));
+    panel.classList.toggle("side-panel", isRequirement);
+    panel.classList.toggle("main-requirements-panel", isRequirement);
     byId("main-context-requirement-status").hidden = !isRequirement;
     byId("main-workspace").classList.toggle("context-open", visible);
-    byId("main-context-open").hidden = !context || visible;
     byId("main-context-open").textContent = context?.type === "requirements" ? "需求说明" : "群任务";
     byId("main-context-open").setAttribute("aria-expanded", String(visible));
   }
@@ -146,7 +148,7 @@ export function createMainContext({ api, current, submit, edit, build }) {
     if (open && page === "chat" && !timer) startPolling();
   }
   byId("main-context-close").addEventListener("click", () => { suppressed = identity(); open = false; stopPolling(); layout(); byId("main-context-open").focus(); });
-  byId("main-context-open").addEventListener("click", () => { suppressed = null; open = true; render(); startPolling(); });
+  byId("main-context-open").addEventListener("click", () => { suppressed = null; open = true; render(); startPolling(); byId("main-context-close").focus(); });
   layout();
   return { set, capture() { return { context: structuredClone(context), open, suppressed }; },
     restore(value) { stopPolling(); groupView = null; context = value.context; open = value.open; suppressed = value.suppressed; notice(byId("main-context-error"), ""); render(); startPolling(); },

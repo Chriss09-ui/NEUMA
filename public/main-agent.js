@@ -19,9 +19,10 @@ let historyCollapsed = false;
 try { historyCollapsed = localStorage.getItem(HISTORY_KEY) === "true"; } catch { /* Current layout remains usable. */ }
 function historyLayout() {
   byId("main-workspace").classList.toggle("history-collapsed", historyCollapsed);
-  byId("main-history-body").hidden = historyCollapsed; byId("main-history-body").inert = historyCollapsed;
-  const toggle = byId("main-history-toggle"); toggle.textContent = historyCollapsed ? "›" : "‹";
-  toggle.setAttribute("aria-expanded", String(!historyCollapsed)); toggle.setAttribute("aria-label", historyCollapsed ? "展开历史对话" : "收起历史对话");
+  byId("main-history-body").inert = historyCollapsed; byId("main-history-body").setAttribute("aria-hidden", String(historyCollapsed));
+  byId("main-new-chat").inert = historyCollapsed; byId("main-new-chat").setAttribute("aria-hidden", String(historyCollapsed));
+  const toggle = byId("main-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
+  toggle.setAttribute("aria-expanded", String(!historyCollapsed)); toggle.setAttribute("aria-label", label); toggle.title = label;
 }
 function buildRequirement(agentId, requirement) {
   const record = requirement || selected?.context?.requirement;
@@ -58,12 +59,13 @@ function render() {
     const groups = node("a", "secondary collaboration-action-link", "查看群组"); groups.href = "#groups";
     actions.append(groups); welcome.append(actions); target.append(welcome);
   }
-  for (const message of selected?.messages || []) target.append(messageRow(message, { attachmentUrl: (id) => api.mainMaterialUrl(selected.id, id) }));
-  if (operation?.reply) target.append(messageRow(operation.reply));
+  for (const message of selected?.messages || []) target.append(messageRow(message, { bubble: true, attachmentUrl: (id) => api.mainMaterialUrl(selected.id, id) }));
+  if (operation?.reply) target.append(messageRow(operation.reply, { bubble: true }));
   if (wasBottom) target.scrollTop = target.scrollHeight;
   const list = byId("main-history-list"); list.replaceChildren();
   for (const record of records) {
     const item = button(record.title || "新对话", () => select(record.id), "collaboration-history-item");
+    item.title = record.title || "新对话";
     item.disabled = Boolean(operation || loading || materials.busy()); item.setAttribute("aria-current", record.id === selected?.id ? "true" : "false"); list.append(item);
   }
   materials.render(); controls();
@@ -183,7 +185,8 @@ byId("main-refresh").addEventListener("click", async () => { if (selected) await
 byId("main-create-agent").addEventListener("click", () => void activateRequirements());
 byId("main-history-toggle").addEventListener("click", () => {
   historyCollapsed = !historyCollapsed;
-  if (historyCollapsed && byId("main-history-body").contains?.(document.activeElement)) byId("main-history-toggle").focus();
+  if (historyCollapsed && (byId("main-history-body").contains?.(document.activeElement)
+    || document.activeElement === byId("main-new-chat"))) byId("main-history-toggle").focus();
   historyLayout(); try { localStorage.setItem(HISTORY_KEY, String(historyCollapsed)); } catch { /* Only persistence is unavailable. */ }
 });
 byId("main-create-group").addEventListener("click", () => document.dispatchEvent(new CustomEvent("neuma:create-group")));
