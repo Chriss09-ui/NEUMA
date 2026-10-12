@@ -16,7 +16,7 @@ test("待发送附件在任务文字输入上方，并保留独立的上传及�
   assert.match(composer, /id="agent-attachment-add"/); assert.match(composer, /id="agent-attachment-pick"/);
 });
 
-test("上传50MiB和每消息10份材料限制在发请求前校验", async () => {
+test("上传20MiB和每消息10份材料限制在发请求前校验", async () => {
   let calls = 0;
   const attachments = new AgentAttachments({ api: { uploadAttachment: async () => { calls++; return { attachment: descriptor(`material-${calls}`) }; } } });
   await attachments.upload("one", "chat", [file("空.pdf", 0)]);

@@ -68,7 +68,7 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
     busy = true; render();
     try {
       for (const file of [...fileList]) {
-        if (file.size > 50 * 1024 * 1024) throw new Error(`${file.name} 超过 50 MiB，请选择较小文件。`);
+        if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} 超过 20 MiB，请选择较小文件。`);
         const result = await api.upload(groupId, file);
         if (id() !== groupId) return;
         const material = result.material || result.attachment;

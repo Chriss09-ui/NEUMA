@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { inspectDevelopmentCode, validateCodePath } from "./development-workspace.mjs";
+import { inspectDevelopmentCode, validateCodePath, validateRuntimeWorkspace } from "./development-workspace.mjs";
 import { bundledIsolationHelper, checkedIsolationHelper, cleanupWindowsIsolation, isolatedNodeArguments,
   nativeIsolationRequest, readIsolationStatus, recoverWindowsIsolation } from "../runtime/isolation-native.mjs";
 
@@ -209,8 +209,9 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
         workspaceDir = await this.canonicalDirectory(workspaceDir);
         // Direct Node filesystem access must meet the same credential/link
         // boundary as the text tools before the OS grants directory access.
-        try { await inspectDevelopmentCode(workspaceDir); }
-        catch { return outcome("error", "workspace_contains_unsafe_files"); }
+        try { await validateRuntimeWorkspace(workspaceDir, { signal }); }
+        catch (error) { return outcome("error", signal?.aborted ? "cancelled"
+          : error.reason === "workspace_file_too_large" ? error.reason : "workspace_contains_unsafe_files"); }
         workingDir = workspaceDir;
         if (workspaceReadOnly) readableDir = workspaceDir;
         else writableDir = workspaceDir;

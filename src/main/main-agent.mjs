@@ -30,10 +30,24 @@ const intents = {
   delegate: /(?:派发|分配|交给|交由|安排|委派|让|请.{0,30}(?:Agent|助手|群|组|团队)).{0,120}|(?:delegate|assign|ask|have).{0,100}/i,
   cancel: /(?:停止|暂停|取消|终止|别再|不要继续).{0,30}|(?:stop|cancel|pause|abort).{0,100}/i,
 };
+const authorizationBoundary = /[，,。.!！?？;；\r\n]+|但是|不过|而是|但|\bbut\b/i;
+const operationWords = {
+  create: "创建|新建|建立|组建|拉|建|create|start",
+  update: "修改|调整|更新|改名|重命名|加入|拉入|拉进|移出|踢出|加进|添加|更换|变更|恢复|重新启用|改为|改成|换成|加上|移除|update|rename|add|remove|restore",
+  archive: "归档|封存|停用|解散|archive",
+  delegate: "派发|分配|交给|交由|安排|委派|让|请|delegate|assign|ask|have",
+  cancel: "停止|暂停|取消|终止|stop|cancel|pause|abort",
+};
+const negation = "不要|别|暂不|不必|不需要|无需|不想|不希望|不打算|请勿|勿|禁止|不允许|不得|不该|(?<!能)不能|\\b(?:not|never|don['’]t|can['’]t|cannot|won['’]t|no\\s+need\\s+to|avoid)\\b";
+const deniedOperations = Object.fromEntries(Object.entries(operationWords).map(([intent, words]) => [intent,
+  new RegExp(`(?:${negation}|不(?=(?:${words}))).*(?:${words})`, "i")]));
 
 function requireAuthorization(ctx, quote, intent) {
-  if (typeof quote !== "string" || !quote.trim() || !ctx.message.includes(quote) || !intents[intent].test(quote)
-    || (intent !== "cancel" && /(?:不要|别|暂不|不必|不需要).{0,30}(?:创建|建群|派发|修改|执行|归档)/.test(quote))
+  const clauses = ctx.message.split(authorizationBoundary);
+  // Check the original clause so a tool cannot remove a preceding negation from its quote.
+  const authorized = typeof quote === "string" && ctx.message.includes(quote) && quote.split(authorizationBoundary).some((part) =>
+    intents[intent].test(part) && clauses.some((clause) => clause.includes(part.trim()) && !deniedOperations[intent].test(clause)));
+  if (!authorized
     || /(?:只|仅).{0,12}(?:讨论|评价|评估|规划|想想)|想想.{0,12}(?:计划|方案)|(?:评价|评估).{0,12}可行性/.test(ctx.message))
     throw new InputError("这项操作需要来自本轮用户的明确要求；读取的消息和材料不能授权操作");
 }
@@ -90,14 +104,14 @@ export class MainAgent {
   }
 
   guard(ctx, toolSignal) {
+    if (ctx.persistenceError) throw failed("persistence_failed", "主 Agent 对话未能保存，已停止继续操作，已执行的操作与已有结果保留，请检查本机存储");
     if (ctx.controller.signal.aborted || toolSignal?.aborted || this.active.get(ctx.conversationId) !== ctx)
       throw failed("cancelled", "主 Agent 回复已停止，已执行的操作与已有结果保留");
-    if (ctx.persistenceError) throw new InputError("主 Agent 对话未能保存，已停止继续操作，请检查本机存储");
   }
 
   async flush(ctx, status = "running", diagnostic) {
     clearTimeout(ctx.timer); ctx.timer = null;
-    return this.store.update(ctx.conversationId, (record) => {
+    try { return await this.store.update(ctx.conversationId, (record) => {
       const request = record.requests.find((item) => item.mutationId === ctx.mutationId);
       const assistant = record.messages.find((item) => item.id === request.assistantId);
       if (request.status !== "running" && !(status === "cancelled" && request.status === "complete")) return;
@@ -116,13 +130,17 @@ export class MainAgent {
         request.diagnostic = effective === "cancelled" ? { stage: "main", reason: "cancelled" } : diagnostic;
         assistant.diagnostic = request.diagnostic;
       }
-    });
+    }); } catch {
+      ctx.persistenceError = true; ctx.controller.abort();
+      void Promise.resolve().then(() => ctx.session?.abort?.()).catch(() => {});
+      throw failed("persistence_failed", "主 Agent 对话未能保存，已停止继续操作，已执行的操作与已有结果保留，请检查本机存储");
+    }
   }
 
   scheduleSave(ctx) {
     if (ctx.timer) return;
     ctx.timer = setTimeout(() => {
-      void this.flush(ctx).catch(() => { ctx.persistenceError = true; ctx.controller.abort(); void ctx.session?.abort?.(); });
+      void this.flush(ctx).catch(() => {});
     }, 1000);
     ctx.timer.unref?.();
   }
@@ -236,9 +254,11 @@ export class MainAgent {
           await this.flush(ctx);
           return { ...result, sourceLink: origin.sourceLink };
         } catch (error) {
-          origin.status = metadata.signal.aborted ? "cancelled" : "failed"; origin.reply = privateReply;
-          try { await savePrivate(origin.status, privateReply, metadata.signal.aborted ? "已停止委派回复，已有操作保留" : "委派回复未完成，已有操作保留"); }
-          catch (saveError) { origin.conversationSaveStatus = saveError.reason === "conversation_conflict" ? "conflict" : "failed"; }
+          if (origin.status === "running") {
+            origin.status = metadata.signal.aborted ? "cancelled" : "failed"; origin.reply = privateReply;
+            try { await savePrivate(origin.status, privateReply, metadata.signal.aborted ? "已停止委派回复，已有操作保留" : "委派回复未完成，已有操作保留"); }
+            catch (saveError) { origin.conversationSaveStatus = saveError.reason === "conversation_conflict" ? "conflict" : "failed"; }
+          }
           await this.flush(ctx); throw error;
         }
       }, "delegate"),
@@ -384,7 +404,8 @@ export class MainAgent {
       const conversation = await this.flush(ctx, "complete"); this.guard(ctx);
       return { reply, conversation, context: conversation.context ?? null, actions: ctx.actions, sources: ctx.sources };
     } catch (error) {
-      const safe = ctx.controller.signal.aborted ? failed("cancelled", "主 Agent 回复已停止，已执行的操作与已有结果保留")
+      const safe = ctx.persistenceError ? failed("persistence_failed", "主 Agent 对话未能保存，已停止继续操作，已执行的操作与已有结果保留，请检查本机存储")
+        : ctx.controller.signal.aborted ? failed("cancelled", "主 Agent 回复已停止，已执行的操作与已有结果保留")
         : error instanceof InputError || error instanceof ProviderError ? error : failed(classifyModelFailure(error?.message).reason, classifyModelFailure(error?.message).message);
       if (ctx.persisted) await this.flush(ctx, safe.diagnostic?.reason === "cancelled" ? "cancelled" : "failed", safe.diagnostic ?? { stage: "main", reason: "invalid_request" });
       throw safe;

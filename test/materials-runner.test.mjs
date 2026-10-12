@@ -25,5 +25,7 @@ test("timeout and cancellation terminate child processes, and close permits futu
   const controller = new AbortController(), running = runner.run({ delay: 10000 }, { signal: controller.signal });
   await delay(10); controller.abort(); await assert.rejects(running, { name: "AbortError" }); assert.equal(runner.active.size, 0);
   const stopped = runner.run({ delay: 10000 }); const rejection = assert.rejects(stopped, { name: "AbortError" }); await runner.close(); await rejection;
+  // Recovery should not depend on cold process startup fitting the timeout used above.
+  runner.timeoutMs = 2000;
   assert.deepEqual(await runner.run({ value: "after-close" }), { value: "after-close" });
 });

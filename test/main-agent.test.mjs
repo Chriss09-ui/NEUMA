@@ -142,6 +142,52 @@ test("礼貌操作要求可以执行，纯方案和否定要求不授权，恢�
   assert.equal(f.calls.length, 2); assert.equal(f.calls[1].input.archived, false); assert.equal(f.calls[1].input.expectedVersion, 1);
 });
 
+test("中文和英文否定不能通过截取正向引用授权，否定停止也不能执行", async (t) => {
+  const cases = [
+    ["不要创建一个新群", "创建一个新群", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["别新建一个群", "新建一个群", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["不创建新群", "创建新群", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["Please don't create a new group", "create a new group", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["Don't create a new group and start another team", "start another team", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["不要归档报告群", "归档报告群", "archive_group", { groupId: "group_one", expectedVersion: 1 }],
+    ["请不要把群名称改为研发组", "群名称改为研发组", "update_group", { groupId: "group_one", expectedVersion: 1, name: "研发组" }],
+    ["不要让整理助手整理报告", "让整理助手整理报告", "assign_agent_task", { agentId: "worker", message: "整理报告" }],
+    ["不要停止正在运行的任务", "停止正在运行的任务", "stop_agent_task", { sessionId: "running_session_12345" }],
+    ["Don't stop this task", "stop this task", "stop_agent_task", { sessionId: "running_session_12345" }],
+    ["Please do not cancel this task", "cancel this task", "stop_group_task", { groupId: "group_one", taskId: "task_one" }],
+    ["Never pause this task", "pause this task", "stop_agent_task", { sessionId: "running_session_12345" }],
+    ["Don't pause this task and stop the other task", "stop the other task", "stop_agent_task", { sessionId: "running_session_12345" }],
+  ];
+  const f = await fixture(t, async ({ payload, tools }) => {
+    const [message, quote, name, params] = cases.find(([message]) => message === payload.currentUserMessage);
+    for (const userRequest of [message, quote]) await assert.rejects(tools[name].execute("negative", { ...params, userRequest }), /本轮用户/);
+  });
+  for (let index = 0; index < cases.length; index++) await f.main.prompt(f.input(cases[index][0], `negative_${index}`));
+  assert.deepEqual(f.calls, []);
+});
+
+test("不同分句中的否定不阻止明确正向操作，不要继续仍能停止任务", async (t) => {
+  const cases = [
+    ["不要创建新群；请停止正在运行的任务", "请停止正在运行的任务", "stop_agent_task", { sessionId: "running_session_12345" }],
+    ["请创建一个新群，但不要停止正在运行的任务", "请创建一个新群", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["不要创建一个新群，创建一个周报群", "创建一个周报群", "create_group", { name: "周报群", memberIds: ["worker"] }],
+    ["Do not create a new group, but stop this task", "stop this task", "stop_agent_task", { sessionId: "running_session_12345" }],
+    ["Do not stop this task; create a new group", "create a new group", "create_group", { name: "新群", memberIds: ["worker"] }],
+    ["不要继续这项任务", "不要继续这项任务", "stop_agent_task", { sessionId: "running_session_12345" }],
+    ["别再执行这项任务", "别再执行这项任务", "stop_group_task", { groupId: "group_one", taskId: "task_one" }],
+  ];
+  const f = await fixture(t, async ({ payload, tools }) => {
+    const [message, quote, name, params] = cases.find(([message]) => message === payload.currentUserMessage);
+    await tools[name].execute("positive", { ...params, userRequest: quote });
+    await tools[name].execute("replay", { ...params, userRequest: quote });
+    if (message.includes("但不要停止")) await assert.rejects(tools.stop_agent_task.execute("negative", {
+      sessionId: "running_session_12345", userRequest: "停止正在运行的任务",
+    }), /本轮用户/);
+  });
+  for (let index = 0; index < cases.length; index++) await f.main.prompt(f.input(cases[index][0], `mixed_${index}`));
+  assert.deepEqual(f.calls.map(({ type }) => type), ["cancel", "create", "create", "cancel", "create", "cancel", "stop"]);
+});
+
 test("主对话附件仅保存引用，派群任务先复制授权材料并保留来源", async (t) => {
   const f = await fixture(t, async ({ payload, tools }) => {
     assert.deepEqual(payload.currentMaterials.map((item) => item.id), ["material_one"]);
@@ -208,7 +254,7 @@ test("创建 Agent 在同一主对话澄清并用真实追问覆盖模型改写�
   assert.match(confirmed.reply, /需要完成架构评估/); assert.equal(confirmed.conversation.messages.length, 4);
 });
 
-test("快捷需求激活不调用模型或增加消息，幂等恢复最新状态并保留多个独立草稿", async (t) => {
+test("快捷需求激活不调用模型或增加消息，幂等保留最新草稿并隔离不同主会话", async (t) => {
   const f = await fixture(t);
   const first = await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "activate_new" });
   assert.equal(first.context.type, "requirements"); assert.equal(first.conversation.messages.length, 0); assert.equal(f.records.length, 0);
@@ -221,6 +267,12 @@ test("快捷需求激活不调用模型或增加消息，幂等恢复最新状�
   const next = await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "activate_second" });
   assert.notEqual(next.context.agentId, first.context.agentId); assert.equal(next.conversation.requirements.length, 3);
   assert.equal(next.conversation.messages.length, 0);
+  const other = (await f.main.createConversation({ mutationId: "other_conversation" })).conversation;
+  const another = await f.main.activateRequirements({ conversationId: other.id, mutationId: "activate_new" });
+  assert.notEqual(another.context.agentId, first.context.agentId); assert.notEqual(another.context.agentId, next.context.agentId);
+  assert.equal(another.conversation.messages.length, 0); assert.equal(f.records.length, 0);
+  assert.deepEqual(another.conversation.requirements.map(({ agentId }) => agentId), [another.context.agentId]);
+  assert.deepEqual((await f.main.getConversation(f.conversation.id)).conversation, next.conversation);
 });
 
 test("旧主对话重新迭代读取其他会话确认的新需求，快捷确认保存最新内容", async (t) => {
@@ -367,6 +419,80 @@ test("直接委派取消保留独立私聊中的部分正文，版本冲突不�
   assert.equal(result.sources[0].status, "complete"); assert.equal(result.sources[0].conversationSaveStatus, "failed");
   assert.equal(f.privateRecords.get(result.sources[0].conversationId).messages[1].content, "用户补充的内容");
   assert.equal(result.sources[0].reply, "工作已完成");
+});
+
+test("同步保存失败立即停止后续副作用，恢复存储后保留已执行操作和部分正文", async (t) => {
+  const f = await fixture(t, async ({ tools }, _session, emit) => {
+    emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "已经处理部分要求" } });
+    await assert.rejects(tools.create_group.execute("first", { name: "第一群", memberIds: ["worker"], userRequest: "创建两个群" }), /未能保存/);
+    await assert.rejects(tools.create_group.execute("second", { name: "第二群", memberIds: ["worker"], userRequest: "创建两个群" }), /未能保存/);
+  });
+  const write = f.main.store.write.bind(f.main.store); let failOnce = true;
+  f.main.store.write = async (record) => {
+    if (failOnce && record.messages.at(-1)?.sources.length) { failOnce = false; throw new Error("disk-full-fixture"); }
+    await write(record);
+  };
+  await assert.rejects(f.main.prompt(f.input("创建两个群")), (error) => error instanceof ProviderError && error.diagnostic.reason === "persistence_failed");
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].input.name, "第一群");
+  assert.equal(f.records[0].aborted, true); assert.equal(f.records[0].disposed, true);
+  const record = (await f.main.getConversation(f.conversation.id)).conversation;
+  assert.equal(record.messages[1].status, "failed"); assert.equal(record.messages[1].content, "已经处理部分要求");
+  assert.equal(record.messages[1].sources[0].operation, "created"); assert.equal(record.requests[0].diagnostic.reason, "persistence_failed");
+  assert.doesNotMatch(JSON.stringify(record), /disk-full-fixture/);
+});
+
+test("持续保存失败返回安全存储错误并阻止后续操作，不覆盖原记录", async (t) => {
+  const f = await fixture(t, async ({ tools }) => {
+    await assert.rejects(tools.create_group.execute("first", { name: "第一群", memberIds: ["worker"], userRequest: "创建两个群" }), /未能保存/);
+    await assert.rejects(tools.create_group.execute("second", { name: "第二群", memberIds: ["worker"], userRequest: "创建两个群" }), /未能保存/);
+  });
+  const write = f.main.store.write.bind(f.main.store);
+  f.main.store.write = async (record) => {
+    if (record.messages.at(-1)?.sources.length) throw new Error("disk-full-fixture");
+    await write(record);
+  };
+  await assert.rejects(f.main.prompt(f.input("创建两个群")), (error) => error instanceof ProviderError
+    && error.diagnostic.reason === "persistence_failed" && !error.message.includes("disk-full-fixture"));
+  assert.equal(f.calls.length, 1); assert.equal(f.records[0].aborted, true);
+  const path = join(f.dataDir, "main", "conversations", `${f.conversation.id}.json`);
+  const record = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(record.requests[0].status, "running"); assert.deepEqual(record.messages[1].sources, []);
+  f.main.store.write = write;
+});
+
+test("已完成的委派结果不会因主对话保存失败改成取消或丢失正文", async (t) => {
+  const f = await fixture(t, async ({ tools }) => {
+    await assert.rejects(tools.assign_agent_task.execute("work", { agentId: "worker", message: "整理报告", userRequest: "让整理助手整理报告" }), /未能保存/);
+    await assert.rejects(tools.assign_agent_task.execute("again", { agentId: "worker", message: "再次整理报告", userRequest: "让整理助手整理报告" }), /未能保存/);
+  });
+  const write = f.main.store.write.bind(f.main.store); let failOnce = true;
+  f.main.store.write = async (record) => {
+    if (failOnce && record.messages.at(-1)?.sources[0]?.status === "complete") { failOnce = false; throw new Error("disk-full-fixture"); }
+    await write(record);
+  };
+  await assert.rejects(f.main.prompt(f.input("让整理助手整理报告")), (error) => error instanceof ProviderError && error.diagnostic.reason === "persistence_failed");
+  assert.equal(f.calls.length, 1);
+  const record = (await f.main.getConversation(f.conversation.id)).conversation, source = record.messages[1].sources[0];
+  assert.equal(source.status, "complete"); assert.equal(source.reply, "报告已整理"); assert.equal(record.messages[1].status, "failed");
+  const privateConversation = f.privateRecords.get(source.conversationId);
+  assert.equal(privateConversation.messages[1].status, "complete"); assert.equal(privateConversation.messages[1].content, "报告已整理");
+});
+
+test("定时保存失败同样阻止工具执行并保留安全失败原因", async (t) => {
+  const f = await fixture(t, async (record, _session, emit) => {
+    emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "部分回复" } });
+    await new Promise((resolve) => { record.release = resolve; });
+    await assert.rejects(record.tools.create_group.execute("late", { name: "新群", memberIds: ["worker"], userRequest: "创建新群" }), /未能保存/);
+  });
+  const write = f.main.store.write.bind(f.main.store); let failOnce = true;
+  f.main.store.write = async (record) => {
+    if (failOnce && record.messages.at(-1)?.content) { failOnce = false; throw new Error("disk-full-fixture"); }
+    await write(record);
+  };
+  await assert.rejects(f.main.prompt(f.input("创建新群")), (error) => error instanceof ProviderError && error.diagnostic.reason === "persistence_failed");
+  assert.deepEqual(f.calls, []); assert.equal(f.records[0].aborted, true);
+  const record = (await f.main.getConversation(f.conversation.id)).conversation;
+  assert.equal(record.messages[1].status, "failed"); assert.equal(record.messages[1].content, "部分回复");
 });
 
 test("取消阻止迟到成功，部分流式回复和已完成结果保留", async (t) => {

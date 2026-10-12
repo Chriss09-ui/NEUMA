@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { open, readdir } from "node:fs/promises";
 import { agentId as validateAgentId } from "../agents/agent-storage.mjs";
 import { MaterialRunner } from "./material-runner.mjs";
-import { MATERIAL_PARSER_VERSION, MAX_MATERIAL_BYTES, MAX_PARSER_RESPONSE, materialFailure, materialFormat, materialId, materialName, validateMaterialSignature } from "./material-formats.mjs";
+import { MATERIAL_PARSER_VERSION, MAX_MATERIAL_BYTES, MAX_LEGACY_MATERIAL_BYTES, MAX_PARSER_RESPONSE, materialFailure, materialFormat, materialId, materialName, validateMaterialSignature } from "./material-formats.mjs";
 
 const cancelled = () => new DOMException("材料读取已停止", "AbortError");
 const metadataFile = (id) => `attachments/${materialId(id)}/descriptor.json`;
@@ -23,12 +23,18 @@ async function nextChunk(iterator, signal) {
 
 function publicDescriptor(value) {
   const { agentId, schemaVersion, ...descriptor } = value;
+  if (descriptor.size > MAX_MATERIAL_BYTES) Object.assign(descriptor, { status: "failed", failureReason: "material_too_large", error: "材料超过 20 MiB，请缩小文件后重新上传" });
   return structuredClone(descriptor);
+}
+
+function requireMaterialSize(descriptor) {
+  if (descriptor.size > MAX_MATERIAL_BYTES) throw materialFailure("material_too_large", "材料超过 20 MiB，请缩小文件后重新上传");
+  return descriptor;
 }
 
 function validDescriptor(value, agentId, id) {
   if (!value || value.schemaVersion !== 1 || value.agentId !== agentId || value.id !== id || materialName(value.name) !== value.name
-      || !Number.isSafeInteger(value.size) || value.size < 1 || value.size > MAX_MATERIAL_BYTES || !/^[a-f0-9]{64}$/.test(value.sha256)
+      || !Number.isSafeInteger(value.size) || value.size < 1 || value.size > MAX_LEGACY_MATERIAL_BYTES || !/^[a-f0-9]{64}$/.test(value.sha256)
       || value.kind !== materialFormat(value.name).kind || typeof value.mimeType !== "string"
       || !["uploaded", "ready", "needs_vision", "failed"].includes(value.status)) throw materialFailure("invalid_material", "材料记录无效，请保留原文件并重新上传");
   return value;
@@ -65,7 +71,7 @@ export class MaterialStore {
         controller.signal.throwIfAborted();
         if (!(value instanceof Uint8Array)) throw materialFailure("invalid_material", "上传文件数据无效");
         const chunk = Buffer.from(value); size += chunk.length;
-        if (size > MAX_MATERIAL_BYTES) throw materialFailure("material_too_large", "单个材料不能超过 50 MiB");
+        if (size > MAX_MATERIAL_BYTES) throw materialFailure("material_too_large", "单个材料不能超过 20 MiB");
         if (prefix.length < 16) prefix = Buffer.concat([prefix, chunk.subarray(0, 16 - prefix.length)]);
         hash.update(chunk); await handle.writeFile(chunk); await originalHandle.writeFile(chunk);
       }
@@ -105,7 +111,7 @@ export class MaterialStore {
   }
 
   async raw(agentId, id) {
-    const descriptor = await this.get(agentId, id), path = await this.storage.path(agentId, `attachments/${id}/original/${descriptor.name}`);
+    const descriptor = requireMaterialSize(await this.get(agentId, id)), path = await this.storage.path(agentId, `attachments/${id}/original/${descriptor.name}`);
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const info = await handle.stat();
@@ -125,7 +131,7 @@ export class MaterialStore {
         signal?.throwIfAborted(); const { bytesRead } = await handle.read(buffer, 0, buffer.length, bytes);
         if (!bytesRead) break;
         bytes += bytesRead;
-        if (bytes > MAX_MATERIAL_BYTES) throw materialFailure("material_too_large", "材料超过 50 MiB");
+        if (bytes > MAX_MATERIAL_BYTES) throw materialFailure("material_too_large", "材料超过 20 MiB");
         hash.update(buffer.subarray(0, bytesRead));
       }
       if (bytes !== descriptor.size || hash.digest("hex") !== descriptor.sha256) throw materialFailure("material_changed", "原始材料已被修改，请重新上传");
@@ -265,7 +271,7 @@ export class MaterialStore {
     if (!Array.isArray(refs) || refs.length > 10) throw materialFailure("invalid_material", "每轮最多引用 10 份材料");
     const ids = refs.map((value) => materialId(typeof value === "string" ? value : value?.id));
     if (new Set(ids).size !== ids.length) throw materialFailure("invalid_material", "材料引用不能重复");
-    return Promise.all(ids.map((id) => this.get(agentId, id)));
+    return Promise.all(ids.map(async (id) => requireMaterialSize(await this.get(agentId, id))));
   }
 
   tools(agentId) {

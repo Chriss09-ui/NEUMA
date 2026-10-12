@@ -462,25 +462,33 @@ test("产物列表位于独立文件库弹窗，历史对话栏不再承载文�
   assert.doesNotMatch(html, /id="agent-artifacts-sidebar"|id="agent-save-chat"/);
 });
 
-test("产物保留在标题栏，新对话文本位于对话区顶部且保存恢复位于错误提示下", async () => {
+test("工作区必要控件唯一且归属正确，弹窗入口保留 ARIA 关联与对话恢复顺序", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
-  const headerStart = html.indexOf('<header class="page-header agent-chat-header">');
-  const header = html.slice(headerStart, html.indexOf("</header>", headerStart));
-  assert.deepEqual([...header.matchAll(/<button id="([^"]+)"/g)].map((match) => match[1]),
-    ["agent-identity-edit", "agent-artifacts-open", "agent-panel-toggle"]);
-  const start = html.indexOf('<section id="agent-conversation"');
+  const tags = [...html.matchAll(/<([a-z][\w-]*)\b[^>]*>/g)];
+  const attribute = (tag, name) => [...tag[0].matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)].find((match) => match[1] === name)?.[3];
+  const element = (id) => {
+    const matches = tags.filter((tag) => attribute(tag, "id") === id);
+    assert.equal(matches.length, 1, `${id} 必须唯一`); return matches[0];
+  };
+  const header = html.slice(element("page-agent").index).match(/<header\b[^>]*>[\s\S]*?<\/header>/)?.[0];
+  assert.ok(header);
+  for (const [id, dialogId] of [["agent-identity-edit", "agent-panel"], ["agent-artifacts-open", "agent-file-dialog"], ["agent-panel-toggle", "agent-panel"]]) {
+    const control = element(id);
+    assert.equal(control[1], "button"); assert.ok(header.includes(control[0]));
+    assert.equal(attribute(control, "type"), "button"); assert.equal(attribute(control, "aria-haspopup"), "dialog");
+    assert.equal(attribute(control, "aria-controls"), dialogId); assert.equal(element(dialogId)[1], "dialog");
+  }
+  const start = element("agent-conversation").index;
   const conversation = html.slice(start, html.indexOf("</section>", start));
-  const barStart = conversation.indexOf('<div class="conversation-bar">');
-  assert.ok(barStart >= 0);
-  const bar = conversation.slice(barStart, conversation.indexOf("</div>", barStart));
-  assert.match(bar, /<button id="agent-new-chat" class="conversation-new-chat" type="button"[^>]*>新对话<\/button>/);
-  assert.equal([...html.matchAll(/id="agent-new-chat"/g)].length, 1);
-  assert.ok(barStart < conversation.indexOf('id="agent-messages"'));
-  assert.doesNotMatch(conversation, /id="agent-artifacts-open"/);
-  assert.match(conversation, /id="agent-conversation-title"[^>]*\bhidden\b/);
-  assert.match(conversation, /class="agent-status-line" hidden/);
-  assert.ok(conversation.indexOf('id="agent-error"') < conversation.indexOf('id="agent-save-actions"'));
-  assert.ok(conversation.indexOf('id="agent-save-actions"') < conversation.indexOf('id="agent-chat-form"'));
+  const newChat = element("agent-new-chat"), error = element("agent-error"), recovery = element("agent-save-actions");
+  assert.equal(newChat[1], "button"); assert.equal(attribute(newChat, "type"), "button");
+  for (const control of [newChat, error, recovery, element("agent-chat-form")]) assert.ok(conversation.includes(control[0]));
+  assert.ok(newChat.index < element("agent-messages").index);
+  assert.equal(conversation.includes(element("agent-artifacts-open")[0]), false);
+  assert.match(element("agent-conversation-title")[0], /\bhidden\b/);
+  assert.equal(attribute(error, "role"), "alert"); assert.equal(attribute(recovery, "role"), "group");
+  assert.ok(attribute(recovery, "aria-label"));
+  assert.ok(error.index < recovery.index); assert.ok(recovery.index < element("agent-chat-form").index);
 });
 
 test("进入已生成 Agent 自动读取文件，首次生成和任务结束刷新，资料变化不重复读取", async () => {

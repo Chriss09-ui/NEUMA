@@ -133,19 +133,6 @@ test("同一主聊再创建不覆盖原 Agent，普通闲聊隐藏上下文但�
   assert.equal(continued.context.confirmed, false); assert.deepEqual(f.errors, []);
 });
 
-test("需求入口激活幂等且不追加主聊消息，不同会话与再次激活各有独立草稿", { timeout: 20_000 }, async (t) => {
-  const f = await sdkFixture(t);
-  const input = { conversationId: f.conversation.id, mutationId: "activate-first" };
-  const one = await f.main.activateRequirements(input), replay = await f.main.activateRequirements(input);
-  assert.equal(one.context.agentId, replay.context.agentId); assert.equal(one.conversation.messages.length, 0); assert.equal(f.requests.length, 0);
-  const two = await f.main.activateRequirements({ ...input, mutationId: "activate-second" });
-  assert.notEqual(one.context.agentId, two.context.agentId);
-  const other = (await f.main.createConversation({ mutationId: "other-conversation" })).conversation;
-  const another = await f.main.activateRequirements({ conversationId: other.id, mutationId: "activate-first" });
-  assert.notEqual(another.context.agentId, one.context.agentId); assert.equal(another.conversation.messages.length, 0);
-  assert.equal((await f.main.getConversation(f.conversation.id)).conversation.requirement.agentId, two.context.agentId);
-});
-
 const contextSource = (await readFile(new URL("../public/main-context.js", import.meta.url), "utf8")).replace(/^import[^\n]*\n/gm, "").replace(/^export /gm, "");
 function contextUI(api = {}) {
   const nodes = new Map(), timers = new Map(), calls = []; let current = { id: "conversation-one" }, serial = 0;

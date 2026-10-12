@@ -1,7 +1,10 @@
 import { extname } from "node:path";
 import { InputError } from "../requirements/core.mjs";
+import { MAX_RUNTIME_FILE_BYTES } from "../runtime/file-limits.mjs";
 
-export const MAX_MATERIAL_BYTES = 50 * 1024 * 1024;
+export const MAX_MATERIAL_BYTES = MAX_RUNTIME_FILE_BYTES;
+// Retain valid legacy descriptors so old materials do not corrupt the whole list.
+export const MAX_LEGACY_MATERIAL_BYTES = 50 * 1024 * 1024;
 export const MAX_MATERIAL_TEXT = 4_000_000;
 export const MAX_PARSER_RESPONSE = 40 * 1024 * 1024;
 export const MATERIAL_PARSER_VERSION = "materials-v1_kreuzberg-4.10.2_sharp-0.35.5";

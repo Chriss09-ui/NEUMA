@@ -8,7 +8,7 @@ const VARIABLE = "--test-panel-width", STORAGE_KEY = "test-panel-width";
 
 function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMax = maxWidth,
   stored, enabled = true, collapsed = false, collapsedWidth = 40,
-  reducedMotion = false, observer = true, storageBlocked = false } = {}) {
+  observer = true, storageBlocked = false } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback, options = {}) {
@@ -50,7 +50,6 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
   const windowRef = new Events(); windowRef.localStorage = storage; windowRef.performance = { now: () => clock };
   windowRef.innerWidth = 1280; windowRef.innerHeight = 900; windowRef.document = document;
   windowRef.getComputedStyle = () => ({ columnGap: "0px" });
-  windowRef.matchMedia = () => ({ matches: reducedMotion });
   const makeObserver = (kind) => class {
     constructor(callback) { this.callback = callback; this.kind = kind; this.targets = []; this.disconnected = false; observations.push(this); }
     observe(target) { this.targets.push(target); }
@@ -281,8 +280,8 @@ test("两栏折叠态手柄仍可操作，当前值和最小值显示真实折�
 });
 
 test("两栏折叠右拉每1px立即预览，零时钟下无死区或动画等待", () => {
-  for (const profile of foldedProfiles) for (const reducedMotion of [false, true]) {
-    const ui = setup({ ...profile, collapsed: true, reducedMotion }); ui.emit("pointerdown");
+  for (const profile of foldedProfiles) {
+    const ui = setup({ ...profile, collapsed: true }); ui.emit("pointerdown");
     assert.equal(ui.applied(), profile.collapsedWidth); assert.equal(ui.handle.hasPointerCapture(7), true);
     assert.equal(ui.layout.classList.contains("is-panel-revealing"), true);
     assert.equal(ui.layout.classList.contains("is-panel-resizing"), false);

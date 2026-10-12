@@ -634,11 +634,59 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   assert.match(ui.text("main-context-content"), /导出需求 JSON/); assertDisclosure(ui.get("main-context-panel"), true);
   await ui.get("main-context-content").querySelectorAll("button").find((item) => item.textContent === "确认需求并开始制作").click(); await settle();
   assert.equal(writes[1].path, "/api/main/conversations/main-one/messages"); assert.equal(writes[1].body.message, "确认需求");
+  assert.equal(ui.get("main-message").value, "我稍后要补充的主聊天草稿");
   assert.equal(events.filter((event) => event.build).length, 1); assert.deepEqual(events.find((event) => event.build).requirement, requirement);
   assert.match(ui.text("main-context-content"), /正在设计架构/);
   // Re-reading a saved conversation must never replay its build action, even without a visible recovery control.
   await ui.get("main-refresh").click(); await settle(); assert.equal(events.filter((event) => event.build).length, 1);
   assert.equal(requests.includes("/api/requirements/turn"), false);
+});
+
+test("需求快捷确认成功、失败或停止都保留原输入及发送期间的草稿编辑", async (t) => {
+  const scenarios = [
+    { outcome: "success", edit: "replace" }, { outcome: "success", edit: "clear" },
+    { outcome: "error", edit: "unchanged" }, { outcome: "error", edit: "replace" }, { outcome: "error", edit: "clear" },
+    { outcome: "cancelled", edit: "unchanged" }, { outcome: "cancelled", edit: "clear" },
+    { outcome: "error", edit: "unchanged", original: "" },
+  ];
+  for (const { outcome, edit, original = "  尚未发送的补充要求\n保留原有格式  " } of scenarios) {
+    await t.test(`${outcome} · ${original ? "已有草稿" : "空输入"} · ${edit}`, async () => {
+      const ready = { type: "requirements", agentId: "research", status: "ready", confirmed: false,
+        draft: { name: { value: "研究助手" } } };
+      let conversation = { id: "main-one", title: "需求确认", context: ready, messages: [] }, release;
+      const writes = [], ui = setup(mainSource, async (path, options = {}) => {
+        if (path.endsWith("/messages")) {
+          writes.push(JSON.parse(options.body));
+          return new Promise((resolve, reject) => {
+            release = resolve;
+            options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+          });
+        }
+        if (path.endsWith("/cancel")) return Response.json({ cancelled: true });
+        return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+      });
+      await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = original;
+      await ui.get("main-context-content").querySelectorAll("button").find((item) => item.textContent === "确认需求并开始制作").click();
+      await settle();
+      assert.equal(writes.length, 1); assert.equal(writes[0].message, "确认需求");
+      assert.equal(ui.get("main-message").value, original, "快捷消息不能覆盖或清空未发送输入");
+      assert.equal(ui.get("main-message").disabled, false);
+      const expected = edit === "replace" ? "发送期间更新的工作草稿" : edit === "clear" ? "" : original;
+      ui.get("main-message").value = expected;
+      if (outcome === "success") {
+        conversation = { ...conversation, context: null, messages: [
+          { role: "user", content: "确认需求" }, { role: "assistant", content: "需求已确认", status: "complete" },
+        ] };
+        release(Response.json({ reply: "需求已确认", conversation, context: null }));
+      } else if (outcome === "error") release(Response.json({ error: "确认暂时失败" }, { status: 500 }));
+      else await ui.get("main-cancel").click();
+      await settle();
+      assert.equal(ui.get("main-message").value, expected, "结束后不能恢复快捷确认串或覆盖后续编辑");
+      assert.equal(ui.get("main-send").disabled, false);
+      if (outcome === "success") assert.match(ui.text("main-messages"), /需求已确认/);
+      else assert.match(ui.text("main-error"), outcome === "cancelled" ? /本轮已停止/ : /确认暂时失败/);
+    });
+  }
 });
 
 test("需求激活未知结果保持主草稿和同一个幂等操作，迭代保持稳定智能体 ID", async () => {

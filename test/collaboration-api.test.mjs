@@ -71,6 +71,16 @@ test("群API提供独立持久任务、能力卡、事件续读和全局活动�
   assert.deepEqual(result.at(-1).result.context, result[1].context);
 });
 
+test("群与主对话上传均在读取内容前拒绝超过 20 MiB 的请求", async (t) => {
+  const { invoke, collaboration } = await fixture(t);
+  const group = (await invoke("POST", "/api/groups", { name: "材料限制", purpose: "检查材料", memberIds: ["analyst"], mutationId: "material-limit" })).json().group;
+  for (const path of [`/api/groups/${group.id}/materials?name=large.pdf`, "/api/main/conversations/main-test/materials"]) {
+    const result = await invoke("POST", path, undefined, { "content-type": "application/pdf", "content-length": String(20 * 1024 * 1024 + 1), "x-file-name": "large.pdf" });
+    assert.equal(result.status, 400); assert.match(result.json().error, /20 MiB/);
+  }
+  assert.deepEqual((await collaboration.getGroup(group.id)).materials, []);
+});
+
 test("主对话在原会话中打开创建或迭代需求，保留本机来源保护", async (t) => {
   const { invoke } = await fixture(t);
   const module = await invoke("GET", "/main-context.js");

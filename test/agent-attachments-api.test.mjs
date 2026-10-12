@@ -71,13 +71,13 @@ test("上传继续拒绝跨站、凭据路径、伪装二进制及无效文件�
   assert.equal(response.status, 403);
 });
 
-test("超过 50 MiB 的 Content-Length 在读取和保存之前拒绝", async () => {
+test("超过 20 MiB 的 Content-Length 在读取和保存之前拒绝", async () => {
   let uploads = 0;
   const handler = createRequestHandler({ config: {}, providers: {}, projects: {}, projectAgent: {},
     prototypeAgents: { uploadAttachment: () => { uploads++; }, close: async () => {} } });
   const request = Object.assign(Readable.from([]), { method: "POST", url: "/api/agents/paper/attachments?name=large.pdf",
-    headers: { "content-type": "application/pdf", "content-length": String(50 * 1024 * 1024 + 1) } });
+    headers: { "content-type": "application/pdf", "content-length": String(20 * 1024 * 1024 + 1) } });
   const response = new EventEmitter(); Object.assign(response, { writeHead(status) { this.status = status; }, end(value) { this.body = value; this.writableEnded = true; } });
   await handler(request, response); await handler.dispose();
-  assert.equal(response.status, 400); assert.match(JSON.parse(response.body).error, /50 MB/); assert.equal(uploads, 0);
+  assert.equal(response.status, 400); assert.match(JSON.parse(response.body).error, /20 MiB/); assert.equal(uploads, 0);
 });

@@ -18,6 +18,7 @@ import { routeSkills } from "./skills/skill-api.mjs";
 import { CollaborationService } from "./collaboration/groups.mjs";
 import { routeCollaboration } from "./collaboration/collaboration-api.mjs";
 import { MainAgent } from "./main/main-agent.mjs";
+import { MAX_MATERIAL_BYTES } from "./materials/material-formats.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = new Map([
@@ -80,7 +81,8 @@ async function sendMaterialFile(response, file, download, signal) {
   const handle = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1 || info.size !== file.size || info.size > 50 * 1024 * 1024)
+    if (info.size > MAX_MATERIAL_BYTES) throw new InputError("材料超过 20 MiB，请缩小文件后重新上传");
+    if (!info.isFile() || info.nlink !== 1 || info.size !== file.size)
       throw new InputError("材料原文件已改变或无法读取，请重新上传");
     signal?.throwIfAborted();
     response.writeHead(200, { ...binaryHeaders(file.name, file.mimeType, download), "content-length": info.size });
@@ -426,8 +428,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         if (request.method === "GET") return sendJson(response, 200, await prototypeAgents.listAttachments(id));
         if (request.method === "POST") {
           const length = request.headers["content-length"];
-          if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > 50 * 1024 * 1024))
-            throw new InputError("单个上传文件不能超过 50 MB");
+          if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > MAX_MATERIAL_BYTES))
+            throw new InputError("单个上传文件不能超过 20 MiB");
           const result = await prototypeAgents.uploadAttachment(id, { name: address.searchParams.get("name"),
             mimeType: address.searchParams.get("mimeType") || request.headers["content-type"], source: request, signal: requestController.signal });
           if (!requestController.signal.aborted) return sendJson(response, 200, result);

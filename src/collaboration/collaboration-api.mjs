@@ -1,4 +1,5 @@
 import { InputError } from "../requirements/core.mjs";
+import { MAX_MATERIAL_BYTES } from "../materials/material-formats.mjs";
 
 export async function routeCollaboration({ request, response, address, getCollaboration, getMainAgent, readBody, sendJson, sendMaterialFile, safeFailure, config, signal }) {
   const path = address.pathname, method = request.method;
@@ -32,7 +33,7 @@ export async function routeCollaboration({ request, response, address, getCollab
     if (method === "GET" && action === "materials") return send({ materials: (await groups.getGroup(groupId)).materials });
     if (method === "POST" && action === "materials") {
       const length = request.headers["content-length"];
-      if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > 50 * 1024 * 1024)) throw new InputError("单个材料不能超过 50 MiB");
+      if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > MAX_MATERIAL_BYTES)) throw new InputError("单个材料不能超过 20 MiB");
       let name = address.searchParams.get("name");
       if (!name && request.headers["x-file-name"]) { try { name = decodeURIComponent(request.headers["x-file-name"]); } catch { throw new InputError("文件名无效"); } }
       return send(await groups.uploadMaterial(groupId, { name, mimeType: request.headers["content-type"], source: request, signal }));
@@ -67,7 +68,7 @@ export async function routeCollaboration({ request, response, address, getCollab
       if (method === "GET" && !materialId) return send(await main.materials.list(conversationId));
       if (method === "POST" && !materialId) {
         const length = request.headers["content-length"];
-        if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > 50 * 1024 * 1024)) throw new InputError("单个材料不能超过 50 MiB");
+        if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > MAX_MATERIAL_BYTES)) throw new InputError("单个材料不能超过 20 MiB");
         let name;
         try { name = decodeURIComponent(request.headers["x-file-name"] ?? ""); } catch { throw new InputError("文件名无效"); }
         return send(await main.materials.upload(conversationId, { name, mimeType: request.headers["content-type"], source: request, signal }));

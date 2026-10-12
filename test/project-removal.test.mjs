@@ -72,6 +72,7 @@ test("已创建进程的启动可以立即停止，删除等待启动收尾后�
   child.stdout = new EventEmitter(); child.stderr = { resume() {} };
   const signals = [];
   const kill = (pid, signal) => {
+    if (signal === 0) throw Object.assign(new Error("fixture process group closed"), { code: "ESRCH" });
     signals.push({ pid, signal }); child.signalCode = signal;
     queueMicrotask(() => child.emit("close", null));
     return true;
@@ -89,6 +90,23 @@ test("已创建进程的启动可以立即停止，删除等待启动收尾后�
   await starting;
   assert.equal(manager.runs.size, 0);
   assert.equal((await manager.list()).some((project) => project.id === "target"), false);
+});
+
+test("进程组停止失败保持可重试状态，删除不能悄悄移除仍在运行的项目", async (t) => {
+  const { manager } = await lifecycleFixture(t);
+  const child = new EventEmitter(); child.pid = 123456789; child.neumaClosed = true; child.exitCode = 0;
+  const run = { status: "running", child };
+  manager.runs.set("target", run);
+  let blocked = true;
+  t.mock.method(process, "kill", () => { throw Object.assign(new Error("fixture stop failure"), { code: blocked ? "EPERM" : "ESRCH" }); });
+  await assert.rejects(manager.stop("target"), { code: "EPERM" });
+  assert.equal(manager.view(await manager.get("target")).status, "failed");
+  assert.equal(manager.view(await manager.get("target")).canStop, true);
+  await assert.rejects(manager.remove("target"), (error) => error.code === "PROJECT_REMOVE_STOP_FAILED");
+  assert.equal((await manager.list()).length, 2);
+  blocked = false;
+  assert.equal((await manager.stop("target")).status, "stopped");
+  assert.equal(manager.view(await manager.get("target")).canStop, false);
 });
 
 test("停止脚本丢失不锁死删除：先保留记录，明确仅移除后清理登记而不执行项目代码", async (t) => {

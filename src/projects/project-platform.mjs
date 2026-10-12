@@ -5,6 +5,7 @@ import { dirname, extname, join, delimiter, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import { InputError } from "../requirements/core.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -144,18 +145,37 @@ export function spawnProject(command, args, options = {}, { spawnImpl = spawn, p
   })();
 }
 
-export async function stopProjectProcess(child, { platform = process.platform } = {}) {
+export function projectProcessGroupAlive(child) {
+  if (!Number.isSafeInteger(child?.pid) || child.pid < 1) return false;
+  try { process.kill(-child.pid, 0); return true; }
+  catch (error) { if (error.code === "ESRCH") return false; return true; }
+}
+
+export async function stopProjectProcess(child, { platform = process.platform, stopTimeoutMs = 1500, killTimeoutMs = 1000 } = {}) {
   if (!child) return;
   if (child.stopTree) return child.stopTree();
-  if (!child.pid || child.neumaClosed) return;
-  if (platform === "win32") throw new InputError("该项目未由进程树管理器托管，无法安全停止全部服务。");
-  let timer;
-  const closed = new Promise((resolve) => child.once("close", resolve));
+  if (!child.pid) return;
+  if (platform === "win32") {
+    if (child.neumaClosed) return;
+    throw new InputError("该项目未由进程树管理器托管，无法安全停止全部服务。");
+  }
+  let closed = Boolean(child.neumaClosed), forced = false;
+  const onClose = () => { closed = true; };
+  child.once("close", onClose);
   const kill = (signal) => {
-    try { process.kill(-child.pid, signal); }
-    catch (error) { if (error.code !== "ESRCH") throw error; }
+    try { process.kill(-child.pid, signal); return true; }
+    catch (error) { if (error.code !== "ESRCH") throw error; return false; }
   };
-  kill("SIGTERM");
-  timer = setTimeout(() => kill("SIGKILL"), 1500); timer.unref();
-  try { await closed; } finally { clearTimeout(timer); }
+  try {
+    kill("SIGTERM");
+    let deadline = Date.now() + stopTimeoutMs;
+    // The launcher can close while descendants in its process group still run.
+    while (kill(0) || !closed) {
+      if (Date.now() >= deadline) {
+        if (forced) throw new InputError("未能确认项目进程组已全部停止，请重新查询运行状态并重试。");
+        kill("SIGKILL"); forced = true; deadline = Date.now() + killTimeoutMs;
+      }
+      await sleep(25);
+    }
+  } finally { child.removeListener("close", onClose); }
 }

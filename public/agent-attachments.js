@@ -1,4 +1,4 @@
-export const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENTS = 10;
 
 const draftKey = (agentId, conversationId) => `${agentId}/${conversationId}`;
@@ -44,7 +44,7 @@ export class AgentAttachments {
       state.error = "每条消息最多添加 10 份材料。"; this.onChange(agentId, conversationId); return;
     }
     if (selected.some((file) => !file.name || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > MAX_ATTACHMENT_BYTES)) {
-      state.error = "请选择非空文件，单份材料最多 50 MiB。"; this.onChange(agentId, conversationId); return;
+      state.error = "请选择非空文件，单份材料最多 20 MiB。"; this.onChange(agentId, conversationId); return;
     }
     state.error = "";
     const items = selected.map((file) => ({ key: crypto.randomUUID(), file, name: file.name, size: file.size, status: "uploading" }));
