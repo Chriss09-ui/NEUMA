@@ -248,16 +248,28 @@ export function validateDesign(value, { requirements, capabilities = CAPABILITIE
 export function checkDesign(value, context) {
   const design = validateDesign(value, context);
   const issues = [];
+  const confirmed = context?.draft?.interaction;
+  const requiresPage = confirmed?.page === true;
+  const requiresOperations = Array.isArray(confirmed?.operations) && confirmed.operations.length > 0;
+  if ((requiresPage || requiresOperations) && (design.schemaVersion !== 2
+    || requiresPage && design.interaction.page !== true
+    || requiresOperations && design.interaction.operations !== true)) issues.push({
+    id: "confirmed_interaction", blocking: true, source: "program",
+    candidateFields: ["schemaVersion", "interaction", "profile", "steps", "coverage", "acceptance"],
+    description: "候选没有保留已确认的托管页面或应用操作需求，不能以旧版结构或关闭交付字段缩减需求。",
+    remedy: "提交 schemaVersion:2，按已确认需求设置 interaction.page/operations，并通过现有研发通道交付；同步核对步骤、需求覆盖和验收，不能降为普通对话或下载文件。",
+  });
   design.unknowns.forEach((item, index) => issues.push({
     id: `unknown_${index + 1}`, blocking: item.blocking,
     description: item.question, remedy: item.resolution,
   }));
   for (const capability of design.capabilities) {
     if (capability.status !== "available") issues.push({
-      id: `capability_${capability.id}`,
+      id: capability.id.length <= 69 ? `capability_${capability.id}`
+        : `capability_${createHash("sha256").update(capability.id).digest("hex").slice(0, 24)}`,
       blocking: capability.status === "unverified" || !requiresDevelopment(design),
       description: `能力 ${capability.id} 尚未可用：${capability.reason}`,
-      remedy: "明确连接或开发路径并验证实际能力；无法验证时保留为未就绪。",
+      remedy: "若为实际执行依赖，选择真实可用的替代能力或现有研发通道，并核对步骤、需求覆盖及验收；仍缺能力时保留未就绪。若为未采用或未来方案，从 capabilities 移至 decisions，保留缺口事实；不能修改程序检查标记来放行。",
     });
   }
   if (!requiresDevelopment(design) && design.state.mode === "persistent") issues.push({
