@@ -1,3 +1,5 @@
+const COLLAPSE_PAUSE_MS = 450, COLLAPSE_PULL_PX = 24;
+
 export function initPanelResize({ layout, handle, variable, storageKey, label, defaultWidth, minWidth, maxWidth,
   getMax = () => maxWidth, isEnabled = () => true, isCollapsed = () => false, collapsedWidth = 0,
   collapse, expand, windowRef = window, storage,
@@ -68,7 +70,7 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
     followPointer(event); event.preventDefault(); handle.focus({ preventScroll: true });
     const closed = isCollapsed();
     dragging = { id: event.pointerId, x: event.clientX, renderedWidth: closed ? collapsedWidth : renderedWidth,
-      preferredWidth, minimum: !closed && renderedWidth <= limits.min ? { at: now(), x: event.clientX } : null,
+      preferredWidth, minimum: !closed && renderedWidth <= limits.min ? { at: now(), x: event.clientX, pull: 0 } : null,
       delta: 0, startedCollapsed: closed, expectedCollapsed: closed,
       phase: closed ? "revealing" : "resizing", opened: false, changed: false };
     apply(); layout.classList.add(closed ? "is-panel-revealing" : "is-panel-resizing");
@@ -88,11 +90,12 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
     }
     dragging.changed ||= dragging.startedCollapsed ? rawWidth > limits.min : dragging.delta !== 0;
     if (rawWidth <= limits.min) {
-      if (!dragging.minimum) dragging.minimum = { at: now(), x: event.clientX };
-      const continuingLeft = event.clientX < dragging.minimum.x;
+      if (!dragging.minimum) dragging.minimum = { at: now(), x: event.clientX, pull: 0 };
+      const leftward = dragging.minimum.x - event.clientX;
       dragging.minimum.x = event.clientX;
-      // Hold at the boundary; only fresh leftward movement after the pause folds it.
-      if (collapse && continuingLeft && now() - dragging.minimum.at >= 180) {
+      // Movement during the pause never contributes to the deliberate pull to fold.
+      if (now() - dragging.minimum.at >= COLLAPSE_PAUSE_MS) dragging.minimum.pull += Math.max(0, leftward);
+      if (collapse && leftward > 0 && dragging.minimum.pull >= COLLAPSE_PULL_PX) {
         finish(false, false); collapse(); refresh(); return;
       }
       // Consume overshoot so moving right immediately widens from the boundary.
