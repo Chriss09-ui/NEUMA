@@ -70,8 +70,12 @@
           <header class="page-header"><div><div class="identity-heading"><h1 id="main-agent-title">NEUMA</h1><span class="identity-badge">工作助理</span></div><p class="page-subtitle">与你持续对话，一起把想法变成可完成的工作。</p></div><div class="header-actions"><button id="main-create-agent" class="secondary" type="button">＋ 创建智能体</button><button id="main-create-group" class="secondary" type="button">创建群组</button><button id="main-context-open" class="secondary" type="button" aria-controls="main-context-panel" aria-expanded="false" hidden>上下文</button></div></header>
           <div id="main-workspace" class="main-agent-layout">
             <aside class="collaboration-history" aria-label="主助理历史对话">
-              <button id="main-history-toggle" class="ghost-button main-history-toggle" type="button" aria-label="收起历史对话" aria-controls="main-history-body" aria-expanded="true">‹</button>
-              <div id="main-history-body"><div class="collaboration-rail-heading"><h2>对话</h2><button id="main-new-chat" class="ghost-button" type="button" aria-label="开始新的主助理对话">＋</button></div><nav id="main-history-list" aria-label="主助理历史对话"></nav><p id="main-history-status" class="muted-note small" role="status"></p></div>
+              <div class="main-history-heading">
+                <h2>对话</h2>
+                <button id="main-new-chat" class="main-history-action" type="button" aria-label="开始新的主助理对话" title="新对话"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+                <button id="main-history-toggle" class="main-history-action main-history-toggle" type="button" aria-label="收起历史对话" title="收起历史对话" aria-controls="main-history-body" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
+              </div>
+              <div id="main-history-body"><nav id="main-history-list" aria-label="主助理历史对话"></nav><p id="main-history-status" class="muted-note small" role="status"></p></div>
             </aside>
             <section class="conversation" aria-label="与 NEUMA 的持续对话">
               <div class="conversation-bar"><span id="main-conversation-title" class="conversation-title">一起推进你的工作</span><button id="main-refresh" class="ghost-button" type="button">刷新</button></div>
@@ -84,11 +88,13 @@
                 <input id="main-file-input" type="file" multiple hidden aria-label="上传主助理材料">
               </form>
             </section>
-            <aside id="main-context-panel" class="collaboration-rail main-context-panel" aria-labelledby="main-context-title" hidden inert>
-              <div class="collaboration-rail-heading"><h2 id="main-context-title">上下文</h2><span id="main-context-requirement-status" class="status" role="status" hidden></span><button id="main-context-close" class="ghost-button" type="button" aria-label="收起上下文">×</button></div>
-              <div id="main-context-error" class="error small" role="alert" hidden></div>
-              <div id="main-context-content"></div>
-            </aside>
+            <div class="main-context-slot">
+              <aside id="main-context-panel" class="collaboration-rail main-context-panel" aria-labelledby="main-context-title" aria-hidden="true" inert>
+                <div class="collaboration-rail-heading"><h2 id="main-context-title">上下文</h2><span id="main-context-requirement-status" class="status" role="status" hidden></span><button id="main-context-close" class="ghost-button" type="button" aria-label="收起上下文">×</button></div>
+                <div id="main-context-error" class="error small" role="alert" hidden></div>
+                <div id="main-context-content"></div>
+              </aside>
+            </div>
           </div>
         </section>
 

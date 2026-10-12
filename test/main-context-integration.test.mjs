@@ -189,12 +189,15 @@ test("右上下文默认隐藏，关闭只停只读轮询而不会取消群任�
   const ui = contextUI({ group: async () => ({ group: { id: "group-one", name: "研究组" }, members: [], tasks: [{ id: "task-one", goal: "持续协作", status: "running" }] }),
     cancelTask: async () => { cancellations++; } });
   ui.panel.reset(null);
-  assert.equal(ui.get("main-context-panel").hidden, true); assert.equal(ui.get("main-context-open").hidden, true); assert.equal(ui.timers.size, 0);
+  assert.equal(ui.get("main-context-panel").getAttribute("aria-hidden"), "true"); assert.equal(ui.get("main-context-panel").inert, true);
+  assert.equal(ui.get("main-context-open").hidden, true); assert.equal(ui.timers.size, 0);
   assert.equal(ui.get("main-context-requirement-status").hidden, true);
   ui.panel.set({ type: "group", groupId: "group-one", taskId: "task-one" }, { reveal: true }); await settle();
-  assert.equal(ui.get("main-context-panel").hidden, false); assert.match(ui.text("main-context-content"), /持续协作 running/);
+  assert.equal(ui.get("main-context-panel").getAttribute("aria-hidden"), "false"); assert.equal(ui.get("main-context-panel").inert, false);
+  assert.match(ui.text("main-context-content"), /持续协作 running/);
   ui.get("main-context-close").click();
-  assert.equal(ui.get("main-context-panel").hidden, true); assert.equal(ui.timers.size, 0); assert.equal(cancellations, 0);
+  assert.equal(ui.get("main-context-panel").getAttribute("aria-hidden"), "true"); assert.equal(ui.get("main-context-panel").inert, true);
+  assert.equal(ui.timers.size, 0); assert.equal(cancellations, 0);
   ui.get("main-context-open").click(); await settle();
   assert.match(ui.text("main-context-content"), /持续协作 running/); assert.equal(cancellations, 0); ui.panel.reset(null);
 });
@@ -266,7 +269,8 @@ test("需求说明切换群任务后隐藏状态标记并清理需求面板样�
   ui.panel.set({ type: "requirements", agentId: "analyst", draft: validDraft("研究需求"), status: "ready", confirmed: false }, { reveal: true });
   assert.equal(ui.get("main-context-requirement-status").hidden, false);
   ui.panel.set({ type: "group", groupId: "research" }, { reveal: true }); await settle();
-  assert.equal(ui.get("main-context-panel").hidden, false); assert.equal(ui.get("main-context-title").textContent, "研究组");
+  assert.equal(ui.get("main-context-panel").getAttribute("aria-hidden"), "false"); assert.equal(ui.get("main-context-panel").inert, false);
+  assert.equal(ui.get("main-context-title").textContent, "研究组");
   assert.equal(ui.get("main-context-requirement-status").hidden, true);
   assert.equal(ui.get("main-context-panel").classList.contains("side-panel"), false);
   assert.equal(ui.get("main-context-panel").classList.contains("main-requirements-panel"), false);
