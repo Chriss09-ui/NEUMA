@@ -8,7 +8,7 @@ const VARIABLE = "--test-panel-width", STORAGE_KEY = "test-panel-width";
 
 function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMax = maxWidth,
   stored, enabled = true, collapsed = false, collapsedWidth = 40,
-  observer = true, storageBlocked = false } = {}) {
+  observer = true, storageBlocked = false, handleRect = { top: 0, height: 900 } } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback, options = {}) {
@@ -33,7 +33,11 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
     removeProperty: (key) => properties.delete(key) };
   layout.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1280, bottom: 900, width: 1280, height: 900 });
   const document = { activeElement: null, getElementById: () => null, body: { style: {}, classList: makeClasses() }, documentElement: { style: {} } };
-  const handle = new Events(); handle.classList = makeClasses(); handle.style = {}; handle.inert = false;
+  const handleProperties = new Map();
+  const handle = new Events(); handle.classList = makeClasses(); handle.inert = false;
+  handle.style = { setProperty: (key, value) => handleProperties.set(key, String(value)), getPropertyValue: (key) => handleProperties.get(key) ?? "",
+    removeProperty: (key) => handleProperties.delete(key) };
+  handle.getBoundingClientRect = () => ({ left: 396, width: 8, ...handleRect, bottom: handleRect.top + handleRect.height });
   handle.setAttribute = (key, value) => attributes.set(key, String(value));
   handle.getAttribute = (key) => attributes.get(key) ?? null;
   handle.removeAttribute = (key) => attributes.delete(key);
@@ -42,7 +46,7 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
   handle.setPointerCapture = (id) => captures.add(id);
   handle.hasPointerCapture = (id) => captures.has(id);
   handle.releasePointerCapture = (id) => { captures.delete(id); releases.push(id); };
-  handle.focus = () => { document.activeElement = handle; };
+  handle.focus = () => { document.activeElement = handle; handle.dispatchEvent({ type: "focus" }); };
   const watchTarget = new Events(); watchTarget.classList = makeClasses(); watchTarget.getBoundingClientRect = layout.getBoundingClientRect;
   const values = new Map(stored === undefined ? [] : [[STORAGE_KEY, String(stored)]]);
   const storage = { getItem(key) { if (storageBlocked) throw new Error("Storage unavailable"); return values.get(key) ?? null; },
@@ -80,6 +84,7 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
     else windowRef.dispatchEvent({ type: "resize" });
   };
   return { controller, layout, handle, windowRef, watchTarget, document, values, writes, releases, observations, collapses, expands, callbacks, emit, applied, notify,
+    grip: () => handle.style.getPropertyValue("--panel-grip-y") || "50%", setRect: (value) => { handleRect = { ...handleRect, ...value }; },
     time: (value) => { clock = value; }, setMax: (value) => { availableMax = value; notify(); },
     setEnabled: (value) => { enabled = value; controller.refresh(); },
     setCollapsed: (value) => { collapsed = value; notify(); }, collapsed: () => collapsed };
@@ -95,6 +100,40 @@ test("列宽默认值与存储偏好更新可访问范围，初始化不保存",
   const navigation = setup({ defaultWidth: 232, minWidth: 200, maxWidth: 320 });
   assert.equal(navigation.applied(), 232); assert.equal(navigation.handle.getAttribute("aria-valuemin"), "200");
   assert.equal(navigation.handle.getAttribute("aria-valuemax"), "320");
+});
+
+test("手柄纵向跟随悬停并夹紧边缘，滚动与刷新重算相对坐标，离开后键盘焦点使用中心", () => {
+  const ui = setup({ handleRect: { top: 100, height: 300 } });
+  assert.equal(ui.grip(), "50%"); ui.handle.focus(); assert.equal(ui.grip(), "50%");
+  ui.emit("pointerenter", { clientY: 160 }); assert.equal(ui.grip(), "60px");
+  ui.emit("pointermove", { clientY: 250 }); assert.equal(ui.grip(), "150px");
+  ui.emit("pointermove", { clientY: 90 }); assert.equal(ui.grip(), "14px");
+  ui.emit("pointermove", { clientY: 410 }); assert.equal(ui.grip(), "286px");
+  ui.emit("pointermove", { clientY: 250 });
+  ui.setRect({ top: 120 }); ui.emit("scroll", {}, ui.windowRef); assert.equal(ui.grip(), "130px");
+  ui.setRect({ top: 150 }); ui.controller.refresh(); assert.equal(ui.grip(), "100px");
+  ui.emit("pointerleave"); assert.equal(ui.grip(), "50%");
+  assert.equal(ui.document.activeElement, ui.handle);
+  assert.equal(ui.applied(), 208); assert.equal(ui.writes.length, 0);
+});
+
+test("活动拖拽保留并更新纵向手柄，忽略其他指针，禁用与释放监听后不再跟随", () => {
+  const ui = setup({ handleRect: { top: 100, height: 300 } });
+  ui.emit("pointerdown", { clientY: 170 }); assert.equal(ui.grip(), "70px");
+  ui.emit("pointerleave"); assert.equal(ui.grip(), "70px");
+  ui.emit("pointermove", { pointerId: 9, clientX: 500, clientY: 290 }, ui.windowRef); assert.equal(ui.grip(), "70px");
+  ui.emit("pointermove", { clientX: 410, clientY: 230 }, ui.windowRef);
+  assert.equal(ui.grip(), "130px"); assert.equal(ui.applied(), 218);
+  ui.setEnabled(false); const disabledPosition = ui.grip();
+  assert.equal(ui.handle.hasPointerCapture(7), false);
+  ui.emit("pointerenter", { clientY: 200 }); ui.emit("pointermove", { clientY: 250 });
+  assert.equal(ui.grip(), disabledPosition); assert.equal(ui.applied(), 208);
+  ui.setEnabled(true); ui.emit("pointerenter", { clientY: 200 }); assert.equal(ui.grip(), "100px");
+  ui.controller.dispose(); const disposedPosition = ui.grip();
+  ui.emit("pointerenter", { clientY: 300 }); ui.emit("pointermove", { clientY: 350 });
+  ui.setRect({ top: 150 }); ui.emit("scroll", {}, ui.windowRef); ui.notify();
+  assert.equal(ui.grip(), disposedPosition);
+  assert.equal(ui.handle.listenerCount(), 0); assert.equal(ui.windowRef.listenerCount(), 0); assert.equal(ui.writes.length, 0);
 });
 
 test("空间变化只夹紧显示宽度，空间恢复后还原偏好且不改存储", () => {
@@ -137,6 +176,21 @@ test("已展开无横向位移时最小宽度的纯纵向移动不保存或折�
   assert.equal(ui.collapsed(), false); assert.equal(ui.collapses.length, 0); assert.equal(ui.handle.hasPointerCapture(7), false);
 });
 
+test("已保存最小宽度从按下开始等待，180ms后需要新的向左移动才折叠", () => {
+  const held = setup({ stored: 160 }); held.emit("pointerdown");
+  held.time(180); held.emit("pointermove", { clientX: 399 }, held.windowRef);
+  assert.equal(held.collapsed(), true); assert.equal(held.collapses.length, 1); assert.equal(held.writes.length, 0);
+
+  const moving = setup({ stored: 160 }); moving.emit("pointerdown");
+  moving.time(179); moving.emit("pointermove", { clientX: 399 }, moving.windowRef);
+  assert.equal(moving.collapses.length, 0);
+  moving.time(180); moving.emit("pointermove", { clientX: 399 }, moving.windowRef);
+  moving.emit("pointermove", { clientX: 399, clientY: 600 }, moving.windowRef);
+  assert.equal(moving.collapses.length, 0);
+  moving.emit("pointermove", { clientX: 398, clientY: 600 }, moving.windowRef);
+  assert.equal(moving.collapsed(), true); assert.equal(moving.collapses.length, 1); assert.equal(moving.writes.length, 0);
+});
+
 test("主指针在窗口中实时拖动，忽略其他按钮和指针，释放才保存", () => {
   const ui = setup();
   ui.emit("pointerdown", { button: 2 }); ui.emit("pointermove", { clientX: 500 }, ui.windowRef);
@@ -162,8 +216,8 @@ test("到最小值释放只保存最小宽度，不折叠", () => {
 test("最小值暂停后继续越界才折叠，回调前恢复偏好并清除拖拽", () => {
   const ui = setup({ stored: 300 });
   ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 260 }, ui.windowRef);
-  ui.time(179); ui.emit("pointermove", { clientX: 228 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.time(180); ui.emit("pointermove", { clientX: 227 }, ui.windowRef);
+  ui.time(179); ui.emit("pointermove", { clientX: 259 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(180); ui.emit("pointermove", { clientX: 258 }, ui.windowRef);
   assert.deepEqual(ui.collapses, [{ width: 300, captured: false, resizing: false }]);
   assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
   ui.emit("pointermove", { clientX: 200 }, ui.windowRef); ui.emit("pointerup", { clientX: 200 }, ui.windowRef);
@@ -171,24 +225,25 @@ test("最小值暂停后继续越界才折叠，回调前恢复偏好并清除�
   ui.setCollapsed(false); assert.equal(ui.applied(), 300);
 });
 
-test("首次大幅越界、经过时间和重复坐标都不会自动折叠，右移也不触发", () => {
+test("首次大幅越界、停顿、重复或纯纵向移动与释放都不会自动折叠", () => {
   const ui = setup({ stored: 300 });
   ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 190 }, ui.windowRef);
   assert.equal(ui.applied(), 160); assert.equal(ui.collapses.length, 0);
   ui.time(500); assert.equal(ui.collapses.length, 0);
   ui.emit("pointermove", { clientX: 190 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.emit("pointermove", { clientX: 200 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.emit("pointermove", { clientX: 199 }, ui.windowRef); assert.equal(ui.collapses.length, 1);
+  ui.emit("pointermove", { clientX: 190, clientY: 600 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointerup", { clientX: 190, clientY: 600 }, ui.windowRef);
+  assert.equal(ui.collapses.length, 0); assert.equal(ui.applied(), 160);
 });
 
-test("不足32px越界不折叠，回到正常宽度重新计算暂停时间", () => {
+test("最小边界消耗越界距离，向右1px立即调宽，反向抵达最小重新计算暂停时间", () => {
   const ui = setup({ stored: 300 });
-  ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 260 }, ui.windowRef);
-  ui.time(180); ui.emit("pointermove", { clientX: 229 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.emit("pointermove", { clientX: 280 }, ui.windowRef); assert.equal(ui.applied(), 180);
-  ui.time(300); ui.emit("pointermove", { clientX: 260 }, ui.windowRef);
-  ui.time(479); ui.emit("pointermove", { clientX: 229 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.time(480); ui.emit("pointermove", { clientX: 228 }, ui.windowRef); assert.equal(ui.collapses.length, 1);
+  ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 190 }, ui.windowRef); assert.equal(ui.applied(), 160);
+  ui.time(180); ui.emit("pointermove", { clientX: 191 }, ui.windowRef);
+  assert.equal(ui.applied(), 161); assert.equal(ui.collapses.length, 0);
+  ui.time(300); ui.emit("pointermove", { clientX: 190 }, ui.windowRef); assert.equal(ui.applied(), 160);
+  ui.time(479); ui.emit("pointermove", { clientX: 189 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(480); ui.emit("pointermove", { clientX: 188 }, ui.windowRef); assert.equal(ui.collapses.length, 1);
 });
 
 test("取消、丢失capture、失焦和Escape都回滚且清除折叠暂停状态", () => {
@@ -421,8 +476,8 @@ test("同一手势即时拉出再停顿收回只折叠一次，不保存途中�
   const ui = setup({ collapsed: true, stored: 300 }); ui.emit("pointerdown");
   ui.emit("pointermove", { clientX: 530 }, ui.windowRef); assert.equal(ui.applied(), 170); assert.equal(ui.expands.length, 1);
   ui.emit("pointermove", { clientX: 520 }, ui.windowRef); assert.equal(ui.applied(), 160);
-  ui.time(179); ui.emit("pointermove", { clientX: 488 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.time(180); ui.emit("pointermove", { clientX: 487 }, ui.windowRef);
+  ui.time(179); ui.emit("pointermove", { clientX: 519 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(180); ui.emit("pointermove", { clientX: 518 }, ui.windowRef);
   assert.equal(ui.collapsed(), true); assert.equal(ui.expands.length, 1); assert.equal(ui.collapses.length, 1);
   assert.equal(ui.applied(), 300); assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
   assert.deepEqual([ui.callbacks.at(-1).captured, ui.callbacks.at(-1).resizing, ui.callbacks.at(-1).revealing], [false, false, false]);
