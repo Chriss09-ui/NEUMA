@@ -176,19 +176,15 @@ test("已展开无横向位移时最小宽度的纯纵向移动不保存或折�
   assert.equal(ui.collapsed(), false); assert.equal(ui.collapses.length, 0); assert.equal(ui.handle.hasPointerCapture(7), false);
 });
 
-test("已保存最小宽度从按下开始等待，180ms后需要新的向左移动才折叠", () => {
-  const held = setup({ stored: 160 }); held.emit("pointerdown");
-  held.time(180); held.emit("pointermove", { clientX: 399 }, held.windowRef);
-  assert.equal(held.collapsed(), true); assert.equal(held.collapses.length, 1); assert.equal(held.writes.length, 0);
-
-  const moving = setup({ stored: 160 }); moving.emit("pointerdown");
-  moving.time(179); moving.emit("pointermove", { clientX: 399 }, moving.windowRef);
-  assert.equal(moving.collapses.length, 0);
-  moving.time(180); moving.emit("pointermove", { clientX: 399 }, moving.windowRef);
-  moving.emit("pointermove", { clientX: 399, clientY: 600 }, moving.windowRef);
-  assert.equal(moving.collapses.length, 0);
-  moving.emit("pointermove", { clientX: 398, clientY: 600 }, moving.windowRef);
-  assert.equal(moving.collapsed(), true); assert.equal(moving.collapses.length, 1); assert.equal(moving.writes.length, 0);
+test("已保存最小宽度从按下等待450ms，轻微左移抖动不足24px不会折叠", () => {
+  const ui = setup({ stored: 160 }); ui.emit("pointerdown");
+  ui.time(449); ui.emit("pointermove", { clientX: 399 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(450); ui.emit("pointermove", { clientX: 398 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(500); ui.emit("pointermove", { clientX: 398 }, ui.windowRef);
+  ui.emit("pointermove", { clientX: 398, clientY: 600 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 376, clientY: 600 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 375, clientY: 600 }, ui.windowRef);
+  assert.equal(ui.collapsed(), true); assert.equal(ui.collapses.length, 1); assert.equal(ui.writes.length, 0);
 });
 
 test("主指针在窗口中实时拖动，忽略其他按钮和指针，释放才保存", () => {
@@ -213,11 +209,12 @@ test("到最小值释放只保存最小宽度，不折叠", () => {
   assert.equal(ui.collapses.length, 0); assert.deepEqual(ui.writes, [{ key: STORAGE_KEY, value: "160" }]);
 });
 
-test("最小值暂停后继续越界才折叠，回调前恢复偏好并清除拖拽", () => {
+test("最小值等待450ms前的大幅越界不计入后续24px，折叠回调前恢复偏好并清除拖拽", () => {
   const ui = setup({ stored: 300 });
   ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 260 }, ui.windowRef);
-  ui.time(179); ui.emit("pointermove", { clientX: 259 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.time(180); ui.emit("pointermove", { clientX: 258 }, ui.windowRef);
+  ui.time(449); ui.emit("pointermove", { clientX: 210 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(450); ui.emit("pointermove", { clientX: 187 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 186 }, ui.windowRef);
   assert.deepEqual(ui.collapses, [{ width: 300, captured: false, resizing: false }]);
   assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
   ui.emit("pointermove", { clientX: 200 }, ui.windowRef); ui.emit("pointerup", { clientX: 200 }, ui.windowRef);
@@ -236,27 +233,33 @@ test("首次大幅越界、停顿、重复或纯纵向移动与释放都不会�
   assert.equal(ui.collapses.length, 0); assert.equal(ui.applied(), 160);
 });
 
-test("最小边界消耗越界距离，向右1px立即调宽，反向抵达最小重新计算暂停时间", () => {
+test("最小边界消耗越界距离，向右1px立即调宽并清空累计拉动，回到最小重新等待", () => {
   const ui = setup({ stored: 300 });
   ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 190 }, ui.windowRef); assert.equal(ui.applied(), 160);
-  ui.time(180); ui.emit("pointermove", { clientX: 191 }, ui.windowRef);
+  ui.time(450); ui.emit("pointermove", { clientX: 178 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 179 }, ui.windowRef);
   assert.equal(ui.applied(), 161); assert.equal(ui.collapses.length, 0);
-  ui.time(300); ui.emit("pointermove", { clientX: 190 }, ui.windowRef); assert.equal(ui.applied(), 160);
-  ui.time(479); ui.emit("pointermove", { clientX: 189 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.time(480); ui.emit("pointermove", { clientX: 188 }, ui.windowRef); assert.equal(ui.collapses.length, 1);
+  ui.time(600); ui.emit("pointermove", { clientX: 178 }, ui.windowRef); assert.equal(ui.applied(), 160);
+  ui.time(1049); ui.emit("pointermove", { clientX: 160 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(1050); ui.emit("pointermove", { clientX: 148 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 137 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 136 }, ui.windowRef); assert.equal(ui.collapses.length, 1);
 });
 
 test("取消、丢失capture、失焦和Escape都回滚且清除折叠暂停状态", () => {
   for (const kind of ["pointercancel", "lostpointercapture", "blur", "Escape", "cancel"]) {
     const ui = setup({ stored: 300 });
-    ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 260 }, ui.windowRef); ui.time(500);
+    ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 260 }, ui.windowRef);
+    ui.time(450); ui.emit("pointermove", { clientX: 248 }, ui.windowRef); ui.time(500);
     if (kind === "Escape") ui.emit("keydown", { key: "Escape" });
     else if (kind === "cancel") ui.controller.cancel();
     else ui.emit(kind, {}, kind === "lostpointercapture" ? ui.handle : ui.windowRef);
     assert.equal(ui.applied(), 300, kind); assert.equal(ui.writes.length, 0, kind);
     assert.equal(ui.handle.hasPointerCapture(7), false, kind); assert.equal(ui.layout.classList.contains("is-panel-resizing"), false, kind);
     ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 190 }, ui.windowRef);
-    assert.equal(ui.collapses.length, 0, `${kind} 后的新拖动必须重新暂停`); ui.controller.cancel();
+    assert.equal(ui.collapses.length, 0, `${kind} 后的新拖动必须重新暂停`);
+    ui.time(950); ui.emit("pointermove", { clientX: 178 }, ui.windowRef);
+    assert.equal(ui.collapses.length, 0, `${kind} 前的累计拉动不能进入新拖动`); ui.controller.cancel();
   }
 });
 
@@ -472,16 +475,17 @@ test("取消预览或实际展开调宽都回到最初折叠偏好，状态回�
   }
 });
 
-test("同一手势即时拉出再停顿收回只折叠一次，不保存途中宽度", () => {
+test("同一手势即时拉出再等待450ms拉动24px只折叠一次，不保存途中宽度", () => {
   const ui = setup({ collapsed: true, stored: 300 }); ui.emit("pointerdown");
   ui.emit("pointermove", { clientX: 530 }, ui.windowRef); assert.equal(ui.applied(), 170); assert.equal(ui.expands.length, 1);
   ui.emit("pointermove", { clientX: 520 }, ui.windowRef); assert.equal(ui.applied(), 160);
-  ui.time(179); ui.emit("pointermove", { clientX: 519 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
-  ui.time(180); ui.emit("pointermove", { clientX: 518 }, ui.windowRef);
+  ui.time(449); ui.emit("pointermove", { clientX: 488 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.time(450); ui.emit("pointermove", { clientX: 465 }, ui.windowRef); assert.equal(ui.collapses.length, 0);
+  ui.emit("pointermove", { clientX: 464 }, ui.windowRef);
   assert.equal(ui.collapsed(), true); assert.equal(ui.expands.length, 1); assert.equal(ui.collapses.length, 1);
   assert.equal(ui.applied(), 300); assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
   assert.deepEqual([ui.callbacks.at(-1).captured, ui.callbacks.at(-1).resizing, ui.callbacks.at(-1).revealing], [false, false, false]);
-  ui.emit("pointerup", { clientX: 487 }, ui.windowRef); assert.equal(ui.writes.length, 0);
+  ui.emit("pointerup", { clientX: 464 }, ui.windowRef); assert.equal(ui.writes.length, 0);
 });
 
 test("外部开合取消临时预览或宽度但保留外部状态，不调用回滚开合", () => {
