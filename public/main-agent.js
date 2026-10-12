@@ -7,12 +7,14 @@ const api = createCollaborationApi(), byId = (id) => document.getElementById(id)
 let selected = null, records = [], operation = null, loading = false, loaded = false, sequence = 0;
 let retryRequest = null, page = "chat", listing = null, activationSequence = 0, activationRetry = null;
 let needsConversationReload = false, needsHistoryReload = false;
+let removing = null, historyMenu = null, historyRevision = 0;
+const removedIds = new Set(), removalRetries = new Map();
 const drafts = new Map();
 const ACTIVE_KEY = "neuma.main.active-conversation.v1";
 const materials = createMainMaterials({ api, current: () => selected, create, changed: controls,
   onError: (message) => notice(byId("main-error"), message, true) });
 const contextPanel = createMainContext({ api, current: () => selected,
-  submit(message) { if (operation || loading) return; void send({ message }); },
+  submit(message) { if (operation || loading || removing) return; void send({ message }); },
   edit(message) { if (!byId("main-message").value.trim()) byId("main-message").value = message; byId("main-message").focus(); },
   build: buildRequirement });
 const HISTORY_KEY = "neuma.main.history-collapsed.v1";
@@ -43,16 +45,42 @@ function showRecovery(message, error = true, target = "main-error") {
   else needsConversationReload = true;
   notice(byId(target), message, error); controls();
 }
+function busy() { return Boolean(loading || operation || removing || materials.busy()); }
+function closeHistoryMenu(restoreFocus = false) {
+  if (!historyMenu) return;
+  const { trigger, row } = historyMenu; historyMenu = null;
+  byId("main-history-menu").hidden = true;
+  trigger.setAttribute("aria-expanded", "false"); row.classList.toggle("has-open-menu", false);
+  if (restoreFocus) trigger.focus({ preventScroll: true });
+}
+function openHistoryMenu(record, trigger, row, focusItem = false) {
+  const wasOpen = historyMenu?.trigger === trigger;
+  closeHistoryMenu();
+  if (wasOpen || busy()) return;
+  historyMenu = { id: record.id, trigger, row };
+  trigger.setAttribute("aria-expanded", "true"); row.classList.toggle("has-open-menu", true);
+  const menu = byId("main-history-menu"), remove = byId("main-history-delete");
+  menu.setAttribute("aria-label", `对话操作：${record.title || "新对话"}`);
+  remove.setAttribute("aria-label", `删除对话：${record.title || "新对话"}`); menu.hidden = false;
+  const bounds = byId("main-history").getBoundingClientRect(), anchor = trigger.getBoundingClientRect();
+  const height = menu.getBoundingClientRect().height, below = anchor.bottom - bounds.top + 4;
+  menu.style.top = `${Math.max(8, below + height <= bounds.height - 8 ? below : anchor.top - bounds.top - height - 4)}px`;
+  if (focusItem) remove.focus({ preventScroll: true });
+}
 function controls() {
-  byId("main-send").disabled = Boolean(loading || operation || materials.busy());
-  byId("main-new-chat").disabled = Boolean(loading || operation || materials.busy());
-  byId("main-refresh").disabled = Boolean(loading || operation || materials.busy());
+  if (busy()) closeHistoryMenu();
+  byId("main-send").disabled = busy();
+  byId("main-new-chat").disabled = busy();
+  byId("main-refresh").disabled = busy();
   byId("main-refresh").hidden = !(needsConversationReload || needsHistoryReload);
   byId("main-recovery").hidden = byId("main-refresh").hidden;
-  byId("main-upload").disabled = Boolean(loading || operation || materials.busy());
-  byId("main-materials-open").disabled = Boolean(loading || operation || materials.busy());
+  byId("main-upload").disabled = busy();
+  byId("main-materials-open").disabled = busy();
+  byId("main-create-agent").disabled = busy();
+  byId("main-history-delete").disabled = busy();
+  for (const item of byId("main-history-list").querySelectorAll("button")) item.disabled = busy();
   byId("main-cancel").hidden = !operation;
-  byId("main-message").disabled = loading;
+  byId("main-message").disabled = Boolean(loading || removing);
 }
 function render() {
   const target = byId("main-messages"), wasBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
@@ -73,16 +101,36 @@ function render() {
   for (const message of selected?.messages || []) target.append(messageRow(message, { bubble: true, attachmentUrl: (id) => api.mainMaterialUrl(selected.id, id) }));
   if (operation?.reply) target.append(messageRow(operation.reply, { bubble: true }));
   if (wasBottom) target.scrollTop = target.scrollHeight;
-  const list = byId("main-history-list"); list.replaceChildren();
+  closeHistoryMenu(true);
+  const list = byId("main-history-list"), focused = document.activeElement;
+  const focusedId = list.contains(focused) ? focused?.dataset?.conversationId : null;
+  const focusedMore = focused?.className?.split(/\s+/).includes("main-history-more");
+  list.replaceChildren();
   for (const record of records) {
+    const row = node("div", "main-history-row"); row.dataset.conversationId = record.id;
+    row.classList.toggle("is-current", record.id === selected?.id);
     const item = button(record.title || "新对话", () => select(record.id), "collaboration-history-item");
-    item.title = record.title || "新对话";
-    item.disabled = Boolean(operation || loading || materials.busy()); item.setAttribute("aria-current", record.id === selected?.id ? "true" : "false"); list.append(item);
+    item.title = record.title || "新对话"; item.dataset.conversationId = record.id;
+    item.setAttribute("aria-label", `打开对话：${item.title}`);
+    item.disabled = busy(); item.setAttribute("aria-current", record.id === selected?.id ? "true" : "false");
+    const more = button("", () => openHistoryMenu(record, more, row), "main-history-more");
+    more.dataset.conversationId = record.id; more.disabled = busy(); more.title = "更多操作";
+    more.setAttribute("aria-label", `对话操作：${item.title}`); more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", "false"); more.setAttribute("aria-controls", "main-history-menu");
+    const dots = node("span", "agent-history-more-icon"); dots.setAttribute("aria-hidden", "true"); more.append(dots);
+    more.addEventListener("keydown", (event) => {
+      if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+      event.preventDefault();
+      if (historyMenu?.trigger === more) byId("main-history-delete").focus({ preventScroll: true });
+      else openHistoryMenu(record, more, row, true);
+    });
+    row.append(item, more); list.append(row);
+    if (record.id === focusedId && !busy()) (focusedMore ? more : item).focus({ preventScroll: true });
   }
   materials.render(); controls();
 }
 async function select(id) {
-  if (operation || loading || materials.busy()) return;
+  if (busy() || removedIds.has(id)) return;
   const unboundDraft = selected ? "" : byId("main-message").value;
   if (selected) drafts.set(selected.id, byId("main-message").value);
   const current = ++sequence; loading = true; controls();
@@ -98,28 +146,77 @@ async function select(id) {
   finally { if (current === sequence) { loading = false; render(); } }
 }
 async function readList() {
+  const revision = historyRevision;
   try {
     const result = await api.conversations();
+    if (revision !== historyRevision) return;
     if (!Array.isArray(result.conversations)) throw new Error("主助理历史尚未确认。");
-    records = result.conversations; loaded = true; needsHistoryReload = false;
+    records = result.conversations.filter((record) => !removedIds.has(record.id)); loaded = true; needsHistoryReload = false;
+    if (selected && !records.some((record) => record.id === selected.id) && !busy()) {
+      drafts.delete(selected.id); selected = null; storage.write(""); retryRequest = null;
+      activationRetry = null; byId("main-message").value = "";
+      materials.reset(); contextPanel.reset(null);
+    }
     notice(byId("main-history-status"), records.length ? "" : "新的对话会自动保存。");
     render();
     if (!selected && records.length) await select(records.find((record) => record.id === storage.read())?.id || records[0].id);
-  } catch (error) { showRecovery(`${error.message} 重新加载后重试。`, true, "main-history-status"); }
+  } catch (error) { if (revision === historyRevision) showRecovery(`${error.message} 重新加载后重试。`, true, "main-history-status"); }
 }
-function list() { if (!listing) listing = readList().finally(() => { listing = null; }); return listing; }
+function list() {
+  if (!listing) {
+    const request = readList().finally(() => { if (listing === request) listing = null; }); listing = request;
+  }
+  return listing;
+}
+async function removeConversation(id) {
+  if (busy()) return;
+  const record = records.find((item) => item.id === id);
+  if (!record || !window.confirm(`删除“${record.title || "新对话"}”？此对话的消息和未确认需求草稿将被删除，已创建的智能体、群组和成果不受影响。`)) return;
+  const version = selected?.id === id ? selected.version : record.version;
+  if (!Number.isSafeInteger(version)) return showRecovery("对话版本尚未确认，请重新加载后删除。", true, "main-history-status");
+  const request = removalRetries.get(id)?.expectedVersion === version ? removalRetries.get(id)
+    : { confirm: true, expectedVersion: version, mutationId: crypto.randomUUID() };
+  removalRetries.set(id, request); removing = id; historyRevision++; sequence++; activationSequence++;
+  notice(byId("main-history-status"), "正在删除对话…"); render();
+  let removed = false;
+  try {
+    const result = await api.removeConversation(id, request);
+    if (result.removed !== true || result.conversationId !== id) throw new Error("删除结果尚未确认，请重试。");
+    removed = true; removedIds.add(id); historyRevision++; removalRetries.delete(id); drafts.delete(id);
+    records = records.filter((item) => item.id !== id);
+    if (selected?.id === id) {
+      materials.consume(); selected = null; storage.write(""); retryRequest = null; activationRetry = null;
+      needsConversationReload = false; byId("main-message").value = "";
+      materials.reset(); contextPanel.reset(null); notice(byId("main-error"), "");
+    }
+    notice(byId("main-history-status"), "");
+  } catch (error) {
+    if ([400, 409].includes(error.status)) removalRetries.delete(id);
+    showRecovery(`删除未完成：${error.message} 可重试或重新加载。`, true, "main-history-status");
+  } finally { removing = null; render(); }
+  if (removed) {
+    if (listing) await listing;
+    await list();
+    if (page === "chat") byId("main-message").focus();
+  } else if (page === "chat") {
+    const row = [...byId("main-history-list").children].find((item) => item.dataset.conversationId === id);
+    row?.querySelector(".main-history-more")?.focus({ preventScroll: true });
+  }
+}
 async function create({ preserveInput = true } = {}) {
-  if (operation || loading || materials.busy()) return;
+  if (busy()) return;
   const input = byId("main-message").value;
   if (selected) drafts.set(selected.id, input);
-  loading = true; controls();
+  loading = true; historyRevision++; controls();
   try {
     const result = await api.createConversation();
     if (!result.conversation?.id) throw new Error("新对话尚未保存，请重试。");
     selected = result.conversation; storage.write(selected.id); retryRequest = null; materials.reset(); contextPanel.reset(null);
     byId("main-message").value = preserveInput ? input : ""; drafts.set(selected.id, byId("main-message").value);
     needsConversationReload = false;
-    notice(byId("main-error"), ""); await list();
+    notice(byId("main-error"), "");
+    if (listing) await listing;
+    await list();
   } catch (error) { showRecovery(error.message); }
   finally { loading = false; render(); byId("main-message").focus(); }
 }
@@ -127,7 +224,7 @@ async function send({ message: shortcutMessage } = {}) {
   const shortcut = shortcutMessage !== undefined;
   const attachmentIds = materials.refs(), supplied = (shortcut ? shortcutMessage : byId("main-message").value).trim();
   const message = supplied || (attachmentIds.length ? "请处理这些材料，任务目标不明确时先向我提问。" : "");
-  if (!message || message.length > 4000 || operation || loading || materials.busy()) return;
+  if (!message || message.length > 4000 || busy()) return;
   if (!selected) { await create(); if (!selected) return; }
   const id = selected.id;
   const previousContext = structuredClone(selected.context ?? null), previousPanel = contextPanel.capture();
@@ -181,7 +278,7 @@ async function send({ message: shortcutMessage } = {}) {
 async function activateRequirements(agentId) {
   document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "chat" } }));
   if (!loaded) await list();
-  if (operation || loading || materials.busy()) return notice(byId("main-error"), "请等当前回复完成，再继续整理需求。", true);
+  if (busy()) return notice(byId("main-error"), "请等当前操作完成，再继续整理需求。", true);
   if (!selected) { await create(); if (!selected) return; }
   const id = selected.id, token = ++activationSequence, key = `${id}:${agentId || "new"}`;
   const body = activationRetry?.key === key ? activationRetry.body : { ...(agentId ? { agentId } : {}), mutationId: crypto.randomUUID() };
@@ -201,9 +298,27 @@ byId("main-new-chat").addEventListener("click", () => void create({ preserveInpu
 byId("main-refresh").addEventListener("click", async () => { if (selected) await select(selected.id); await list(); });
 byId("main-create-agent").addEventListener("click", () => void activateRequirements());
 byId("main-history-toggle").addEventListener("click", () => {
+  closeHistoryMenu();
   historyCollapsed = !historyCollapsed;
   if (historyCollapsed && byId("main-history-body").contains?.(document.activeElement)) byId("main-history-toggle").focus();
   historyLayout(); try { localStorage.setItem(HISTORY_KEY, String(historyCollapsed)); } catch { /* Only persistence is unavailable. */ }
+});
+byId("main-history-delete").addEventListener("click", () => {
+  const target = historyMenu; closeHistoryMenu(true);
+  if (target && page === "chat") return removeConversation(target.id);
+});
+byId("main-history-list").addEventListener("scroll", () => closeHistoryMenu(true));
+window.addEventListener?.("resize", () => closeHistoryMenu(true));
+document.addEventListener("click", (event) => {
+  if (historyMenu && !historyMenu.trigger.contains(event.target) && !byId("main-history-menu").contains(event.target)) closeHistoryMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (!historyMenu) return;
+  if (event.key === "Escape" || event.key === "Tab") {
+    if (event.key === "Escape") event.preventDefault(); closeHistoryMenu(true);
+  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && byId("main-history-menu").contains(event.target)) {
+    event.preventDefault(); byId("main-history-delete").focus({ preventScroll: true });
+  }
 });
 byId("main-create-group").addEventListener("click", () => document.dispatchEvent(new CustomEvent("neuma:create-group")));
 byId("main-cancel").addEventListener("click", async () => {
@@ -214,6 +329,7 @@ byId("main-cancel").addEventListener("click", async () => {
   finally { byId("main-cancel").disabled = false; }
 });
 document.addEventListener("neuma:route", (event) => {
+  closeHistoryMenu();
   page = event.detail.page;
   contextPanel.route(page);
   if (page === "chat" && !loaded) void list();

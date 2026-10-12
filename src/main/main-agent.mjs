@@ -3,11 +3,11 @@ import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { MAIN_PROMPT } from "./main-prompts.mjs";
-import { WebCapabilities, createWebTools, WEB_RUNTIME_PROMPT, networkAllowed } from "../runtime/web-capabilities.mjs";
-import { MainStore, mainId } from "./main-store.mjs";
+import { MainStore, mainId, mainConversationFailure } from "./main-store.mjs";
 import { MainMaterials } from "./main-materials.mjs";
 import { makeProviders } from "../requirements/providers.mjs";
 import { advanceRequirement, isMainConfirmation, prepareRequirement, rememberRequirement, requirementContext } from "./main-requirements.mjs";
+import { WebCapabilities, createWebTools, WEB_RUNTIME_PROMPT, networkAllowed } from "../runtime/web-capabilities.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const schema = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
@@ -77,32 +77,59 @@ export class MainAgent {
     this.getRequirementProviders = getRequirementProviders ?? (() => makeProviders(this.config));
     this.store = new MainStore({ dataDir }); this.materials = mainMaterials ?? new MainMaterials({ dataDir, collaboration });
     this.ready = Promise.all([this.store.ready, this.materials.ready]); this.ready.catch(() => {});
-    this.active = new Map(); this.closed = false; this.permanentlyClosed = false;
+    this.active = new Map(); this.activating = new Set(); this.removals = new Map(); this.closed = false; this.permanentlyClosed = false;
   }
 
   async listConversations() { return { conversations: await this.store.list() }; }
   async createConversation(input = {}) { return { conversation: await this.store.create(input) }; }
   async getConversation(conversationId) { return { conversation: await this.store.get(conversationId) }; }
 
+  async removeConversation(conversationId, input = {}) {
+    mainId(conversationId);
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new InputError("主对话删除请求无效");
+    await this.ready;
+    const ongoing = this.removals.get(conversationId);
+    if (ongoing) {
+      if (input.confirm !== true || input.mutationId !== ongoing.mutationId || input.expectedVersion !== ongoing.expectedVersion)
+        throw mainConversationFailure("conversation_conflict", "这份主对话正在删除，请等待完成后刷新");
+      return ongoing.result;
+    }
+    const assertIdle = () => {
+      if (this.active.has(conversationId) || this.activating.has(conversationId))
+        throw mainConversationFailure("conversation_conflict", "这份主对话正在处理，请停止或等待完成后再删除");
+    };
+    assertIdle();
+    const operation = { mutationId: input.mutationId, expectedVersion: input.expectedVersion,
+      result: this.store.remove(conversationId, input, assertIdle) };
+    this.removals.set(conversationId, operation);
+    try { return await operation.result; }
+    finally { if (this.removals.get(conversationId) === operation) this.removals.delete(conversationId); }
+  }
+
   async activateRequirements({ conversationId, agentId, mutationId } = {}) {
     mainId(conversationId); mainId(mutationId, "请求"); if (agentId) mainId(agentId, "Agent");
     await this.ready; if (this.closed || this.active.has(conversationId)) throw new InputError("当前主对话正在处理，请等待完成或停止");
-    const record = await this.store.get(conversationId), key = agentId ?? null;
-    const previous = record.requirementActivations?.find((item) => item.mutationId === mutationId);
-    if (previous) {
-      if (previous.agentId !== key) throw new InputError("这个请求标识已用于其他需求入口");
-      return { conversation: record, context: record.context ?? null };
-    }
-    const requirement = await prepareRequirement({ record, conversationId, mutationId, agentId, mode: agentId ? "edit" : "new" }, this.agents);
-    const context = requirementContext(requirement);
-    const conversation = await this.store.update(conversationId, (next) => {
-      if (this.closed || this.active.has(conversationId)) throw new InputError("当前主对话正在处理，请等待完成或停止");
-      const replay = next.requirementActivations?.find((item) => item.mutationId === mutationId);
-      if (replay) return;
-      rememberRequirement(next, requirement); next.requirementActivations ??= [];
-      next.requirementActivations.push({ mutationId, agentId: key, context });
-    });
-    return { conversation, context };
+    if (this.removals.has(conversationId) || this.activating.has(conversationId))
+      throw mainConversationFailure("conversation_conflict", "这份主对话正在更新，请等待完成后重试");
+    this.activating.add(conversationId);
+    try {
+      const record = await this.store.get(conversationId), key = agentId ?? null;
+      const previous = record.requirementActivations?.find((item) => item.mutationId === mutationId);
+      if (previous) {
+        if (previous.agentId !== key) throw new InputError("这个请求标识已用于其他需求入口");
+        return { conversation: record, context: record.context ?? null };
+      }
+      const requirement = await prepareRequirement({ record, conversationId, mutationId, agentId, mode: agentId ? "edit" : "new" }, this.agents);
+      const context = requirementContext(requirement);
+      const conversation = await this.store.update(conversationId, (next) => {
+        if (this.closed || this.active.has(conversationId)) throw new InputError("当前主对话正在处理，请等待完成或停止");
+        const replay = next.requirementActivations?.find((item) => item.mutationId === mutationId);
+        if (replay) return;
+        rememberRequirement(next, requirement); next.requirementActivations ??= [];
+        next.requirementActivations.push({ mutationId, agentId: key, context });
+      });
+      return { conversation, context };
+    } finally { this.activating.delete(conversationId); }
   }
 
   guard(ctx, toolSignal) {
@@ -322,7 +349,12 @@ export class MainAgent {
     attachmentIds.forEach((value) => mainId(value, "材料"));
     if (typeof message !== "string" || !message.trim() && !attachmentIds.length || message.length > 12_000) throw new InputError("请输入 12000 字以内的要求或上传材料");
     await this.ready; if (this.closed) throw new InputError("主 Agent 已关闭");
+    if (this.removals.has(conversationId) || this.activating.has(conversationId))
+      throw mainConversationFailure("conversation_conflict", "这份主对话正在更新，请等待完成后重试");
     const record = await this.store.get(conversationId), fingerprint = attachmentIds.length ? hash(JSON.stringify({ message, attachmentIds })) : hash(message);
+    this.store.assertAvailable(conversationId);
+    if (this.removals.has(conversationId) || this.activating.has(conversationId))
+      throw mainConversationFailure("conversation_conflict", "这份主对话正在更新，请等待完成后重试");
     const active = this.active.get(conversationId);
     if (active?.mutationId === mutationId) {
       if (active.fingerprint !== fingerprint) throw new InputError("这个请求标识已用于不同内容，请重新发送");
@@ -373,7 +405,7 @@ export class MainAgent {
       if (!this.config.llmConfigured) throw failed("not_configured", "请先在设置中连接模型");
       ctx.onProgress({ type: "status", phase: "thinking", label: "正在了解你的要求…" });
       ctx.session = await this.sessionFactory({ config: this.config, cwd: this.store.root, dataDir: this.store.root,
-        systemPrompt: [MAIN_PROMPT, WEB_RUNTIME_PROMPT].join("\n"), customTools: this.tools(ctx), maxOutputTokens: modelOutputBudget(this.config, 8192) });
+        systemPrompt: `${MAIN_PROMPT}\n${WEB_RUNTIME_PROMPT}`, customTools: this.tools(ctx), maxOutputTokens: modelOutputBudget(this.config, 8192) });
       this.guard(ctx);
       unsubscribe = ctx.session.subscribe?.((event) => {
         if (ctx.controller.signal.aborted) return;

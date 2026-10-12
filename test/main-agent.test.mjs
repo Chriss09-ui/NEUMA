@@ -99,6 +99,117 @@ test("主 Agent 长期对话自动保存、成功历史恢复，创建和发送�
   assert.equal(saved.messages.length, 4); assert.equal(saved.requests.length, 2);
 });
 
+test("删除主对话清除消息与草稿，墓碑重启后仍拒绝读取、写入和创建回执重放", async (t) => {
+  const f = await fixture(t);
+  await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "open_worker" });
+  const current = (await f.main.prompt(f.input("确认需求"))).conversation;
+  const kept = join(f.root, "kept-material.txt"); await writeFile(kept, "保留材料文件");
+  const removal = { confirm: true, expectedVersion: current.version, mutationId: "remove_once" };
+  assert.deepEqual(await f.main.removeConversation(f.conversation.id, removal), { removed: true, conversationId: f.conversation.id });
+  assert.deepEqual(await f.main.removeConversation(f.conversation.id, removal), { removed: true, conversationId: f.conversation.id });
+  assert.deepEqual((await f.main.listConversations()).conversations, []);
+  const tombstone = JSON.parse(await readFile(join(f.dataDir, "main", "conversations", `${f.conversation.id}.json`), "utf8"));
+  assert.deepEqual(tombstone.messages, []); assert.deepEqual(tombstone.requests, []);
+  assert.equal(tombstone.requirements, undefined); assert.equal(tombstone.requirement, undefined); assert.equal(tombstone.context, undefined);
+  assert.equal(tombstone.version, current.version + 1); assert.equal(tombstone.creationMutationId, "create_once");
+  assert.equal(f.requirements.get("worker").id, "worker"); assert.equal(await readFile(kept, "utf8"), "保留材料文件");
+  const restored = new MainAgent({ config: f.config, dataDir: f.dataDir, agents: f.agents, collaboration: f.collaboration,
+    mainMaterials: f.mainMaterials, sessionFactory: model(f.records) });
+  t.after(() => restored.close()); await restored.ready;
+  assert.deepEqual((await restored.listConversations()).conversations, []);
+  assert.deepEqual(await restored.removeConversation(f.conversation.id, removal), { removed: true, conversationId: f.conversation.id });
+  for (const operation of [() => restored.getConversation(f.conversation.id), () => restored.prompt(f.input("迟到消息", "late_turn")),
+    () => restored.activateRequirements({ conversationId: f.conversation.id, mutationId: "late_activation" }),
+    () => restored.createConversation({ mutationId: "create_once" }), () => restored.store.update(f.conversation.id, () => {})]) {
+    await assert.rejects(operation(), { reason: "conversation_deleted" });
+  }
+  await assert.rejects(restored.removeConversation(f.conversation.id, { ...removal, mutationId: "different_remove" }), { reason: "conversation_deleted" });
+  await assert.rejects(restored.removeConversation(f.conversation.id, { ...removal, expectedVersion: current.version + 1 }), { reason: "conversation_conflict" });
+  assert.notEqual((await restored.createConversation({ mutationId: "new_after_remove" })).conversation.id, f.conversation.id);
+  assert.equal(f.records.length, 0);
+});
+
+test("删除主对话需要明确确认与当前版本，过期请求和保存失败均保留原记录", async (t) => {
+  const f = await fixture(t), original = (await f.main.getConversation(f.conversation.id)).conversation;
+  const input = { confirm: true, expectedVersion: original.version, mutationId: "remove_validation" };
+  for (const invalid of [{ ...input, confirm: false }, { ...input, confirm: undefined }, { ...input, expectedVersion: 0 },
+    { ...input, mutationId: "../unsafe" }, { ...input, mutationId: undefined }, null]) await assert.rejects(f.main.removeConversation(f.conversation.id, invalid), InputError);
+  assert.deepEqual((await f.main.getConversation(f.conversation.id)).conversation, original);
+  const changed = await f.main.store.update(f.conversation.id, (record) => { record.title = "其他窗口更新"; });
+  await assert.rejects(f.main.removeConversation(f.conversation.id, input), { reason: "conversation_conflict" });
+  const write = f.main.store.write.bind(f.main.store);
+  f.main.store.write = async (record) => { if (record.deletedAt) throw new Error("disk-full-fixture"); return write(record); };
+  await assert.rejects(f.main.removeConversation(f.conversation.id, { ...input, expectedVersion: changed.version }));
+  assert.deepEqual((await f.main.getConversation(f.conversation.id)).conversation, changed);
+  assert.equal((await f.main.listConversations()).conversations[0].id, f.conversation.id);
+  f.main.store.write = write;
+  await f.main.removeConversation(f.conversation.id, { ...input, expectedVersion: changed.version });
+});
+
+test("正在回复的主对话拒绝删除，停止完成后才允许删除", async (t) => {
+  const started = deferred(), f = await fixture(t, async (record) => {
+    await new Promise((resolve) => { record.release = resolve; started.resolve(); });
+  });
+  const pending = f.main.prompt(f.input()), rejected = assert.rejects(pending, (error) => error.diagnostic.reason === "cancelled");
+  await started.promise;
+  const current = (await f.main.getConversation(f.conversation.id)).conversation;
+  await assert.rejects(f.main.removeConversation(f.conversation.id, { confirm: true, expectedVersion: current.version, mutationId: "remove_running" }),
+    { reason: "conversation_conflict" });
+  assert.equal(f.records[0].aborted, false);
+  const stopped = await f.main.cancel(f.conversation.id); await rejected;
+  await f.main.removeConversation(f.conversation.id, { confirm: true, expectedVersion: stopped.conversation.version, mutationId: "remove_stopped" });
+  await assert.rejects(f.main.getConversation(f.conversation.id), { reason: "conversation_deleted" });
+});
+
+test("读取旧快照但尚未登记的回复不能在删除完成后启动或恢复对话", async (t) => {
+  const f = await fixture(t), read = deferred(), release = deferred(), get = f.main.store.get.bind(f.main.store);
+  f.main.store.get = async (id) => { const record = await get(id); read.resolve(); await release.promise; return record; };
+  const pending = f.main.prompt(f.input("迟到消息")), rejected = assert.rejects(pending, { reason: "conversation_deleted" });
+  await read.promise;
+  await f.main.removeConversation(f.conversation.id, { confirm: true, expectedVersion: f.conversation.version, mutationId: "remove_before_registration" });
+  release.resolve(); await rejected; f.main.store.get = get;
+  assert.equal(f.records.length, 0); assert.equal(f.main.active.size, 0);
+  await assert.rejects(f.main.store.update(f.conversation.id, (record) => { record.messages = []; }), { reason: "conversation_deleted" });
+});
+
+test("主对话需求入口准备期间拒绝删除，删除持久化期间阻止新的回复和需求入口", async (t) => {
+  const f = await fixture(t), preparing = deferred(), finishPreparing = deferred(), originalRequirements = f.agents.getRequirements;
+  f.agents.getRequirements = async () => { preparing.resolve(); await finishPreparing.promise; return originalRequirements(); };
+  const activation = f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "pending_activation" });
+  await preparing.promise;
+  const removal = { confirm: true, expectedVersion: f.conversation.version, mutationId: "busy_remove" };
+  await assert.rejects(f.main.removeConversation(f.conversation.id, removal), { reason: "conversation_conflict" });
+  finishPreparing.resolve(); const activated = await activation;
+  const writing = deferred(), finishWriting = deferred(), write = f.main.store.write.bind(f.main.store);
+  f.main.store.write = async (record) => { if (record.deletedAt) { writing.resolve(); await finishWriting.promise; } return write(record); };
+  const input = { ...removal, expectedVersion: activated.conversation.version };
+  const pending = f.main.removeConversation(f.conversation.id, input); await writing.promise;
+  const repeat = f.main.removeConversation(f.conversation.id, input);
+  await assert.rejects(f.main.prompt(f.input()), { reason: "conversation_conflict" });
+  await assert.rejects(f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "during_remove" }), { reason: "conversation_conflict" });
+  await assert.rejects(f.main.removeConversation(f.conversation.id, { ...input, mutationId: "other_remove" }), { reason: "conversation_conflict" });
+  finishWriting.resolve(); assert.deepEqual(await pending, await repeat);
+  assert.equal(f.records.length, 0); assert.deepEqual((await f.main.listConversations()).conversations, []);
+});
+
+test("主 Agent 公开检索沿用对话范围，最新请求刷新且不联网要求在执行前拒绝", async (t) => {
+  let calls = 0;
+  const web = new WebCapabilities({ fetchImpl: async () => {
+    calls++; return new Response(JSON.stringify({ results: [{ url: "https://example.com", title: "Example", content: "摘要" }] }), { headers: { "content-type": "application/json" } });
+  } });
+  const f = await fixture(t, async (record) => {
+    if (record.payload.currentUserMessage.includes("不要联网")) {
+      await assert.rejects(record.tools.web_search.execute("search", { query: "example" }), { reason: "network_disabled" }); return;
+    }
+    const result = JSON.parse((await record.tools.web_search.execute("search", { query: "example" })).content[0].text);
+    assert.equal(result.status, "ok");
+  }, { web });
+  await f.main.prompt(f.input("搜索资料", "search_one"));
+  await f.main.prompt(f.input("再看看", "search_two")); assert.equal(calls, 1);
+  await f.main.prompt(f.input("刷新最新资料", "search_three")); assert.equal(calls, 2);
+  await f.main.prompt(f.input("不要联网", "search_four")); assert.equal(calls, 2);
+});
+
 test("群外管理使用当前用户引用、版本和幂等标识，群任务不冒充群成员", async (t) => {
   const f = await fixture(t, async ({ tools }) => {
     await tools.get_group.execute("read", { groupId: "group_one" });
@@ -569,22 +680,4 @@ test("主 Agent 存储拒绝符号链接文件和路径穿越", async (t) => {
   const restored = new MainAgent({ config: f.config, dataDir: f.dataDir, agents: f.agents, collaboration: f.collaboration, sessionFactory: model(f.records) });
   await assert.rejects(restored.ready, /文件类型/);
   assert.equal(await readFile(target, "utf8"), "{}");
-});
-
-test("主 Agent 公开检索沿用对话范围，最新请求刷新且不联网要求在执行前拒绝", async (t) => {
-  let calls = 0;
-  const web = new WebCapabilities({ fetchImpl: async () => {
-    calls++; return new Response(JSON.stringify({ results: [{ url: "https://example.com", title: "Example", content: "摘要" }] }), { headers: { "content-type": "application/json" } });
-  } });
-  const f = await fixture(t, async (record) => {
-    if (record.payload.currentUserMessage.includes("不要联网")) {
-      await assert.rejects(record.tools.web_search.execute("search", { query: "example" }), { reason: "network_disabled" }); return;
-    }
-    const result = JSON.parse((await record.tools.web_search.execute("search", { query: "example" })).content[0].text);
-    assert.equal(result.status, "ok");
-  }, { web });
-  await f.main.prompt(f.input("搜索资料", "search_one"));
-  await f.main.prompt(f.input("再看看", "search_two")); assert.equal(calls, 1);
-  await f.main.prompt(f.input("刷新最新资料", "search_three")); assert.equal(calls, 2);
-  await f.main.prompt(f.input("不要联网", "search_four")); assert.equal(calls, 2);
 });
