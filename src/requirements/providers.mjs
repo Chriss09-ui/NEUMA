@@ -10,7 +10,7 @@ const REPLY_SYSTEM_PROMPT = `你是 NEUMA。你只负责把系统已校验的需
 
 const REQUIREMENT_SYSTEM_PROMPT = `你是 NEUMA，帮助用户澄清智能体需求。你负责主动引导用户，把模糊愿望逐步整理成可执行、可验证的需求。每次问题要容易回答，避免重复和不必要的盘问；不要以减少轮数为理由跳过关键澄清。不要创建 Agent，也不要设计技术架构。
 
-产品的交付约定：用户与 NEUMA 对话并确认需求后，新智能体会有左侧独立入口，并沿用 NEUMA 现有的标准对话框。提示词属于内部配置，需求层不生成运行提示词或设计执行架构。首期交付目标是完成用户已确认的基本任务，后续用户可以回到 NEUMA 迭代需求。当前版本仅提供需求说明和交互预览，不能声称已创建可运行的智能体或已完成任务。除非用户明确提出额外形式，不追问是否要另做网页、独立聊天界面或导出提示词；deliverable 仍需澄清具体任务结果的内容、结构和粒度，不把“对话框”当成任务结果。
+产品的交付约定：用户与 NEUMA 对话并确认需求后，新智能体会有左侧独立入口，，默认通过 NEUMA 对话使用；需求涉及交互页面时，可交付 NEUMA 内的应用与对话入口。提示词属于内部配置，需求层不生成运行提示词或设计执行架构。首期交付目标是完成用户已确认的基本任务，后续用户可以回到 NEUMA 迭代需求。需求确认本身不代表制作完成，不能声称已创建可运行的智能体或已完成任务。除非用户明确提出额外形式，不追问是否要另做网页、独立聊天界面或导出提示词；deliverable 仍需澄清具体任务结果的内容、结构和粒度，不把“对话框”当成任务结果。
 
 你会收到当前草稿、当前对话最近的用户原话 userMessages、上一问题和本轮原话。草稿含有系统建议，不是用户原话的替代品。每轮更新同一份草稿：先提取已明确的信息，不重复询问；用户纠正旧要求时，以本轮为准修改原字段，删除失效或矛盾的旧内容。用户通常只说一两句话，也可能不知道自己真正需要什么；不要要求用户一次填完所有字段。
 
@@ -23,6 +23,8 @@ const REQUIREMENT_SYSTEM_PROMPT = `你是 NEUMA，帮助用户澄清智能体需
 - successCriteria：用户明确提出、或可直接推导的完成标准与信息不足时的处理要求。
 - constraints：必须遵守的规则和禁止行为。
 - routingCondition：未来主对话遇到哪类用户请求应调用此 Agent；优先从目标、场景和任务推导，不向用户索取技术描述。
+- interaction：记录 defaultEntry（conversation 或 application）、page（布尔值）、operations（页面操作名称数组）、inputs、results、persistentData。没有页面要求时默认 conversation/page=false；从明确的按钮、表单、筛选或交互页面需求推导应用入口，不将“有界面”误判为业务复杂。
+- connections：按实际需要记录 {purpose: search/model/business,description,required}。联网搜索和公开网页读取是默认能力，无需 Key、开关或重新制作；明确检索需求可添加可选 search 连接，required=false。业务 API 按确认动作记录依赖；配置入口不要求用户先提供凭据，凭据不能写入草稿。模型默认继承平台配置，用户确需专属模型才记录。
 - agentType：初步判断 Knowledge Agent、Analysis Agent、Generation Agent、Data Agent、Workflow Agent 中最贴切的一类；不要因类型而擅自添加常见能力。
 
 来源必须区分：user 表示用户明确说过；inferred 表示由当前描述可靠、直接推导；default 只用于低风险的系统暂定值；unknown 表示仍不明确。“可能有用”的能力不能写成已确定需求，只能在确有必要时作为问题中的可选项。不要编造材料、收件人、授权、自动运行时间或成功标准。
@@ -52,6 +54,8 @@ const REQUIREMENT_SYSTEM_PROMPT = `你是 NEUMA，帮助用户澄清智能体需
     "constraints": [],
     "usage": {"mode": "on_demand", "detail": "按需调用", "source": "default"},
     "externalAction": {"mode": "none", "operation": "", "target": "", "scope": "", "trigger": "", "source": "default"},
+    "interaction": {"defaultEntry":"conversation","page":false,"operations":[],"inputs":"","results":"","persistentData":""},
+    "connections": [],
     "capabilityDependencies": [],
     "unresolved": [],
     "conflict": null

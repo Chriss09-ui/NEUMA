@@ -38,12 +38,14 @@ async function agentFixture(t, sessionFactory) {
     configured() {}, prune() {}, approvedDefinition: () => true,
     getArchitecture: async () => ({ delivery: "ready" }), workspace: async () => root,
     storage: { directory: async () => root }, development: { close: async () => {} },
+    applications: { close: async () => {} },
+    connections: { snapshot: async () => ({ agentId: "alpha", version: 0, connections: [] }), modelConfig: async (_snapshot, config) => config },
     materials: { resolve: async () => [], tools: () => [], close: async () => {} }, sessionFactory,
   });
   return agents;
 }
 
-for (const boundary of ["ready", "closing", "architecture", "workspace", "storage", "factory"]) {
+for (const boundary of ["ready", "closing", "architecture", "connections", "workspace", "storage", "factory"]) {
   test(`Agent 外部取消发生在 ${boundary} 等待期间不会启动模型或遗留晚到会话`, { timeout: 5000 }, async (t) => {
     const held = deferred(), entered = deferred(), fixture = sessionFixture();
     let factories = 0;
@@ -53,6 +55,7 @@ for (const boundary of ["ready", "closing", "architecture", "workspace", "storag
     if (boundary === "ready" || boundary === "closing") {
       Object.defineProperty(agents, boundary, { configurable: true, get() { entered.resolve(); return held.promise; } });
     } else if (boundary === "architecture") agents.getArchitecture = () => delayed({ delivery: "ready" });
+    else if (boundary === "connections") agents.connections.snapshot = () => delayed({ agentId: "alpha", version: 0, connections: [] });
     else if (boundary === "workspace") agents.workspace = () => delayed(awaitedRoot);
     else if (boundary === "storage") agents.storage.directory = () => delayed(awaitedRoot);
     else agents.sessionFactory = async () => { factories++; return delayed(fixture.session); };

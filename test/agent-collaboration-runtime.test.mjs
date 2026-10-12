@@ -57,7 +57,7 @@ test("群短会话不含私人记忆/材料工具，协商只装群工具，工�
   assert.doesNotMatch(JSON.stringify(first.options.systemPrompt) + first.prompts.join(""), /PRIVATE_MEMORY_FIXTURE|list_materials|read_material/);
   assert.equal(first.disposed, true); assert.equal(first.autoCompaction, false);
   await agents.executeCollaboration(round("a", "second-group-session-12345"));
-  assert.deepEqual(Object.keys(executions()[1].tools), ["list_workspace_files", "read_workspace_file", "write_workspace_file"]);
+  assert.deepEqual(Object.keys(executions()[1].tools), ["list_workspace_files", "read_workspace_file", "write_workspace_file", "web_search", "web_fetch"]);
   assert.notEqual(executions()[0].session, executions()[1].session);
   const activity = (await agents.activitySnapshot()).activities;
   assert.equal(activity.length, 2); assert.equal(activity.every((item) => item.status === "complete"), true);

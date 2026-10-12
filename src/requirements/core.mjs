@@ -134,6 +134,17 @@ export function normalizeDraft(value) {
       trigger: cleanText(action.trigger, 500),
       source: SOURCES.has(action.source) ? action.source : "default",
     },
+    ...(raw.interaction && typeof raw.interaction === "object" ? { interaction: {
+      defaultEntry: raw.interaction.defaultEntry === "application" ? "application" : "conversation",
+      page: raw.interaction.page === true,
+      operations: normalizeStrings(raw.interaction.operations),
+      inputs: cleanText(raw.interaction.inputs), results: cleanText(raw.interaction.results),
+      persistentData: cleanText(raw.interaction.persistentData),
+    } } : {}),
+    ...(Array.isArray(raw.connections) ? { connections: raw.connections.slice(0, 40).filter((item) => item && typeof item === "object").map((item) => ({
+      purpose: ["search", "model", "business"].includes(item.purpose) ? item.purpose : "business",
+      description: cleanText(item.description, 500), required: item.required === true,
+    })).filter((item) => item.description) } : {}),
     capabilityDependencies: normalizeStrings(raw.capabilityDependencies),
     unresolved: normalizeStrings(raw.unresolved),
     conflict: conflict?.left && conflict?.right ? conflict : null,

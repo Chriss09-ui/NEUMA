@@ -15,8 +15,8 @@ for await(const chunk of process.stdin){size+=chunk.length;if(size>131072)throw 
 process.argv=[process.execPath,target,Buffer.concat(chunks).toString('utf8')];
 await import(pathToFileURL(target).href);`;
 
-export function isolatedNodeArguments(entrypoint) {
-  return ["--disable-proto=throw", "--max-old-space-size=128", "--input-type=module", "--eval", NODE_INPUT_BOOTSTRAP, entrypoint];
+export function isolatedNodeArguments(entrypoint, bootstrap = NODE_INPUT_BOOTSTRAP) {
+  return ["--disable-proto=throw", "--max-old-space-size=128", "--input-type=module", "--eval", bootstrap, entrypoint];
 }
 
 export function bundledIsolationHelper({ platform = process.platform, arch = process.arch } = {}) {
@@ -36,7 +36,7 @@ export async function checkedIsolationHelper(path) {
   } catch { return null; }
 }
 
-export async function nativeIsolationRequest({ helperPath, temporaryDir, platform, nodePath, codeDir, writableDir, readableDir, workingDir, entrypoint, timeoutMs, maxOutputBytes }) {
+export async function nativeIsolationRequest({ helperPath, temporaryDir, platform, nodePath, codeDir, writableDir, readableDir, workingDir, entrypoint, timeoutMs, maxOutputBytes, bootstrap }) {
   const controlDir = await realpath(await mkdtemp(join(temporaryDir, "neuma-isolation-control-")));
   try {
     if ([codeDir, writableDir, readableDir].filter(Boolean).some((path) => inside(path, controlDir) || inside(controlDir, path)))
@@ -46,7 +46,7 @@ export async function nativeIsolationRequest({ helperPath, temporaryDir, platfor
       "--timeout", String(timeoutMs), "--max-output", String(maxOutputBytes), "--status", statusPath];
     if (readableDir) args.push("--read", readableDir);
     if (platform === "win32") args.push("--journal", journalPath);
-    args.push("--", ...isolatedNodeArguments(join(codeDir, entrypoint)));
+    args.push("--", ...isolatedNodeArguments(join(codeDir, entrypoint), bootstrap));
     return { command: helperPath, args, controlDir, statusPath, journalPath };
   } catch (error) { await rm(controlDir, { recursive: true, force: true }); throw error; }
 }

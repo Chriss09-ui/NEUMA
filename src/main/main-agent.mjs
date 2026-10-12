@@ -3,6 +3,7 @@ import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { MAIN_PROMPT } from "./main-prompts.mjs";
+import { WebCapabilities, createWebTools, WEB_RUNTIME_PROMPT, networkAllowed } from "../runtime/web-capabilities.mjs";
 import { MainStore, mainId } from "./main-store.mjs";
 import { MainMaterials } from "./main-materials.mjs";
 import { makeProviders } from "../requirements/providers.mjs";
@@ -70,8 +71,9 @@ function paging(offset = 0, limit = 20) {
 }
 
 export class MainAgent {
-  constructor({ config, dataDir, agents, collaboration, sessionFactory = createPiSession, mainMaterials, getRequirementProviders }) {
+  constructor({ config, dataDir, agents, collaboration, sessionFactory = createPiSession, mainMaterials, getRequirementProviders, web = new WebCapabilities() }) {
     Object.assign(this, { config, agents, collaboration, sessionFactory });
+    this.web = web;
     this.getRequirementProviders = getRequirementProviders ?? (() => makeProviders(this.config));
     this.store = new MainStore({ dataDir }); this.materials = mainMaterials ?? new MainMaterials({ dataDir, collaboration });
     this.ready = Promise.all([this.store.ready, this.materials.ready]); this.ready.catch(() => {});
@@ -270,11 +272,14 @@ export class MainAgent {
       tool("open_agent_requirements", "在当前主对话推进 Agent 需求", schema({ agentId: id, mode: { type: "string", enum: ["new", "continue", "edit"] } }, []),
         (params, metadata) => this.requirements(ctx, params, metadata)),
     ];
-    return [...tools, ...this.materials.tools(ctx.conversationId).map((materialTool) => ({ ...materialTool,
+    const publicTools = createWebTools({ web: this.web, agentId: "main", scope: `main:${ctx.conversationId}`,
+      signal: ctx.controller.signal, allowNetwork: networkAllowed(ctx.message), refresh: /刷新|最新|refresh|latest/i.test(ctx.message) });
+    return [...tools, ...[...this.materials.tools(ctx.conversationId), ...publicTools].map((materialTool) => ({ ...materialTool,
       execute: async (callId, params, toolSignal, ...args) => {
         this.guard(ctx, toolSignal);
         const activeSignal = toolSignal ? AbortSignal.any([toolSignal, ctx.controller.signal]) : ctx.controller.signal;
-        ctx.onProgress({ type: "status", phase: "tool", label: "正在读取主对话材料…" });
+        if (ctx.forcedReply !== undefined) throw new InputError("本轮需求已提交，请等待下一条用户消息");
+        ctx.onProgress({ type: "status", phase: "tool", label: materialTool.name.startsWith("web_") ? `${materialTool.label}…` : "正在读取主对话材料…" });
         const result = await materialTool.execute(callId, params, activeSignal, ...args);
         this.guard(ctx, toolSignal); return result;
       },
@@ -368,7 +373,7 @@ export class MainAgent {
       if (!this.config.llmConfigured) throw failed("not_configured", "请先在设置中连接模型");
       ctx.onProgress({ type: "status", phase: "thinking", label: "正在了解你的要求…" });
       ctx.session = await this.sessionFactory({ config: this.config, cwd: this.store.root, dataDir: this.store.root,
-        systemPrompt: MAIN_PROMPT, customTools: this.tools(ctx), maxOutputTokens: modelOutputBudget(this.config, 8192) });
+        systemPrompt: [MAIN_PROMPT, WEB_RUNTIME_PROMPT].join("\n"), customTools: this.tools(ctx), maxOutputTokens: modelOutputBudget(this.config, 8192) });
       this.guard(ctx);
       unsubscribe = ctx.session.subscribe?.((event) => {
         if (ctx.controller.signal.aborted) return;

@@ -49,7 +49,7 @@ function brief(value, fields, limit) {
 
 function summarizeReport(report, limit, count) {
   if (!report || typeof report !== "object" || Array.isArray(report)) return undefined;
-  const result = brief(report, ["id", "codeHash", "status", "mode", "taskId"], 160);
+  const result = brief(report, ["id", "codeHash", "status", "mode", "taskId", "evidenceMode", "connectionVerified"], 160);
   if (typeof report.summary === "string") result.summary = shortText(report.summary, limit);
   if (Array.isArray(report.results)) {
     const failed = report.results.filter((item) => item && item.status !== "passed");

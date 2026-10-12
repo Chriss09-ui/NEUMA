@@ -147,7 +147,9 @@ test("小米 MiMo 使用 JSON 模式并关闭需求提取时的深度思考", as
   assert.deepEqual(body.thinking, { type: "disabled" });
   assert.match(body.messages[0].content, /scenario/);
   assert.match(body.messages[0].content, /routingCondition/);
-  assert.match(body.messages[0].content, /左侧独立入口.*标准对话框/);
+  assert.match(body.messages[0].content, /左侧独立入口.*默认通过 NEUMA 对话使用/);
+  assert.match(body.messages[0].content, /interaction.*defaultEntry/);
+  assert.match(body.messages[0].content, /联网搜索和公开网页读取是默认能力/);
   assert.match(body.messages[0].content, /首期交付目标是完成用户已确认的基本任务/);
   assert.match(body.messages[0].content, /不生成运行提示词或设计执行架构/);
   assert.match(body.messages[0].content, /不把“对话框”当成任务结果/);

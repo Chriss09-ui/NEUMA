@@ -1499,3 +1499,19 @@ test("资料保存后才返回的旧查询不会发送覆盖事件", async () =>
   assert.equal(ui.profileEvents.filter((detail) => detail.id === "two").length, 1);
   assert.equal(ui.profileEvents.filter((detail) => detail.id === "two")[0].profile.name, "新的日报名字");
 });
+
+test("已验收但缺连接的应用保留工作区与设置产物入口，不回到制作面板", async () => {
+  const ui = await setup({ inspect: () => Response.json({ ...readyResult(),
+    architecture: architecture({ status: "passed", delivery: "needs_connection" }),
+    application: { pageReady: true, deliveryVersion: "accepted-one", manifest: { page: { entrypoint: "ui/index.html" } },
+      actions: [{ id: "sync", ready: false, missingConnections: ["business"] }] },
+  }) });
+  assert.equal(ui.runtime().status, "needs_connection");
+  assert.equal(ui.get("agent-making-panel").hidden, true);
+  assert.equal(ui.get("agent-conversation-actions").hidden, false);
+  assert.equal(ui.runtimeEvents.at(-1).application.pageReady, true);
+  const updated = requirements.map((item) => item.id === "one" ? { ...item, draft: { goal: { value: "新应用需求", source: "user" } } } : item);
+  await ui.emit("neuma:agents-changed", { items: updated, busy: false });
+  assert.equal(ui.runtime().application, null);
+  assert.equal(ui.get("agent-making-panel").hidden, false);
+});

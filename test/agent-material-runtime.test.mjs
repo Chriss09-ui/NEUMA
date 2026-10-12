@@ -44,7 +44,7 @@ test("只声明对话的正式 Agent 继承公共材料工具，纯图片附件�
   const result = await agents.prompt({ ...turn(), attachments: [{ id: attachment.id }] });
   assert.equal(result.status, "complete");
   const { options, prompts } = records[0];
-  assert.deepEqual(options.customTools.map((tool) => tool.name), ["list_materials", "read_material", "read_material_image"]);
+  assert.deepEqual(options.customTools.map((tool) => tool.name), ["list_materials", "read_material", "read_material_image", "web_search", "web_fetch"]);
   assert.equal(prompts[0].promptOptions.images.length, 1);
   assert.equal(prompts[0].promptOptions.images[0].mimeType, "image/png");
   assert.ok(Buffer.from(prompts[0].promptOptions.images[0].data, "base64").subarray(0, 8).equals(png.subarray(0, 8)));
@@ -92,7 +92,7 @@ test("冻结 v1 目录的旧正式定义可运行，不改原指令或业务工�
   await agents.prompt(turn("继续"));
   assert.equal((await agents.get("paper")).instructions, definition.instructions);
   assert.deepEqual((await agents.get("paper")).architectureRef, definition.architectureRef);
-  assert.equal(records[0].options.customTools.length, 3);
+  assert.equal(records[0].options.customTools.length, 5);
   agents.agents.get("paper").mode = "prototype";
   await assert.rejects(agents.prompt({ ...turn("不能跳过评估"), sessionId: "old-prototype-session" }), /尚未生成/);
 });
