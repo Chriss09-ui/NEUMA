@@ -6,6 +6,7 @@ import { button, messageRow, node, notice } from "./group-view.js";
 const api = createCollaborationApi(), byId = (id) => document.getElementById(id);
 let selected = null, records = [], operation = null, loading = false, loaded = false, sequence = 0;
 let retryRequest = null, page = "chat", listing = null, activationSequence = 0, activationRetry = null;
+let needsConversationReload = false, needsHistoryReload = false;
 const drafts = new Map();
 const ACTIVE_KEY = "neuma.main.active-conversation.v1";
 const materials = createMainMaterials({ api, current: () => selected, create, changed: controls,
@@ -20,13 +21,12 @@ try { historyCollapsed = localStorage.getItem(HISTORY_KEY) === "true"; } catch {
 function historyLayout() {
   byId("main-workspace").classList.toggle("history-collapsed", historyCollapsed);
   byId("main-history-body").inert = historyCollapsed; byId("main-history-body").setAttribute("aria-hidden", String(historyCollapsed));
-  byId("main-new-chat").inert = historyCollapsed; byId("main-new-chat").setAttribute("aria-hidden", String(historyCollapsed));
   const toggle = byId("main-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
   toggle.setAttribute("aria-expanded", String(!historyCollapsed)); toggle.setAttribute("aria-label", label); toggle.title = label;
 }
 function buildRequirement(agentId, requirement) {
   const record = requirement || selected?.context?.requirement;
-  if (!record || record.id !== agentId) return notice(byId("main-error"), "需求保存记录尚未确认，请刷新后重试制作。", true);
+  if (!record || record.id !== agentId) return showRecovery("需求保存记录尚未确认，请重新加载后重试制作。");
   document.dispatchEvent(new CustomEvent("neuma:main-requirement-saved", { detail: { requirement: record, build: true } }));
 }
 function applyContext(value, { reveal = false, force = false, syncRequirement = false } = {}) {
@@ -38,10 +38,17 @@ function applyContext(value, { reveal = false, force = false, syncRequirement = 
 const storage = { read() { try { return localStorage.getItem(ACTIVE_KEY); } catch { return null; } },
   write(id) { try { localStorage.setItem(ACTIVE_KEY, id); } catch { /* Server history remains authoritative. */ } } };
 
+function showRecovery(message, error = true, target = "main-error") {
+  if (target === "main-history-status") needsHistoryReload = true;
+  else needsConversationReload = true;
+  notice(byId(target), message, error); controls();
+}
 function controls() {
   byId("main-send").disabled = Boolean(loading || operation || materials.busy());
   byId("main-new-chat").disabled = Boolean(loading || operation || materials.busy());
   byId("main-refresh").disabled = Boolean(loading || operation || materials.busy());
+  byId("main-refresh").hidden = !(needsConversationReload || needsHistoryReload);
+  byId("main-recovery").hidden = byId("main-refresh").hidden;
   byId("main-upload").disabled = Boolean(loading || operation || materials.busy());
   byId("main-materials-open").disabled = Boolean(loading || operation || materials.busy());
   byId("main-cancel").hidden = !operation;
@@ -51,10 +58,14 @@ function render() {
   const target = byId("main-messages"), wasBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
   target.replaceChildren();
   byId("main-conversation-title").textContent = selected?.title || "一起推进你的工作";
+  byId("main-conversation-title").hidden = !selected?.messages?.length;
   if (!selected?.messages?.length) {
     const welcome = node("div", "collaboration-empty main-welcome");
-    welcome.append(node("span", "collaboration-empty-mark", "N"), node("h2", "", "今天，我们一起推进什么？"),
-      node("p", "muted-note", "你可以直接交代工作、联系某个智能体，或创建一个群组让成员共同完成任务。"));
+    const mark = node("span", "brand-mark main-welcome-mark"); mark.setAttribute("aria-hidden", "true");
+    const image = node("img"); image.src = "/assets/brand/neuma-mark.png"; image.alt = "";
+    image.width = 52; image.height = 52; image.draggable = false; mark.append(image);
+    welcome.append(mark, node("h2", "", "今天，想先完成什么？"),
+      node("p", "muted-note", "说说你的想法，或把材料发过来。\n整理资料、写文案、分析问题，都可以从这里开始。"));
     const actions = node("div", "main-welcome-actions");
     const groups = node("a", "secondary collaboration-action-link", "查看群组"); groups.href = "#groups";
     actions.append(groups); welcome.append(actions); target.append(welcome);
@@ -72,6 +83,7 @@ function render() {
 }
 async function select(id) {
   if (operation || loading || materials.busy()) return;
+  const unboundDraft = selected ? "" : byId("main-message").value;
   if (selected) drafts.set(selected.id, byId("main-message").value);
   const current = ++sequence; loading = true; controls();
   try {
@@ -79,20 +91,21 @@ async function select(id) {
     if (current !== sequence) return;
     if (result.conversation?.id !== id) throw new Error("主助理对话身份尚未确认，请重试。");
     selected = result.conversation; storage.write(id); retryRequest = null; materials.reset(); contextPanel.reset(selected.context);
-    byId("main-message").value = drafts.get(id) || "";
+    byId("main-message").value = drafts.get(id) ?? unboundDraft;
+    needsConversationReload = false;
     notice(byId("main-error"), ""); render();
-  } catch (error) { notice(byId("main-error"), error.message, true); }
+  } catch (error) { showRecovery(error.message); }
   finally { if (current === sequence) { loading = false; render(); } }
 }
 async function readList() {
   try {
     const result = await api.conversations();
     if (!Array.isArray(result.conversations)) throw new Error("主助理历史尚未确认。");
-    records = result.conversations; loaded = true;
+    records = result.conversations; loaded = true; needsHistoryReload = false;
     notice(byId("main-history-status"), records.length ? "" : "新的对话会自动保存。");
     render();
     if (!selected && records.length) await select(records.find((record) => record.id === storage.read())?.id || records[0].id);
-  } catch (error) { notice(byId("main-history-status"), `${error.message} 点击刷新重试。`, true); }
+  } catch (error) { showRecovery(`${error.message} 重新加载后重试。`, true, "main-history-status"); }
 }
 function list() { if (!listing) listing = readList().finally(() => { listing = null; }); return listing; }
 async function create({ preserveInput = true } = {}) {
@@ -105,8 +118,9 @@ async function create({ preserveInput = true } = {}) {
     if (!result.conversation?.id) throw new Error("新对话尚未保存，请重试。");
     selected = result.conversation; storage.write(selected.id); retryRequest = null; materials.reset(); contextPanel.reset(null);
     byId("main-message").value = preserveInput ? input : ""; drafts.set(selected.id, byId("main-message").value);
+    needsConversationReload = false;
     notice(byId("main-error"), ""); await list();
-  } catch (error) { notice(byId("main-error"), error.message, true); }
+  } catch (error) { showRecovery(error.message); }
   finally { loading = false; render(); byId("main-message").focus(); }
 }
 async function send() {
@@ -126,7 +140,7 @@ async function send() {
   const previous = selected.messages.length;
   const user = { role: "user", content: message, ...(attachmentIds.length ? { attachments: materials.attachments() } : {}) };
   selected.messages.push(user);
-  byId("main-message").value = ""; notice(byId("main-error"), ""); render();
+  byId("main-message").value = ""; needsConversationReload = false; notice(byId("main-error"), ""); render();
   try {
     const result = await api.mainTurn(id, request, { signal: running.controller.signal, onProgress(event) {
       if (operation !== running || running.controller.signal.aborted) return;
@@ -154,7 +168,7 @@ async function send() {
     selected.messages.splice(previous);
     if (running.reply.content) selected.messages.push(user, { ...running.reply, status: stopped ? "cancelled" : "error" });
     if (!byId("main-message").value.trim()) byId("main-message").value = message;
-    notice(byId("main-error"), stopped ? "本轮已停止，已保存的内容可刷新查看。" : `${error.message} 当前输入已保留，可重试或刷新。`, !stopped);
+    showRecovery(stopped ? "本轮已停止，已保存的内容可重新加载查看。" : `${error.message} 当前输入已保留，可重试或重新加载。`, !stopped);
   } finally {
     if (operation === running) operation = null;
     byId("main-progress").textContent = "主助理位于群外，帮你管理和联系所有智能体。";
@@ -175,8 +189,9 @@ async function activateRequirements(agentId) {
     if (token !== activationSequence || selected?.id !== id) return;
     if (result.conversation?.id !== id) throw new Error("需求对话身份尚未确认。");
     selected = result.conversation; applyContext(result.context || selected.context, { reveal: true, force: true, syncRequirement: true }); activationRetry = null;
+    needsConversationReload = false;
     notice(byId("main-error"), ""); render();
-  } catch (error) { if (token === activationSequence) notice(byId("main-error"), `${error.message} 原对话与输入已保留。`, true); }
+  } catch (error) { if (token === activationSequence) showRecovery(`${error.message} 原对话与输入已保留。`); }
   finally { if (token === activationSequence) { loading = false; controls(); byId("main-message").focus(); } }
 }
 byId("main-chat-form").addEventListener("submit", (event) => { event.preventDefault(); void send(); });
@@ -185,8 +200,7 @@ byId("main-refresh").addEventListener("click", async () => { if (selected) await
 byId("main-create-agent").addEventListener("click", () => void activateRequirements());
 byId("main-history-toggle").addEventListener("click", () => {
   historyCollapsed = !historyCollapsed;
-  if (historyCollapsed && (byId("main-history-body").contains?.(document.activeElement)
-    || document.activeElement === byId("main-new-chat"))) byId("main-history-toggle").focus();
+  if (historyCollapsed && byId("main-history-body").contains?.(document.activeElement)) byId("main-history-toggle").focus();
   historyLayout(); try { localStorage.setItem(HISTORY_KEY, String(historyCollapsed)); } catch { /* Only persistence is unavailable. */ }
 });
 byId("main-create-group").addEventListener("click", () => document.dispatchEvent(new CustomEvent("neuma:create-group")));
@@ -194,7 +208,7 @@ byId("main-cancel").addEventListener("click", async () => {
   const current = operation; if (!current) return;
   byId("main-cancel").disabled = true;
   try { await api.cancelMain(current.id); current.controller.abort(); }
-  catch (error) { notice(byId("main-error"), `停止尚未确认：${error.message}`, true); }
+  catch (error) { showRecovery(`停止尚未确认：${error.message}`); }
   finally { byId("main-cancel").disabled = false; }
 });
 document.addEventListener("neuma:route", (event) => {

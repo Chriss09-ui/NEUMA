@@ -109,23 +109,51 @@ test("群成员自主协作、能力和任务分开显示，离开群页不会�
   assert.equal(ui.get("group-message").value, "留在这个群的草稿");
 });
 
-test("群消息保留成员与用户身份、定向接收者和时间", async () => {
+test("群消息使用纯气泡，身份与定向接收者仅保留在无障碍标签和提示中", async () => {
   const state = detail(), createdAt = "2026-10-12T02:00:00.000Z";
   state.messages[0] = { ...state.messages[0], recipientId: "reviewer", createdAt };
   state.messages.push({ id: "message-two", seq: 2, sender: { type: "user", id: "user", name: "用户" },
-    content: "请继续检查", taskId: "task-one", status: "complete", createdAt });
+    content: "请检查写作助手的初稿", recipientId: "writer", taskId: "task-one", status: "complete", createdAt });
   state.lastSequence = 2;
   const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] } : state));
   await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
   const rows = ui.get("group-messages").children;
   assert.equal(rows.length, 2);
-  const identity = rows[0].children.find((item) => item.className === "collaboration-message-heading");
-  assert.equal(identity.children[0].className, "collaboration-message-avatar");
-  assert.equal(identity.children[0].textContent, "写"); assert.equal(identity.children[1].textContent, "写作助手");
-  assert.equal(identity.children[2].textContent, "→ 检查助手");
-  assert.equal(identity.children.find((item) => item.tagName === "TIME").dateTime, createdAt);
-  const userIdentity = rows[1].children.find((item) => item.className === "collaboration-message-heading");
-  assert.equal(userIdentity.children[0].textContent, "我"); assert.equal(userIdentity.children[1].textContent, "你");
+  for (const [index, role, sender, recipient] of [[0, "assistant", "写作助手", "检查助手"], [1, "user", "你", "写作助手"]]) {
+    const row = rows[index], body = row.children.find((item) => item.className === "bubble");
+    assert.equal(row.className, `message ${role}`); assert.equal(row.getAttribute("role"), "group");
+    assert.equal(row.getAttribute("aria-label"), `${sender}发送的消息，定向发送给${recipient}`);
+    assert.equal(row.getAttribute("title"), `${sender} → ${recipient}`);
+    assert.equal(body.textContent, state.messages[index].content);
+    assert.equal(row.querySelectorAll("*").some((item) => item.className.startsWith("collaboration-message-") || item.tagName === "TIME"), false);
+    assert.equal(textOf(row), state.messages[index].content);
+  }
+  assert.match(ui.text("group-members"), /写作助手/); assert.match(ui.text("group-members"), /检查助手/);
+});
+
+test("群纯气泡保留任务过滤、材料引用、成果入口和真实失败停止状态", async () => {
+  const state = detail();
+  state.messages[0] = { ...state.messages[0], content: "已整理 #agent/writer", status: "failed",
+    attachments: [{ id: "material-one", name: "研究资料.txt" }], actions: [{ href: "#group/one", label: "查看协作成果" }] };
+  state.messages.push({ id: "stopped", seq: 2, sender: { type: "agent", id: "reviewer" }, recipientId: "former-member",
+    content: "已保留检查结果", taskId: "task-one", status: "cancelled" },
+  { id: "other-task", seq: 3, sender: { type: "user" }, content: "另一项任务的消息", taskId: "task-two", status: "complete" });
+  state.tasks.push({ id: "task-two", goal: "另一项任务", status: "completed" }); state.lastSequence = 3;
+  const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] } : state));
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  assert.equal(ui.get("group-messages").children.length, 3);
+  await ui.get("group-tasks").children.find((item) => item.children[0].textContent === "整理报告").children[0].click();
+  const rows = ui.get("group-messages").children;
+  assert.deepEqual(rows.map((row) => row.dataset.messageId), ["message-one", "stopped"]);
+  assert.equal(rows[0].children.find((item) => item.className === "bubble").textContent, "已整理");
+  const material = rows[0].children.find((item) => item.className === "collaboration-links" && item.children.some((child) => child.tagName === "SPAN"));
+  assert.equal(material.children[0].textContent, "▧ 研究资料.txt");
+  const links = rows[0].children.find((item) => item.className === "collaboration-links" && item.children.some((child) => child.tagName === "A"));
+  assert.deepEqual(links.children.map((item) => item.href), ["#agent/writer", "#group/one"]);
+  assert.equal(links.children[1].textContent, "查看协作成果");
+  assert.match(textOf(rows[0]), /失败/); assert.match(textOf(rows[1]), /已停止/);
+  assert.equal(rows[1].getAttribute("aria-label"), "检查助手发送的消息，定向发送给former-member");
+  assert.equal(rows[1].children.find((item) => item.className === "bubble").textContent, "已保留检查结果");
 });
 
 test("群消息发送失败保留输入，重试复用同一个操作，不会重新派发任务", async () => {
@@ -241,6 +269,8 @@ test("主助理历史自动恢复，创建页面和群页不会清除它，来�
   const ui = setup(mainSource, async (path) => Response.json(path === "/api/main/conversations" ? { conversations: [conversation] }
     : path === "/api/activity" ? { agents: [], groups: [], tasks: [] } : { conversation }));
   await ui.route({ page: "chat" }); await settle();
+  assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
+  assert.equal(ui.get("main-conversation-title").hidden, false);
   assert.match(ui.text("main-messages"), /已查看/);
   const row = ui.get("main-messages").children[0];
   const links = row.children.find((item) => item.className === "collaboration-links");
@@ -250,6 +280,55 @@ test("主助理历史自动恢复，创建页面和群页不会清除它，来�
   await ui.route({ page: "create" }); await ui.route({ page: "group", groupId: "one" }); await ui.route({ page: "chat" }); await settle();
   assert.equal(ui.get("main-message").value, "未发送的主助理草稿");
   assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "main-one");
+  assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
+});
+
+test("主历史或详情首次读取失败后显示重新加载，恢复仅读取数据并保留未发送输入", async () => {
+  for (const failedSource of ["history", "conversation"]) {
+    const conversation = { id: "main-one", title: "已保存的工作", messages: [{ role: "assistant", content: "服务端保存的回复", status: "complete" }] };
+    const requests = []; let failing = true;
+    const ui = setup(mainSource, async (path, options = {}) => {
+      requests.push({ path, method: options.method || "GET" });
+      if (failing && (failedSource === "history" ? path === "/api/main/conversations" : path === "/api/main/conversations/main-one")) throw new Error("读取暂时中断");
+      return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+    });
+    await ui.route({ page: "chat" }); await settle();
+    assert.equal(ui.get("main-refresh").hidden, false, failedSource); assert.equal(ui.get("main-recovery").hidden, false, failedSource);
+    assert.match(ui.text(failedSource === "history" ? "main-history-status" : "main-error"), /读取暂时中断/);
+    ui.get("main-message").value = "尚未发送的工作要求";
+    failing = false; await ui.get("main-refresh").click(); await settle();
+    assert.match(ui.text("main-messages"), /服务端保存的回复/);
+    assert.equal(ui.get("main-message").value, "尚未发送的工作要求", failedSource);
+    assert.equal(ui.get("main-refresh").hidden, true, failedSource); assert.equal(ui.get("main-recovery").hidden, true, failedSource);
+    assert.equal(ui.text("main-history-status"), ""); assert.equal(ui.text("main-error"), "");
+    assert.equal(requests.every(({ method, path }) => method === "GET" && ["/api/main/conversations", "/api/main/conversations/main-one"].includes(path)), true);
+  }
+});
+
+test("主详情和历史的恢复状态独立，另一个读取成功不能隐藏仍然失败的重新加载入口", async () => {
+  const conversation = { id: "main-one", title: "持续工作", messages: [{ role: "assistant", content: "服务端已保存的内容", status: "complete" }] };
+  const requests = []; let failHistory = false, failConversation = false;
+  const ui = setup(mainSource, async (path, options = {}) => {
+    requests.push({ path, method: options.method || "GET" });
+    if (path.endsWith("/messages")) throw new Error("回复连接中断");
+    if (path === "/api/main/conversations" && failHistory) throw new Error("历史读取中断");
+    if (path === "/api/main/conversations/main-one" && failConversation) throw new Error("详情读取中断");
+    return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+  });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "继续分析材料";
+  failHistory = true; await ui.submit("main-chat-form"); await settle();
+  assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
+  await ui.get("main-refresh").click(); await settle();
+  assert.match(ui.text("main-messages"), /服务端已保存的内容/); assert.match(ui.text("main-history-status"), /历史读取中断/);
+  assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
+  failHistory = false; failConversation = true; await ui.get("main-refresh").click(); await settle();
+  assert.equal(ui.text("main-history-status"), ""); assert.match(ui.text("main-error"), /详情读取中断/);
+  assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
+  failConversation = false; await ui.get("main-refresh").click(); await settle();
+  assert.equal(ui.text("main-history-status"), ""); assert.equal(ui.text("main-error"), "");
+  assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
+  assert.equal(ui.get("main-message").value, "继续分析材料");
+  assert.deepEqual(requests.filter(({ method }) => method !== "GET"), [{ path: "/api/main/conversations/main-one/messages", method: "POST" }]);
 });
 
 test("主历史使用纯气泡，移除身份与时间但保留正文中的称呼", async () => {
@@ -281,6 +360,7 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   });
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "整理材料";
   await ui.submit("main-chat-form"); await settle();
+  assert.equal(ui.get("main-new-chat").disabled, true); assert.equal(ui.get("main-new-chat").hidden, false);
   let reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   assert.equal(reply.children.find((item) => item.className === "bubble").textContent, "正在处理…");
   assert.equal(reply.children.some((item) => item.className === "collaboration-message-heading"), false);
@@ -297,6 +377,8 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   streamController.close(); await settle();
   const completed = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   assert.equal(completed.children.find((item) => item.className === "bubble").classes.has("streaming"), false);
+  assert.equal(ui.get("main-new-chat").disabled, false); assert.equal(ui.get("main-new-chat").hidden, false);
+  assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
 });
 
 test("主历史异常纯气泡保留部分正文和真实失败、停止及中断状态", async () => {
@@ -327,8 +409,10 @@ test("主助理空白页只显示宽对话和可折叠历史，不读取常驻�
   ui.get("main-new-chat").focus();
   await ui.get("main-history-toggle").click();
   assertDisclosure(ui.get("main-history-body"), false); assert.equal(ui.get("main-history-toggle").hidden, false);
-  assertDisclosure(ui.get("main-new-chat"), false);
-  assert.equal(ui.document.activeElement, ui.get("main-history-toggle"));
+  assert.equal(ui.get("main-new-chat").hidden, false); assert.equal(ui.get("main-new-chat").inert === true, false);
+  assert.notEqual(ui.get("main-new-chat").getAttribute("aria-hidden"), "true");
+  assert.equal(ui.document.activeElement, ui.get("main-new-chat"));
+  assert.equal(ui.get("main-conversation-title").hidden, true);
   assert.equal(ui.get("main-history-toggle").title, "展开历史对话");
   assert.equal(ui.get("main-history-toggle").getAttribute("aria-expanded"), "false");
   assert.equal(ui.get("main-history-toggle").children[0], toggleIcon);
@@ -337,9 +421,10 @@ test("主助理空白页只显示宽对话和可折叠历史，不读取常驻�
   assert.equal(ui.get("main-message").value, "保留的草稿");
   const restored = setup(mainSource, async () => Response.json({ conversations: [] }), [...ui.stored]);
   assertDisclosure(restored.get("main-history-body"), false);
-  assertDisclosure(restored.get("main-new-chat"), false);
+  assert.equal(restored.get("main-new-chat").hidden, false); assert.equal(restored.get("main-new-chat").inert === true, false);
+  assert.notEqual(restored.get("main-new-chat").getAttribute("aria-hidden"), "true");
   await restored.get("main-history-toggle").click(); assertDisclosure(restored.get("main-history-body"), true);
-  assertDisclosure(restored.get("main-new-chat"), true);
+  assert.equal(restored.get("main-new-chat").hidden, false);
   assert.equal(restored.get("main-history-toggle").title, "收起历史对话");
 });
 
@@ -347,15 +432,18 @@ test("历史连续收起展开即时转移焦点，最终状态和草稿保持�
   const ui = setup(mainSource, async () => Response.json({ conversations: [] }));
   await ui.route({ page: "chat" }); await settle();
   ui.get("main-message").value = "动画期间保留的草稿";
-  const toggle = ui.get("main-history-toggle"); ui.get("main-new-chat").focus();
+  const toggle = ui.get("main-history-toggle"), historyItem = ui.document.createElement("button");
+  ui.get("main-history-body").append(historyItem); historyItem.focus();
   const closing = toggle.click();
   assert.equal(ui.document.activeElement, toggle);
-  assertDisclosure(ui.get("main-history-body"), false); assertDisclosure(ui.get("main-new-chat"), false);
+  assertDisclosure(ui.get("main-history-body"), false); assert.equal(ui.get("main-new-chat").hidden, false);
   await closing;
   for (let index = 0; index < 5; index++) {
+    ui.get("main-new-chat").focus();
     await toggle.click();
     const visible = index % 2 === 0;
-    assertDisclosure(ui.get("main-history-body"), visible); assertDisclosure(ui.get("main-new-chat"), visible);
+    assertDisclosure(ui.get("main-history-body"), visible); assert.equal(ui.get("main-new-chat").hidden, false);
+    assert.equal(ui.get("main-new-chat").inert === true, false); assert.equal(ui.document.activeElement, ui.get("main-new-chat"));
     assert.equal(ui.get("main-workspace").classes.has("history-collapsed"), !visible);
     assert.equal(toggle.getAttribute("aria-expanded"), String(visible));
     assert.equal(ui.get("main-message").value, "动画期间保留的草稿");
@@ -431,6 +519,7 @@ test("主助理仅在成功的群管理或群任务来源出现时通知群列�
     await ui.route({ page: "chat" }); await settle(); assert.equal(notifications, 0);
     ui.get("main-message").value = "完成当前操作"; await ui.submit("main-chat-form"); await settle();
     assert.equal(notifications, expected, JSON.stringify(source));
+    // Directly invoke the hidden recovery control to isolate history reads from new group actions.
     await ui.get("main-refresh").click(); await settle(); assert.equal(notifications, expected);
   }
 });
@@ -444,8 +533,9 @@ test("群变更触发的新列表优先于迟到的初始列表，主草稿保�
   assert.equal(ui.get("sidebar-group-list").children[0].textContent, "新的研究组"); assert.equal(ui.get("main-message").value, "下一条未发送主草稿");
 });
 
-test("主对话草稿按会话独立恢复，主动新对话空白而旧草稿保留", async () => {
-  const conversations = [{ id: "main-a", title: "对话 A", messages: [] }, { id: "main-b", title: "对话 B", messages: [] }];
+test("历史折叠后顶部新对话仍能创建空白会话，旧草稿按会话独立恢复", async () => {
+  const conversations = [{ id: "main-a", title: "对话 A", messages: [{ role: "assistant", content: "A 中已保存的工作", status: "complete" }] },
+    { id: "main-b", title: "对话 B", messages: [] }];
   const ui = setup(mainSource, async (path, options = {}) => {
     if (path === "/api/main/conversations" && options.method === "POST") {
       const conversation = { id: "main-new", title: "新对话", messages: [] }; conversations.push(conversation); return Response.json({ conversation });
@@ -454,7 +544,13 @@ test("主对话草稿按会话独立恢复，主动新对话空白而旧草稿�
   });
   const choose = async (title) => { await ui.get("main-history-list").children.find((item) => item.textContent === title).click(); await settle(); };
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "草稿 A";
+  assert.equal(ui.get("main-conversation-title").hidden, false);
+  await ui.get("main-history-toggle").click(); assertDisclosure(ui.get("main-history-body"), false);
+  assert.equal(ui.get("main-new-chat").hidden, false); assert.equal(ui.get("main-new-chat").disabled, false);
+  assert.equal(ui.get("main-new-chat").inert === true, false);
   await ui.get("main-new-chat").click(); await settle(); assert.equal(ui.get("main-message").value, "");
+  assert.equal(ui.get("main-conversation-title").hidden, true); assert.doesNotMatch(ui.text("main-messages"), /A 中已保存的工作/);
+  assertDisclosure(ui.get("main-history-body"), false); await ui.get("main-history-toggle").click();
   await choose("对话 B"); assert.equal(ui.get("main-message").value, ""); ui.get("main-message").value = "草稿 B";
   await choose("对话 A"); assert.equal(ui.get("main-message").value, "草稿 A");
   await choose("对话 B"); assert.equal(ui.get("main-message").value, "草稿 B");
@@ -470,6 +566,7 @@ test("创建或选择主对话失败保留当前输入，首次自动建对话�
   });
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "仍属于 A 的草稿";
   await ui.get("main-new-chat").click(); await settle(); assert.equal(ui.get("main-message").value, "仍属于 A 的草稿");
+  assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
   await ui.get("main-history-list").children[1].click(); await settle(); assert.equal(ui.get("main-message").value, "仍属于 A 的草稿");
   assert.equal(ui.text("main-conversation-title"), "对话 A");
   const writes = []; let created = false;
@@ -499,6 +596,7 @@ test("服务器已取消或明确失败后主动重发使用新请求，取消�
     await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "继续这个任务";
     await ui.submit("main-chat-form"); await settle();
     assert.equal(ui.get("main-message").value, "继续这个任务");
+    assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
     if (reason === "cancelled") {
       assert.match(ui.text("main-error"), /本轮已停止/); assert.equal(ui.get("main-error").classes.has("error"), false);
       assert.match(ui.text("main-messages"), /已停止/);
@@ -538,6 +636,7 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   assert.equal(writes[1].path, "/api/main/conversations/main-one/messages"); assert.equal(writes[1].body.message, "确认需求");
   assert.equal(events.filter((event) => event.build).length, 1); assert.deepEqual(events.find((event) => event.build).requirement, requirement);
   assert.match(ui.text("main-context-content"), /正在设计架构/);
+  // Re-reading a saved conversation must never replay its build action, even without a visible recovery control.
   await ui.get("main-refresh").click(); await settle(); assert.equal(events.filter((event) => event.build).length, 1);
   assert.equal(requests.includes("/api/requirements/turn"), false);
 });
@@ -553,8 +652,10 @@ test("需求激活未知结果保持主草稿和同一个幂等操作，迭代�
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "保留原主聊天输入";
   await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: { agentId: "existing-agent" } }); await settle();
   assert.equal(ui.get("main-message").value, "保留原主聊天输入"); assert.match(ui.text("main-error"), /原对话与输入已保留/);
+  assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
   await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: { agentId: "existing-agent" } }); await settle();
   assert.deepEqual(writes[1], writes[0]); assert.equal(writes[0].agentId, "existing-agent"); assert.match(ui.text("main-context-content"), /既有助手/);
+  assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
 });
 
 test("主聊天群任务上下文显示实际分工与结果，关闭只停止查看，重开恢复轮询", async () => {
@@ -606,6 +707,7 @@ test("上下文消失时关闭面板并将面板内焦点交回主输入", async
   const panel = ui.get("main-context-panel"), close = ui.get("main-context-close"); panel.append(close); close.focus();
   ui.get("main-message").value = "上下文消失也保留的草稿";
   conversation = { ...conversation, context: null };
+  // Invoke recovery directly to verify that the saved context replaces the open panel without losing the draft.
   await ui.get("main-refresh").click(); await settle();
   assertDisclosure(panel, false); assert.equal(ui.timers.size, 0);
   assert.equal(ui.get("main-context-open").hidden, true); assert.equal(ui.document.activeElement, ui.get("main-message"));
@@ -712,6 +814,24 @@ test("桌面主聊天统一需求输入，旧创建表单仅作为隐藏档案�
   assert.match(html, /id="main-message"/); assert.match(html, /id="group-message"/); assert.match(html, /id="main-create-agent"/);
   assert.match(html, /id="page-create"[^>]+hidden inert/); assert.match(html, /id="main-context-panel"[^>]+aria-hidden="true" inert/);
   assert.match(html, /class="main-context-slot"[^>]*>\s*<aside id="main-context-panel"/);
+  const mainPage = html.slice(html.indexOf('<section id="page-chat"'), html.indexOf('<dialog id="main-material-dialog"'));
+  assert.doesNotMatch(mainPage, /class="page-header"|与你持续对话，一起把想法变成可完成的工作。/);
+  const actions = mainPage.match(/<div class="main-conversation-actions">([\s\S]*?)<\/div>/)?.[1];
+  assert.ok(actions);
+  const newChat = mainPage.match(/<button id="main-new-chat"([^>]*)>([\s\S]*?)<\/button>/);
+  assert.ok(newChat); assert.equal(newChat[2], "新对话"); assert.match(newChat[1], /class="conversation-new-chat"/);
+  assert.doesNotMatch(newChat[1], /\bhidden\b|\binert\b|aria-hidden="true"/);
+  assert.match(mainPage, /<div class="conversation-bar">\s*<button id="main-new-chat"/);
+  assert.equal((mainPage.match(/id="main-new-chat"/g) || []).length, 1);
+  assert.doesNotMatch(mainPage.match(/<div class="main-history-heading">([\s\S]*?)<\/div>/)?.[1] || "", /id="main-new-chat"/);
+  assert.match(mainPage, /<span id="main-conversation-title"[^>]*hidden/);
+  for (const id of ["main-create-agent", "main-create-group", "main-context-open"]) {
+    assert.equal((mainPage.match(new RegExp(`id="${id}"`, "g")) || []).length, 1);
+    assert.ok(actions.includes(`id="${id}"`));
+  }
+  assert.doesNotMatch(actions, /id="main-refresh"/);
+  assert.equal((mainPage.match(/id="main-refresh"/g) || []).length, 1);
+  assert.match(mainPage, /<div id="main-recovery" class="collaboration-links" hidden>\s*<button id="main-refresh"[^>]*hidden[^>]*>重新加载<\/button>\s*<\/div>/);
   assert.equal(html.includes('id="main-activity"'), false);
   assert.equal(html.includes("主持人"), false);
 });

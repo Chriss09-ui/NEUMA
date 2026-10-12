@@ -38,6 +38,7 @@ const PUBLIC = new Map([
     [`/assets/avatars/${shape}-mask.png`, [`assets/avatars/${shape}-mask.png`, "image/png"]]),
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
   ["/shell.js", ["shell.js", "text/javascript; charset=utf-8"]],
+  ["/panel-resize.js", ["panel-resize.js", "text/javascript; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
   ["/skills.js", ["skills.js", "text/javascript; charset=utf-8"]],
   ["/skills-view.js", ["skills-view.js", "text/javascript; charset=utf-8"]],

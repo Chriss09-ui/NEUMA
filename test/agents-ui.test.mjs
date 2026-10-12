@@ -913,14 +913,25 @@ test("切换智能体保留各自输入，运行和回复不串到其他智能�
 test("新对话生成独立会话并停止旧任务，旧任务迟到的失败不能恢复到新对话", async () => {
   const partial = stream(), ui = await setup({ turn: () => partial.response });
   const pending = ui.submit("旧任务"); await settle();
-  const oldSession = ui.item().sessionId;
+  const oldConversation = ui.item(), oldSession = oldConversation.sessionId;
+  partial.send({ type: "text-delta", delta: "已完成的部分" }); await settle();
+  ui.get("agent-message").value = "旧对话下一项草稿";
   await ui.get("agent-new-chat").click();
+  assert.notEqual(ui.item().id, oldConversation.id);
   assert.notEqual(ui.item().sessionId, oldSession);
   assert.equal(ui.item().messages.length, 0);
   assert.equal(ui.get("agent-messages").children[0].className, "welcome");
+  assert.equal(ui.requests.find((request) => request.path === "/api/agents/turn").signal.aborted, true);
+  assert.equal(ui.requests.find((request) => request.path === "/api/agents/cancel").body.sessionId, oldSession);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
   partial.close(); await pending;
   assert.equal(ui.get("agent-message").value, "");
   assert.equal(ui.item().messages.length, 0);
+  const saved = ui.records.get(`one/${oldConversation.id}`);
+  assert.equal(saved.messages[1].content, "已完成的部分");
+  assert.equal(saved.messages[1].status, "stopped");
+  await ui.select(oldConversation.id);
+  assert.equal(ui.get("agent-message").value, "旧对话下一项草稿");
 });
 
 test("需求修改使产物过期待重新生成，保留可见消息且新版本不恢复旧上下文", async () => {
@@ -1169,6 +1180,14 @@ test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存",
   await ui.get("agent-history-toggle").click();
   assert.equal(ui.get("agent-workspace").classes.has("history-collapsed"), true);
   assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+  const previous = ui.item().id;
+  ui.get("agent-message").value = "旧对话草稿";
+  await ui.get("agent-new-chat").click();
+  assert.notEqual(ui.item().id, previous);
+  assert.equal(ui.get("agent-message").value, "");
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.get("agent-history-body").hidden, true);
+  assert.equal(ui.get("agent-conversation").hidden, false);
   const restored = await setup({ stored: ui.stored });
   assert.equal(restored.get("agent-history-body").hidden, true);
   assert.equal(restored.get("agent-history-toggle").attributes.get("aria-expanded"), "false");
