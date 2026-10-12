@@ -4,7 +4,7 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
   now = () => windowRef.performance.now(), watch = [] } = {}) {
   const noop = () => {};
   if (!layout?.getBoundingClientRect || !handle) return { refresh: noop, cancel: noop, dispose: noop };
-  let preferredWidth = defaultWidth, renderedWidth = defaultWidth, limits, dragging = null, disposed = false;
+  let preferredWidth = defaultWidth, renderedWidth = defaultWidth, limits, dragging = null, pointerY = null, disposed = false;
   try {
     storage ??= windowRef.localStorage;
     const stored = Number(storage?.getItem(storageKey));
@@ -12,6 +12,20 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
   } catch { /* Width adjustment remains usable without browser storage. */ }
   const clamp = (width) => Math.min(limits.max, Math.max(limits.min, width));
   const persist = () => { try { storage?.setItem(storageKey, String(preferredWidth)); } catch { /* Keep the preference in memory. */ } };
+  const placeGrip = () => {
+    if (pointerY === null) { handle.style.removeProperty("--panel-grip-y"); return; }
+    const { top, height } = handle.getBoundingClientRect();
+    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) return;
+    const inset = Math.min(14, height / 2);
+    handle.style.setProperty("--panel-grip-y", `${Math.min(height - inset, Math.max(inset, pointerY - top))}px`);
+  };
+  const followPointer = (event) => {
+    if (disposed || !isEnabled() || event.isPrimary === false || !Number.isFinite(event.clientY)) return;
+    pointerY = event.clientY; placeGrip();
+  };
+  const hover = (event) => { if (!dragging) followPointer(event); };
+  const leave = () => { if (!dragging) { pointerY = null; placeGrip(); } };
+  const focus = () => { if (!dragging && pointerY === null) placeGrip(); };
   const apply = () => {
     renderedWidth = clamp(preferredWidth);
     const closed = isCollapsed();
@@ -44,22 +58,25 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
     if (!enabled || (dragging && dragging.expectedCollapsed !== isCollapsed())) finish(false, false);
     handle.inert = !enabled; handle.tabIndex = enabled ? 0 : -1;
     handle.setAttribute("aria-hidden", String(!enabled));
-    handle.setAttribute("aria-disabled", String(!enabled)); apply();
+    handle.setAttribute("aria-disabled", String(!enabled));
+    if (!enabled) pointerY = null;
+    apply(); placeGrip();
   };
   const down = (event) => {
     if (disposed || dragging || event.button !== 0 || event.isPrimary === false || !Number.isFinite(event.clientX)) return;
     refresh(); if (!isEnabled()) return;
-    event.preventDefault(); handle.focus({ preventScroll: true });
+    followPointer(event); event.preventDefault(); handle.focus({ preventScroll: true });
     const closed = isCollapsed();
     dragging = { id: event.pointerId, x: event.clientX, renderedWidth: closed ? collapsedWidth : renderedWidth,
-      preferredWidth, minimum: null, delta: 0, startedCollapsed: closed, expectedCollapsed: closed,
+      preferredWidth, minimum: !closed && renderedWidth <= limits.min ? { at: now(), x: event.clientX } : null,
+      delta: 0, startedCollapsed: closed, expectedCollapsed: closed,
       phase: closed ? "revealing" : "resizing", opened: false, changed: false };
     apply(); layout.classList.add(closed ? "is-panel-revealing" : "is-panel-resizing");
     try { handle.setPointerCapture?.(event.pointerId); } catch { /* Window listeners still finish the drag. */ }
   };
   const move = (event) => {
     if (!dragging || event.pointerId !== dragging.id || !Number.isFinite(event.clientX)) return;
-    event.preventDefault();
+    event.preventDefault(); followPointer(event);
     dragging.delta = event.clientX - dragging.x;
     const rawWidth = dragging.renderedWidth + dragging.delta;
     if (dragging.phase === "revealing") {
@@ -74,11 +91,12 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
       if (!dragging.minimum) dragging.minimum = { at: now(), x: event.clientX };
       const continuingLeft = event.clientX < dragging.minimum.x;
       dragging.minimum.x = event.clientX;
-      const beyondLimit = limits.min - rawWidth;
-      // Crossing the limit once never collapses; a later deliberate pull does.
-      if (collapse && continuingLeft && now() - dragging.minimum.at >= 180 && beyondLimit >= 32) {
+      // Hold at the boundary; only fresh leftward movement after the pause folds it.
+      if (collapse && continuingLeft && now() - dragging.minimum.at >= 180) {
         finish(false, false); collapse(); refresh(); return;
       }
+      // Consume overshoot so moving right immediately widens from the boundary.
+      dragging.x = event.clientX; dragging.renderedWidth = limits.min;
     } else dragging.minimum = null;
     handle.classList.toggle("at-minimum", rawWidth <= limits.min);
     preferredWidth = clamp(Math.round(rawWidth)); apply();
@@ -107,7 +125,9 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
     preferredWidth = defaultWidth; refresh(); persist(); handle.focus({ preventScroll: true });
   };
   handle.setAttribute("role", "separator"); handle.setAttribute("aria-orientation", "vertical");
-  const listeners = [[handle, "pointerdown", down], [handle, "lostpointercapture", cancelPointer],
+  const listeners = [[handle, "pointerenter", hover], [handle, "pointermove", hover],
+    [handle, "pointerleave", leave], [handle, "focus", focus], [windowRef, "scroll", placeGrip, true],
+    [handle, "pointerdown", down], [handle, "lostpointercapture", cancelPointer],
     [handle, "keydown", keyboard], [handle, "dblclick", reset], [windowRef, "pointermove", move],
     [windowRef, "pointerup", up], [windowRef, "pointercancel", cancelPointer], [windowRef, "blur", cancel]];
   const targets = [...new Set([layout, ...watch].filter(Boolean))];
@@ -118,12 +138,12 @@ export function initPanelResize({ layout, handle, variable, storageKey, label, d
   const Mutation = windowRef.MutationObserver;
   const mutations = typeof Mutation === "function" ? new Mutation(refresh) : null;
   for (const target of targets) mutations?.observe(target, { attributes: true, attributeFilter: ["class", "hidden"] });
-  for (const [target, name, listener] of listeners) target.addEventListener(name, listener);
+  for (const [target, name, listener, options] of listeners) target.addEventListener(name, listener, options);
   refresh();
   return { refresh, cancel, dispose: () => {
     if (disposed) return;
     cancel(); disposed = true; observer?.disconnect(); mutations?.disconnect();
-    for (const [target, name, listener] of listeners) target.removeEventListener(name, listener);
+    for (const [target, name, listener, options] of listeners) target.removeEventListener(name, listener, options);
   } };
 }
 
