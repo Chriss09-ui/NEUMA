@@ -32,7 +32,7 @@ function profileFor(agent) {
 
 function refreshAvailability() {
   const id = currentId(), ready = Boolean(id && runtime?.definition), item = id ? state(id) : null;
-  byId("agent-details-unavailable").hidden = ready;
+  byId("agent-details-unavailable").hidden = ready || view === "connections";
   for (const name of ["name", "description", "icon"]) byId(`agent-profile-${name}`).disabled = !ready;
   byId("agent-profile-custom-icon").disabled = !ready;
   byId("agent-avatar-reset").disabled = !ready;
@@ -97,7 +97,7 @@ function selectView(next) {
   const previousHeight = animate ? dialog.getBoundingClientRect().height : 0;
   if (changed) stopViewTransitions();
   view = next; dialog.dataset.view = view;
-  for (const tab of ["memory", "profile"]) {
+  for (const tab of ["memory", "profile", "connections"]) {
     byId(`agent-details-${tab}`).hidden = tab !== view;
     byId(`agent-details-${tab}-tab`).setAttribute("aria-pressed", String(tab === view));
   }
@@ -106,6 +106,7 @@ function selectView(next) {
   refreshAvailability();
   if (view === "profile") renderProfile();
   if (view === "memory") { renderMemory(); if (runtime.definition) void loadMemory(currentId()); }
+  emit("neuma:agent-connections-view", { agentId: currentId(), active: view === "connections" });
   if (animate) {
     const nextHeight = dialog.getBoundingClientRect().height;
     viewTransitions = [
@@ -328,14 +329,19 @@ byId("agent-profile-form").addEventListener("submit", async (event) => {
 });
 
 for (const trigger of ["agent-panel-toggle", "agent-identity-edit"]) byId(trigger).addEventListener("click", () => openPanel("profile", trigger));
-for (const tab of ["memory", "profile"]) byId(`agent-details-${tab}-tab`).addEventListener("click", () => selectView(tab));
+for (const tab of ["memory", "profile", "connections"]) byId(`agent-details-${tab}-tab`).addEventListener("click", () => selectView(tab));
+document.addEventListener("neuma:agent-connections-open", () => openPanel("connections", "agent-panel-toggle"));
 byId("agent-details-close").addEventListener("click", () => dialog.close());
 dialog.addEventListener("close", () => {
   stopViewTransitions();
+  emit("neuma:agent-connections-view", { agentId: currentId(), active: false });
   if (currentId() && currentId() === settingsAgentId) byId(returnFocus).focus({ preventScroll: true });
 });
 byId("agent-file-close").addEventListener("click", () => fileDialog.close());
 byId("agent-artifacts-open").addEventListener("click", openArtifacts);
+document.addEventListener("neuma:agent-artifacts-changed", (event) => {
+  if (currentId() === event.detail.agentId && runtime?.definition) void loadFiles(currentId());
+});
 fileDialog.addEventListener("close", () => {
   if (fileDialog.open) return;
   const id = fileFocus?.agentId; fileFocus = null;

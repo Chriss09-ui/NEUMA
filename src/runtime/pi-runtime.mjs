@@ -185,7 +185,7 @@ function controlledResources(sdk, systemPrompt) {
   };
 }
 
-export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT, maxOutputTokens = modelOutputBudget(config) }) {
+export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT, maxOutputTokens = modelOutputBudget(config), beforeModelRequest }) {
   const knownLimits = knownModelLimits(config);
   const outputLimit = knownLimits?.maxOutputTokens ?? 16_384;
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens > outputLimit)
@@ -218,10 +218,17 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
     },
   });
   const transport = new EnvHttpProxyAgent({ headersTimeout: 0, bodyTimeout: 0, allowH2: false, proxyTunnel: true });
+  const anonymousModel = config.modelAuthType === "none";
   let connectionFailed = false;
-  const fetchModel = (input, options) => {
+  const fetchModel = async (input, options) => {
+    options?.signal?.throwIfAborted();
     if (connectionFailed) throw new Error("Model connection retries exhausted");
-    return transportFetch(input, { ...options, dispatcher: transport });
+    // Runs on every HTTP attempt, including SDK retries and tool continuations.
+    await beforeModelRequest?.({ signal: options?.signal });
+    options?.signal?.throwIfAborted();
+    const headers = anonymousModel ? new Headers(options?.headers ?? input?.headers) : undefined;
+    headers?.delete("authorization");
+    return transportFetch(input, { ...options, ...(headers ? { headers } : {}), dispatcher: transport });
   };
   try {
   modelRuntime.registerProvider("neuma", {
@@ -236,7 +243,8 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
       ...(mimo
         ? { samplingParams: { thinking: { type: "disabled" } } } : {}) }],
   });
-  await modelRuntime.setRuntimeApiKey("neuma", config.apiKey);
+  // Pi requires a nonempty key even for an anonymous endpoint; the transport strips the synthetic header.
+  await modelRuntime.setRuntimeApiKey("neuma", anonymousModel ? "neuma-anonymous-placeholder" : config.apiKey);
   const { session } = await sdk.createAgentSession({
     cwd, agentDir: join(dataDir, "pi"), modelRuntime, model: modelRuntime.getModel("neuma", config.model),
     thinkingLevel: "off", resourceLoader: controlledResources(sdk, systemPrompt),

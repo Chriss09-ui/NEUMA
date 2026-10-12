@@ -220,7 +220,7 @@ async function deleteConversation(id, cid) {
 function runtime(agent) {
   if (!runtimes.has(agent.id)) runtimes.set(agent.id, {
     status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, architecture: null, development: null, operation: null, inspection: null, sequence: 0,
-    error: "", label: "", inspectionError: false, rebuildRequested: false,
+    error: "", label: "", inspectionError: false, rebuildRequested: false, application: null,
   });
   return runtimes.get(agent.id);
 }
@@ -339,7 +339,7 @@ function renderControls(agent) {
 }
 
 function renderMaking(agent) {
-  const state = runtime(agent), making = state.status !== "ready" && !conversation(agent.id).turn;
+  const state = runtime(agent), making = state.status !== "ready" && !state.application?.pageReady && !conversation(agent.id).turn;
   byId("agent-making-panel").hidden = !making;
   byId("agent-history-sidebar").hidden = making;
   byId("agent-conversation").hidden = making;
@@ -418,6 +418,7 @@ function broadcastRuntime(agent = current()) {
       agentId: agent.id, agent: structuredClone(agent), definition: state.definition ? structuredClone(state.definition) : null,
       architecture: state.architecture ? structuredClone(state.architecture) : null,
       development: state.development ? structuredClone(state.development) : null,
+      application: state.application ? structuredClone(state.application) : null,
       developmentAction: development.canStart || development.canResume ? development.actionLabel : null,
       status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || item.storageError || state.error,
     } }));
@@ -552,6 +553,7 @@ function inspectAgent(agent, refresh = false) {
       state.definition = result.agent ?? null;
       state.architecture = result.architecture ?? null;
       state.development = result.development ?? null;
+      state.application = result.application ?? null;
       state.error = "";
       Object.assign(state, agentBuildState(agent, result));
       syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
@@ -588,6 +590,7 @@ async function buildAgent(id, queueIfBusy = false) {
   state.status = "building";
   state.architecture = null;
   state.development = null;
+  state.application = null;
   state.error = item.error = "";
   state.inspectionError = false;
   state.label = "正在设计与检查…";
@@ -612,6 +615,7 @@ async function buildAgent(id, queueIfBusy = false) {
     state.definition = result.agent ?? null;
     state.architecture = result.architecture ?? null;
     state.development = result.development ?? null;
+    state.application = result.application ?? null;
     Object.assign(state, agentBuildState(agent, result));
     if (state.status === "ready") item.sessionId = crypto.randomUUID();
     syncProfile(id, result.profile || result.agent?.profile, profileVersion);
@@ -649,6 +653,7 @@ function applyDevelopmentResult(agent, state, result) {
   state.definition = result.agent ?? null;
   state.architecture = result.architecture ?? null;
   state.development = result.development ?? null;
+  state.application = result.application ?? null;
   Object.assign(state, agentBuildState(agent, result));
 }
 
@@ -866,6 +871,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
     state.sequence++;
     state.operation?.controller.abort();
     state.status = "stale";
+    state.application = null;
     state.label = "";
     state.error = "";
     state.inspectionError = false;
@@ -900,6 +906,17 @@ document.addEventListener("neuma:agent-development-stop", (event) => stopDevelop
 document.addEventListener("neuma:agent-runtime-request", (event) => {
   const agent = agents.find((item) => item.id === (event.detail?.agentId ?? route.agentId));
   if (agent) broadcastRuntime(agent);
+});
+document.addEventListener("neuma:agent-application-loaded", (event) => {
+  const { agentId, application, revision } = event.detail;
+  const agent = agents.find((item) => item.id === agentId);
+  if (!agent || runtime(agent).definition?.revision !== revision || runtime(agent).operation || runtime(agent).status === "stale") return;
+  runtime(agent).application = application;
+  if (visible(agentId)) renderControls(agent);
+});
+document.addEventListener("neuma:agent-connections-changed", (event) => {
+  const agent = agents.find((item) => item.id === event.detail.agentId);
+  if (agent) void inspectAgent(agent, true);
 });
 document.addEventListener("neuma:agent-profile-changed", (event) => {
   const { id } = event.detail ?? {};

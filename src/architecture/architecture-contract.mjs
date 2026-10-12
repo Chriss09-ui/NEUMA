@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { InputError, normalizeDraft, decideNext } from "../requirements/core.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
+export const CURRENT_ARCHITECTURE_VERSION = 2;
+export const supportedArchitectureVersion = (record) => [1, 2].includes(record?.contractVersion)
+  && record.contractVersion === (record?.design?.schemaVersion ?? 1);
+export const requiresDevelopment = (design) => ["workflow", "custom"].includes(design?.profile)
+  || design?.interaction?.page === true || design?.interaction?.operations === true;
 export const CAPABILITY_CATALOG_VERSION = 2;
 export const LEGACY_CAPABILITIES = Object.freeze([
   { id: "conversation", status: "available", scope: "基于用户提供的文本进行对话与生成；不包含联网检索、外部动作或定时运行。" },
@@ -61,7 +66,7 @@ const references = (minItems = 0) => ({ ...list(identifier, minItems), uniqueIte
 const issueSchema = object({ id: identifier, blocking: { type: "boolean" }, description: text(), remedy: text() });
 const REVIEW_CHECKS = ["requirements", "feasibility", "minimality", "interfaces", "failure_handling", "verification"];
 
-export const DESIGN_SCHEMA = object({
+export const LEGACY_DESIGN_SCHEMA = object({
   profile: choice("light", "workflow", "custom"),
   rationale: text(4000),
   instructions: text(12_000),
@@ -82,6 +87,20 @@ export const DESIGN_SCHEMA = object({
   }), 3),
   unknowns: list(object({ question: text(), blocking: { type: "boolean" }, resolution: text() })),
 });
+
+export const INTERACTION_SCHEMA = object({
+  defaultEntry: choice("conversation", "application"), page: { type: "boolean" }, operations: { type: "boolean" },
+  inputs: text(), results: text(), persistentData: text(),
+});
+export const CONNECTION_SCHEMA = object({ id: identifier, purpose: choice("search", "model", "business"),
+  required: { type: "boolean" }, description: text(), operations: list(object({
+    id: identifier, method: choice("GET", "POST", "PUT", "PATCH", "DELETE"), path: text(500), input: text(), output: text(), safeTest: { type: "boolean" },
+  }), 0, 40),
+});
+export const DESIGN_V2_SCHEMA = object({ ...LEGACY_DESIGN_SCHEMA.properties, schemaVersion: { type: "integer", enum: [2] },
+  interaction: INTERACTION_SCHEMA, connections: list(CONNECTION_SCHEMA, 0, 40) });
+// The tool accepts both generations; validation below selects an exact version.
+export const DESIGN_SCHEMA = { ...DESIGN_V2_SCHEMA, required: LEGACY_DESIGN_SCHEMA.required };
 
 export const REVIEW_SCHEMA = object({
   candidateHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
@@ -111,6 +130,8 @@ function validateSchema(value, schema, path = "design") {
         || (schema.maxLength && value.length > schema.maxLength)
         || (schema.pattern && !new RegExp(schema.pattern).test(value))
         || (schema.enum && !schema.enum.includes(value))) fail(`${path} 文本或取值无效`);
+  } else if (schema.type === "integer") {
+    if (!Number.isSafeInteger(value) || (schema.enum && !schema.enum.includes(value))) fail(`${path} 版本无效`);
   } else if (typeof value !== "boolean") fail(`${path} 必须为布尔值`);
 }
 
@@ -140,11 +161,31 @@ export function requirementItems(value) {
   items.push({ id: "externalAction", text: action.mode === "none" ? "边界：不执行对外动作"
     : `对外动作：${action.operation}；目标：${action.target}；范围：${action.scope}；触发：${action.trigger}` });
   items.push(...draft.capabilityDependencies.map((item, index) => ({ id: `capability_${index + 1}`, text: `能力依赖：${item}` })));
+  if (draft.interaction) {
+    const { operations, ...interaction } = draft.interaction;
+    items.push({ id: "interaction", text: `交互：${JSON.stringify(interaction)}` });
+    items.push(...operations.map((operation, index) => ({ id: `operation_${index + 1}`, text: `页面操作：${operation}` })));
+  }
+  items.push(...(draft.connections ?? []).map((connection, index) => ({ id: `connection_${index + 1}`, text: `服务依赖：${JSON.stringify(connection)}` })));
   return items;
 }
 
 export function validateDesign(value, { requirements, capabilities = CAPABILITIES, evidence = [] } = {}) {
-  validateSchema(value, DESIGN_SCHEMA);
+  validateSchema(value, value?.schemaVersion === 2 ? DESIGN_V2_SCHEMA : LEGACY_DESIGN_SCHEMA);
+  if (value.schemaVersion === 2) {
+    if (value.interaction.defaultEntry === "application" && !value.interaction.page) fail("应用入口必须交付页面");
+    uniqueIds(value.connections, "connections");
+    for (const connection of value.connections) {
+      uniqueIds(connection.operations, "connection.operations");
+      if (connection.purpose !== "business" && connection.operations.length) fail("仅业务连接可以声明业务操作");
+      if (connection.purpose === "business" && !connection.operations.length) fail("业务连接必须声明实际操作");
+      for (const operation of connection.operations) {
+        if (!operation.path.startsWith("/") || operation.path.startsWith("//") || /[\\\x00-\x20?#]/.test(operation.path)
+          || operation.path.split("/").includes("..")) fail("业务操作必须使用固定安全相对路径");
+        if (operation.safeTest && !["GET"].includes(operation.method)) fail("无副作用连接测试只允许 GET");
+      }
+    }
+  }
   if (!Array.isArray(requirements) || !requirements.length) fail("缺少已确认的需求清单");
   for (const requirement of requirements) validateSchema(requirement, object({ id: identifier, text: text(4000) }), "requirements");
   const requirementIds = uniqueIds(requirements, "requirements");
@@ -214,17 +255,17 @@ export function checkDesign(value, context) {
   for (const capability of design.capabilities) {
     if (capability.status !== "available") issues.push({
       id: `capability_${capability.id}`,
-      blocking: capability.status === "unverified" || design.profile === "light",
+      blocking: capability.status === "unverified" || !requiresDevelopment(design),
       description: `能力 ${capability.id} 尚未可用：${capability.reason}`,
       remedy: "明确连接或开发路径并验证实际能力；无法验证时保留为未就绪。",
     });
   }
-  if (design.profile === "light" && design.state.mode === "persistent") issues.push({
+  if (!requiresDevelopment(design) && design.state.mode === "persistent") issues.push({
     id: "persistent_state", blocking: true,
     description: "轻量执行器未提供自主维护的持久状态。",
     remedy: "将状态缩减为任务上下文，或选择 workflow/custom 并说明实现路径。",
   });
-  return { issues, runnable: design.profile === "light"
+  return { issues, runnable: !requiresDevelopment(design)
     && design.state.mode !== "persistent"
     && design.capabilities.every((item) => item.status === "available")
     && !issues.some((item) => item.blocking) };

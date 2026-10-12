@@ -213,7 +213,7 @@ test("持久化与重启保持需求、Agent ID、候选哈希和评估绑定，
   const reply = await restored.prompt(turn());
   assert.equal(reply.status, "complete");
   const runtime = records.find((record) => record.role === "runtime");
-  assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), PUBLIC_TOOL_IDS);
+  assert.deepEqual(runtime.options.customTools.map((tool) => tool.name), [...PUBLIC_TOOL_IDS, "web_search", "web_fetch"]);
   assert.deepEqual((await restored.get("weekly")).toolIds, []);
 });
 
@@ -226,7 +226,7 @@ test("历史正式定义继承公共材料工具，旧目录、指令与执行�
   await agents.close();
   const restored = new PrototypeAgents(options); t.after(() => restored.close());
   assert.equal((await restored.prompt(turn())).status, "complete");
-  assert.deepEqual(records.find((record) => record.role === "runtime").options.customTools.map((tool) => tool.name), PUBLIC_TOOL_IDS);
+  assert.deepEqual(records.find((record) => record.role === "runtime").options.customTools.map((tool) => tool.name), [...PUBLIC_TOOL_IDS, "web_search", "web_fetch"]);
   const compatible = await restored.build(input());
   assert.equal(compatible.agent.revision, original.agent.revision);
   assert.equal(compatible.agent.instructions, original.agent.instructions);

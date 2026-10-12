@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
-import { designHash, ARCHITECTURE_VERSION } from "../architecture/architecture-contract.mjs";
-import { PLAN_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
+import { designHash, supportedArchitectureVersion, requiresDevelopment } from "../architecture/architecture-contract.mjs";
+import { PLAN_SCHEMA, PLAN_V2_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
 import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT } from "./development-prompts.mjs";
 import { compactDevelopmentContext, createContextReadTool } from "./development-context.mjs";
+import { bindApplicationManifest } from "../applications/application-contract.mjs";
+import { WebCapabilities, createWebTools, WEB_RUNTIME_PROMPT, networkAllowed } from "../runtime/web-capabilities.mjs";
 import { AgentStorage } from "../agents/agent-storage.mjs";
 
 const LABELS = { intake: "正在接收设计与准备工作区…", planning: "正在拆分并检查研发任务…",
@@ -41,12 +43,13 @@ export function developmentSummary(record) {
 }
 
 export class DevelopmentController {
-  constructor({ config, cwd, dataDir, storage, sessionFactory = createPiSession, store, workspace, executor, getArchitecture, limits = {} }) {
+  constructor({ config, cwd, dataDir, storage, sessionFactory = createPiSession, store, workspace, executor, getArchitecture, web, limits = {} }) {
     Object.assign(this, { config, cwd, dataDir, sessionFactory, getArchitecture });
     this.storage = storage ?? store?.storage ?? workspace?.storage ?? new AgentStorage({ dataDir });
     this.store = store ?? new DevelopmentStore({ dataDir, storage: this.storage });
     this.workspace = workspace ?? new DevelopmentWorkspace({ dataDir, storage: this.storage });
     this.executor = executor ?? new DevelopmentExecutor();
+    this.web = web ?? new WebCapabilities();
     this.limits = { ...DEFAULT_LIMITS, ...limits };
     this.active = new Map();
   }
@@ -118,7 +121,7 @@ export class DevelopmentController {
 
   async role(ctx, { kind, tools = [], validate, counter, limit }) {
     const name = kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review";
-    const schemas = { planner: PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
+    const schemas = { planner: ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
     const handle = { kind, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false };
     const submit = { name, label: "提交阶段结果", description: "提交经过结构校验的阶段结果；提交不表示整体通过。",
       parameters: schemas[kind], executionMode: "sequential", execute: async (_id, value) => {
@@ -129,7 +132,9 @@ export class DevelopmentController {
         handle.session?.setAutoCompactionEnabled?.(false);
         return { ...toolResult({ submitted: true }), terminate: true };
       } };
-    const guardedTools = [...tools, createContextReadTool(() => handle.payload)].map((tool) => ({ ...tool, execute: async (...args) => {
+    const webTools = kind === "reviewer" ? [] : createWebTools({ web: this.web, agentId: ctx.record.agentId,
+      scope: `development:${ctx.record.id}`, signal: ctx.signal, allowNetwork: networkAllowed(ctx.record.architecture.requirements) });
+    const guardedTools = [...tools, ...webTools, createContextReadTool(() => handle.payload)].map((tool) => ({ ...tool, execute: async (...args) => {
       this.guard(ctx);
       if (!handle.accepting || handle.submitted) throw new InputError("当前阶段不能继续修改或读取工具，请等待下一项工作");
       const result = await tool.execute(...args);
@@ -137,7 +142,7 @@ export class DevelopmentController {
     } }));
     handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
-      systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind],
+      systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind] + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT),
       customTools: [...guardedTools, submit], maxOutputTokens: modelOutputBudget(this.config, { planner: 8192, developer: 16384, reviewer: 4096 }[kind]) });
     if (kind === "developer") handle.session.setAutoCompactionEnabled?.(false);
     ctx.handles.add(handle);
@@ -206,7 +211,7 @@ export class DevelopmentController {
   base(ctx) {
     const r = ctx.record;
     return { architectureRef: r.architectureRef, requirements: r.architecture.requirements,
-      design: r.architecture.design, entrypoint: r.plan?.entrypoint,
+      design: r.architecture.design, entrypoint: r.plan?.entrypoint, runtime: r.plan?.runtime, application: r.plan?.application,
       handoffs: r.handoffs.slice(-12), remaining: r.budgets };
   }
 
@@ -261,7 +266,7 @@ export class DevelopmentController {
     const selected = new Set(ctx.record.tasks.filter((item) => item.status === "verified").map((item) => item.id));
     if (task) selected.add(task.id);
     const cases = !task || task.integration ? ctx.record.plan.cases : ctx.record.plan.cases.filter((item) => selected.has(item.taskId));
-    const report = await this.executor.verify({ snapshot, entrypoint: ctx.record.plan.entrypoint, cases,
+    const report = await this.executor.verify({ snapshot, entrypoint: ctx.record.plan.entrypoint, cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, validateResources: !task || Boolean(task.integration),
       stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
     this.guard(ctx);
     if (report.codeHash !== snapshot.hash) throw new Stop("测试证据对应的代码版本不一致", "failed");
@@ -284,7 +289,7 @@ export class DevelopmentController {
           execute: async () => {
             const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
             const report = await this.executor.verify({ snapshot, entrypoint: ctx.record.plan.entrypoint,
-              cases: ctx.record.plan.cases, stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
+              cases: ctx.record.plan.cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
             this.guard(ctx);
             const evidence = { ...report, id: randomUUID(), mode: "self_test", planHash: ctx.record.planHash };
             ctx.record.reports.push(evidence); await this.save(ctx);
@@ -332,10 +337,10 @@ export class DevelopmentController {
   }
 
   async run(architecture, { signal, onProgress = () => {}, resume = false, activate } = {}) {
-    if (architecture?.status !== "passed" || architecture.contractVersion !== ARCHITECTURE_VERSION
+    if (architecture?.status !== "passed" || !supportedArchitectureVersion(architecture)
       || architecture.candidateHash !== designHash(architecture.design) || architecture.review?.verdict !== "pass"
       || architecture.review.candidateHash !== architecture.candidateHash || architecture.issues?.some((issue) => issue.blocking)
-      || !["workflow", "custom"].includes(architecture.design.profile)) throw new InputError("请先完成可交接的流程或专用程序架构评估");
+      || !requiresDevelopment(architecture.design)) throw new InputError("请先完成可交接的流程或专用程序架构评估");
     const agentId = architecture.agentId;
     if (this.active.has(agentId)) throw new InputError("这个 Agent 正在研发，请等待完成或停止");
     const controller = new AbortController();
@@ -400,7 +405,9 @@ export class DevelopmentController {
         }
         await this.phase(ctx, "packaging");
         ctx.record.package = { id: `pkg_${randomUUID()}`, buildId: ctx.record.id, architectureRef: ctx.record.architectureRef, codeHash: snapshot.hash,
-          planHash: ctx.record.planHash, entrypoint: ctx.record.plan.entrypoint, runtime: "node-json", snapshot,
+          planHash: ctx.record.planHash, entrypoint: ctx.record.plan.entrypoint, runtime: ctx.record.plan.runtime, snapshot,
+          ...(ctx.record.plan.runtime === "node-action" ? { protocolVersion: 2,
+            application: bindApplicationManifest(ctx.record.plan.application, snapshot, [result.report.id]) } : {}),
           verificationId: result.report.id };
         (ctx.record.deliveries ??= []).push({ package: clone(ctx.record.package), status: "verified" });
         await this.save(ctx);

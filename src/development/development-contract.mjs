@@ -1,3 +1,5 @@
+import { validateApplicationManifest, validateActionInput } from "../applications/application-contract.mjs";
+import { ACTION_CAPABILITIES } from "./node-action-bootstrap.mjs";
 import { createHash } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 
@@ -9,7 +11,7 @@ const object = (properties) => ({ type: "object", properties, required: Object.k
 const references = (minItems = 0) => ({ ...list(identifier, minItems), uniqueItems: true });
 const paths = (minItems = 0) => ({ ...list(text(500), minItems), uniqueItems: true });
 
-export const PLAN_SCHEMA = object({
+export const LEGACY_PLAN_SCHEMA = object({
   summary: text(), runtime: choice("node-json"), entrypoint: text(500),
   tasks: list(object({
     id: identifier, title: text(200), description: text(), requirementIds: references(1),
@@ -20,6 +22,16 @@ export const PLAN_SCHEMA = object({
     assertions: list(object({ path: text(500, 0), expectedJson: text(60_000) }), 1, 40),
   }), 1, 200),
 });
+
+const actionCase = object({ ...LEGACY_PLAN_SCHEMA.properties.cases.items.properties,
+  actionId: identifier,
+  mocks: list(object({ capability: text(100), argsJson: text(60_000), resultJson: text(60_000) }), 0, 100),
+});
+export const PLAN_V2_SCHEMA = object({ ...LEGACY_PLAN_SCHEMA.properties,
+  schemaVersion: { type: "integer", enum: [2] }, runtime: choice("node-action"),
+  application: { type: "object", properties: {}, required: [], additionalProperties: true }, cases: list(actionCase, 1, 200),
+});
+export const PLAN_SCHEMA = LEGACY_PLAN_SCHEMA;
 
 export const REVIEW_SCHEMA = object({
   subjectHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
@@ -43,7 +55,7 @@ function validateSchema(value, schema, path) {
       || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail(`${path} 必须为对象`);
     for (const key of schema.required) if (!Object.hasOwn(value, key)) fail(`${path}.${key} 缺失`);
     for (const key of Object.keys(value)) {
-      if (!Object.hasOwn(schema.properties, key)) fail(`${path} 包含不支持的字段`);
+      if (!Object.hasOwn(schema.properties, key)) { if (schema.additionalProperties === true) continue; fail(`${path} 包含不支持的字段`); }
       validateSchema(value[key], schema.properties[key], `${path}.${key}`);
     }
   } else if (schema.type === "array") {
@@ -56,6 +68,8 @@ function validateSchema(value, schema, path) {
       || (schema.maxLength && value.length > schema.maxLength)
       || (schema.pattern && !new RegExp(schema.pattern).test(value))
       || (schema.enum && !schema.enum.includes(value))) fail(`${path} 文本或取值无效`);
+  } else if (schema.type === "integer") {
+    if (!Number.isSafeInteger(value) || (schema.enum && !schema.enum.includes(value))) fail(`${path} 版本无效`);
   } else if (typeof value !== "boolean") fail(`${path} 必须为布尔值`);
 }
 
@@ -94,7 +108,27 @@ function safeAssertionPath(value) {
 }
 
 export function validatePlan(value, { architecture, previousPlan } = {}) {
-  validateSchema(value, PLAN_SCHEMA, "plan");
+  if (architecture?.design?.schemaVersion === 2 && (value?.schemaVersion !== 2 || value?.runtime !== "node-action")) {
+    fail("已批准的 v2 架构必须使用 schemaVersion=2 和 node-action，不能降级为旧执行协议");
+  }
+  validateSchema(value, value?.schemaVersion === 2 ? PLAN_V2_SCHEMA : LEGACY_PLAN_SCHEMA, "plan");
+  if (value.schemaVersion === 2) {
+    validateApplicationManifest(value.application, { allowUnverified: true });
+    if (value.application.entrypoint !== value.entrypoint) fail("应用入口与研发入口不一致");
+    if (architecture?.design?.interaction && architecture.design.interaction.page !== Boolean(value.application.page)) fail("页面交付必须匹配已评估的交互形式");
+    const connections = new Set((architecture?.design?.connections ?? []).map((item) => item.id));
+    for (const action of value.application.actions) for (const id of action.connectionIds) if (!connections.has(id)) fail("动作引用了架构未设计的连接");
+    for (const test of value.cases) {
+      const action = value.application.actions.find((item) => item.id === test.actionId);
+      if (!action) fail("验收用例引用不存在的动作");
+      validateActionInput(action, parsedExpected(test.input));
+      for (const mock of test.mocks) {
+        if (!ACTION_CAPABILITIES.includes(mock.capability)) fail("测试替身能力无效");
+        parsedExpected(mock.argsJson); parsedExpected(mock.resultJson);
+      }
+    }
+    if (value.application.actions.some((action) => !value.cases.some((item) => item.actionId === action.id))) fail("每个动作必须有实际验收用例");
+  }
   const requirements = architecture?.requirements;
   const acceptance = architecture?.design?.acceptance;
   if (!Array.isArray(requirements) || !requirements.length || !Array.isArray(acceptance) || !acceptance.length) {
@@ -117,6 +151,9 @@ export function validatePlan(value, { architecture, previousPlan } = {}) {
   }
   for (const id of requirementIds) if (!coveredRequirements.has(id)) fail(`需求 ${id} 缺少研发任务`);
   for (const id of acceptanceIds) if (!coveredAcceptance.has(id)) fail(`验收 ${id} 缺少研发任务`);
+  if (value.application?.page) for (const resource of value.application.page.resources) {
+    if (!files.has(safeRelativePath(resource.path))) fail("页面资源必须包含在任务文件清单中");
+  }
   safeRelativePath(value.entrypoint);
   if (!/\.(?:mjs|js)$/.test(value.entrypoint) || !files.has(value.entrypoint)) fail("Node 入口必须是任务文件清单中的 .mjs 或 .js 文件");
   const visiting = new Set(), visited = new Set();
@@ -152,7 +189,7 @@ export function validatePlan(value, { architecture, previousPlan } = {}) {
     const cases = new Map(value.cases.map((test) => [test.id, test]));
     for (const old of previous.cases) {
       const current = cases.get(old.id);
-      if (!current || current.acceptanceId !== old.acceptanceId || current.input !== old.input) fail("修订计划不能删除或替换已确认的验收用例");
+      if (!current || current.acceptanceId !== old.acceptanceId || current.input !== old.input || current.actionId !== old.actionId || hashValue(current.mocks ?? []) !== hashValue(old.mocks ?? [])) fail("修订计划不能删除或替换已确认的验收用例");
       for (const assertion of old.assertions) {
         const unchanged = current.assertions.find((entry) => entry.path === assertion.path);
         if (!unchanged || hashValue(parsedExpected(unchanged.expectedJson)) !== hashValue(parsedExpected(assertion.expectedJson))) {

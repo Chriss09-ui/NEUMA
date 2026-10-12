@@ -216,6 +216,9 @@
               <div><h1 id="agent-title">我的智能体</h1><p id="agent-subtitle" class="page-subtitle"></p></div>
             </div>
             <div class="header-actions">
+              <span id="agent-application-state" class="application-delivery-state" role="status" hidden></span>
+              <div id="agent-view-switch" class="agent-view-switch" role="group" aria-label="智能体使用方式" hidden><button id="agent-view-application" type="button" aria-pressed="true">应用</button><button id="agent-view-chat" type="button" aria-pressed="false">对话</button></div>
+              <button id="agent-assistant-toggle" class="secondary" type="button" aria-controls="agent-conversation" aria-expanded="false" hidden>助手</button>
               <div id="agent-conversation-actions" class="agent-conversation-actions" hidden>
                 <button id="agent-artifacts-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="agent-file-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>产物</span><span id="agent-artifacts-count" class="agent-artifacts-badge">0</span></button>
               </div>
@@ -227,6 +230,11 @@
             <a class="text-link" href="#chat">回到 NEUMA</a>
           </div>
           <div id="agent-workspace" class="agent-chat-layout">
+            <section id="agent-application" class="agent-application" aria-label="智能体应用" hidden>
+              <div id="agent-application-connection-note" class="application-connection-note" hidden><p id="agent-application-connection-text"></p><button id="agent-application-configure" class="secondary" type="button">配置连接</button></div>
+              <div id="agent-application-frame-host" class="application-frame-host"><div class="application-frame-feedback"><p id="agent-application-loading" role="status">正在打开应用…</p><button id="agent-application-retry" type="button" class="secondary" hidden>重新打开</button></div></div>
+              <details class="application-tasks"><summary>任务记录 <span id="agent-application-task-status" role="status">正在读取任务…</span></summary><div id="agent-application-task-list" class="application-task-list"></div></details>
+            </section>
             <div id="agent-making-panel" class="agent-making-panel" hidden>
               <div id="agent-making-content"></div>
               <div id="agent-development" class="agent-development" hidden></div>
@@ -264,7 +272,8 @@
           </div>
           <dialog id="agent-panel" class="agent-details-dialog" aria-labelledby="agent-details-title">
             <header class="agent-details-header"><div><h2 id="agent-details-title">智能体设置</h2><p id="agent-details-name" class="muted-note"></p></div><button id="agent-details-close" class="ghost-button" type="button" aria-label="关闭智能体面板">关闭</button></header>
-            <nav class="agent-details-tabs" aria-label="智能体设置分类"><button id="agent-details-profile-tab" type="button" aria-pressed="true">基本资料</button><button id="agent-details-memory-tab" type="button" aria-pressed="false">记忆</button></nav>
+            <nav class="agent-details-tabs" aria-label="智能体设置分类"><button id="agent-details-profile-tab" type="button" aria-pressed="true">基本资料</button><button id="agent-details-memory-tab" type="button" aria-pressed="false">记忆</button><button id="agent-details-connections-tab" type="button" aria-pressed="false">连接与模型</button></nav>
+            <section id="agent-details-connections" class="agent-detail-section" aria-label="连接与模型" hidden><div id="agent-connections-content"></div></section>
             <div id="agent-details-unavailable" class="agent-detail-note" role="status" hidden>智能体生成后，就可以管理记忆和资料。</div>
             <section id="agent-details-memory" class="agent-detail-section" aria-label="智能体记忆" hidden>
               <form id="agent-memory-form"><label for="agent-memory-input">希望它长期记住的内容</label><p class="muted-note">填写你的背景、常用格式和工作偏好。仅用于这个智能体，新对话也会保留。</p><textarea id="agent-memory-input" rows="10" maxlength="12000" placeholder="例如：默认使用中文；先给结论，再解释细节；术语第一次出现时补充解释。"></textarea><div class="agent-detail-footer"><p id="agent-memory-feedback" class="muted-note small" role="status" aria-live="polite">保存后，从下一次任务开始使用。</p><button id="agent-memory-save" class="primary" type="submit">保存记忆</button></div></form>
@@ -651,6 +660,7 @@
       <div id="sidebar-resize" class="panel-resizer sidebar-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整主导航宽度" aria-controls="sidebar-details" title="向右拖动可展开或调宽，达到最窄后继续向左拖动可折叠；双击恢复默认宽度"></div>
     </div>
 
+    <dialog id="application-material-dialog" class="agent-details-dialog" aria-labelledby="application-material-title"><header class="agent-details-header"><h2 id="application-material-title">选择应用材料</h2><button id="application-material-close" class="ghost-button" type="button">关闭</button></header><div id="application-material-list" class="agent-detail-section"></div><footer class="application-material-footer"><button id="application-material-confirm" class="primary" type="button">使用选中材料</button></footer></dialog>
     <script type="module" src="/shell.js"></script>
     <script type="module" src="/app.js"></script>
     <script type="module" src="/main-agent.js"></script>
@@ -658,6 +668,8 @@
     <script type="module" src="/groups.js"></script>
     <script type="module" src="/agents.js"></script>
     <script type="module" src="/agent-details.js"></script>
+    <script type="module" src="/agent-connections.js"></script>
+    <script type="module" src="/application-workspace.js"></script>
     <script type="module" src="/projects.js"></script>
     <script type="module" src="/runtime.js"></script>
     <script type="module" src="/skills.js"></script>

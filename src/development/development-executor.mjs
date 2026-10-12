@@ -1,3 +1,7 @@
+import { InputError } from "../requirements/core.mjs";
+import { NODE_ACTION_BOOTSTRAP, ACTION_CAPABILITIES } from "./node-action-bootstrap.mjs";
+import { validateApplicationManifest, validateActionInput, validateActionOutput } from "../applications/application-contract.mjs";
+import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, lstat } from "node:fs/promises";
@@ -65,22 +69,22 @@ export class DevelopmentExecutor {
     return resolved;
   }
 
-  async sandboxRun({ codeDir, entrypoint, input, writableDir, readableDir, workingDir = writableDir, signal, timeoutMs = this.timeoutMs }) {
+  async sandboxRun({ codeDir, entrypoint, input, writableDir, readableDir, workingDir = writableDir, signal, timeoutMs = this.timeoutMs, maxOutputBytes = this.maxOutputBytes, channel, bootstrap }) {
     if (signal?.aborted) return outcome("error", "cancelled");
     let command = this.sandboxPath, args, nativeRequest, cleanupComplete = true;
     if (this.platform === "darwin") args = ["-p", sandboxProfile({ codeDir, writableDir, readableDir, nodePath: this.nodePath }), this.nodePath,
-      ...isolatedNodeArguments(join(codeDir, entrypoint))];
+      ...isolatedNodeArguments(join(codeDir, entrypoint), bootstrap)];
     else if (["linux", "win32"].includes(this.platform)) {
       const helperPath = await checkedIsolationHelper(this.nativeHelperPath);
       if (!helperPath) return outcome("error", "isolation_helper_unavailable");
       try {
         nativeRequest = await nativeIsolationRequest({ helperPath, temporaryDir: this.temporaryDir, platform: this.platform,
-          nodePath: this.nodePath, codeDir, writableDir, readableDir, workingDir, entrypoint, timeoutMs, maxOutputBytes: this.maxOutputBytes });
+          nodePath: this.nodePath, codeDir, writableDir, readableDir, workingDir, entrypoint, timeoutMs, maxOutputBytes, bootstrap });
         ({ command, args } = nativeRequest);
       } catch { return outcome("error", "isolation_setup_failed"); }
     } else return outcome("not_run", "当前平台没有操作系统隔离执行器");
     try { return await new Promise((resolveResult) => {
-      let child, timer, settled = false, reason = "", stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), exitCode = null;
+      let child, timer, settled = false, reason = "", sentBytes = 0, stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), exitCode = null;
       const kill = () => {
         if (!child?.pid) return;
         if (this.platform === "win32") { try { child.kill("SIGKILL"); } catch {} }
@@ -88,7 +92,7 @@ export class DevelopmentExecutor {
       };
       const finish = async () => {
         if (settled) return; settled = true;
-        clearTimeout(timer); signal?.removeEventListener("abort", abort); kill();
+        clearTimeout(timer); signal?.removeEventListener("abort", abort); channel?.close(); kill();
         let status = { status: reason ? "error" : exitCode === 0 ? "passed" : "failed", exitCode, ...(reason ? { reason } : {}) };
         if (nativeRequest) {
           if (!reason) status = await readIsolationStatus(nativeRequest.statusPath, exitCode) ?? { status: "error", exitCode, reason: "isolation_setup_failed" };
@@ -110,10 +114,13 @@ export class DevelopmentExecutor {
       const abort = () => stop("cancelled");
       const collect = (stream, data) => {
         const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        const remaining = Math.max(0, this.maxOutputBytes - stdout.length - stderr.length);
+        const remaining = Math.max(0, maxOutputBytes - stdout.length - stderr.length - sentBytes);
         if (stream === "stdout") stdout = Buffer.concat([stdout, bytes.subarray(0, remaining)]);
         else stderr = Buffer.concat([stderr, bytes.subarray(0, remaining)]);
         if (bytes.length > remaining) stop("output_limit");
+        else if (stream === "stdout" && !reason && channel) {
+          try { channel.receive(bytes); } catch { stop("invalid_action_channel"); }
+        }
       };
       try {
         child = this.spawnImpl(command, args, { cwd: workingDir, env: cleanEnv(writableDir, this.nodePath),
@@ -121,7 +128,15 @@ export class DevelopmentExecutor {
         child.stdout?.on("data", (value) => collect("stdout", value));
         child.stderr?.on("data", (value) => collect("stderr", value));
         child.stdin?.on("error", () => { /* The child may exit before consuming input. */ });
-        child.stdin?.end(input);
+        if (channel) {
+          channel.open((value) => {
+            if (settled || reason || signal?.aborted) return false;
+            const data = JSON.stringify(value) + "\n";
+            if (Buffer.byteLength(data) + sentBytes + stdout.length + stderr.length > maxOutputBytes) { stop("output_limit"); return false; }
+            sentBytes += Buffer.byteLength(data);
+            child.stdin.write(data); return true;
+          }, stop);
+        } else child.stdin?.end(input);
         child.on("error", () => stop("spawn_failed"));
         child.on("exit", (code, terminationSignal) => { exitCode = code; if (terminationSignal && !reason) reason = "process_terminated"; kill(); });
         child.on("close", (code, terminationSignal) => {
@@ -228,8 +243,91 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
     } finally { if (scratch) await rm(scratch, { recursive: true, force: true }); }
   }
 
-  async verify({ snapshot, entrypoint, cases, stateful = false, signal }) {
+  async runAction({ codeDir, entrypoint, actionId, input, signal, onCapability, onProgress = () => {}, timeoutMs = 120000 }) {
+    if (signal?.aborted) return outcome("error", "cancelled");
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) return outcome("error", "invalid_timeout");
+    const availability = await this.probe({ signal });
+    if (!availability.available) return outcome(signal?.aborted ? "error" : "not_run", availability.reason);
+    let scratch;
+    const calls = new AbortController();
+    const abort = () => calls.abort(); signal?.addEventListener("abort", abort, { once: true });
+    try {
+      validateCodePath(entrypoint);
+      if (!/\.(?:mjs|js)$/.test(entrypoint) || typeof actionId !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(actionId)
+        || ["constructor", "prototype", "__proto__"].includes(actionId) || input === undefined
+        || Buffer.byteLength(JSON.stringify(input)) > 128 * 1024) return outcome("error", "invalid_entrypoint_or_input");
+      codeDir = await this.canonicalDirectory(codeDir);
+      const code = await inspectDevelopmentCode(codeDir);
+      if (!code.files.some((file) => file.path === entrypoint)) return outcome("error", "entrypoint_missing");
+      scratch = await mkdtemp(join(this.temporaryDir, "neuma-action-run-"));
+      const writableDir = await realpath(scratch);
+      if (inside(codeDir, writableDir) || inside(writableDir, codeDir)) return outcome("error", "code_and_working_directory_overlap");
+      let buffer = "", reply, stop, final, closed = false, callCount = 0, progress = Promise.resolve();
+      const decoder = new StringDecoder("utf8");
+      const ids = new Set(), pending = new Set();
+      const validFields = (value, fields) => value && typeof value === "object" && !Array.isArray(value)
+        && Object.keys(value).length === fields.length && fields.every((key) => Object.hasOwn(value, key));
+      const channel = {
+        open: (send, terminate) => { reply = send; stop = terminate; send({ type: "start", protocolVersion: 2, actionId, input }); },
+        close: () => { closed = true; calls.abort(); },
+        receive: (bytes) => {
+          buffer += decoder.write(bytes);
+          for (;;) {
+            const end = buffer.indexOf("\n"); if (end < 0) break;
+            const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+            const message = JSON.parse(line);
+            if (final || closed) throw new Error("message_after_result");
+            if (message.type === "call") {
+              if (!validFields(message, ["type", "id", "capability", "args"]) || typeof message.id !== "string"
+                || !/^call_[1-9][0-9]{0,6}$/.test(message.id) || ids.has(message.id) || ++callCount > 1000
+                || pending.size >= 32 || !ACTION_CAPABILITIES.includes(message.capability)
+                || !message.args || typeof message.args !== "object" || Array.isArray(message.args)) throw new Error("invalid_capability_call");
+              ids.add(message.id); pending.add(message.id);
+              Promise.resolve().then(async () => {
+                if (closed || calls.signal.aborted) return;
+                if (typeof onCapability !== "function") throw new Error("capability_unavailable");
+                return onCapability({ capability: message.capability, args: structuredClone(message.args), signal: calls.signal });
+              }).then((value) => {
+                if (!closed && !calls.signal.aborted) reply({ type: "reply", id: message.id, ok: true, value: value === undefined ? null : value });
+              }, (error) => {
+                const safe = error instanceof InputError;
+                if (!closed && !calls.signal.aborted) reply({ type: "reply", id: message.id, ok: false,
+                  error: safe ? String(error.message).slice(0, 2000) : "能力调用未完成",
+                  reason: safe && typeof error.reason === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(error.reason) ? error.reason : "capability_failed" });
+              }).catch(() => stop("invalid_capability_reply")).finally(() => pending.delete(message.id));
+            } else if (message.type === "progress") {
+              if (!validFields(message, ["type", "value"])) throw new Error("invalid_progress");
+              progress = progress.then(() => onProgress(structuredClone(message.value))).catch(() => { stop("progress_save_failed"); throw new Error("progress_save_failed"); });
+              progress.catch(() => {});
+            } else if (message.type === "result") {
+              if (pending.size || typeof message.ok !== "boolean"
+                || !validFields(message, message.ok ? ["type", "ok", "value"] : ["type", "ok", "error"])) throw new Error("invalid_result");
+              final = message;
+            } else throw new Error("invalid_message");
+          }
+        },
+      };
+      const run = await this.sandboxRun({ codeDir, entrypoint, writableDir, signal, timeoutMs,
+        maxOutputBytes: 1024 * 1024, channel, bootstrap: NODE_ACTION_BOOTSTRAP });
+      await progress;
+      if (run.status !== "passed") return run;
+      buffer += decoder.end();
+      if (buffer.trim() || !final || !final.ok) return { ...run, status: "failed", reason: "action_result_missing_or_failed" };
+      return { ...run, output: final.value };
+    } catch { return outcome("error", signal?.aborted ? "cancelled" : "invalid_action_or_execution_directory"); }
+    finally { calls.abort(); signal?.removeEventListener("abort", abort); if (scratch) await rm(scratch, { recursive: true, force: true }); }
+  }
+
+  async verify({ snapshot, entrypoint, cases, stateful = false, signal, runtime = "node-json", application, validateResources = true }) {
     const report = { status: "not_run", codeHash: snapshot?.hash ?? null, results: [], summary: "没有实际执行验收", stateful };
+    if (!["node-json", "node-action"].includes(runtime)) return { ...report, status: "error", summary: "验收运行协议无效" };
+    if (runtime === "node-action") {
+      try { validateApplicationManifest(application, { ...(validateResources ? { snapshot } : {}), allowUnverified: true }); }
+      catch { return { ...report, status: "failed", summary: "应用清单未匹配验收快照，页面或后端文件仍需修复" }; }
+      report.evidenceMode = "mock_capabilities";
+      report.pageResourcesChecked = validateResources;
+      report.connectionVerified = false;
+    }
     if (typeof stateful !== "boolean") return { ...report, stateful: false, status: "error", summary: "验收状态模式无效" };
     if (!Array.isArray(cases) || cases.length === 0) return report;
     if (cases.length > 200) return { ...report, status: "error", summary: "验收用例数量超限" };
@@ -256,9 +354,30 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
       // Their frozen order is significant; user workspaces are never reused.
       if (stateful) verificationWorkspace = await realpath(await mkdtemp(join(this.temporaryDir, "neuma-verification-state-")));
       for (const item of cases) {
-        const run = await this.run({ codeDir: snapshot.path, entrypoint, input: item.input, signal,
+        let run, mockCalls;
+        if (runtime === "node-action") {
+          const action = application.actions.find((entry) => entry.id === item.actionId);
+          let input;
+          try { input = validateActionInput(action, JSON.parse(item.input)); }
+          catch { return { ...report, status: "error", summary: "动作或输入与验收契约不匹配" }; }
+          if (!Array.isArray(item.mocks)) return { ...report, status: "error", summary: "动作验收缺少显式测试替身清单" };
+          let unexpectedCapability = false;
+          const remaining = [...item.mocks]; mockCalls = [];
+          run = await this.runAction({ codeDir: snapshot.path, entrypoint, actionId: action.id, input, signal,
+            onCapability: async ({ capability, args }) => {
+              const index = remaining.findIndex((mock) => mock.capability === capability && isDeepStrictEqual(JSON.parse(mock.argsJson), args));
+              if (index < 0) { unexpectedCapability = true; throw new Error("unconfigured_test_capability"); }
+              const [mock] = remaining.splice(index, 1); mockCalls.push({ capability, mocked: true });
+              return JSON.parse(mock.resultJson);
+            } });
+          if (run.status === "passed") {
+            try { validateActionOutput(action, run.output); }
+            catch { run = { ...run, status: "failed", reason: "action_output_schema_mismatch" }; }
+            if (remaining.length || unexpectedCapability) run = { ...run, status: "failed", reason: unexpectedCapability ? "unconfigured_test_capability" : "unused_capability_mocks" };
+          }
+        } else run = await this.run({ codeDir: snapshot.path, entrypoint, input: item.input, signal,
           ...(verificationWorkspace ? { workspaceDir: verificationWorkspace } : {}) });
-        const result = { caseId: item.id, ...(item.taskId === undefined ? {} : { taskId: item.taskId }),
+        const result = { caseId: item.id, ...(mockCalls ? { evidenceMode: "mock_capabilities", mockCalls, actionId: item.actionId } : {}), ...(item.taskId === undefined ? {} : { taskId: item.taskId }),
           ...(item.acceptanceId === undefined ? {} : { acceptanceId: item.acceptanceId }), status: run.status,
           input: item.input, exitCode: run.exitCode, stdout: run.stdout, stderr: run.stderr, reason: run.reason ?? "",
           expected: item.assertions.map(({ path, expectedJson }) => ({ path, value: JSON.parse(expectedJson) })) };

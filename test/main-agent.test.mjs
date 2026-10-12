@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { MainAgent } from "../src/main/main-agent.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft } from "./helpers/architecture.mjs";
+import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 
@@ -568,4 +569,22 @@ test("主 Agent 存储拒绝符号链接文件和路径穿越", async (t) => {
   const restored = new MainAgent({ config: f.config, dataDir: f.dataDir, agents: f.agents, collaboration: f.collaboration, sessionFactory: model(f.records) });
   await assert.rejects(restored.ready, /文件类型/);
   assert.equal(await readFile(target, "utf8"), "{}");
+});
+
+test("主 Agent 公开检索沿用对话范围，最新请求刷新且不联网要求在执行前拒绝", async (t) => {
+  let calls = 0;
+  const web = new WebCapabilities({ fetchImpl: async () => {
+    calls++; return new Response(JSON.stringify({ results: [{ url: "https://example.com", title: "Example", content: "摘要" }] }), { headers: { "content-type": "application/json" } });
+  } });
+  const f = await fixture(t, async (record) => {
+    if (record.payload.currentUserMessage.includes("不要联网")) {
+      await assert.rejects(record.tools.web_search.execute("search", { query: "example" }), { reason: "network_disabled" }); return;
+    }
+    const result = JSON.parse((await record.tools.web_search.execute("search", { query: "example" })).content[0].text);
+    assert.equal(result.status, "ok");
+  }, { web });
+  await f.main.prompt(f.input("搜索资料", "search_one"));
+  await f.main.prompt(f.input("再看看", "search_two")); assert.equal(calls, 1);
+  await f.main.prompt(f.input("刷新最新资料", "search_three")); assert.equal(calls, 2);
+  await f.main.prompt(f.input("不要联网", "search_four")); assert.equal(calls, 2);
 });

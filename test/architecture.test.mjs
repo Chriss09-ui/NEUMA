@@ -9,6 +9,7 @@ import { createPiSession } from "../src/runtime/pi-runtime.mjs";
 import { CAPABILITY_CATALOG_VERSION, CAPABILITIES, capabilitySnapshotCompatible, designHash } from "../src/architecture/architecture-contract.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
+import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 
 const definition = (id = "weekly") => ({ id, name: "周报助手", draft: validDraft(), fingerprint: "requirements-v1" });
 const submissionNames = { designer: "submit_architecture", reviewer: "submit_architecture_review", specialist: "submit_module_design" };
@@ -69,7 +70,7 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   assert.deepEqual(sessions.map((item) => item.role), ["designer", "reviewer"]);
   assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [8192, 4096]);
   assert.notEqual(sessions[0].session, sessions[1].session);
-  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "submit_architecture"]);
+  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "submit_architecture"]);
   assert.deepEqual(Object.keys(sessions[1].tools), ["submit_architecture_review"]);
   assert.deepEqual(researchCalls, []); assert.deepEqual(result.modules, []);
   assert.ok(sessions.every((item) => item.disposed));
@@ -162,6 +163,26 @@ test("技术搜索按需调用，真实来源进入设计、评估与持久化�
   assert.deepEqual(sessions[1].payload.evidence.find((item) => item.id === source.id), source);
   assert.deepEqual(result.researchGaps, ["版本兼容需单独核对"]);
   assert.deepEqual((await designer.get("weekly")).evidence, result.evidence);
+});
+
+test("公共检索按需产生可引用证据，独立评审仍无联网工具", async (t) => {
+  let calls = 0;
+  const web = new WebCapabilities({ fetchImpl: async () => {
+    calls++; return new Response(JSON.stringify({ results: [{ url: "https://example.com/api", title: "API", content: "接口摘要" }] }), { headers: { "content-type": "application/json" } });
+  } });
+  const { designer, sessions } = await fixture(t, { web, onPrompt: async ({ record, submit }) => {
+    if (record.role === "designer") {
+      const result = JSON.parse((await record.tools.web_search.execute("search", { query: "official API" })).content[0].text);
+      const candidate = validDesign(record.payload.requirements); candidate.decisions[0].evidenceIds = [result.results[0].evidenceId];
+      return submit(candidate);
+    }
+    assert.equal(record.tools.web_search, undefined);
+    return submit(passingReview(record.payload.candidateHash));
+  } });
+  const result = await designer.design(definition());
+  assert.equal(calls, 1); assert.equal(result.status, "passed");
+  assert.equal(sessions[1].payload.evidence.at(-1).url, "https://example.com/api");
+  assert.match(result.evidence.at(-1).versionScope, /摘要/);
 });
 
 test("搜索为空时不能引用伪造证据；搜索预算最多三次", async (t) => {

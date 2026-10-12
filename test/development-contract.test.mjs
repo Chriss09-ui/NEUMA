@@ -49,6 +49,27 @@ test("plan rejects unsupported fields, runtime, missing data and duplicate refer
   for (const change of changes) { const value = plan(); change(value); assert.throws(() => check(value), InputError); }
 });
 
+test("approved v2 architecture requires node-action and cannot bypass the application contract with a legacy plan", () => {
+  const approved = architecture();
+  approved.design.schemaVersion = 2;
+  approved.design.interaction = { page: true };
+  const legacy = plan();
+  assert.deepEqual(check(legacy), legacy);
+  assert.throws(() => validatePlan(legacy, { architecture: approved }), /v2 架构必须使用/);
+  const inputSchema = { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false };
+  const outputSchema = { type: "object", properties: { items: { type: "array", items: { type: "string" } }, error: { type: "string" } }, required: [], additionalProperties: false };
+  const current = { ...legacy, schemaVersion: 2, runtime: "node-action",
+    tasks: legacy.tasks.map((task) => ({ ...task, files: [...task.files, "ui/index.html"] })),
+    cases: legacy.cases.map((item) => ({ ...item, actionId: "extract", input: JSON.stringify({ text: item.input }), mocks: [] })),
+    application: { protocolVersion: 2, runtime: "node-action", entrypoint: legacy.entrypoint,
+      page: { entrypoint: "ui/index.html", resources: [{ path: "ui/index.html", sha256: "" }] },
+      actions: [{ id: "extract", title: "提取", inputSchema, outputSchema, connectionIds: [] }],
+      stateVersion: 1, evidenceIds: [] } };
+  assert.deepEqual(validatePlan(current, { architecture: approved }), current);
+  assert.throws(() => validatePlan({ ...current, runtime: "node-json" }, { architecture: approved }), /v2 架构必须使用/);
+  assert.throws(() => validatePlan({ ...current, application: { ...current.application, page: null } }, { architecture: approved }), /页面交付必须匹配/);
+});
+
 test("every requirement and acceptance is assigned and has real test cases", () => {
   for (const change of [
     (value) => { value.tasks[1].requirementIds = ["goal"]; },

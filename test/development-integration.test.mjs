@@ -53,7 +53,7 @@ async function sdkFixture(t, { invalidPlan = false } = {}) {
       const expected = role === "planner" ? ["list_code_files", "read_code_file", "submit_development_plan"]
         : role === "developer" ? ["list_code_files", "read_code_file", "run_development_checks", "submit_development_work", "write_code_file"]
           : payload.mode === "plan" ? ["submit_development_review"] : ["list_code_files", "read_code_file", "submit_development_review"];
-      assert.deepEqual(names, [...expected, "read_development_context"].sort());
+      assert.deepEqual(names, [...expected, "read_development_context", ...(role === "reviewer" ? [] : ["web_search", "web_fetch"])].sort());
       if (!called.length) {
         assert.equal(body.messages.some((message) => ["assistant", "tool"].includes(message.role)), false);
         assert.doesNotMatch(JSON.stringify(body.messages), /PRIVATE_SESSION_FINISH/);

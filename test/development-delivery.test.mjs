@@ -170,7 +170,7 @@ test("真实交付闭环：架构评估→研发隔离验收→激活→运行�
   assert.equal(runtime.status, "complete"); assert.match(runtime.reply, /"normalized":"SHIP THIS CODE","length":14/);
   const runtimeSession = sessions.find((item) => item.role === "runtime");
   assert.deepEqual(runtimeSession.toolResults, [{ status: "completed", result: { normalized: "SHIP THIS CODE", length: 14 } }]);
-  assert.deepEqual(Object.keys(runtimeSession.tools), ["list_materials", "read_material", "read_material_image", "run_developed_workflow"]);
+  assert.deepEqual(Object.keys(runtimeSession.tools), ["list_materials", "read_material", "read_material_image", "web_search", "web_fetch", "run_developed_workflow"]);
 });
 
 test("首轮交付启动失败携带原始证据进入新修复会话，重验后激活新快照", localMac, async (t) => {

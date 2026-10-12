@@ -19,6 +19,7 @@ import { CollaborationService } from "./collaboration/groups.mjs";
 import { routeCollaboration } from "./collaboration/collaboration-api.mjs";
 import { MainAgent } from "./main/main-agent.mjs";
 import { MAX_MATERIAL_BYTES } from "./materials/material-formats.mjs";
+import { routeApplication } from "./applications/application-api.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC = new Map([
@@ -49,6 +50,7 @@ const PUBLIC = new Map([
   ["/runtime-view.js", ["runtime-view.js", "text/javascript; charset=utf-8"]],
   ["/chat-ui.js", ["chat-ui.js", "text/javascript; charset=utf-8"]],
   ...["collaboration-api", "group-view", "group-materials", "groups", "main-agent", "main-context", "main-materials"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
+  ...["application-api", "application-bridge", "application-tasks", "application-workspace", "agent-connections"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -59,7 +61,7 @@ function sendJson(response, status, value) {
 
 function safeFailure(error, config) {
   const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required"].includes(error.reason) ? error.reason : null;
-  const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason || error.reason === "collaboration_conflict" || error.reason === "main_conflict");
+  const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason || ["collaboration_conflict", "main_conflict", "application_conflict", "connection_conflict"].includes(error.reason));
   const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";
   const diagnostic = error instanceof ProviderError || (error instanceof InputError && error.code === "PROJECT_ADD_FAILED" && error.diagnostic) ? error.diagnostic : error instanceof InputError
@@ -328,6 +330,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (path.startsWith("/api/")) { await settingsQueue; requestController.signal.throwIfAborted(); }
       if (await routeCollaboration({ request, response, address, getCollaboration, getMainAgent,
         readBody: (maxBytes) => readJson(request, maxBytes), sendJson, sendMaterialFile, safeFailure, config, signal: requestController.signal })) return;
+      if (await routeApplication({ request, response, address, agents: prototypeAgents,
+        readBody: (maxBytes) => readJson(request, maxBytes), sendJson, signal: requestController.signal })) return;
       if (path === "/api/skills" || path.startsWith("/api/skills/")) {
         const result = await routeSkills({ method: request.method, path, manager: skillManager,
           readBody: (maxBytes) => readJson(request, maxBytes), signal: requestController.signal,
@@ -416,7 +420,10 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
       if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]),
         architecture: await prototypeAgents.getArchitecture?.(agentQuery[1]) ?? null,
-        ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment(agentQuery[1]) } : {}) });
+        ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment(agentQuery[1]) } : {}),
+        ...(prototypeAgents.applications ? { application: await prototypeAgents.applications.summary(agentQuery[1]).catch(() => ({ manifest: null, pageReady: false, actions: [], deliveryVersion: null })),
+          connectionRequirements: await prototypeAgents.connectionRequirements(agentQuery[1]),
+          tasks: (await prototypeAgents.applications.store.list(agentQuery[1], { scope: "private" })).slice(-20) } : {}) });
       const agentProfile = path.match(/^\/api\/agents\/([\w-]+)\/profile$/);
       if (request.method === "POST" && agentProfile) return sendJson(response, 200, await prototypeAgents.setProfile(agentProfile[1], await readJson(request)));
       const agentMemory = path.match(/^\/api\/agents\/([\w-]+)\/memory$/);
@@ -566,7 +573,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     }
   };
   const initialization = [prototypeAgents.ready, prototypeAgents.storage?.ready,
-    prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready, collaboration?.ready, mainAgent?.ready];
+    prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready, prototypeAgents.applications?.ready,
+    prototypeAgents.connections?.ready, collaboration?.ready, mainAgent?.ready];
   if (projects.load) initialization.push(projects.load());
   if (initialization.every((item) => item === undefined)) state = "ready";
   handler.ready = Promise.all(initialization).then(() => { if (state === "starting") state = "ready"; });
