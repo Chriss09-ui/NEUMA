@@ -17,7 +17,7 @@ function setup(source, request, initialStorage = []) {
     addEventListener(type, listener) { this.listeners.set(type, [...(this.listeners.get(type) || []), listener]); }
     dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) || []).map((listener) => listener(event))); }
   }
-  const document = new Events(), nodes = new Map(), timers = new Map(), stored = new Map(initialStorage);
+  const document = new Events(), nodes = new Map(), timers = new Map(), stored = new Map(initialStorage), renderedReplies = [];
   class Element extends Events {
     constructor(tag = "div") { super(); this.tagName = tag.toUpperCase(); }
     children = []; attributes = new Map(); dataset = {}; hidden = false; open = false; disabled = false; checked = false;
@@ -50,15 +50,18 @@ function setup(source, request, initialStorage = []) {
   class Event { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } }
   let serial = 0;
   const context = vm.createContext({ document, Event, CustomEvent: Event, crypto: { randomUUID: () => `mutation-${++serial}` },
+    renderRichText(container, content) { renderedReplies.push({ container, content }); container.textContent = content;
+      container.classes.add("rich-text"); container.className = [...new Set([...container.className.split(/\s+/).filter(Boolean), "rich-text"])].join(" "); },
     fetch: request, Response, ReadableStream, TextDecoder, TextEncoder, AbortController, structuredClone, URL, Blob, setTimeout, clearTimeout,
     localStorage: { getItem: (key) => stored.get(key) || null, setItem: (key, value) => stored.set(key, value) },
     setInterval(callback) { const id = ++serial; timers.set(id, callback); return id; }, clearInterval(id) { timers.delete(id); },
   });
   vm.runInContext(source, context);
-  return { get, document, timers, stored, context, route: (detail) => document.dispatchEvent(new Event("neuma:route", { detail })),
+  return { get, document, timers, stored, context, renderedReplies, route: (detail) => document.dispatchEvent(new Event("neuma:route", { detail })),
     submit: (id) => get(id).dispatchEvent({ type: "submit", preventDefault() {} }), text: (id) => textOf(get(id)) };
 }
 const textOf = (node) => `${node.textContent || ""}${(node.children || []).map(textOf).join("")}`;
+const isBubble = (node) => node.className.split(/\s+/).includes("bubble");
 const assertDisclosure = (element, visible) => {
   assert.equal(element.getAttribute("aria-hidden"), String(!visible), element.id);
   assert.equal(element.inert, !visible, element.id);
@@ -70,6 +73,23 @@ const detail = (id = "one", name = "研究小组") => ({ group: group(id, name),
   tasks: [{ id: "task-one", goal: "整理报告", status: "running", children: [{ id: "part-one", title: "整理初稿", status: "running", assigneeId: "writer" }] }],
   messages: [{ id: "message-one", seq: 1, sender: { type: "agent", id: "writer", name: "写作助手" }, content: `${name}的初稿`, taskId: "task-one", status: "complete" }],
   materials: [], artifacts: [], lastSequence: 1 });
+
+test("主聊和群聊共享助理富文本入口，用户原文与独立导航链接保留", async () => {
+  const assistant = { role: "assistant", content: "**积分讲解** $x^2$ #group/one", status: "complete",
+    actions: [{ href: "#agent/writer", label: "打开写作助手" }] };
+  const user = { role: "user", content: "**原始输入** `f(x)=x^2` #group/one", status: "complete" };
+  for (const source of [mainSource, groupsSource]) {
+    const ui = setup(source, async () => Response.json({ groups: [] }));
+    const assistantRow = vm.runInContext(`messageRow(${JSON.stringify(assistant)}, { bubble: true })`, ui.context);
+    const userRow = vm.runInContext(`messageRow(${JSON.stringify(user)}, { bubble: true })`, ui.context);
+    assert.equal(ui.renderedReplies.length, 1);
+    assert.equal(ui.renderedReplies[0].content, "**积分讲解** $x^2$");
+    assert.equal(ui.renderedReplies[0].container, assistantRow.children[0]);
+    assert.equal(userRow.children[0].textContent, user.content);
+    assert.equal(userRow.children[0].classes.has("rich-text"), false);
+    assert.deepEqual(assistantRow.children.at(-1).children.map((link) => link.href), ["#group/one", "#agent/writer"]);
+  }
+});
 
 test("协作请求保留群身份、幂等操作与定向消息，群材料使用独立下载入口", async () => {
   const requests = [], api = createCollaborationApi(async (path, options = {}) => { requests.push({ path, options }); return Response.json({ message: { id: "ok" } }); });
@@ -120,7 +140,7 @@ test("群消息使用纯气泡，身份与定向接收者仅保留在无障碍�
   const rows = ui.get("group-messages").children;
   assert.equal(rows.length, 2);
   for (const [index, role, sender, recipient] of [[0, "assistant", "写作助手", "检查助手"], [1, "user", "你", "写作助手"]]) {
-    const row = rows[index], body = row.children.find((item) => item.className === "bubble");
+    const row = rows[index], body = row.children.find(isBubble);
     assert.equal(row.className, `message ${role}`); assert.equal(row.getAttribute("role"), "group");
     assert.equal(row.getAttribute("aria-label"), `${sender}发送的消息，定向发送给${recipient}`);
     assert.equal(row.getAttribute("title"), `${sender} → ${recipient}`);
@@ -145,7 +165,7 @@ test("群纯气泡保留任务过滤、材料引用、成果入口和真实失�
   await ui.get("group-tasks").children.find((item) => item.children[0].textContent === "整理报告").children[0].click();
   const rows = ui.get("group-messages").children;
   assert.deepEqual(rows.map((row) => row.dataset.messageId), ["message-one", "stopped"]);
-  assert.equal(rows[0].children.find((item) => item.className === "bubble").textContent, "已整理");
+  assert.equal(rows[0].children.find(isBubble).textContent, "已整理");
   const material = rows[0].children.find((item) => item.className === "collaboration-links" && item.children.some((child) => child.tagName === "SPAN"));
   assert.equal(material.children[0].textContent, "▧ 研究资料.txt");
   const links = rows[0].children.find((item) => item.className === "collaboration-links" && item.children.some((child) => child.tagName === "A"));
@@ -153,7 +173,7 @@ test("群纯气泡保留任务过滤、材料引用、成果入口和真实失�
   assert.equal(links.children[1].textContent, "查看协作成果");
   assert.match(textOf(rows[0]), /失败/); assert.match(textOf(rows[1]), /已停止/);
   assert.equal(rows[1].getAttribute("aria-label"), "检查助手发送的消息，定向发送给former-member");
-  assert.equal(rows[1].children.find((item) => item.className === "bubble").textContent, "已保留检查结果");
+  assert.equal(rows[1].children.find(isBubble).textContent, "已保留检查结果");
 });
 
 test("群消息发送失败保留输入，重试复用同一个操作，不会重新派发任务", async () => {
@@ -275,7 +295,7 @@ test("主助理历史自动恢复，创建页面和群页不会清除它，来�
   const row = ui.get("main-messages").children[0];
   const links = row.children.find((item) => item.className === "collaboration-links");
   assert.deepEqual(links.children.map((item) => item.href), ["#group/one", "#agent/writer", "#create", "#chat"]);
-  assert.equal(row.children.find((item) => item.className === "bubble").textContent, "已查看");
+  assert.equal(row.children.find(isBubble).textContent, "已查看");
   ui.get("main-message").value = "未发送的主助理草稿";
   await ui.route({ page: "create" }); await ui.route({ page: "group", groupId: "one" }); await ui.route({ page: "chat" }); await settle();
   assert.equal(ui.get("main-message").value, "未发送的主助理草稿");
@@ -342,7 +362,7 @@ test("主历史使用纯气泡，移除身份与时间但保留正文中的称�
   const rows = ui.get("main-messages").children;
   assert.equal(rows.length, 2);
   for (const [index, role, label] of [[0, "user", "发送的消息"], [1, "assistant", "助理的回复"]]) {
-    const row = rows[index], body = row.children.find((item) => item.className === "bubble");
+    const row = rows[index], body = row.children.find(isBubble);
     assert.equal(row.className, `message ${role}`); assert.equal(row.getAttribute("role"), "group");
     assert.equal(row.getAttribute("aria-label"), label); assert.equal(body.textContent, conversation.messages[index].content);
     assert.equal(row.querySelectorAll("*").some((item) => item.className.startsWith("collaboration-message-") || item.tagName === "TIME"), false);
@@ -362,13 +382,13 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   await ui.submit("main-chat-form"); await settle();
   assert.equal(ui.get("main-new-chat").disabled, true); assert.equal(ui.get("main-new-chat").hidden, false);
   let reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
-  assert.equal(reply.children.find((item) => item.className === "bubble").textContent, "正在处理…");
+  assert.equal(reply.children.find(isBubble).textContent, "正在处理…");
   assert.equal(reply.children.some((item) => item.className === "collaboration-message-heading"), false);
   streamController.enqueue(new TextEncoder().encode([
     { type: "text-start" }, { type: "text-delta", delta: "已整理" }, { type: "text-delta", delta: "第一份材料" },
   ].map(JSON.stringify).join("\n") + "\n"));
   await settle(); reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
-  const body = reply.children.find((item) => item.className === "bubble");
+  const body = reply.children.find(isBubble);
   assert.equal(body.textContent, "已整理第一份材料"); assert.equal(body.classes.has("streaming"), true);
   assert.equal(textOf(reply), "已整理第一份材料");
   streamController.enqueue(new TextEncoder().encode(JSON.stringify({ type: "done", result: { reply: "已整理第一份材料",
@@ -376,7 +396,7 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
       { role: "assistant", content: "已整理第一份材料", status: "complete" }] } } }) + "\n"));
   streamController.close(); await settle();
   const completed = ui.get("main-messages").children.find((item) => item.className === "message assistant");
-  assert.equal(completed.children.find((item) => item.className === "bubble").classes.has("streaming"), false);
+  assert.equal(completed.children.find(isBubble).classes.has("streaming"), false);
   assert.equal(ui.get("main-new-chat").disabled, false); assert.equal(ui.get("main-new-chat").hidden, false);
   assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
 });
@@ -392,7 +412,7 @@ test("主历史异常纯气泡保留部分正文和真实失败、停止及中�
   assert.equal(rows.length, statuses.length);
   for (const [index, [status, label]] of statuses.entries()) {
     const row = rows[index]; assert.equal(row.className, "message assistant");
-    assert.equal(row.children.find((item) => item.className === "bubble").textContent, `已保留的片段 ${status}`);
+    assert.equal(row.children.find(isBubble).textContent, `已保留的片段 ${status}`);
     assert.equal(row.children.find((item) => item.tagName === "P").textContent, label);
     assert.equal(row.children.some((item) => item.className === "collaboration-message-heading"), false);
   }

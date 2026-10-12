@@ -140,6 +140,8 @@ test("源码入口可以启动，不被循环模块等待卡住", {
   await copyFile(join(source, "package.json"), join(root, "package.json"));
   await cp(join(source, "src"), join(root, "src"), { recursive: true });
   await cp(join(source, "public"), join(root, "public"), { recursive: true });
+  for (const dependency of ["marked", "katex"])
+    await cp(join(source, "node_modules", dependency), join(root, "node_modules", dependency), { recursive: true });
   const child = spawn(process.execPath, [join(root, "src", "server.mjs")], { cwd: root,
     env: { PATH: process.env.PATH, PORT: "0", NODE_OPTIONS: "--max-old-space-size=128" },
     stdio: ["ignore", "pipe", "pipe"] });
@@ -159,6 +161,8 @@ test("源码入口可以启动，不被循环模块等待卡住", {
   assert.equal((await fetch(`${url}api/health`)).status, 200);
   const page = await fetch(url);
   assert.equal(page.status, 200); assert.match(await page.text(), /app\.js/);
+  for (const asset of ["vendor/marked.mjs", "vendor/katex/katex.mjs", "vendor/katex/katex.min.css"])
+    assert.equal((await fetch(url + asset)).status, 200, asset);
   assert.ok((await readdir(root)).includes(".neuma"));
   assert.ok(!(await readdir(join(root, "src"))).includes(".neuma"));
   const exited = once(child, "exit"); child.kill("SIGINT"); assert.equal((await exited)[0], 0);

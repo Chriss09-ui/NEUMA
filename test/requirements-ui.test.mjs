@@ -55,6 +55,7 @@ function setup(turn, { stored = new Map(), requirements = [], conversations = ne
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
   const requests = [], persistenceRequests = [], serverRequirements = new Map(requirements.map((item) => [item.id, item]));
   const context = vm.createContext({
+    renderRichText: (container, content) => { container.textContent = String(content || ""); },
     ...state, document, window: { confirm: () => true, localStorage: {
       getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key),
     } },

@@ -4,11 +4,30 @@
   "description": "NEUMA 本机智能体与项目工作台（Apple 芯片 Mac 试用版）",
   "private": false,
   "type": "module",
-  "bin": { "neuma": "bin/neuma.cjs" },
-  "repository": { "type": "git", "url": "git+https://github.com/Chriss09-ui/NEUMA.git" },
-  "files": ["src/", "npm-shrinkwrap.json", "bin/", "public/", "scripts/check-release.mjs", "scripts/check-preview-release.mjs", "README.md", "docs/images/readme-workspace.jpg", "docs/images/readme-projects.jpg"],
-  "os": ["darwin"],
-  "cpu": ["arm64"],
+  "bin": {
+    "neuma": "bin/neuma.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chriss09-ui/NEUMA.git"
+  },
+  "files": [
+    "src/",
+    "npm-shrinkwrap.json",
+    "bin/",
+    "public/",
+    "scripts/check-release.mjs",
+    "scripts/check-preview-release.mjs",
+    "README.md",
+    "docs/images/readme-workspace.jpg",
+    "docs/images/readme-projects.jpg"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "publishConfig": {
     "access": "public",
     "tag": "preview",
@@ -31,6 +50,8 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.0",
     "@kreuzberg/node": "4.10.2",
+    "katex": "0.19.0",
+    "marked": "18.1.1",
     "sharp": "0.35.5"
   }
 }

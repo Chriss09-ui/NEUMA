@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addUserMessage, createAttachmentCard, mountWelcome, readReply, recoverInput, renderUserMessage } from "../public/chat-ui.js";
+import { addUserMessage, createAttachmentCard, createReplyView, mountWelcome, readReply, recoverInput, renderUserMessage } from "../public/chat-ui.js";
 import { recentUserMessages } from "../public/state.js";
 
 function streamResponse(parts) {
@@ -115,17 +115,24 @@ function messageDocument(t) {
   const document = { activeElement: null };
   class Element {
     children = []; attributes = new Map(); listeners = new Map(); dataset = {}; className = ""; _textContent = "";
-    classList = { add: (...names) => { this.className += ` ${names.join(" ")}`; }, toggle() {} };
+    classList = {
+      add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(" "); },
+      toggle: (name, enabled) => { const names = new Set(this.className.split(/\s+/).filter(Boolean));
+        if (enabled) names.add(name); else names.delete(name); this.className = [...names].join(" "); },
+    };
     get textContent() { return this._textContent; }
     set textContent(value) { this._textContent = value; this.children = []; }
     set innerHTML(_value) { throw new Error("文件卡片必须通过DOM节点呈现文件名"); }
-    append(...nodes) { this.children.push(...nodes); }
+    append(...nodes) { this.children.push(...nodes.flatMap((node) => node.nodeType === 11 ? node.children : [node])); }
+    replaceChildren(...nodes) { this._textContent = ""; this.children = []; this.append(...nodes); }
     setAttribute(name, value) { this.attributes.set(name, value); }
     addEventListener(name, handler) { this.listeners.set(name, handler); }
     click() { return this.listeners.get("click")?.({}); }
     focus() { document.activeElement = this; }
   }
   document.createElement = (tag) => Object.assign(new Element(), { tagName: tag.toUpperCase(), ownerDocument: document });
+  document.createTextNode = (content) => Object.assign(new Element(), { nodeType: 3, textContent: String(content), ownerDocument: document });
+  document.createDocumentFragment = () => Object.assign(new Element(), { nodeType: 11, ownerDocument: document });
   const previous = globalThis.document; globalThis.document = document;
   t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous; });
   return document;
@@ -171,4 +178,35 @@ test("文件卡片保留长文件名与完整可访问标题，将不安全名�
   assert.equal(preview.attributes.get("aria-label"), `预览 ${name}`);
   assert.ok(nodes.some((node) => node.textContent === name));
   assert.equal(nodes.some((node) => ["IMG", "SCRIPT"].includes(node.tagName)), false);
+});
+
+test("助理格式化回复按原始内容缓存，状态变化保留 DOM 与流式反馈", (t) => {
+  messageDocument(t);
+  const reply = createReplyView("学习助手"), source = "**几何讲解**\n\n- 第一步\n- 第二步";
+  reply.update({ content: source, status: "writing" });
+  const [bubble, activity, error] = reply.row.children;
+  assert.match(bubble.className, /rich-text/);
+  assert.ok(allMessageNodes(bubble).some((node) => node.tagName === "STRONG" && messageText(node).includes("几何讲解")));
+  assert.ok(allMessageNodes(bubble).some((node) => node.tagName === "UL"));
+  assert.equal(bubble.attributes.get("aria-live"), "off"); assert.match(bubble.className, /streaming/);
+  const rendered = [...bubble.children];
+  reply.update({ content: source, status: "complete" });
+  assert.equal(bubble.children.length, rendered.length);
+  rendered.forEach((node, index) => assert.equal(bubble.children[index], node, "可访问公式和格式 DOM 不应因状态更新反复重建"));
+  assert.equal(bubble.attributes.get("aria-live"), "polite"); assert.doesNotMatch(bubble.className, /streaming/);
+  assert.equal(activity.hidden, true);
+  reply.update({ content: "**部分回复**", status: "error", error: "连接中断" });
+  assert.match(messageText(bubble), /部分回复/); assert.equal(error.textContent, "连接中断"); assert.equal(error.hidden, false);
+  reply.update({ content: "", status: "stopped" });
+  assert.equal(bubble.hidden, true); assert.equal(bubble.children.length, 0);
+  assert.match(messageText(activity), /已停止回复/);
+});
+
+test("用户公式和 Markdown 原文保持可编辑文本，不经过助理渲染", (t) => {
+  messageDocument(t);
+  const source = "**不要改写输入**，公式 `f(x)=x^2` 和 $x^2$";
+  const row = renderUserMessage({ role: "user", content: source, delivery: "sent" }, {});
+  const bubble = row.children[0];
+  assert.equal(bubble.textContent, source); assert.equal(bubble.children.length, 0);
+  assert.doesNotMatch(bubble.className, /rich-text/);
 });
