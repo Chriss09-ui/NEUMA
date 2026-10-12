@@ -63,7 +63,7 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(page.text, /id="agent-send"[^>]*disabled/);
   assert.match(page.text, /id="agent-build"[^>]*disabled/);
   assert.match(page.text, /让 NEUMA 帮我迭代/);
-  assert.match(page.text, /<h1 id="main-agent-title">NEUMA<\/h1>/);
+  assert.match(page.text, /<h1 id="main-agent-title" class="sr-only">主对话<\/h1>/);
   assert.match(page.text, /<h1 id="chat-title">创建智能体<\/h1>/);
   assert.match(page.text, /id="page-create"[^>]*data-page="legacy-create"[^>]*hidden inert/);
   assert.match(page.text, /class="main-context-slot"/);
@@ -75,6 +75,7 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.equal(agentUi.status, 200);
   assert.match(agentUi.headers["content-type"], /javascript/);
   assert.equal((await invoke(handler, "GET", "/chat-ui.js")).status, 200);
+  assert.equal((await invoke(handler, "GET", "/panel-resize.js")).status, 200);
   assert.match(page.text, /id="reset"[^>]*>＋ 新对话/);
   assert.match(page.text, /id="diagnostics"[^>]*>导出诊断记录/);
 

@@ -462,15 +462,21 @@ test("产物列表位于独立文件库弹窗，历史对话栏不再承载文�
   assert.doesNotMatch(html, /id="agent-artifacts-sidebar"|id="agent-save-chat"/);
 });
 
-test("产物和新对话位于标题栏，隐藏对话说明且保存恢复位于错误提示下", async () => {
+test("产物保留在标题栏，新对话文本位于对话区顶部且保存恢复位于错误提示下", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const headerStart = html.indexOf('<header class="page-header agent-chat-header">');
   const header = html.slice(headerStart, html.indexOf("</header>", headerStart));
   assert.deepEqual([...header.matchAll(/<button id="([^"]+)"/g)].map((match) => match[1]),
-    ["agent-identity-edit", "agent-artifacts-open", "agent-new-chat", "agent-panel-toggle"]);
+    ["agent-identity-edit", "agent-artifacts-open", "agent-panel-toggle"]);
   const start = html.indexOf('<section id="agent-conversation"');
   const conversation = html.slice(start, html.indexOf("</section>", start));
-  assert.doesNotMatch(conversation, /class="conversation-bar"|id="agent-artifacts-open"|id="agent-new-chat"/);
+  const barStart = conversation.indexOf('<div class="conversation-bar">');
+  assert.ok(barStart >= 0);
+  const bar = conversation.slice(barStart, conversation.indexOf("</div>", barStart));
+  assert.match(bar, /<button id="agent-new-chat" class="conversation-new-chat" type="button"[^>]*>新对话<\/button>/);
+  assert.equal([...html.matchAll(/id="agent-new-chat"/g)].length, 1);
+  assert.ok(barStart < conversation.indexOf('id="agent-messages"'));
+  assert.doesNotMatch(conversation, /id="agent-artifacts-open"/);
   assert.match(conversation, /id="agent-conversation-title"[^>]*\bhidden\b/);
   assert.match(conversation, /class="agent-status-line" hidden/);
   assert.ok(conversation.indexOf('id="agent-error"') < conversation.indexOf('id="agent-save-actions"'));

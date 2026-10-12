@@ -71,8 +71,13 @@ export function renderMessages(target, messages, selectedTask = "", members = []
     target.append(welcome);
   }
   for (const message of visible) {
-    const recipient = members.find((member) => member.id === message.recipientId);
-    target.append(messageRow(recipient ? { ...message, recipientId: recipient.name } : message));
+    const isUser = message.sender?.type === "user" || message.role === "user";
+    const sender = isUser ? "你" : message.sender?.name || members.find((member) => member.id === message.sender?.id)?.name || "NEUMA";
+    const recipient = members.find((member) => member.id === message.recipientId)?.name || message.recipientId;
+    const row = messageRow(message, { bubble: true });
+    row.setAttribute("aria-label", `${sender}发送的消息${recipient ? `，定向发送给${recipient}` : ""}`);
+    row.setAttribute("title", `${sender}${recipient ? ` → ${recipient}` : ""}`);
+    target.append(row);
   }
   if (atBottom) target.scrollTop = target.scrollHeight;
 }

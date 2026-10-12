@@ -67,19 +67,27 @@
 
       <main class="main" id="main-content">
         <section id="page-chat" class="page page-main-agent" data-page="chat" aria-labelledby="main-agent-title">
-          <header class="page-header"><div><div class="identity-heading"><h1 id="main-agent-title">NEUMA</h1><span class="identity-badge">工作助理</span></div><p class="page-subtitle">与你持续对话，一起把想法变成可完成的工作。</p></div><div class="header-actions"><button id="main-create-agent" class="secondary" type="button">＋ 创建智能体</button><button id="main-create-group" class="secondary" type="button">创建群组</button><button id="main-context-open" class="secondary" type="button" aria-controls="main-context-panel" aria-expanded="false" hidden>上下文</button></div></header>
+          <h1 id="main-agent-title" class="sr-only">主对话</h1>
           <div id="main-workspace" class="main-agent-layout">
-            <aside class="collaboration-history" aria-label="主助理历史对话">
+            <aside id="main-history" class="collaboration-history" aria-label="主助理历史对话">
               <div class="main-history-heading">
                 <h2>对话</h2>
-                <button id="main-new-chat" class="main-history-action" type="button" aria-label="开始新的主助理对话" title="新对话"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
                 <button id="main-history-toggle" class="main-history-action main-history-toggle" type="button" aria-label="收起历史对话" title="收起历史对话" aria-controls="main-history-body" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
               </div>
               <div id="main-history-body"><nav id="main-history-list" aria-label="主助理历史对话"></nav><p id="main-history-status" class="muted-note small" role="status"></p></div>
             </aside>
             <section class="conversation" aria-label="与 NEUMA 的持续对话">
-              <div class="conversation-bar"><span id="main-conversation-title" class="conversation-title">一起推进你的工作</span><button id="main-refresh" class="ghost-button" type="button">刷新</button></div>
+              <div class="conversation-bar">
+                <button id="main-new-chat" class="conversation-new-chat" type="button">新对话</button>
+                <span id="main-conversation-title" class="conversation-title" hidden></span>
+                <div class="main-conversation-actions">
+                  <button id="main-create-agent" class="ghost-button" type="button">创建智能体</button>
+                  <button id="main-create-group" class="ghost-button" type="button">创建群组</button>
+                  <button id="main-context-open" class="ghost-button" type="button" aria-controls="main-context-panel" aria-expanded="false" hidden>上下文</button>
+                </div>
+              </div>
               <div id="main-messages" class="messages collaboration-messages" aria-live="polite"></div><div id="main-error" class="error" role="alert" hidden></div>
+              <div id="main-recovery" class="collaboration-links" hidden><button id="main-refresh" class="ghost-button" type="button" hidden>重新加载</button></div>
               <form id="main-chat-form" class="composer" autocomplete="off">
                 <div id="main-pending-materials" class="group-pending-materials" aria-label="主助理本轮材料" hidden></div>
                 <label class="sr-only" for="main-message">给 NEUMA 的消息</label><textarea id="main-message" rows="2" maxlength="4000" placeholder="告诉我你的目标，或把材料交给某个群组分析…"></textarea>
@@ -95,6 +103,7 @@
                 <div id="main-context-content"></div>
               </aside>
             </div>
+            <div id="main-history-resize" class="panel-resizer main-history-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整历史对话栏宽度" aria-controls="main-history" title="向右拖动可展开或调宽，达到最窄后继续向左拖动可折叠；双击恢复默认宽度"></div>
           </div>
         </section>
 
@@ -209,7 +218,6 @@
             <div class="header-actions">
               <div id="agent-conversation-actions" class="agent-conversation-actions" hidden>
                 <button id="agent-artifacts-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="agent-file-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>产物</span><span id="agent-artifacts-count" class="agent-artifacts-badge">0</span></button>
-                <button id="agent-new-chat" class="new-chat-button" type="button">＋ 新对话</button>
               </div>
               <button id="agent-panel-toggle" class="secondary agent-settings-button" type="button" aria-haspopup="dialog" aria-controls="agent-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M18 7h2M4 17h3M12 17h8"/><circle cx="15.5" cy="7" r="2.5"/><circle cx="9.5" cy="17" r="2.5"/></svg><span>智能体设置</span></button>
             </div>
@@ -235,7 +243,7 @@
               </div>
             </aside>
             <section id="agent-conversation" class="conversation" aria-label="用户智能体的独立对话">
-              <span id="agent-conversation-title" class="conversation-title" hidden></span>
+              <div class="conversation-bar"><button id="agent-new-chat" class="conversation-new-chat" type="button">新对话</button><span id="agent-conversation-title" class="conversation-title" hidden></span></div>
               <div class="agent-status-line" hidden><p id="agent-runtime-status" role="status" aria-live="polite">智能体界面尚未加载。若此提示持续显示，请刷新页面；更新代码后需重启本机服务。</p><button id="agent-build-shortcut" class="text-link link-button" type="button" hidden>生成智能体</button></div>
               <div id="agent-messages" class="messages" aria-live="polite"></div>
               <div id="agent-error" class="error" role="alert" hidden></div>
@@ -640,11 +648,13 @@
           </form>
         </section>
       </main>
+      <div id="sidebar-resize" class="panel-resizer sidebar-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整主导航宽度" aria-controls="sidebar-details" title="向右拖动可展开或调宽，达到最窄后继续向左拖动可折叠；双击恢复默认宽度"></div>
     </div>
 
     <script type="module" src="/shell.js"></script>
     <script type="module" src="/app.js"></script>
     <script type="module" src="/main-agent.js"></script>
+    <script type="module" src="/panel-resize.js"></script>
     <script type="module" src="/groups.js"></script>
     <script type="module" src="/agents.js"></script>
     <script type="module" src="/agent-details.js"></script>
