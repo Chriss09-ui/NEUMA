@@ -8,7 +8,7 @@ NEUMA 是一个在本机运行的智能体工作台。你用自然语言描述�
 
 NEUMA 读作“纽玛”，取意早期音乐记谱中的 *neuma*：把声音组织成可复现的结构，对应把语言描述变成可运行的智能体。[Treccani 词典](https://www.treccani.it/vocabolario/neuma/)将这一音乐术语溯源到古希腊语 **νεῦμα**，意为“示意、手势”。正式拼写统一为 **NEUMA**。
 
-[快速开始](#快速开始) · [项目特点](#项目特点) · [使用指南](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/user-guide.md) · [npm](https://www.npmjs.com/package/@chrissliu/neuma)
+[快速开始](#快速开始) · [项目特点](#项目特点) · [源码开发](#源码开发) · [npm](https://www.npmjs.com/package/@chrissliu/neuma)
 
 > 当前公开版本 `0.1.0-preview.1` 是 **Apple 芯片 Mac（M 系列）试用版**，通过 npm 的 `preview` 标签安装。Windows、Linux 和 Intel Mac 尚不在本次公开支持范围内。
 
@@ -95,21 +95,21 @@ neuma
 - 智能体支持文本对话及专属目录内的文件工具；生成程序当前支持使用 Node 内置模块的本地任务。普通材料读取复用平台工具，不为每个助手分别生成解析程序。
 - 正式外部连接、后台定时和事件触发需要对应适配，不会自动把尚未接入的能力标为可用。
 - 不自动为生成程序或已有项目安装额外依赖，也不自动部署外部服务。
-- 这是试用版本；最低 Node 版本和完整系统认证仍待补齐。其他操作系统的适配进度见安装说明。
+- 这是试用版本；最低 Node 版本和完整系统认证仍待补齐。
 
-## 文档与开发
+## 源码开发
 
-| 文档 | 内容 |
-| --- | --- |
-| [详细使用指南](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/user-guide.md) | 智能体操作、项目管理、数据保存、诊断及接口参考。 |
-| [安装与迁移](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/npm-installation.md) | CLI、数据迁移、平台进度与发布条件。 |
-| [架构说明](https://github.com/Chriss09-ui/NEUMA/blob/main/ARCHITECTURE.md) | 设计、评估、能力边界与持久状态。 |
-| [研发流程](https://github.com/Chriss09-ui/NEUMA/blob/main/docs/development-layer-design.md) | 任务拆分、开发、独立验收与交付。 |
-| [开发约定](https://github.com/Chriss09-ui/NEUMA/blob/main/AGENTS.md) | 修改代码前需要遵循的项目规范。 |
+当前 npm 试用版的源码已合并至 [`main`](https://github.com/Chriss09-ui/NEUMA/tree/main) 分支。使用前述 Node.js 环境安装并启动：
 
-当前 npm 试用版的源码已合并至 [`main`](https://github.com/Chriss09-ui/NEUMA/tree/main) 分支。源码安装与测试方式见详细使用指南。
+```sh
+git clone https://github.com/Chriss09-ui/NEUMA.git neuma
+cd neuma
+npm ci --ignore-scripts
+cp .env.example .env
+npm start
+```
 
-服务端源码统一放在 `src/`，按功能分组；前端资源、测试、开发脚本和说明文档分别在 `public/`、`test/`、`scripts/` 和 `docs/`。
+启动后在网页“设置”中配置模型。服务端源码统一放在 `src/`，按功能分组；前端资源、测试和开发脚本分别在 `public/`、`test/` 和 `scripts/`。
 
 开发时可按层运行测试：
 
