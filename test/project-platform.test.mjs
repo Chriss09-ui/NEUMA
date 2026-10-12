@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -82,6 +82,38 @@ test("Windows 停止期限会终止辅助进程并等待关闭，未收到关闭
     await assert.rejects(stopped, /未能确认/); assert.equal(kills, 1);
     if (!closes) supervisor.emit("close", null, "SIGKILL");
   }
+});
+
+test("POSIX 停止等待整个进程组退出，父进程先关闭也会清理忽略 SIGTERM 的子进程", { skip: process.platform === "win32", timeout: 10_000 }, async (t) => {
+  for (const launcherClosed of [false, true]) {
+    const workerSource = "process.on('SIGTERM', () => {}); process.send({ pid: process.pid }); setInterval(() => {}, 1000);";
+    const parentSource = `import { spawn } from 'node:child_process';
+const worker = spawn(process.execPath, ['-e', ${JSON.stringify(workerSource)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+worker.on('message', (message) => { console.log(JSON.stringify(message)); worker.disconnect(); });
+setInterval(() => {}, 1000);`;
+    const child = spawnProject("node", ["--input-type=module", "-e", parentSource], {
+      detached: true, stdio: ["ignore", "pipe", "ignore"], env: projectEnvironment(),
+    });
+    t.after(() => { try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } });
+    let output = "";
+    for await (const chunk of child.stdout) { output += chunk; if (output.includes("\n")) break; }
+    const workerPid = JSON.parse(output).pid;
+    assert.equal(process.kill(workerPid, 0), true);
+    if (launcherClosed) { const closed = once(child, "close"); child.kill("SIGTERM"); await closed; }
+    await stopProjectProcess(child, { stopTimeoutMs: 50 });
+    assert.equal(child.neumaClosed, true);
+    assert.throws(() => process.kill(workerPid, 0), { code: "ESRCH" });
+    assert.throws(() => process.kill(-child.pid, 0), { code: "ESRCH" });
+  }
+});
+
+test("POSIX 强制停止仍无法确认进程组退出时有界失败，不遗留关闭监听", async (t) => {
+  const child = new EventEmitter(); child.pid = 123456789; child.neumaClosed = true;
+  const signals = [];
+  t.mock.method(process, "kill", (_pid, signal) => { signals.push(signal); return true; });
+  await assert.rejects(stopProjectProcess(child, { platform: "linux", stopTimeoutMs: 0, killTimeoutMs: 0 }), /未能确认/);
+  assert.equal(signals.filter((signal) => signal === "SIGKILL").length, 1);
+  assert.equal(child.listenerCount("close"), 0);
 });
 
 test("批处理拒绝变量展开和内联参数，PowerShell 保留系统执行策略", async (t) => {

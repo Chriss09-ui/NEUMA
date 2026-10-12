@@ -20,6 +20,9 @@
   "scripts": {
     "start": "node --env-file=.env src/server.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "test:unit": "node scripts/run-tests.mjs unit",
+    "test:integration": "node scripts/run-tests.mjs integration",
+    "test:browser": "node scripts/run-tests.mjs browser",
     "package:prepare": "node scripts/prepare-package.mjs",
     "release:check": "node scripts/check-release.mjs",
     "release:preview:check": "node scripts/check-preview-release.mjs",

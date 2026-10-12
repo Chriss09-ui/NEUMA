@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, symlink, link, lstat } from "node:fs/promises";
+import { mkdtemp, mkdir, open, writeFile, readFile, rm, realpath, symlink, link, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DevelopmentExecutor } from "../src/development/development-executor.mjs";
 import { inspectDevelopmentCode } from "../src/development/development-workspace.mjs";
+import { MAX_RUNTIME_FILE_BYTES } from "../src/runtime/file-limits.mjs";
+import { AgentStorage } from "../src/agents/agent-storage.mjs";
+import { MaterialStore } from "../src/materials/material-store.mjs";
 
 async function fixture(t, source = "console.log(JSON.stringify({ok:true,values:[42]}));") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "neuma-executor-test-")));
@@ -131,6 +134,35 @@ test("运行层指定工作目录只授予该目录，代码版本保持只读",
   assert.equal((await executor.run({ ...input, input: "", workspaceDir })).status, "passed");
   assert.equal(calls.at(-1).options.cwd, await realpath(workspaceDir));
   assert.match(calls.at(-1).args[1], /allow file-read\* file-write\* \(subpath/);
+});
+
+test("运行目录接受 20 MiB 文件与超过代码总量、数量限制的用户数据", async (t) => {
+  const input = await fixture(t), { executor, calls } = fakeSandbox();
+  const workspaceDir = join(input.root, "runtime-data"); await mkdir(workspaceDir);
+  for (const name of ["first.csv", "second.csv"]) {
+    const handle = await open(join(workspaceDir, name), "w", 0o400);
+    try { await handle.truncate(MAX_RUNTIME_FILE_BYTES); } finally { await handle.close(); }
+  }
+  await Promise.all(Array.from({ length: 201 }, (_, index) => writeFile(join(workspaceDir, `data-${index}.txt`), "data")));
+  const result = await executor.run({ ...input, input: "", workspaceDir, workspaceReadOnly: true });
+  assert.equal(result.status, "passed"); assert.equal(calls.length, 2);
+  await assert.rejects(inspectDevelopmentCode(workspaceDir), /2 MB|200 个文件/);
+  const handle = await open(join(workspaceDir, "oversized.csv"), "w");
+  try { await handle.truncate(MAX_RUNTIME_FILE_BYTES + 1); } finally { await handle.close(); }
+  const rejected = await executor.run({ ...input, input: "", workspaceDir });
+  assert.equal(rejected.status, "error"); assert.equal(rejected.reason, "workspace_file_too_large"); assert.equal(calls.length, 2);
+});
+
+test("真实隔离流程在合法 3 MiB 上传材料进入工作目录后仍可运行", async (t) => {
+  const executor = new DevelopmentExecutor();
+  if (!await requireIsolation(t, executor)) return;
+  const input = await fixture(t), storage = new AgentStorage({ dataDir: join(input.root, "data") });
+  const materials = new MaterialStore({ storage }); t.after(() => materials.close());
+  const workspaceDir = await storage.directory("large-material", "workspace", { create: true });
+  const attachment = (await materials.upload("large-material", { name: "data.csv", source: Buffer.alloc(3 * 1024 * 1024, 32) })).attachment;
+  assert.equal(attachment.size, 3 * 1024 * 1024);
+  const result = await executor.run({ ...input, input: "", workspaceDir, workspaceReadOnly: true });
+  assert.equal(result.status, "passed", JSON.stringify(result)); assert.equal(result.output.ok, true);
 });
 
 test("隔离探测启动失败时绝不退回普通 node，也不公开进程错误细节", async (t) => {

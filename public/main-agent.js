@@ -12,7 +12,7 @@ const ACTIVE_KEY = "neuma.main.active-conversation.v1";
 const materials = createMainMaterials({ api, current: () => selected, create, changed: controls,
   onError: (message) => notice(byId("main-error"), message, true) });
 const contextPanel = createMainContext({ api, current: () => selected,
-  submit(message) { if (operation || loading) return; byId("main-message").value = message; void send(); },
+  submit(message) { if (operation || loading) return; void send({ message }); },
   edit(message) { if (!byId("main-message").value.trim()) byId("main-message").value = message; byId("main-message").focus(); },
   build: buildRequirement });
 const HISTORY_KEY = "neuma.main.history-collapsed.v1";
@@ -123,8 +123,9 @@ async function create({ preserveInput = true } = {}) {
   } catch (error) { showRecovery(error.message); }
   finally { loading = false; render(); byId("main-message").focus(); }
 }
-async function send() {
-  const attachmentIds = materials.refs(), supplied = byId("main-message").value.trim();
+async function send({ message: shortcutMessage } = {}) {
+  const shortcut = shortcutMessage !== undefined;
+  const attachmentIds = materials.refs(), supplied = (shortcut ? shortcutMessage : byId("main-message").value).trim();
   const message = supplied || (attachmentIds.length ? "请处理这些材料，任务目标不明确时先向我提问。" : "");
   if (!message || message.length > 4000 || operation || loading || materials.busy()) return;
   if (!selected) { await create(); if (!selected) return; }
@@ -140,7 +141,8 @@ async function send() {
   const previous = selected.messages.length;
   const user = { role: "user", content: message, ...(attachmentIds.length ? { attachments: materials.attachments() } : {}) };
   selected.messages.push(user);
-  byId("main-message").value = ""; needsConversationReload = false; notice(byId("main-error"), ""); render();
+  if (!shortcut) byId("main-message").value = "";
+  needsConversationReload = false; notice(byId("main-error"), ""); render();
   try {
     const result = await api.mainTurn(id, request, { signal: running.controller.signal, onProgress(event) {
       if (operation !== running || running.controller.signal.aborted) return;
@@ -167,7 +169,7 @@ async function send() {
     selected.context = previousContext; contextPanel.restore(previousPanel);
     selected.messages.splice(previous);
     if (running.reply.content) selected.messages.push(user, { ...running.reply, status: stopped ? "cancelled" : "error" });
-    if (!byId("main-message").value.trim()) byId("main-message").value = message;
+    if (!shortcut && !byId("main-message").value.trim()) byId("main-message").value = message;
     showRecovery(stopped ? "本轮已停止，已保存的内容可重新加载查看。" : `${error.message} 当前输入已保留，可重试或重新加载。`, !stopped);
   } finally {
     if (operation === running) operation = null;

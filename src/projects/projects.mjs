@@ -10,7 +10,7 @@ import { projectRuntimeSnapshot, scanLocalRuntime } from "./project-runtime.mjs"
 import { projectPath, validateProjectPlan, validateScriptCommand } from "./project-inspection.mjs";
 import { startScriptServices, stopScriptServices } from "./project-script-runtime.mjs";
 import { createProjectAddError, ProjectFailureStore } from "./project-diagnostics.mjs";
-import { projectEnvironment, spawnProject, stopProjectProcess } from "./project-platform.mjs";
+import { projectEnvironment, projectProcessGroupAlive, spawnProject, stopProjectProcess } from "./project-platform.mjs";
 
 const TYPES = { ".html": "text/html", ".htm": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
   ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
@@ -204,7 +204,8 @@ export class ProjectManager {
       pageOpened: Boolean(run?.pageOpened), openingPage: Boolean(run?.openingPage || run?.checkingPage), openError: run?.openError ?? null,
       error: run?.error ?? null, canLaunch: !inspecting && !run?.stopping && project.allowLaunch === true && (project.kind === "web" || Boolean(project.launch)),
       canStop: run?.background ? Boolean(run.ownsService || run.status === "starting") : ["starting", "running"].includes(run?.status)
-        || Boolean(run?.child && !run.child.neumaClosed && run.child.exitCode === null) };
+        || Boolean(run?.stopping || run?.stopFailed || run?.child && !run.child.neumaClosed && run.child.exitCode === null)
+        || this.platform !== "win32" && projectProcessGroupAlive(run?.child) };
   }
 
   async list() { await this.queue; await this.load(); return this.records.map((item) => this.view(item)); }
@@ -414,7 +415,7 @@ export class ProjectManager {
         child.on("error", () => { run.status = "failed"; run.error = "启动程序不可用，请检查是否已安装相应运行环境"; });
         child.on("close", (code) => {
           run.url = null;
-          if (run.status === "stopped") return;
+          if (run.stopping || run.status === "stopped") return;
           run.status = code === 0 ? (project.kind === "desktop" ? "external" : "completed") : "failed";
           if (code !== 0) run.error = `项目已退出（退出码 ${code ?? "未知"}），请在项目自己的终端检查原因`;
         });
@@ -450,26 +451,26 @@ export class ProjectManager {
     if (run.checkingPage) return;
     run.checkingPage = true; run.openError = null;
     try {
-    for (let attempt = 0; attempt < 30 && ["starting", "running"].includes(run.status); attempt++) {
+    for (let attempt = 0; attempt < 30 && !run.stopping && ["starting", "running"].includes(run.status); attempt++) {
       try {
         const url = candidate();
         if (url && Number(new URL(url).port || 80) !== this.blockedPort) {
           const response = await fetch(url, { signal: AbortSignal.timeout(500), redirect: "error" });
           await response.body?.cancel();
-          if (response.ok && run.status === "running") {
+          if (response.ok && !run.stopping && run.status === "running") {
             run.url = url; await this.openPage(run); return;
           }
         }
       } catch { /* An alive process can take time to expose its page. */ }
       await sleep(300);
     }
-    if (run.status === "running") run.openError = "项目正在运行，暂时没有发现可打开的网页。可以再试一次；脚本工具可能没有窗口。";
+    if (!run.stopping && run.status === "running") run.openError = "项目正在运行，暂时没有发现可打开的网页。可以再试一次；脚本工具可能没有窗口。";
     } finally { run.checkingPage = false; }
   }
 
   async openPage(run) {
     if (run.openingPage) return run.openingPage;
-    const active = () => ["running", "external"].includes(run.status);
+    const active = () => !run.stopping && ["running", "external"].includes(run.status);
     if (!active() || !run.url) return;
     run.openError = null;
     run.openingPage = Promise.resolve().then(() => { if (active()) return this.openBrowser(run.url); })
@@ -483,14 +484,25 @@ export class ProjectManager {
     const starting = this.pendingStarts.get(id);
     if (starting) starting.cancelled = true;
     const project = await this.get(id), run = this.runs.get(id);
+    if (run?.stopPromise) { await run.stopPromise; return this.view(project); }
     if (!run || !this.view(project).canStop) return this.view(project);
     if (run.background) {
       await stopScriptServices(project, run, { spawnImpl: this.spawnImpl, projectSpawn: this.projectSpawn, platform: this.platform, env: projectEnvironment() });
       return this.view(project);
     }
-    run.status = "stopped"; run.url = null; run.pageOpened = false; run.openError = null;
-    if (run.server) await new Promise((done) => run.server.close(done));
-    await stopProjectProcess(run.child, { platform: this.platform });
+    run.stopping = true; run.url = null; run.pageOpened = false; run.openError = null;
+    run.stopPromise = (async () => {
+      try {
+        if (run.server) await new Promise((done) => run.server.close(done));
+        await stopProjectProcess(run.child, { platform: this.platform });
+        run.status = "stopped"; run.stopFailed = false; run.error = null;
+      } catch (error) {
+        run.status = "failed"; run.stopFailed = true;
+        run.error = error instanceof InputError ? error.message : "未能停止全部项目进程，请重试。";
+        throw error;
+      }
+    })().finally(() => { run.stopping = false; run.stopPromise = null; });
+    await run.stopPromise;
     return this.view(project);
   }
 

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import { ProjectManager, openProjectPage } from "../src/projects/projects.mjs";
 
 async function fixture(t) {
@@ -86,6 +87,66 @@ server.listen(0,'127.0.0.1',()=>console.log('http://127.0.0.1:'+server.address()
   } finally {
     if (previousKey === undefined) delete process.env.NEUMA_LLM_API_KEY; else process.env.NEUMA_LLM_API_KEY = previousKey;
   }
+});
+
+async function exitedLauncher(t, { keepGroup = false } = {}) {
+  const { app, manager } = await fixture(t);
+  await writeFile(join(app, "package.json"), JSON.stringify({ scripts: { start: "node launcher.mjs" } }));
+  await writeFile(join(app, "launcher.mjs"), "// fixture launcher\n");
+  const child = new EventEmitter(); child.pid = 123456789; child.exitCode = null;
+  child.stdout = new EventEmitter(); child.stderr = { resume() {} };
+  let alive = true, spawned = 0;
+  const signals = [];
+  manager.spawnImpl = () => {
+    spawned++;
+    queueMicrotask(() => { child.exitCode = 0; child.emit("close", 0); });
+    return child;
+  };
+  t.mock.method(process, "kill", (pid, signal) => {
+    assert.equal(pid, -child.pid);
+    if (!alive) throw Object.assign(new Error("fixture process group closed"), { code: "ESRCH" });
+    if (signal !== 0) { signals.push(signal); if (!keepGroup) alive = false; }
+    return true;
+  });
+  t.after(() => { alive = false; });
+  const project = await manager.add({ path: app });
+  await manager.configure(project.id, { command: "node", args: ["launcher.mjs"], allowLaunch: true });
+  const started = await manager.start(project.id);
+  assert.equal(child.neumaClosed, true); assert.equal(child.exitCode, 0);
+  assert.equal(started.status, "completed", "应通过正常关闭事件更新状态，不伪造运行状态");
+  return { manager, project, signals, spawned: () => spawned, closeGroup() { alive = false; }, alive: () => alive };
+}
+
+test("父进程已经退出但后代仍在时，项目停止和删除仍清理残留进程组", { skip: process.platform === "win32" }, async (t) => {
+  for (const action of ["stop", "remove"]) {
+    await t.test(action, async (t) => {
+      const { manager, project, signals, alive } = await exitedLauncher(t);
+      assert.equal(manager.view(await manager.get(project.id)).canStop, true);
+      if (action === "stop") {
+        const stopped = await manager.stop(project.id);
+        assert.equal(stopped.status, "stopped"); assert.equal(stopped.canStop, false);
+        await manager.remove(project.id);
+      } else assert.equal((await manager.remove(project.id)).removed, true);
+      assert.deepEqual(signals, ["SIGTERM"]); assert.equal(alive(), false);
+      assert.equal(manager.runs.size, 0); assert.equal((await manager.list()).length, 0);
+    });
+  }
+});
+
+test("父进程退出后的并发停止和删除共享清理，等待后代退出期间禁止重新启动", { skip: process.platform === "win32" }, async (t) => {
+  const { manager, project, signals, spawned, closeGroup } = await exitedLauncher(t, { keepGroup: true });
+  const stopping = manager.stop(project.id);
+  await waitFor(() => signals.includes("SIGTERM"));
+  await assert.rejects(manager.start(project.id), /停止|启动方式尚未就绪/);
+  let removed = false;
+  const removing = manager.remove(project.id).then((result) => { removed = true; return result; });
+  await new Promise(setImmediate);
+  assert.equal(removed, false); assert.equal(manager.runs.has(project.id), true);
+  assert.equal((await manager.list()).length, 1);
+  closeGroup();
+  const [, result] = await Promise.all([stopping, removing]);
+  assert.equal(result.removed, true); assert.deepEqual(signals, ["SIGTERM"]);
+  assert.equal(spawned(), 1); assert.equal(manager.runs.size, 0);
 });
 
 test("系统浏览器打开已验证本机地址，不用 Shell、不继承模型密钥，失败返回安全提示", async () => {

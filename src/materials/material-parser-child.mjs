@@ -9,7 +9,8 @@ async function inputBytes(request) {
   const handle = await open(request.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1 || info.size > MAX_MATERIAL_BYTES) throw materialFailure("invalid_material", "材料文件无效或超过 50 MiB");
+    if (!info.isFile() || info.nlink !== 1) throw materialFailure("invalid_material", "材料文件无效");
+    if (info.size > MAX_MATERIAL_BYTES) throw materialFailure("material_too_large", "材料超过 20 MiB");
     const bytes = await handle.readFile();
     if (bytes.length > MAX_MATERIAL_BYTES || createHash("sha256").update(bytes).digest("hex") !== request.sha256)
       throw materialFailure("material_changed", "原始材料已被修改，请重新上传");

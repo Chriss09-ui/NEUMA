@@ -141,6 +141,18 @@ test("文本文件真实落盘并分批读取，路径、隐藏凭据和符号�
   assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "outside");
 });
 
+test("普通运行文件读取接受 20 MiB 边界，拒绝超过上限的文件", async (t) => {
+  const records = [], { agents } = await fixture(t, factory(records));
+  await agents.build(input()); await agents.prompt(turn());
+  const { options } = records[1], reader = options.customTools.find((tool) => tool.name === "read_workspace_file");
+  const limit = 20 * 1024 * 1024, path = join(options.cwd, "large.txt");
+  await writeFile(path, Buffer.alloc(limit, 97));
+  const result = JSON.parse((await reader.execute("boundary", { file: "large.txt", offset: limit - 1 })).content[0].text);
+  assert.equal(result.text, "a"); assert.equal(result.truncated, false);
+  await writeFile(path, Buffer.alloc(limit + 1, 97));
+  await assert.rejects(reader.execute("overflow", { file: "large.txt" }), /20 MiB/);
+});
+
 test("并发轮次拒绝，停止只影响指定会话；清理后可以重新运行", async (t) => {
   let started;
   const waiting = new Promise((done) => { started = done; }), records = [];

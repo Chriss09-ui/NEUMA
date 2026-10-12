@@ -13,7 +13,7 @@ export function createMainMaterials({ api, current, create, changed, onError }) 
     const refs = selection(), target = byId("main-pending-materials"); target.replaceChildren(); target.hidden = !refs.size;
     for (const id of refs) target.append(button(`${description(id)?.name || "已选材料"} ×`, () => { refs.delete(id); render(); changed(); }, "group-material-chip"));
     byId("main-upload").disabled = uploading; byId("main-materials-open").disabled = uploading;
-    byId("main-material-status").textContent = uploading ? "正在上传材料…" : refs.size ? `本轮使用 ${refs.size} 份材料` : "单份 50 MiB · 最多 10 份";
+    byId("main-material-status").textContent = uploading ? "正在上传材料…" : refs.size ? `本轮使用 ${refs.size} 份材料` : "单份 20 MiB · 最多 10 份";
   }
   function add(attachment) {
     const refs = selection();
@@ -28,7 +28,7 @@ export function createMainMaterials({ api, current, create, changed, onError }) 
     uploading = true; render(); changed();
     try {
       for (const file of [...files]) {
-        if (file.size > 50 * 1024 * 1024) throw new Error(`${file.name} 超过 50 MiB，请选择较小文件。`);
+        if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} 超过 20 MiB，请选择较小文件。`);
         const result = await api.uploadMainMaterial(id, file);
         if (current()?.id !== id) return;
         if (!result.attachment?.id) throw new Error("上传结果尚未确认，请重试。");

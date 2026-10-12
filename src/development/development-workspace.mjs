@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, opendir, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { InputError } from "../requirements/core.mjs";
 import { safeRelativePath } from "./development-contract.mjs";
 import { AgentStorage } from "../agents/agent-storage.mjs";
+import { MAX_RUNTIME_FILE_BYTES } from "../runtime/file-limits.mjs";
 
 export const DEVELOPMENT_LIMITS = Object.freeze({ fileBytes: 2 * 1024 * 1024, totalBytes: 10 * 1024 * 1024, files: 200 });
 const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -84,6 +85,23 @@ export async function inspectDevelopmentCode(root) {
   await walk(root);
   files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   return { path: root, hash: digest(JSON.stringify(files)), files, contents };
+}
+
+export async function validateRuntimeWorkspace(root, { signal } = {}) {
+  root = await safeDirectory(root);
+  const walk = async (directory, prefix = "") => {
+    for await (const entry of await opendir(directory)) {
+      signal?.throwIfAborted();
+      const file = prefix + entry.name;
+      validateCodePath(file);
+      const path = join(root, file), info = await lstat(path);
+      if (info.isSymbolicLink()) throw new InputError("运行目录包含符号链接");
+      if (info.isDirectory()) { await walk(path, file + "/"); continue; }
+      if (!info.isFile() || info.nlink !== 1) throw new InputError("运行目录只允许普通文件，不能包含硬链接");
+      if (info.size > MAX_RUNTIME_FILE_BYTES) throw Object.assign(new InputError("运行文件不能超过 20 MiB"), { reason: "workspace_file_too_large" });
+    }
+  };
+  await walk(root);
 }
 
 export class DevelopmentWorkspace {

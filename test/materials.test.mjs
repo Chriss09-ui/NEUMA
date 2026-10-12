@@ -9,7 +9,7 @@ import { crc32 } from "node:zlib";
 import sharp from "sharp";
 import { AgentStorage } from "../src/agents/agent-storage.mjs";
 import { MaterialStore } from "../src/materials/material-store.mjs";
-import { MAX_MATERIAL_BYTES } from "../src/materials/material-formats.mjs";
+import { MATERIAL_PARSER_VERSION, MAX_MATERIAL_BYTES } from "../src/materials/material-formats.mjs";
 
 const fixtures = fileURLToPath(new URL("./fixtures/materials/", import.meta.url));
 async function setup(t, runner) {
@@ -70,7 +70,7 @@ test("redaction keeps original line numbers for multiline credential-like test t
   assert.equal(last.sourceInfo.lineStart, 7);
 });
 
-test("uploads reject unsafe names, content type mismatches, and a streamed 50 MiB overflow", async (t) => {
+test("uploads reject unsafe names, content type mismatches, and a streamed 20 MiB overflow", async (t) => {
   const { store } = await setup(t);
   for (const name of ["../notes.txt", "sub/notes.txt", "sub\\notes.txt", "sub／notes.txt", ".env", "id_rsa", "password.txt", "api-key.py", "credential.json", "notes.exe"])
     await assert.rejects(store.upload("agent-a", { name, source: Buffer.from("untrusted") }));
@@ -78,8 +78,39 @@ test("uploads reject unsafe names, content type mismatches, and a streamed 50 Mi
   await assert.rejects(store.upload("agent-a", { name: "fake.png", source: Buffer.from("not a PNG") }), /扩展名/);
   const block = Buffer.alloc(1024 * 1024, 97);
   async function* tooLarge() { for (let size = 0; size <= MAX_MATERIAL_BYTES; size += block.length) yield block; }
-  await assert.rejects(store.upload("agent-a", { name: "large.txt", source: tooLarge() }), /50 MiB/);
+  await assert.rejects(store.upload("agent-a", { name: "large.txt", source: tooLarge() }), /20 MiB/);
   assert.deepEqual((await store.list("agent-a")).attachments, []);
+});
+
+test("a streamed upload accepts exactly 20 MiB", async (t) => {
+  const { store } = await setup(t), block = Buffer.alloc(1024 * 1024, 32);
+  async function* boundary() { for (let size = 0; size < MAX_MATERIAL_BYTES; size += block.length) yield block; }
+  const attachment = await upload(store, "boundary.csv", boundary());
+  assert.equal(MAX_MATERIAL_BYTES, 20 * 1024 * 1024); assert.equal(attachment.size, MAX_MATERIAL_BYTES);
+  assert.equal((await store.raw("agent-a", attachment.id)).size, MAX_MATERIAL_BYTES);
+});
+
+test("legacy oversized materials remain listed but cannot bypass the new limit through a cache", async (t) => {
+  let calls = 0;
+  const runner = { async run() { calls++; throw new Error("oversized legacy material must not be parsed"); }, async close() {} };
+  const { store, storage } = await setup(t, runner);
+  const attachment = await upload(store, "legacy.csv", Buffer.from("legacy material"));
+  const descriptorPath = `attachments/${attachment.id}/descriptor.json`, descriptor = await storage.readJson("agent-a", descriptorPath);
+  const source = Buffer.alloc(MAX_MATERIAL_BYTES + 1, 32), hash = createHash("sha256").update(source).digest("hex");
+  const rawPath = (await store.raw("agent-a", attachment.id)).path; await chmod(rawPath, 0o600); await writeFile(rawPath, source);
+  await storage.writeJson("agent-a", descriptorPath, { ...descriptor, size: source.length, sha256: hash, status: "ready" });
+  const cachePath = `attachments/${attachment.id}/cache/${hash}.${MATERIAL_PARSER_VERSION}.json`;
+  const cached = { parserVersion: MATERIAL_PARSER_VERSION, sha256: hash, result: { text: "old cached result", images: [], locations: [], status: "ready" } };
+  await storage.writeJson("agent-a", cachePath, cached);
+  await upload(store, "current.txt", Buffer.from("current material"));
+  const listed = (await store.list("agent-a")).attachments; assert.equal(listed.length, 2);
+  assert.equal(listed.find((item) => item.id === attachment.id).failureReason, "material_too_large");
+  for (const operation of [() => store.raw("agent-a", attachment.id), () => store.preview("agent-a", attachment.id),
+    () => store.image("agent-a", attachment.id), () => store.resolve("agent-a", [attachment.id])]) {
+    await assert.rejects(operation(), (error) => error.reason === "material_too_large" && /20 MiB/.test(error.message));
+  }
+  assert.equal(calls, 0); assert.deepEqual(await storage.readJson("agent-a", cachePath), cached);
+  assert.equal((await storage.readJson("agent-a", descriptorPath)).status, "ready");
 });
 
 test("cache hits recheck source hashes and reject link replacement", async (t) => {
