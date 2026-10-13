@@ -98,7 +98,7 @@
               <form id="main-chat-form" class="composer" autocomplete="off">
                 <div id="main-pending-materials" class="group-pending-materials" aria-label="主助理本轮材料" hidden></div>
                 <label class="sr-only" for="main-message">给 NEUMA 的消息</label><textarea id="main-message" rows="2" maxlength="4000" placeholder="告诉我你的目标，或把材料交给某个群组分析…"></textarea>
-                <p id="main-progress" class="muted-note small main-progress" role="status">主助理位于群外，帮你管理和联系所有智能体。</p>
+                <p id="main-progress" class="muted-note small main-progress" role="status" hidden></p>
                 <div class="composer-footer"><div class="agent-attachment-actions"><button id="main-upload" class="ghost-button" type="button">＋ 上传材料</button><button id="main-materials-open" class="ghost-button" type="button" aria-haspopup="dialog" aria-controls="main-material-dialog">已有材料</button><span id="main-material-status" class="main-material-status" role="status">单份 20 MiB · 最多 10 份</span></div><div class="composer-actions"><button id="main-cancel" class="secondary" type="button" hidden>停止回复</button><button id="main-send" class="primary" type="submit">发送</button></div></div>
                 <input id="main-file-input" type="file" multiple hidden aria-label="上传主助理材料">
               </form>
