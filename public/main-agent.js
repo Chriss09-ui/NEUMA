@@ -81,6 +81,7 @@ function controls() {
   for (const item of byId("main-history-list").querySelectorAll("button")) item.disabled = busy();
   byId("main-cancel").hidden = !operation;
   byId("main-message").disabled = Boolean(loading || removing);
+  if (!operation) notice(byId("main-progress"), "");
 }
 function render() {
   const target = byId("main-messages"), wasBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
@@ -245,7 +246,7 @@ async function send({ message: shortcutMessage } = {}) {
       if (operation !== running || running.controller.signal.aborted) return;
       if (event.type === "text-start") running.reply.content = "";
       if (event.type === "text-delta") running.reply.content += event.delta || "";
-      if (event.type === "status") byId("main-progress").textContent = event.label || "正在联系智能体、整理工作…";
+      if (event.type === "status") notice(byId("main-progress"), event.label || "正在联系智能体、整理工作…");
       if (event.type === "context") applyContext(event.context, { reveal: true });
       render();
     } });
@@ -270,7 +271,6 @@ async function send({ message: shortcutMessage } = {}) {
     showRecovery(stopped ? "本轮已停止，已保存的内容可重新加载查看。" : `${error.message} 当前输入已保留，可重试或重新加载。`, !stopped);
   } finally {
     if (operation === running) operation = null;
-    byId("main-progress").textContent = "主助理位于群外，帮你管理和联系所有智能体。";
     render(); await list();
     if (page === "chat") byId("main-message").focus();
   }

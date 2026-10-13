@@ -156,18 +156,18 @@ export function initWorkspaceResize({ documentRef = document, windowRef = window
   if (!shell || !workspace || !page) return;
   const history = byId("main-history"), watch = [shell, workspace, page, history];
   const collapsed = (root, name) => root.classList.contains(name);
-  const contextWidth = () => collapsed(workspace, "context-open") ? 324 : 0;
+  const contextWidth = () => collapsed(workspace, "context-open") ? 304 : 0;
   const fold = (id) => { const toggle = byId(id); toggle.click(); toggle.focus({ preventScroll: true }); };
   const sidebar = initPanelResize({ layout: shell, handle: byId("sidebar-resize"), variable: "--sidebar",
-    storageKey: "neuma.sidebar.width.v1", label: "主导航", defaultWidth: 232, minWidth: 200, maxWidth: 320,
+    storageKey: "neuma.sidebar.width.v1", label: "主导航", defaultWidth: 232, minWidth: 175, maxWidth: 320,
     windowRef, watch, isCollapsed: () => collapsed(shell, "sidebar-collapsed"), collapsedWidth: 72,
     getMax: () => {
       const width = shell.getBoundingClientRect().width;
-      if (page.hidden) return Math.max(200, width - 640);
+      if (page.hidden) return Math.max(175, width - 640);
       const css = windowRef.getComputedStyle(page);
       const padding = (Number.parseFloat(css.paddingLeft) || 0) + (Number.parseFloat(css.paddingRight) || 0);
       // Reserve the open history minimum so pulling it out never shifts its origin.
-      return Math.max(200, width - padding - 160 - contextWidth() - 388);
+      return Math.max(175, width - padding - 160 - contextWidth() - 388);
     }, collapse: () => fold("sidebar-toggle"), expand: () => byId("sidebar-toggle").click() });
   const historyPanel = initPanelResize({ layout: workspace, handle: byId("main-history-resize"), variable: "--main-history-width",
     storageKey: "neuma.main.history-width.v1", label: "历史对话", defaultWidth: 208, minWidth: 160, maxWidth: 360,

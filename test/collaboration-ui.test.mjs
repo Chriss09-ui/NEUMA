@@ -661,6 +661,7 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "整理材料";
+  assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
   await ui.submit("main-chat-form"); await settle();
   assert.equal(ui.get("main-new-chat").disabled, true); assert.equal(ui.get("main-new-chat").hidden, false);
   assert.equal(mainHistoryMore(ui, conversation.id).disabled, true);
@@ -670,10 +671,12 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   assert.equal(reply.children.find(isBubble).textContent, "正在处理…");
   assert.equal(reply.children.some((item) => item.className === "collaboration-message-heading"), false);
   streamController.enqueue(new TextEncoder().encode([
-    { type: "text-start" }, { type: "text-delta", delta: "已整理" }, { type: "text-delta", delta: "第一份材料" },
+    { type: "status", label: "正在整理材料…" }, { type: "text-start" },
+    { type: "text-delta", delta: "已整理" }, { type: "text-delta", delta: "第一份材料" },
   ].map(JSON.stringify).join("\n") + "\n"));
   await settle(); reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   const body = reply.children.find(isBubble);
+  assert.equal(ui.text("main-progress"), "正在整理材料…"); assert.equal(ui.get("main-progress").hidden, false);
   assert.equal(body.textContent, "已整理第一份材料"); assert.equal(body.classes.has("streaming"), true);
   assert.equal(textOf(reply), "已整理第一份材料");
   streamController.enqueue(new TextEncoder().encode(JSON.stringify({ type: "done", result: { reply: "已整理第一份材料",
@@ -684,6 +687,7 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   assert.equal(completed.children.find(isBubble).classes.has("streaming"), false);
   assert.equal(ui.get("main-new-chat").disabled, false); assert.equal(ui.get("main-new-chat").hidden, false);
   assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
+  assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
 });
 
 test("主历史异常纯气泡保留部分正文和真实失败、停止及中断状态", async () => {
@@ -1124,7 +1128,7 @@ test("服务器已取消或明确失败后主动重发使用新请求，取消�
       if (path.endsWith("/messages")) {
         writes.push(JSON.parse(options.body));
         if (writes.length === 1) return new Response([
-          { type: "text-start" }, { type: "text-delta", delta: "已输出的部分内容" },
+          { type: "status", label: "正在处理…" }, { type: "text-start" }, { type: "text-delta", delta: "已输出的部分内容" },
           { type: "error", error: "服务端已结束本轮", diagnostic: { stage: "main", reason } },
         ].map(JSON.stringify).join("\n") + "\n", { headers: { "content-type": "application/x-ndjson" } });
         return Response.json({ reply: "新的请求已完成", conversation: { ...conversation, messages: [{ role: "assistant", content: "新的请求已完成", status: "complete" }] } });
@@ -1134,6 +1138,7 @@ test("服务器已取消或明确失败后主动重发使用新请求，取消�
     await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "继续这个任务";
     await ui.submit("main-chat-form"); await settle();
     assert.equal(ui.get("main-message").value, "继续这个任务");
+    assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
     assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
     if (reason === "cancelled") {
       assert.match(ui.text("main-error"), /本轮已停止/); assert.equal(ui.get("main-error").classes.has("error"), false);
@@ -1412,6 +1417,7 @@ test("桌面主聊天统一需求输入，旧创建表单仅作为隐藏档案�
   assert.match(html, /class="main-context-slot"[^>]*>\s*<aside id="main-context-panel"/);
   const mainPage = html.slice(html.indexOf('<section id="page-chat"'), html.indexOf('<dialog id="main-material-dialog"'));
   assert.doesNotMatch(mainPage, /class="page-header"|与你持续对话，一起把想法变成可完成的工作。/);
+  assert.match(mainPage, /<p id="main-progress"[^>]*\bhidden><\/p>/);
   const actions = mainPage.match(/<div class="main-conversation-actions">([\s\S]*?)<\/div>/)?.[1];
   assert.ok(actions);
   const newChat = mainPage.match(/<button id="main-new-chat"([^>]*)>([\s\S]*?)<\/button>/);

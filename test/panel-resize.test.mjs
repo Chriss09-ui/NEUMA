@@ -97,8 +97,8 @@ test("列宽默认值与存储偏好更新可访问范围，初始化不保存",
   assert.equal(ui.handle.getAttribute("aria-valuemin"), "160"); assert.equal(ui.handle.getAttribute("aria-valuemax"), "360");
   assert.equal(ui.handle.getAttribute("aria-valuenow"), "208");
   assert.equal(ui.handle.getAttribute("aria-hidden"), "false"); assert.equal(ui.handle.inert, false); assert.equal(ui.handle.tabIndex, 0);
-  const navigation = setup({ defaultWidth: 232, minWidth: 200, maxWidth: 320 });
-  assert.equal(navigation.applied(), 232); assert.equal(navigation.handle.getAttribute("aria-valuemin"), "200");
+  const navigation = setup({ defaultWidth: 232, minWidth: 175, maxWidth: 320 });
+  assert.equal(navigation.applied(), 232); assert.equal(navigation.handle.getAttribute("aria-valuemin"), "175");
   assert.equal(navigation.handle.getAttribute("aria-valuemax"), "320");
 });
 
@@ -324,7 +324,7 @@ test("存储不可用或损坏不会阻止交互", () => {
 
 const foldedProfiles = [
   { defaultWidth: 208, minWidth: 160, maxWidth: 360, collapsedWidth: 40, stored: 300 },
-  { defaultWidth: 232, minWidth: 200, maxWidth: 320, collapsedWidth: 72, stored: 280 }
+  { defaultWidth: 232, minWidth: 175, maxWidth: 320, collapsedWidth: 72, stored: 280 }
 ];
 
 test("两栏折叠态手柄仍可操作，当前值和最小值显示真实折叠宽度", () => {
@@ -546,7 +546,8 @@ test("需求说明打开时历史栏开合与拉出预览不改变主导航宽�
     const names = new Set();
     return { contains: (name) => names.has(name), toggle: (name, active) => active ? names.add(name) : names.delete(name) };
   };
-  const shell = { classList: classes(), getBoundingClientRect: () => ({ width: 1200 }) };
+  let shellWidth = 1200;
+  const shell = { classList: classes(), getBoundingClientRect: () => ({ width: shellWidth }) };
   const workspace = { classList: classes(), getBoundingClientRect: () => ({ width: 900 }) };
   const page = { hidden: false }, history = { classList: classes() };
   workspace.classList.toggle("context-open", true);
@@ -559,9 +560,16 @@ test("需求说明打开时历史栏开合与拉出预览不改变主导航宽�
   const captured = []; context.initPanelResize = (options) => { captured.push(options); return options; };
   const controllers = context.initWorkspaceResize({ documentRef, windowRef });
   assert.equal(captured.length, 2); assert.equal(controllers.sidebar, captured[0]); assert.equal(controllers.history, captured[1]);
+  assert.equal(controllers.sidebar.minWidth, 175);
   for (const [state, collapsed, revealing] of [["folded", true, false], ["revealing", true, true], ["open", false, false]]) {
     workspace.classList.toggle("history-collapsed", collapsed); workspace.classList.toggle("is-panel-revealing", revealing);
     history.classList.toggle("is-collapsed", collapsed);
-    assert.equal(controllers.sidebar.getMax(), 276, state + " 时应一直预留历史最小展开宽度160，保持拉出起点");
+    assert.equal(controllers.sidebar.getMax(), 296, state + " 时应一直预留历史最小展开宽度160，保持拉出起点");
   }
+  assert.equal(controllers.history.getMax(), 208);
+  workspace.classList.toggle("context-open", false);
+  assert.equal(controllers.sidebar.getMax(), 600); assert.equal(controllers.history.getMax(), 512);
+  workspace.classList.toggle("context-open", true);
+  shellWidth = 1000; assert.equal(controllers.sidebar.getMax(), 175);
+  page.hidden = true; shellWidth = 700; assert.equal(controllers.sidebar.getMax(), 175);
 });
