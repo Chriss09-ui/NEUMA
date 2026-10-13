@@ -48,6 +48,8 @@ const PUBLIC = new Map([
   ["/agent-details.js", ["agent-details.js", "text/javascript; charset=utf-8"]],
   ["/agent-details-view.js", ["agent-details-view.js", "text/javascript; charset=utf-8"]],
   ["/agent-avatar.js", ["agent-avatar.js", "text/javascript; charset=utf-8"]],
+  ["/group-avatar.js", ["group-avatar.js", "text/javascript; charset=utf-8"]],
+  ["/select-menu.js", ["select-menu.js", "text/javascript; charset=utf-8"]],
   ["/agent-avatar-motion.js", ["agent-avatar-motion.js", "text/javascript; charset=utf-8"]],
   ["/assets/brand/neuma-mark.png", ["assets/brand/neuma-mark.png", "image/png"]],
   ["/assets/avatars/core.png", ["assets/avatars/core.png", "image/png"]],

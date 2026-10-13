@@ -1,5 +1,8 @@
 import { createCollaborationApi } from "./collaboration-api.js";
 import { createGroupMaterials } from "./group-materials.js";
+import { renderAgentAvatar } from "./agent-avatar.js";
+import { renderGroupAvatar } from "./group-avatar.js";
+import { createSelectMenu } from "./select-menu.js";
 import { button, node, notice, renderMembers, renderMessages, renderTasks, terminalTask } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = (id) => document.getElementById(id);
@@ -8,8 +11,43 @@ let loading = false, sending = false, selectedTask = "", newTask = false, pollTi
 let editing = null, editorTrigger = null, editorSaving = false, editorSequence = 0, editorRetry = null, retry = null;
 let listSequence = 0;
 const drafts = new Map();
+const avatarMembers = new Map();
 const materials = createGroupMaterials({ api, current: () => data, refresh: load, changed: controls });
 const navigate = (detail) => document.dispatchEvent(new CustomEvent("neuma:navigate", { detail }));
+const taskMenu = createSelectMenu({ select: byId("group-task-filter"), trigger: byId("group-task-trigger"),
+  menu: byId("group-task-menu"), value: byId("group-task-value"), document, window });
+const recipientMenu = createSelectMenu({ select: byId("group-recipient"), trigger: byId("group-recipient-trigger"),
+  menu: byId("group-recipient-menu"), value: byId("group-recipient-value"), icon: byId("group-recipient-icon"),
+  renderIcon: renderRecipientIcon, document, window });
+
+function renderRecipientIcon(target, option) {
+  target.replaceChildren(); target.classList.remove("group-avatar", "has-star-avatar");
+  delete target.dataset.avatarKey; delete target.dataset.groupAvatarKey;
+  if (option.value) renderAgentAvatar(target, data?.members?.find((member) => member.id === option.value)
+    ?? { id: option.value }, { motion: false });
+  else renderGroupAvatar(target, data?.group, data?.members || []);
+}
+
+function rememberAvatars(members = []) {
+  let changed = false;
+  for (const member of members) {
+    if (typeof member?.id !== "string" || (!member.profile && avatarMembers.has(member.id))) continue;
+    const icon = typeof member.profile?.icon === "string" ? member.profile.icon : "";
+    if (avatarMembers.get(member.id)?.profile.icon === icon) continue;
+    avatarMembers.set(member.id, { id: member.id, profile: { icon } }); changed = true;
+  }
+  return changed;
+}
+function groupAvatar(group, className) {
+  const avatar = node("span", className); renderGroupAvatar(avatar, group, [...avatarMembers.values()]); return avatar;
+}
+function renderGroupIdentity() {
+  if (data?.group?.id === route.groupId) renderGroupAvatar(byId("group-avatar"), data.group, [...avatarMembers.values()]);
+}
+function syncAvatars(members) {
+  if (!rememberAvatars(members)) return;
+  renderLibrary(); renderGroupIdentity();
+}
 
 function controls() {
   const unavailable = loading || !data?.group || data.group.archived;
@@ -17,9 +55,11 @@ function controls() {
   byId("group-new-task").disabled = Boolean(unavailable || sending);
   byId("group-message").disabled = Boolean(unavailable || sending);
   byId("group-recipient").disabled = Boolean(unavailable || sending);
-  byId("group-compose-status").textContent = data?.group?.archived ? "群已归档，取消归档后可继续协作。"
-    : sending ? "正在提交消息…" : newTask || terminalTask(data?.tasks?.find((task) => task.id === selectedTask))
-      ? "下一条消息将发起一项新任务。" : "只向群内分享的消息与材料会进入协作。";
+  recipientMenu.refresh(); taskMenu.refresh();
+  const status = byId("group-compose-status");
+  status.textContent = data?.group?.archived ? "群已归档，取消归档后可继续协作。"
+    : sending ? "正在提交消息…" : "";
+  status.hidden = !status.textContent;
 }
 function renderLibrary() {
   const target = byId("groups-list"), rail = byId("sidebar-group-list"); target.replaceChildren(); rail.replaceChildren();
@@ -32,12 +72,14 @@ function renderLibrary() {
   for (const group of visible) {
     const card = node("article", "group-library-card"), title = node("a", "group-library-title", group.name);
     title.href = `#group/${encodeURIComponent(group.id)}`;
-    const heading = node("div", "group-library-heading"); heading.append(title, node("span", "identity-badge", group.archived ? "已归档" : "协作群"));
+    const heading = node("div", "group-library-heading"); heading.append(groupAvatar(group, "group-library-avatar"), title,
+      node("span", "identity-badge", group.archived ? "已归档" : "协作群"));
     card.append(heading, node("p", "muted-note", group.purpose || "共同推进工作"),
       node("p", "group-library-meta", `${group.memberIds?.length || 0} 位成员 · ${group.updatedAt ? new Date(group.updatedAt).toLocaleDateString("zh-CN") : "刚刚创建"}`)); target.append(card);
   }
   for (const group of groups.filter((item) => !item.archived)) {
-    const link = node("a", "sidebar-group-link", group.name); link.href = `#group/${encodeURIComponent(group.id)}`;
+    const link = node("a", "sidebar-group-link"); link.href = `#group/${encodeURIComponent(group.id)}`;
+    link.append(groupAvatar(group, "sidebar-group-avatar"), node("span", "sidebar-group-name", group.name));
     link.setAttribute("aria-current", route.page === "group" && route.groupId === group.id ? "page" : "false"); rail.append(link);
   }
   notice(byId("sidebar-groups-feedback"), "");
@@ -57,7 +99,8 @@ async function list() {
 function render() {
   if (!data?.group || route.page !== "group" || data.group.id !== route.groupId) return;
   const group = data.group;
-  byId("group-title").textContent = group.name; byId("group-purpose").textContent = group.purpose || "群内成员依据自己的能力共同工作";
+  renderGroupIdentity();
+  byId("group-title").textContent = group.name;
   byId("group-archived").hidden = !group.archived; byId("group-archive").textContent = group.archived ? "取消归档" : "归档";
   byId("group-member-count").textContent = String(data.members?.length || 0);
   const filter = byId("group-task-filter"); filter.replaceChildren();
@@ -82,7 +125,8 @@ async function load(id = route.groupId, { quiet = false } = {}) {
     const result = await api.group(id);
     if (requestSequence !== sequence || route.page !== "group" || route.groupId !== id) return;
     if (result.group?.id !== id) throw new Error("群组身份尚未确认，请重试。");
-    data = result; notice(byId("group-error"), ""); render();
+    data = result; if (rememberAvatars(result.members)) renderLibrary();
+    notice(byId("group-error"), ""); render();
   } catch (error) { if (requestSequence === sequence && route.groupId === id) notice(byId("group-error"), `${error.message} 点击右侧刷新重试。`, true); }
   finally { if (sequence === requestSequence) { loading = false; controls(); } }
 }
@@ -129,8 +173,9 @@ async function editor(group = null, trigger = byId("groups-create")) {
     for (const agent of result.agents || []) {
       const label = node("label", "group-pick-member"), input = node("input"); input.type = "checkbox"; input.value = agent.id;
       input.checked = group?.memberIds?.includes(agent.id) || false; input.disabled = !agent.ready && !input.checked;
-      const copy = node("span"); copy.append(node("strong", "", agent.name), node("small", "muted-note", agent.ready ? agent.description || "已通过运行检查" : "尚未就绪"));
-      label.append(input, copy); target.append(label);
+      const avatar = node("span", "group-pick-avatar"); avatar.setAttribute("aria-hidden", "true"); renderAgentAvatar(avatar, agent);
+      const copy = node("span", "group-pick-copy"); copy.append(node("strong", "", agent.name), node("small", "muted-note", agent.ready ? agent.description || "已通过运行检查" : "尚未就绪"));
+      label.append(input, avatar, copy); target.append(label);
     }
     if (!result.agents?.length) { target.append(node("p", "muted-note", "先创建并完成一个智能体，再邀请它参加群协作。")); const link = node("a", "text-link", "创建智能体"); link.href = "#create"; link.addEventListener("click", closeEditor); target.append(link); }
     byId("group-editor-save").disabled = false;
@@ -178,10 +223,17 @@ byId("groups-show-archived").addEventListener("change", renderLibrary);
 for (const id of ["groups-create", "sidebar-create-group"]) byId(id).addEventListener("click", () => void editor(null, byId(id)));
 document.addEventListener("neuma:create-group", () => void editor(null, byId("main-create-group")));
 document.addEventListener("neuma:groups-changed", () => void list());
+document.addEventListener("neuma:agents-changed", (event) => syncAvatars(event.detail?.items || []));
+document.addEventListener("neuma:agent-profile-changed", (event) => {
+  if (event.detail?.profile) syncAvatars([{ id: event.detail.id, profile: event.detail.profile }]);
+});
+document.addEventListener("neuma:agent-profiles-loaded", (event) => syncAvatars((event.detail?.profiles || [])
+  .map((profile) => ({ id: profile.id, profile }))));
 byId("group-editor-form").addEventListener("submit", (event) => { event.preventDefault(); void saveEditor(); });
 byId("group-editor-close").addEventListener("click", closeEditor);
 byId("group-editor").addEventListener("cancel", (event) => { event.preventDefault(); closeEditor(); });
 document.addEventListener("neuma:route", (event) => {
+  recipientMenu.close(); taskMenu.close();
   if (route.page === "group" && route.groupId) drafts.set(route.groupId, byId("group-message").value);
   const previous = route.groupId; route = event.detail; clearInterval(pollTimer); pollTimer = null; requestSequence++;
   renderLibrary();
@@ -189,7 +241,9 @@ document.addEventListener("neuma:route", (event) => {
   if (route.page === "group") {
     if (previous !== route.groupId) {
       data = null; selectedTask = ""; newTask = false; materials.reset();
-      byId("group-title").textContent = "正在读取群组…"; byId("group-purpose").textContent = "";
+      byId("group-recipient").value = "";
+      renderGroupAvatar(byId("group-avatar"), null);
+      byId("group-title").textContent = "正在读取群组…";
       byId("group-messages").replaceChildren(node("p", "muted-note", "正在加载群消息…"));
       byId("group-members").replaceChildren(); byId("group-tasks").replaceChildren();
     }
@@ -197,4 +251,5 @@ document.addEventListener("neuma:route", (event) => {
     void load(); pollTimer = setInterval(() => void poll(), 2500);
   }
 });
+document.dispatchEvent(new CustomEvent("neuma:agents-request"));
 void list();

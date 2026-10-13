@@ -132,12 +132,19 @@ test("私聊与群共用同 Agent 队列，全局两个执行，排队取消不�
 test("能力卡包含未生成成员而不泄露指令/记忆，活动摘要清理并在重启标中断", async (t) => {
   const { agents, options } = await fixture(t);
   await agents.setMemory("a", "PRIVATE_MEMORY_FIXTURE");
+  const profile = { name: "成员 a", description: "公开能力简介", icon: "star:4:1" };
+  await agents.setProfile("a", profile);
   await agents.saveRequirements("pending", input("pending", "等待开发"));
   const cards = (await agents.capabilityCards()).agents;
   assert.equal(cards.find((item) => item.id === "pending").ready, false);
   assert.equal(cards.find((item) => item.id === "pending").revision, null);
   assert.equal(cards.find((item) => item.id === "a").ready, true);
+  assert.deepEqual(cards.find((item) => item.id === "a").profile, { icon: profile.icon });
   assert.doesNotMatch(JSON.stringify(cards), /PRIVATE_MEMORY_FIXTURE|instructions|architectureRef/);
+  cards.find((item) => item.id === "a").profile.icon = "star:0:0";
+  assert.deepEqual((await agents.get("a")).profile, profile);
+  await agents.setProfile("a", { ...profile, icon: "star:2:6" });
+  assert.deepEqual((await agents.capabilityCards()).agents.find((item) => item.id === "a").profile, { icon: "star:2:6" });
   const pending = await agents.activities.start({ agentId: "a", sessionId: "interrupted-session-12345", revision: 1,
     scope: { groupId: "group-one", taskId: "task-one" }, message: 'Bearer private-fixture api_key="private-fixture"' });
   assert.doesNotMatch(pending.summary, /private-fixture/);

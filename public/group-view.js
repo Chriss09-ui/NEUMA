@@ -1,4 +1,5 @@
 import { renderRichText } from "./rich-text.js";
+import { renderAgentAvatar } from "./agent-avatar.js";
 
 export const taskLabels = { queued: "等待认领", pending: "等待认领", running: "协作中", discussing: "正在讨论", planning: "正在分工",
   working: "正在处理", completed: "已完成", complete: "已完成", partial: "部分交付", failed: "失败", blocked: "等待处理", cancelled: "已停止", interrupted: "已中断",
@@ -93,7 +94,9 @@ export function renderMembers(target, members) {
     const card = node("details", "group-member-card");
     card.dataset.memberId = member.id; card.open = opened.has(member.id);
     const summary = node("summary");
-    summary.append(node("span", "collaboration-message-avatar", Array.from(member.name || "A")[0]), node("strong", "", member.name),
+    const avatar = node("span", "collaboration-message-avatar group-member-avatar");
+    avatar.setAttribute("aria-hidden", "true"); renderAgentAvatar(avatar, member);
+    summary.append(avatar, node("strong", "", member.name),
       node("span", `member-ready ${member.ready ? "" : "unavailable"}`, member.ready ? "可工作" : "未就绪"));
     card.append(summary, node("p", "muted-note small", member.description || "暂无简介"));
     for (const [key, label] of [["task", "擅长"], ["input", "需要输入"], ["output", "交付"], ["boundaries", "范围"]]) {

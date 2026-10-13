@@ -498,6 +498,7 @@ export class PrototypeAgents {
       const draft = entry.draft, profile = profileOf(entry);
       const clean = (value, limit = 500) => safeDiagnosticText(typeof value === "string" ? value : "").slice(0, limit);
       return { id: entry.id, name: clean(profile.name ?? entry.name, 120), description: clean(profile.description, 240),
+        profile: { icon: clean(profile.icon, 16) },
         task: clean(draft?.task?.value || draft?.goal?.value), input: clean(draft?.inputSource?.value), output: clean(draft?.deliverable?.value),
         boundaries: (draft?.constraints ?? []).map((item) => clean(item.text)).filter(Boolean).slice(0, 20),
         ready: Boolean(agent && !this.builds.has(entry.id) && !this.removing.has(entry.id)
