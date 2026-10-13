@@ -52,8 +52,17 @@ export function resolveAgentAvatar(agent) {
   return { type: "star", ...avatar, icon: avatarIcon(avatar) };
 }
 
-export function renderAgentAvatar(target, agent, { document: documentRef = target?.ownerDocument ?? globalThis.document, motion = true } = {}) {
+export function setAgentAvatarActivity(target, activity = "idle") {
   if (!target) return;
+  const value = ["thinking", "working", "queued"].includes(activity) ? activity : "idle";
+  target.dataset.avatarActivity = value;
+  const root = target.children[0];
+  if (root?.dataset.starAvatar === "true") root.dataset.activity = root.dataset.avatarMotion === "true" ? value : "idle";
+}
+
+export function renderAgentAvatar(target, agent, { document: documentRef = target?.ownerDocument ?? globalThis.document, motion = true, activity = "idle" } = {}) {
+  if (!target) return;
+  setAgentAvatarActivity(target, agent ? activity : "idle");
   const avatar = agent ? resolveAgentAvatar(agent) : null;
   const key = avatar ? `${avatar.type}:${avatar.icon ?? avatar.text}:${motion}` : "empty";
   if (target.dataset.avatarKey === key && (avatar?.type !== "star" || target.children.length)) return;
@@ -68,14 +77,18 @@ export function renderAgentAvatar(target, agent, { document: documentRef = targe
     const element = documentRef.createElement(tag); element.className = className; return element;
   };
   const root = make("span", "star-avatar"), world = make("span", "star-avatar-world");
+  const movement = make("span", "star-avatar-core-activity");
   const shell = make("span", "star-avatar-shell"), core = make("img", "star-avatar-core");
   root.dataset.starAvatar = "true"; root.dataset.avatarMotion = String(motion);
+  root.dataset.activity = motion ? target.dataset.avatarActivity : "idle";
   root.dataset.shape = avatar.shape; root.dataset.color = avatar.color;
   root.setAttribute("aria-hidden", "true");
   const color = avatarColors.find((item) => item.id === avatar.color);
   shell.setAttribute("style", `--avatar-mask: url("/assets/avatars/${avatar.shape}-mask.png"); --avatar-shell: ${color.hex};`);
   const layout = avatarFaceLayout(avatar.shape);
+  // Rotate around the visible symbol after its shape-specific placement, not the PNG canvas centre.
+  movement.setAttribute("style", `transform-origin: ${layout.left + 139 * layout.size / 256}% ${layout.top + 134 * layout.size / 256}%;`);
   core.setAttribute("style", `--avatar-core-left: ${layout.left}%; --avatar-core-top: ${layout.top}%; --avatar-core-size: ${layout.size}%;`);
   core.src = "/assets/avatars/core.png"; core.alt = ""; core.draggable = false;
-  world.append(shell, core); root.append(world); target.append(root);
+  movement.append(core); world.append(shell, movement); root.append(world); target.append(root);
 }

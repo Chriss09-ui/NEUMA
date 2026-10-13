@@ -127,14 +127,16 @@ function assertStarAvatar(target, icon, { shape, color } = {}) {
   assert.equal(root.dataset.avatarMotion, "true");
   if (shape) assert.equal(root.dataset.shape, shape);
   if (color) assert.equal(root.dataset.color, color);
-  const world = root.children[0];
-  assert.equal(world.className, "star-avatar-world");
+  const descendants = (node) => [node, ...node.children.flatMap(descendants)];
+  const world = descendants(root).find((node) => node.className === "star-avatar-world");
+  assert.ok(world);
   assert.equal(world.children.length, 2);
   assert.equal(world.children[0].className, "star-avatar-shell");
   assert.match(world.children[0].attributes.get("style"), new RegExp(`/assets/avatars/${root.dataset.shape}-mask\\.png`));
-  assert.equal(world.children[1].tagName, "IMG");
-  assert.equal(world.children[1].className, "star-avatar-core");
-  assert.equal(world.children[1].src, "/assets/avatars/core.png");
+  const core = descendants(world).find((node) => node.className === "star-avatar-core");
+  assert.equal(core.tagName, "IMG");
+  assert.equal(core.src, "/assets/avatars/core.png");
+  return world.children[0];
 }
 
 test("主 Agent 逐段显示且复用气泡，完成前不更新需求说明，并保留下一条草稿", async () => {
@@ -322,15 +324,15 @@ test("当前展示头像的造型和配色同步管理卡、交付卡，继续�
   const profile = { name: "我的星核伙伴", description: "整理会议", icon: "star:4:7" };
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "test-agent", profile } });
   for (const avatar of [managementAvatar(ui), deliveryAvatar(ui)]) {
-    assertStarAvatar(avatar, profile.icon, { shape: "diamond", color: "rose" });
-    assert.match(avatar.children[0].children[0].children[0].attributes.get("style"), /--avatar-shell: #eb167e;/);
+    const shell = assertStarAvatar(avatar, profile.icon, { shape: "diamond", color: "rose" });
+    assert.match(shell.attributes.get("style"), /--avatar-shell: #eb167e;/);
   }
   const next = { ...profile, icon: "star:2:0" };
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "test-agent", profile: next } });
   await ui.submit("继续迭代需求");
   for (const avatar of [managementAvatar(ui), deliveryAvatar(ui)]) {
-    assertStarAvatar(avatar, next.icon, { shape: "trapezoid", color: "mint" });
-    assert.match(avatar.children[0].children[0].children[0].attributes.get("style"), /--avatar-shell: #00b894;/);
+    const shell = assertStarAvatar(avatar, next.icon, { shape: "trapezoid", color: "mint" });
+    assert.match(shell.attributes.get("style"), /--avatar-shell: #00b894;/);
   }
   assert.equal(ui.agents()[0].profile.icon, next.icon);
   assert.equal(ui.agents()[0].name, "会议助手");

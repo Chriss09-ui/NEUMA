@@ -5,7 +5,7 @@ import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js
 import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime, developmentPhases } from "./agent-runtime.js";
 import { createDevelopmentView } from "./agent-details-view.js";
 import { createAgentMakingView } from "./agent-build-view.js";
-import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar } from "./agent-avatar.js";
+import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "./agent-avatar.js";
 
 installAvatarMotion(document, window);
 
@@ -15,6 +15,8 @@ let agents = [];
 let mainBusy = false;
 let route = { page: "chat", agentId: null };
 const runtimes = new Map(), inputs = new Map();
+const sidebarAvatars = new Map();
+const avatarActivityLabels = { thinking: "正在思考…", working: "正在工作…", queued: "等待开始…" };
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
 let developmentView = null;
@@ -178,6 +180,7 @@ async function stopConversation(id, item = conversation(id)) {
   const user = item.messages[item.messages.indexOf(operation.reply) - 1];
   if (user?.role === "user") { user.delivery = "stopped"; attachments.restore(id, item.id, user.attachments); }
   item.turn = item.replyView = null;
+  syncAvatarActivity(agents.find((agent) => agent.id === id));
   void history.changed(id, item, { immediate: true });
   if (visible(id, item) && current()) { renderMessages(current()); renderControls(current()); }
   try { await api.cancel(item.sessionId); }
@@ -230,9 +233,30 @@ function showError(text = "") {
   byId("agent-error").hidden = !text;
 }
 
+function avatarActivity(agent) {
+  const state = runtime(agent), turn = conversations.get(agent.id)?.turn;
+  if (turn) return turn.controller.signal.aborted || ["complete", "error", "stopped"].includes(turn.reply.status)
+    ? "idle" : turn.avatarActivity || "thinking";
+  if (state.operation?.controller.signal.aborted || state.operation?.stopping) return "idle";
+  if (agentDevelopmentState(agent, state).active || state.operation?.development || state.operation?.kind?.startsWith("development")) return "working";
+  if (state.operation?.kind === "build" || ["building", "designing", "evaluating"].includes(state.status)) return "thinking";
+  return "idle";
+}
+
+function syncAvatarActivity(agent) {
+  if (!agent) return;
+  const activity = avatarActivity(agent), sidebar = sidebarAvatars.get(agent.id);
+  if (sidebar) {
+    setAgentAvatarActivity(sidebar.mark, activity);
+    sidebar.status.textContent = avatarActivityLabels[activity] || sidebar.restingLabel;
+  }
+  if (visible(agent.id)) setAgentAvatarActivity(byId("agent-icon"), activity);
+}
+
 function renderSidebar() {
   const list = byId("sidebar-agent-list");
   list.replaceChildren();
+  sidebarAvatars.clear();
   byId("sidebar-agents-empty").hidden = agents.length > 0;
   byId("sidebar-create-agent").disabled = mainBusy;
   for (const agent of agents) {
@@ -242,7 +266,7 @@ function renderSidebar() {
     link.setAttribute("aria-label", `进入 ${name} 的对话`);
     if (visible(agent.id)) link.setAttribute("aria-current", "page");
     const mark = element("span", "agent-avatar", "");
-    renderAgentAvatar(mark, agent);
+    renderAgentAvatar(mark, agent, { activity: avatarActivity(agent) });
     mark.setAttribute("aria-hidden", "true");
     const state = runtime(agent);
     const label = element("span", "sidebar-agent-label", "");
@@ -251,8 +275,10 @@ function renderSidebar() {
       needs_development: "需要研发", infeasible: "方案不可行", failed: "处理失败", cancelled: "已停止",
       blocked: "尚未就绪", stale: "需求已更新 · 待生成", unchecked: "正在读取状态", checking: "正在读取状态",
       error: state.inspectionError ? "状态读取失败" : "处理失败" };
-    label.append(element("strong", "", name), element("small", "", state.status === "ready"
-      ? "可以运行" : statusLabel[state.status] || "待生成"));
+    const restingLabel = state.status === "ready" ? "可以运行" : statusLabel[state.status] || "待生成";
+    const status = element("small", "", avatarActivityLabels[avatarActivity(agent)] || restingLabel);
+    sidebarAvatars.set(agent.id, { mark, status, restingLabel });
+    label.append(element("strong", "", name), status);
     link.append(mark, label);
     list.append(link);
   }
@@ -301,6 +327,7 @@ function userRow(id, item, message) {
 }
 
 function renderControls(agent) {
+  syncAvatarActivity(agent);
   const state = runtime(agent), item = conversation(agent.id), operation = state.operation || item.turn;
   const development = agentDevelopmentState(agent, state);
   const library = history.state(agent.id);
@@ -482,7 +509,7 @@ function renderWorkspace({ renderConversation = true } = {}) {
   byId("agent-conversation-actions").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
   byId("agent-title").textContent = agent ? agentDisplayName(agent) : "找不到智能体";
-  renderAgentAvatar(byId("agent-icon"), agent);
+  renderAgentAvatar(byId("agent-icon"), agent, { activity: agent ? avatarActivity(agent) : "idle" });
   const avatar = agent && resolveAgentAvatar(agent);
   const color = avatar?.type === "star" ? avatarColors.find((item) => item.id === avatar.color) : null;
   const messageStyle = byId("agent-messages").style;
@@ -608,6 +635,7 @@ async function buildAgent(id, queueIfBusy = false) {
         state.development = progress.development; operation.development = true;
         operation.phase = progress.phase; operation.label = progress.label;
       }
+      syncAvatarActivity(agent);
       if (visible(id)) renderControls(agent);
     } });
     operation.controller.signal.throwIfAborted();
@@ -741,6 +769,7 @@ async function rebuildIfRequested(id, state) {
 }
 
 function updateReply(id, item) {
+  syncAvatarActivity(agents.find((agent) => agent.id === id));
   if (!visible(id, item)) return;
   const container = byId("agent-messages");
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
@@ -806,7 +835,7 @@ async function sendMessage() {
   const user = addUserMessage(item.messages, message, attachmentRefs);
   user.revision = String(state.definition.revision);
   const reply = { role: "assistant", content: "", status: "thinking", label: "正在处理任务…", revision: user.revision };
-  const operation = { controller: new AbortController(), reply };
+  const operation = { controller: new AbortController(), reply, avatarActivity: "thinking" };
   item.turn = operation;
   item.loaded = true;
   item.messages.push(reply);
@@ -823,9 +852,14 @@ async function sendMessage() {
       ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, {
       signal: operation.controller.signal, onProgress(progress) {
         if (operation.controller.signal.aborted) return;
-        if (progress.type === "text-start") { reply.content = ""; reply.status = "thinking"; }
-        if (progress.type === "text-delta" && typeof progress.delta === "string") { reply.content += progress.delta; reply.status = "writing"; }
-        if (progress.type === "status") { reply.status = "thinking"; reply.label = progress.label || "正在处理任务…"; }
+        if (progress.type === "text-start") { reply.content = ""; reply.status = "thinking"; operation.avatarActivity = "thinking"; }
+        if (progress.type === "text-delta" && typeof progress.delta === "string") {
+          reply.content += progress.delta; reply.status = "writing"; operation.avatarActivity = "working";
+        }
+        if (progress.type === "status") {
+          reply.status = "thinking"; reply.label = progress.label || "正在处理任务…";
+          operation.avatarActivity = progress.phase === "tool" ? "working" : progress.phase === "queued" ? "queued" : "thinking";
+        }
         updateReply(agent.id, item);
         history.changed(agent.id, item);
       },
@@ -851,6 +885,7 @@ async function sendMessage() {
       if (user.delivery !== "sent") item.userRows.get(user)?.replaceWith(userRow(agent.id, item, user));
     }
     if (item.turn === operation) item.turn = item.replyView = null;
+    syncAvatarActivity(agent);
     await history.changed(agent.id, item, { immediate: true });
     if (visible(agent.id, item)) {
       const restoreInput = [input, byId("agent-send"), byId("agent-cancel-reply")].includes(document.activeElement);

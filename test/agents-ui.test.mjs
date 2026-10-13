@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import * as state from "../public/state.js";
-import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar } from "../public/agent-avatar.js";
+import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "../public/agent-avatar.js";
 
 const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-build-view.js", "agent-conversations.js", "agent-attachments.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
@@ -204,7 +204,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
   };
   const context = vm.createContext({ ...state, document, Date: Clock, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
     renderRichText: (container, content) => { container.textContent = String(content || ""); },
-    renderAgentAvatar: (target, agent) => renderAgentAvatar(target, agent, { document }), avatarColors, resolveAgentAvatar, installAvatarMotion,
+    renderAgentAvatar: (target, agent, options) => renderAgentAvatar(target, agent, { ...options, document }), avatarColors, resolveAgentAvatar, installAvatarMotion, setAgentAvatarActivity,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: (id) => timers.delete(id),
     window: { confirm: (message) => { confirmations.push(message); return confirm(message); }, localStorage: {
@@ -385,6 +385,67 @@ test("默认小星核使用稳定智能体 ID，侧栏、欢迎区和标题使�
   assert.deepEqual(assertStarAvatar(refreshed.get("agent-icon")), original);
 });
 
+const avatarState = (target) => target.querySelector(".star-avatar")?.dataset.activity;
+const sidebarAvatar = (ui, index = 0) => ui.get("sidebar-agent-list").children[index].children[0];
+
+test("头像随排队、思考、工具执行和回复切换，连续文本不重建动画节点，完成即复位", async () => {
+  const partial = stream(), ui = await setup({ turn: () => partial.response });
+  const header = ui.get("agent-icon"), star = header.children[0];
+  const pending = ui.submit("整理材料"); await settle();
+  assert.equal(avatarState(header), "thinking");
+  assert.equal(avatarState(sidebarAvatar(ui)), "thinking");
+  assert.equal(avatarState(sidebarAvatar(ui, 1)), "idle");
+  for (const [phase, expected] of [["queued", "queued"], ["thinking", "thinking"], ["tool", "working"], ["thinking", "thinking"]]) {
+    partial.send({ type: "status", phase }); await settle();
+    assert.equal(avatarState(header), expected); assert.equal(avatarState(sidebarAvatar(ui)), expected);
+    assert.equal(header.children[0], star);
+  }
+  partial.send({ type: "text-start" }); partial.send({ type: "text-delta", delta: "已整理" }); await settle();
+  assert.equal(avatarState(header), "working");
+  assert.match(treeText(ui.get("sidebar-agent-list").children[0]), /正在工作/);
+  partial.send({ type: "text-delta", delta: "材料" }); await settle();
+  assert.equal(header.children[0], star);
+  partial.send({ type: "done", result: completed(ui.requests.find((request) => request.path.endsWith("/turn")).body) });
+  partial.close(); await pending;
+  assert.equal(avatarState(header), "idle"); assert.equal(avatarState(sidebarAvatar(ui)), "idle");
+  assert.match(treeText(ui.get("sidebar-agent-list").children[0]), /可以运行/);
+});
+
+test("离开智能体后侧栏仍跟随任务，后台失败停止动作且不污染当前头像", async () => {
+  const partial = stream(), ui = await setup({ turn: () => partial.response });
+  const pending = ui.submit("整理材料"); await settle(); await ui.route("two");
+  partial.send({ type: "status", phase: "tool" }); await settle();
+  assert.equal(avatarState(sidebarAvatar(ui)), "working");
+  assert.equal(avatarState(ui.get("agent-icon")), "idle");
+  partial.fail(new Error("任务连接断开")); await pending;
+  assert.equal(avatarState(sidebarAvatar(ui)), "idle");
+  assert.equal(avatarState(ui.get("agent-icon")), "idle");
+});
+
+test("取消立即停止头像，迟到的工具进度和完成不会重启动作", async () => {
+  const partial = stream(), ui = await setup({ turn: () => partial.response });
+  const pending = ui.submit("整理材料"); await settle();
+  await ui.get("agent-cancel-reply").click();
+  assert.equal(avatarState(ui.get("agent-icon")), "idle");
+  assert.equal(avatarState(sidebarAvatar(ui)), "idle");
+  partial.send({ type: "status", phase: "tool" });
+  partial.send({ type: "done", result: completed(ui.requests.find((request) => request.path.endsWith("/turn")).body) });
+  partial.close(); await pending;
+  assert.equal(avatarState(ui.get("agent-icon")), "idle");
+  assert.equal(avatarState(sidebarAvatar(ui)), "idle");
+});
+
+test("头像关闭动效、改成文本或清空时不会残留活动图层", async () => {
+  const ui = await setup(), target = ui.get("agent-icon");
+  renderAgentAvatar(target, requirements[0], { motion: false, activity: "working" });
+  assert.equal(avatarState(target), "idle");
+  setAgentAvatarActivity(target, "thinking"); assert.equal(avatarState(target), "idle");
+  renderAgentAvatar(target, { ...requirements[0], profile: { icon: "📝" } }, { activity: "working" });
+  assert.equal(target.textContent, "📝"); assert.equal(avatarState(target), undefined);
+  renderAgentAvatar(target, null); assert.equal(target.children.length, 0);
+  assert.equal(target.dataset.avatarActivity, "idle");
+});
+
 test("头像展示资料变更同步侧栏、欢迎区和标题，不改变智能体运行版本", async () => {
   const ui = await setup(), profile = { name: "我的星核伙伴", description: "我的头像", icon: "star:4:6" };
   await ui.emit("neuma:agents-changed", { items: requirements.map((agent) => agent.id === "one"
@@ -432,7 +493,7 @@ test("切换智能体使用各自气泡颜色，文字头像与缺失智能体�
   const style = ui.get("agent-messages").style;
   assert.equal(style.getPropertyValue("--user-bubble-background"), "#ff7a00");
   await ui.route("two");
-  assert.equal(style.getPropertyValue("--user-bubble-background"), "#1677ff");
+  assert.equal(style.getPropertyValue("--user-bubble-background"), avatarColors.find((color) => color.id === "blue").hex);
   await ui.route("one");
   assert.equal(style.getPropertyValue("--user-bubble-background"), "#ff7a00");
   await ui.emit("neuma:agents-changed", { items: items.map((agent) => agent.id === "one"
@@ -582,9 +643,12 @@ test("生成智能体自动贯穿研发五阶段，停止后续接且旧研发�
     },
   });
   const pending = ui.emit("neuma:agent-build", { id: "one" }); await settle();
+  assert.equal(avatarState(ui.get("agent-icon")), "thinking");
   building.send({ type: "status", phase: "planning", label: "架构已通过，正在拆分研发任务。",
     architecture: architecture({ delivery: "needs_development" }), development: developmentRecord({ phase: "planning" }) });
   await settle();
+  assert.equal(avatarState(ui.get("agent-icon")), "working");
+  assert.equal(avatarState(sidebarAvatar(ui)), "working");
   assert.equal(ui.get("agent-development").hidden, false);
   assert.match(treeText(ui.get("agent-development")), /接收设计.*拆分任务.*开发任务.*检查验收.*整理交付/s);
   assert.equal(developmentButton(ui).textContent, "终止生成");
@@ -597,6 +661,8 @@ test("生成智能体自动贯穿研发五阶段，停止后续接且旧研发�
   assert.equal(ui.get("agent-development").children[0].children[1].children[3].attributes.get("aria-current"), "step");
   await developmentButton(ui).click();
   assert.equal(ui.requests.find((request) => request.path === "/api/agents/build").signal.aborted, true);
+  assert.equal(avatarState(ui.get("agent-icon")), "idle");
+  assert.equal(avatarState(sidebarAvatar(ui)), "idle");
   building.send({ type: "done", result: developmentResult(developmentRecord({ status: "completed", delivery: "ready" }),
     { agent: designedDefinition(), architecture: architecture() }) }); building.close(); await pending;
   assert.equal(ui.runtime().development.status, "cancelled");
@@ -906,6 +972,7 @@ test("切换智能体保留各自输入，运行和回复不串到其他智能�
   assert.notEqual(turns[0].body.sessionId, turns[1].body.sessionId);
   assert.equal(turns[1].body.history.length, 0);
   partial.send({ type: "done", result: completed(turns[0].body, "会议已完成") }); partial.close(); await pending;
+  assert.equal(avatarState(sidebarAvatar(ui)), "idle");
   await ui.route("one");
   assert.equal(ui.get("agent-message").value, "会议下一条");
   assert.equal(ui.get("agent-messages").children.at(-1).children[0].textContent, "会议已完成");
