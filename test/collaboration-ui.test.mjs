@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { createCollaborationApi } from "../public/collaboration-api.js";
+import { renderAgentAvatar as renderAvatar, resolveAgentAvatar } from "../public/agent-avatar.js";
+import { renderGroupAvatar as renderGroup } from "../public/group-avatar.js";
+import { createSelectMenu } from "../public/select-menu.js";
 
 const read = async (file) => (await readFile(new URL(`../public/${file}`, import.meta.url), "utf8"))
   .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "");
@@ -15,7 +18,8 @@ function setup(source, request, initialStorage = [], { confirm = () => false } =
   class Events {
     listeners = new Map();
     addEventListener(type, listener) { this.listeners.set(type, [...(this.listeners.get(type) || []), listener]); }
-    dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) || []).map((listener) => listener(event))); }
+    dispatchEvent(event) { if (!event.target) Object.defineProperty(event, "target", { value: this, configurable: true });
+      return Promise.all((this.listeners.get(event.type) || []).map((listener) => listener(event))); }
   }
   const document = new Events(), nodes = new Map(), timers = new Map(), stored = new Map(initialStorage), renderedReplies = [], confirmations = [];
   class Element extends Events {
@@ -53,13 +57,18 @@ function setup(source, request, initialStorage = [], { confirm = () => false } =
     }));
     return nodes.get(id);
   };
-  document.hidden = false; document.getElementById = get; document.createElement = (tag) => new Element(tag);
+  document.hidden = false; document.getElementById = (id) => id === "group-purpose" ? null : get(id);
+  document.createElement = (tag) => new Element(tag);
   class Event { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } }
+  document.defaultView = { Event };
   let serial = 0;
   const context = vm.createContext({ document, Event, CustomEvent: Event, crypto: { randomUUID: () => `mutation-${++serial}` },
     window: { innerWidth: 1440, innerHeight: 900, addEventListener() {}, confirm(message) { confirmations.push(message); return confirm(message); } },
     renderRichText(container, content) { renderedReplies.push({ container, content }); container.textContent = content;
       container.classes.add("rich-text"); container.className = [...new Set([...container.className.split(/\s+/).filter(Boolean), "rich-text"])].join(" "); },
+    renderAgentAvatar: (target, agent, options = {}) => renderAvatar(target, agent, { ...options, document }),
+    renderGroupAvatar: (target, group, members) => renderGroup(target, group, members, { document }),
+    createSelectMenu,
     fetch: request, Response, ReadableStream, TextDecoder, TextEncoder, AbortController, structuredClone, URL, Blob, setTimeout, clearTimeout,
     localStorage: { getItem: (key) => stored.get(key) || null, setItem: (key, value) => stored.set(key, value) },
     setInterval(callback) { const id = ++serial; timers.set(id, callback); return id; }, clearInterval(id) { timers.delete(id); },
@@ -124,6 +133,27 @@ test("侧栏群组列表不显示空列表提示，群组入口和群组页引�
   }
 });
 
+test("群头像在侧栏、列表和群标题使用同一静态组合，资料更新不增加读取请求", async () => {
+  const requests = [], state = detail();
+  state.members[0].profile = { icon: "star:4:1" }; state.members[1].profile = { icon: "star:0:2" };
+  const ui = setup(groupsSource, async (path) => { requests.push(path); return Response.json(path === "/api/groups" ? { groups: [state.group] } : state); });
+  await settle(); await ui.document.dispatchEvent({ type: "neuma:agents-changed", detail: { items: state.members } });
+  await ui.route({ page: "group", groupId: "one" }); await settle();
+  const avatars = () => [ui.get("sidebar-group-list").children[0].children[0],
+    ui.get("groups-list").children[0].children[0].children[0], ui.get("group-avatar")];
+  for (const avatar of avatars()) {
+    assert.equal(avatar.dataset.memberCount, "2");
+    assert.deepEqual(avatar.children.map((child) => child.dataset.avatarIcon), ["star:4:1", "star:0:2"]);
+    assert.ok(avatar.children.every((child) => child.children[0].dataset.avatarMotion === "false"));
+  }
+  const before = requests.length;
+  await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "writer", profile: { icon: "star:1:7" } } });
+  for (const avatar of avatars()) assert.equal(avatar.children[0].dataset.avatarIcon, "star:1:7");
+  assert.equal(requests.length, before);
+  assert.equal(ui.get("sidebar-group-list").children[0].href, "#group/one");
+  assert.equal(ui.text("sidebar-group-list"), "研究小组");
+});
+
 test("群成员自主协作、能力和任务分开显示，离开群页不会取消正在执行的任务", async () => {
   const requests = [], ui = setup(groupsSource, async (path) => {
     requests.push(path);
@@ -133,6 +163,7 @@ test("群成员自主协作、能力和任务分开显示，离开群页不会�
   assert.match(ui.text("group-members"), /写作助手/); assert.match(ui.text("group-members"), /检查助手/);
   assert.match(ui.text("group-tasks"), /整理初稿/);
   assert.equal(ui.get("group-recipient").children[0].textContent, "群内成员自主协作");
+  assert.equal(ui.text("group-compose-status"), ""); assert.equal(ui.get("group-compose-status").hidden, true);
   assert.equal(ui.get("group-members").children.length, 2);
   ui.get("group-message").value = "留在这个群的草稿";
   await ui.route({ page: "chat" }); await settle();
@@ -188,6 +219,76 @@ test("群纯气泡保留任务过滤、材料引用、成果入口和真实失�
   assert.equal(rows[1].children.find(isBubble).textContent, "已保留检查结果");
 });
 
+test("定制接收者菜单发送选定成员，自主协作不传成员，未就绪选项不可选", async () => {
+  const state = detail(), writes = []; state.members[1].ready = false;
+  const ui = setup(groupsSource, async (path, options = {}) => {
+    if (path.endsWith("/messages")) { writes.push(JSON.parse(options.body)); return Response.json({ message: { id: "sent" } }); }
+    return Response.json(path === "/api/groups" ? { groups: [group()] } : state);
+  });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-recipient-trigger").click();
+  await ui.get("group-recipient-menu").children[2].click();
+  assert.equal(ui.get("group-recipient").value, "");
+  await ui.get("group-recipient-menu").children[1].click();
+  assert.equal(ui.get("group-recipient").value, "writer");
+  assert.equal(ui.get("group-recipient-value").textContent, "写作助手");
+  assert.equal(ui.get("group-recipient-menu").hidden, true);
+  ui.get("group-message").value = "请整理报告"; await ui.submit("group-chat-form"); await settle();
+  assert.equal(writes[0].recipientId, "writer");
+  await ui.get("group-recipient-trigger").click(); await ui.get("group-recipient-menu").children[0].click();
+  ui.get("group-message").value = "请自主协作"; await ui.submit("group-chat-form"); await settle();
+  assert.equal(Object.hasOwn(writes[1], "recipientId"), false);
+});
+
+test("定制任务菜单筛选消息，刷新保留选择，任务移除或新任务恢复全部", async () => {
+  const state = detail(); state.tasks.push({ id: "task-two", goal: "第二项任务", status: "completed" });
+  state.messages.push({ ...state.messages[0], id: "message-two", taskId: "task-two", content: "第二份材料" });
+  const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] } : state));
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-task-trigger").click(); await ui.get("group-task-menu").children[2].click();
+  assert.equal(ui.get("group-task-filter").value, "task-two");
+  assert.match(ui.text("group-messages"), /第二份材料/); assert.doesNotMatch(ui.text("group-messages"), /研究小组的初稿/);
+  assert.equal(ui.document.activeElement, ui.get("group-message"));
+  await ui.get("group-refresh").click(); await settle(); assert.equal(ui.get("group-task-filter").value, "task-two");
+  state.tasks.pop(); await ui.get("group-refresh").click(); await settle();
+  assert.equal(ui.get("group-task-filter").value, ""); assert.equal(ui.get("group-task-value").textContent, "全部消息");
+  await ui.get("group-task-trigger").click(); await ui.get("group-task-menu").children[1].click();
+  await ui.get("group-new-task").click(); assert.equal(ui.get("group-task-filter").value, "");
+});
+
+test("接收者菜单发送中禁用关闭，完成后恢复，跨群不继承旧收件人", async () => {
+  const state = detail(); let release;
+  const ui = setup(groupsSource, async (path) => {
+    if (path.endsWith("/messages")) return new Promise((resolve) => { release = () => resolve(Response.json({ message: { id: "sent" } })); });
+    return Response.json(path === "/api/groups" ? { groups: [group()] } : path === "/api/groups/two" ? detail("two") : state);
+  });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-recipient-trigger").click(); await ui.get("group-recipient-menu").children[1].click();
+  await ui.get("group-recipient-trigger").click(); ui.get("group-message").value = "整理报告";
+  await ui.submit("group-chat-form"); await settle();
+  assert.equal(ui.get("group-recipient-trigger").disabled, true); assert.equal(ui.get("group-recipient-menu").hidden, true);
+  assert.equal(ui.get("group-compose-status").hidden, false); assert.match(ui.text("group-compose-status"), /正在提交/);
+  release(); await settle(); assert.equal(ui.get("group-recipient-trigger").disabled, false);
+  await ui.get("group-recipient-trigger").click(); await ui.route({ page: "group", groupId: "two" }); await settle();
+  assert.equal(ui.get("group-recipient-menu").hidden, true); assert.equal(ui.get("group-recipient").value, "");
+  state.group.archived = true; await ui.route({ page: "group", groupId: "one" }); await settle();
+  assert.equal(ui.get("group-recipient-trigger").disabled, true);
+});
+
+test("群任务轮询不收起正在浏览的接收者菜单，也不改变待确认活动项", async () => {
+  const state = detail();
+  const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] }
+    : path.includes("/events?") ? { events: [{ seq: 2 }], lastSequence: 2 } : state));
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  const trigger = ui.get("group-recipient-trigger"); await trigger.click();
+  await trigger.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() {} });
+  const active = trigger.getAttribute("aria-activedescendant"); ui.get("group-recipient-menu").scrollTop = 64;
+  [...ui.timers.values()][0](); await settle();
+  assert.equal(ui.get("group-recipient-menu").hidden, false);
+  assert.equal(trigger.getAttribute("aria-activedescendant"), active);
+  assert.equal(ui.get("group-recipient-menu").scrollTop, 64); assert.equal(ui.get("group-recipient").value, "");
+});
+
 test("群消息发送失败保留输入，重试复用同一个操作，不会重新派发任务", async () => {
   const writes = []; let failed = true;
   const ui = setup(groupsSource, async (path, options = {}) => {
@@ -205,6 +306,43 @@ test("群消息发送失败保留输入，重试复用同一个操作，不会�
   await ui.submit("group-chat-form"); await settle();
   assert.deepEqual(writes[1], writes[0]); assert.equal(writes[0].recipientId, "reviewer"); assert.equal(writes[0].taskId, "task-one");
   assert.equal(ui.get("group-message").value, "");
+});
+
+test("群成员选择显示各自头像，缺省头像稳定且未就绪状态与已有选择保留", async () => {
+  const candidates = [
+    { ...member(), profile: { icon: "star:4:1" } },
+    { ...member("reviewer", "检查助手"), ready: false, profile: { icon: "star:1:0" } },
+    { ...member("new-member", "待加入助手"), ready: false },
+    { ...member("legacy", "自定义图标助手"), profile: { icon: "📝" } },
+  ];
+  const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] }
+    : path === "/api/collaboration/agents" ? { agents: candidates } : detail()));
+  await settle(); await ui.get("groups-create").click(); await settle();
+  const rows = ui.get("group-member-picker").children;
+  assert.equal(rows.length, candidates.length);
+  for (const [index, candidate] of candidates.entries()) {
+    const [input, avatar, copy] = rows[index].children, expected = resolveAgentAvatar(candidate);
+    assert.equal(input.value, candidate.id); assert.equal(input.checked, false);
+    assert.equal(input.disabled, !candidate.ready);
+    assert.equal(avatar.dataset.avatarIcon, expected.icon ?? expected.text);
+    assert.equal(avatar.getAttribute("aria-hidden"), "true");
+    assert.equal(copy.children[0].textContent, candidate.name);
+    assert.equal(copy.children[1].textContent, candidate.ready ? candidate.description : "尚未就绪");
+    if (expected.type === "star") {
+      assert.equal(avatar.children[0].dataset.shape, expected.shape);
+      assert.equal(avatar.children[0].dataset.color, expected.color);
+    } else assert.equal(avatar.textContent, "📝");
+  }
+  const defaultIcon = rows[2].children[1].dataset.avatarIcon;
+  await ui.get("group-editor-close").click();
+  candidates[2].name = "已改名的待加入助手";
+  await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-edit").click(); await settle();
+  const edited = ui.get("group-member-picker").children;
+  assert.equal(edited[2].children[1].dataset.avatarIcon, defaultIcon);
+  assert.equal(edited[1].children[0].checked, true);
+  assert.equal(edited[1].children[0].disabled, false);
+  assert.equal(edited[2].children[0].disabled, true);
 });
 
 test("创建群的未知结果可幂等重试，保留名称、用途和成员选择", async () => {
@@ -237,18 +375,43 @@ test("切换群组后迟到的旧群响应不能覆盖新群，新的任务可�
   await ui.route({ page: "group", groupId: "two" }); await settle(); release(); await settle();
   assert.equal(ui.text("group-title"), "新的小组"); assert.equal(ui.text("group-messages").includes("研究小组的初稿"), false);
   await ui.get("group-new-task").click(); ui.get("group-message").value = "开始第二份报告";
+  assert.equal(ui.text("group-compose-status"), ""); assert.equal(ui.get("group-compose-status").hidden, true);
   await ui.submit("group-chat-form"); await settle();
   assert.equal(writes[0].newTask, true); assert.equal(writes[0].taskId, undefined);
 });
 
+test("成员能力使用各自星核，缺省或已移除成员按稳定身份回退，改名不换头像", async () => {
+  const state = detail(); state.members[0].profile = { icon: "star:4:1" };
+  state.members.push({ id: "removed-member", name: "已移除的 Agent", ready: false });
+  const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] } : state));
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  const cards = ui.get("group-members").children;
+  for (const [index, candidate] of state.members.entries()) {
+    const [avatar, name, status] = cards[index].children[0].children;
+    assert.equal(avatar.dataset.avatarIcon, resolveAgentAvatar(candidate).icon);
+    assert.equal(avatar.dataset.avatarKind, "star"); assert.equal(avatar.textContent, "");
+    assert.equal(avatar.getAttribute("aria-hidden"), "true");
+    assert.equal(name.textContent, candidate.name); assert.equal(status.textContent, candidate.ready ? "可工作" : "未就绪");
+    assert.equal(cards[index].children.at(-1).href, `#agent/${candidate.id}`);
+  }
+  const defaultIcon = cards[1].children[0].children[0].dataset.avatarIcon;
+  state.members[1].name = "改名后的检查助手";
+  await ui.get("group-refresh").click(); await settle();
+  assert.equal(ui.get("group-members").children[1].children[0].children[0].dataset.avatarIcon, defaultIcon);
+});
+
 test("成员能力展开状态在群进度更新时保留，归档群阻止继续发送", async () => {
   const state = detail(); const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] } : state));
+  state.members[0].profile = { icon: "star:4:1" };
   await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
   ui.get("group-members").children[0].open = true;
+  state.members[0].profile.icon = "star:0:2";
   await ui.get("group-refresh").click(); await settle();
   assert.equal(ui.get("group-members").children[0].open, true);
+  assert.equal(ui.get("group-members").children[0].children[0].children[0].dataset.avatarIcon, "star:0:2");
   state.group.archived = true; await ui.get("group-refresh").click(); await settle();
   assert.equal(ui.get("group-send").disabled, true); assert.match(ui.text("group-compose-status"), /取消归档/);
+  assert.equal(ui.get("group-compose-status").hidden, false);
 });
 
 test("已完成任务的后续材料请求自动开启新任务，真实执行阶段显示中文", async () => {
@@ -261,7 +424,8 @@ test("已完成任务的后续材料请求自动开启新任务，真实执行�
   });
   await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
   await ui.get("group-tasks").children[0].children[0].click();
-  assert.match(ui.text("group-tasks"), /已完成 · 交付成果/); assert.match(ui.text("group-compose-status"), /新任务/);
+  assert.match(ui.text("group-tasks"), /已完成 · 交付成果/); assert.equal(ui.text("group-compose-status"), "");
+  assert.equal(ui.get("group-compose-status").hidden, true);
   await ui.get("group-files-open").click();
   await ui.get("group-file-list").children.find((item) => item.tagName === "BUTTON").click(); await settle();
   await ui.get("group-file-actions").children[1].click(); await ui.submit("group-chat-form"); await settle();
@@ -275,8 +439,8 @@ test("群材料预览和私人分享只操作明确选中的文件", async () =>
     requests.push({ path, body: options.body ? JSON.parse(options.body) : undefined });
     if (path.endsWith("/preview")) return Response.json({ text: "资料正文" });
     if (path === "/api/collaboration/agents") return Response.json({ agents: [member()] });
-    if (path.endsWith("/attachments")) return Response.json({ attachments: [{ id: "private-one", name: "私人材料.txt" }] });
-    if (path.endsWith("/files")) return Response.json({ files: [{ path: "report.txt" }] });
+    if (path.endsWith("/attachments")) return Response.json({ attachments: [{ id: "private-one", name: "私人材料.txt", size: 128 }] });
+    if (path.endsWith("/files")) return Response.json({ files: [{ path: "report.txt", size: 2048 }] });
     if (path.endsWith("/share")) return Response.json({ material: { id: "shared" } });
     return Response.json(path === "/api/groups" ? { groups: [group()] } : state);
   });
@@ -289,9 +453,115 @@ test("群材料预览和私人分享只操作明确选中的文件", async () =>
   assert.match(ui.text("group-pending-materials"), /资料.txt/);
   await ui.get("group-share-open").click(); await settle();
   assert.equal(requests.filter((item) => item.path.endsWith("/share")).length, 0);
-  const row = ui.get("group-share-list").children.find((item) => item.className === "group-share-item");
-  await row.children[1].click(); await settle();
+  const rows = ui.get("group-share-list").querySelectorAll(".group-share-item");
+  assert.equal(ui.text("group-share-count"), "2");
+  assert.equal(textOf(rows[0].querySelector(".group-share-file-meta")), "材料 · 128 B");
+  assert.equal(textOf(rows[1].querySelector(".group-share-file-meta")), "工作成果 · 2.0 KB");
+  await rows[0].querySelector("button").click(); await settle();
   assert.deepEqual(requests.find((item) => item.path.endsWith("/share")).body.attachmentId, "private-one");
+});
+
+test("分享来源自定义下拉切换只读取文件，单类失败保留另一类文件", async () => {
+  const requests = [], ui = setup(groupsSource, async (path, options = {}) => {
+    requests.push({ path, body: options.body ? JSON.parse(options.body) : undefined });
+    if (path === "/api/collaboration/agents") return Response.json({ agents: [member(), member("reviewer", "检查助手")] });
+    if (path === "/api/agents/reviewer/attachments") return Response.json({ error: "材料读取失败" }, { status: 500 });
+    if (path.endsWith("/attachments")) return Response.json({ attachments: [] });
+    if (path.endsWith("/files")) return Response.json({ files: [{ path: path.includes("reviewer") ? "review.html" : "draft.txt" }] });
+    return Response.json(path === "/api/groups" ? { groups: [group()] } : detail());
+  });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-share-open").click(); await settle();
+  await ui.get("group-share-agent-trigger").click();
+  assert.equal(ui.get("group-share-agent-menu").hidden, false);
+  await ui.get("group-share-agent-menu").children[1].click(); await settle();
+  assert.equal(ui.get("group-share-agent").value, "reviewer");
+  assert.equal(ui.text("group-share-agent-value"), "检查助手");
+  assert.equal(ui.get("group-share-agent-menu").hidden, true);
+  assert.equal(requests.filter((item) => item.path.endsWith("/share")).length, 0);
+  assert.ok(requests.some((item) => item.path === "/api/agents/reviewer/attachments"));
+  assert.ok(requests.some((item) => item.path === "/api/agents/reviewer/files"));
+  assert.equal(ui.text("group-share-count"), "1");
+  assert.match(ui.text("group-share-list"), /review\.html/);
+  assert.doesNotMatch(ui.text("group-share-list"), /draft\.txt/);
+  assert.match(ui.text("group-share-status"), /材料读取失败/);
+  assert.equal(ui.get("group-share-status").classList.contains("error"), true);
+});
+
+test("关闭分享弹窗后，迟到的来源或文件读取不能更新弹窗", async () => {
+  for (const delayed of ["agents", "files"]) {
+    const requests = []; let release;
+    const ui = setup(groupsSource, async (path) => {
+      requests.push(path);
+      if (path === "/api/collaboration/agents") return delayed === "agents"
+        ? new Promise((resolve) => { release = () => resolve(Response.json({ agents: [member()] })); })
+        : Response.json({ agents: [member()] });
+      if (path.endsWith("/attachments")) return Response.json({ attachments: [] });
+      if (path.endsWith("/files")) return new Promise((resolve) => { release = () => resolve(Response.json({ files: [{ path: "late.txt" }] })); });
+      return Response.json(path === "/api/groups" ? { groups: [group()] } : detail());
+    });
+    await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+    await ui.get("group-share-open").click(); await settle();
+    await ui.get("group-share-close").click();
+    const before = { list: ui.text("group-share-list"), value: ui.text("group-share-agent-value"), count: ui.text("group-share-count"), status: ui.text("group-share-status") };
+    release(); await settle();
+    assert.equal(ui.get("group-share-dialog").open, false);
+    assert.equal(ui.get("group-share-agent-menu").hidden, true);
+    assert.equal(ui.document.activeElement, ui.get("group-share-open"));
+    assert.deepEqual({ list: ui.text("group-share-list"), value: ui.text("group-share-agent-value"), count: ui.text("group-share-count"), status: ui.text("group-share-status") }, before);
+    if (delayed === "agents") assert.equal(requests.some((path) => /\/(?:attachments|files)$/.test(path)), false);
+  }
+});
+
+test("来源切换后旧文件响应不能覆盖当前来源列表", async () => {
+  let release;
+  const ui = setup(groupsSource, async (path) => {
+    if (path === "/api/collaboration/agents") return Response.json({ agents: [member(), member("reviewer", "检查助手")] });
+    if (path.endsWith("/attachments")) return Response.json({ attachments: [] });
+    if (path === "/api/agents/writer/files") return new Promise((resolve) => { release = () => resolve(Response.json({ files: [{ path: "old.txt" }] })); });
+    if (path === "/api/agents/reviewer/files") return Response.json({ files: [{ path: "current.txt" }] });
+    return Response.json(path === "/api/groups" ? { groups: [group()] } : detail());
+  });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-share-open").click(); await settle();
+  await ui.get("group-share-agent-trigger").click(); await ui.get("group-share-agent-menu").children[1].click(); await settle();
+  assert.match(ui.text("group-share-list"), /current\.txt/);
+  release(); await settle();
+  assert.equal(ui.text("group-share-count"), "1");
+  assert.match(ui.text("group-share-list"), /current\.txt/);
+  assert.doesNotMatch(ui.text("group-share-list"), /old\.txt/);
+  assert.equal(ui.text("group-share-agent-value"), "检查助手");
+});
+
+test("文件分享失败可用同一幂等标识重试，成功后不能重复提交", async () => {
+  const shares = []; let release;
+  const ui = setup(groupsSource, async (path, options = {}) => {
+    if (path === "/api/collaboration/agents") return Response.json({ agents: [member()] });
+    if (path.endsWith("/attachments")) return Response.json({ attachments: [] });
+    if (path.endsWith("/files")) return Response.json({ files: [{ path: "report.html" }] });
+    if (path.endsWith("/share")) {
+      shares.push(JSON.parse(options.body));
+      return shares.length === 1 ? Response.json({ error: "暂时不能分享" }, { status: 503 })
+        : new Promise((resolve) => { release = () => resolve(Response.json({ material: { id: "shared" } })); });
+    }
+    return Response.json(path === "/api/groups" ? { groups: [group()] } : detail());
+  });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.get("group-share-open").click(); await settle();
+  const action = ui.get("group-share-list").querySelector(".group-share-item").querySelector("button");
+  await action.click(); await settle();
+  assert.equal(action.disabled, false); assert.equal(action.textContent, "分享");
+  assert.match(ui.text("group-share-status"), /暂时不能分享/);
+  const secondClick = action.click(); await settle();
+  assert.equal(action.disabled, true); assert.equal(action.textContent, "分享中…");
+  await action.click(); assert.equal(shares.length, 2);
+  release(); await secondClick; await settle();
+  assert.equal(shares[0].path, "report.html"); assert.equal(shares[0].agentId, "writer");
+  assert.equal(shares[1].mutationId, shares[0].mutationId);
+  assert.equal(action.disabled, true); assert.equal(action.dataset.state, "shared");
+  assert.equal(action.textContent, "✓ 已分享");
+  assert.equal(ui.get("group-share-status").classList.contains("error"), false);
+  await action.click(); assert.equal(shares.length, 2);
 });
 
 test("主助理历史自动恢复，创建页面和群页不会清除它，来源链接可安全打开", async () => {
@@ -767,7 +1037,7 @@ test("主聊天成功创建群后侧栏立即读取真实列表，不切页或�
   await ui.route({ page: "chat" }); await settle(); assert.equal(ui.get("sidebar-group-list").children.length, 0);
   ui.get("main-message").value = "帮我创建一个研究组"; await ui.submit("main-chat-form"); await settle();
   assert.equal(listReads, 2); assert.equal(turns, 1); assert.equal(navigations.length, 0);
-  assert.equal(ui.get("sidebar-group-list").children[0].textContent, "新建研究组");
+  assert.equal(ui.text("sidebar-group-list"), "新建研究组");
   assert.equal(ui.get("sidebar-group-list").children[0].href, "#group/created-group");
   assert.match(ui.text("main-messages"), /研究组已创建/);
 });
@@ -798,7 +1068,7 @@ test("群变更触发的新列表优先于迟到的初始列表，主草稿保�
     return Response.json({ groups: [group("new-group", "新的研究组")] }); });
   await settle(); ui.get("main-message").value = "下一条未发送主草稿";
   await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle(); release(); await settle();
-  assert.equal(ui.get("sidebar-group-list").children[0].textContent, "新的研究组"); assert.equal(ui.get("main-message").value, "下一条未发送主草稿");
+  assert.equal(ui.text("sidebar-group-list"), "新的研究组"); assert.equal(ui.get("main-message").value, "下一条未发送主草稿");
 });
 
 test("历史折叠后顶部新对话仍能创建空白会话，旧草稿按会话独立恢复", async () => {
@@ -1128,6 +1398,16 @@ test("桌面主聊天统一需求输入，旧创建表单仅作为隐藏档案�
   for (const id of ["page-chat", "page-create", "page-group", "page-groups", "group-editor", "group-files-dialog", "group-share-dialog"]) assert.equal((html.match(new RegExp(`id="${id}"`, "g")) || []).length, 1);
   assert.match(html, /aria-label="主助理历史对话"/); assert.match(html, /aria-label="群成员与任务"/);
   assert.match(html, /id="main-message"/); assert.match(html, /id="group-message"/); assert.match(html, /id="main-create-agent"/);
+  const groupHeader = html.slice(html.indexOf('<section id="page-group"'), html.indexOf('<dialog id="group-editor"')).match(/<header[\s\S]*?<\/header>/)?.[0];
+  assert.ok(groupHeader); assert.match(groupHeader, /id="group-title"/);
+  assert.doesNotMatch(groupHeader, /id="group-purpose"|page-subtitle/);
+  assert.match(html, /id="group-purpose-input"/);
+  const formStart = html.indexOf('<form id="group-chat-form"');
+  const groupForm = html.slice(formStart, html.indexOf('</form>', formStart));
+  const footerStart = groupForm.indexOf('<div class="composer-footer">');
+  assert.ok(footerStart >= 0 && groupForm.indexOf('id="group-recipient-trigger"') > footerStart);
+  assert.ok(groupForm.indexOf('id="group-upload"') > footerStart);
+  assert.doesNotMatch(groupForm, /group-compose-options/);
   assert.match(html, /id="page-create"[^>]+hidden inert/); assert.match(html, /id="main-context-panel"[^>]+aria-hidden="true" inert/);
   assert.match(html, /class="main-context-slot"[^>]*>\s*<aside id="main-context-panel"/);
   const mainPage = html.slice(html.indexOf('<section id="page-chat"'), html.indexOf('<dialog id="main-material-dialog"'));
