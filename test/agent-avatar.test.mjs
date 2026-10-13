@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import sharp from "sharp";
 import { avatarShapes, avatarColors, avatarIcon, parseAvatarIcon, resolveAgentAvatar, avatarFaceLayout } from "../public/agent-avatar.js";
 import { avatarPointerPose, advanceAvatarPose, restingAvatarPose, installAvatarMotion } from "../public/agent-avatar-motion.js";
 
@@ -34,6 +35,82 @@ test("所有生产图形资源独立可用且坐标尺寸一致，小头像与�
     assert.equal(bytes.subarray(1, 4).toString(), "PNG");
     assert.equal(bytes.readUInt32BE(16), 256); assert.equal(bytes.readUInt32BE(20), 256);
     assert.ok(bytes.length > 500 && bytes.length < 100_000);
+  }
+});
+
+test("内核完整旋转一周仍在六种外壳内部，32px头像保留至少3px间隔", async () => {
+  const decode = async (name) => sharp(await readFile(new URL(`../public/assets/avatars/${name}.png`, import.meta.url)))
+    .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const core = await decode("core");
+  let radius = 0;
+  for (let y = 0; y < core.info.height; y++) for (let x = 0; x < core.info.width; x++) {
+    if (core.data[(y * core.info.width + x) * 4 + 3] > 0) radius = Math.max(radius, Math.hypot(x - 139, y - 134));
+  }
+  for (const { id, face } of avatarShapes) {
+    const mask = await decode(`${id}-mask`);
+    let inradius = Infinity;
+    for (let y = 0; y < mask.info.height; y++) for (let x = 0; x < mask.info.width; x++) {
+      const offset = (y * mask.info.width + x) * 4;
+      const coverage = (.2126 * mask.data[offset] + .7152 * mask.data[offset + 1] + .0722 * mask.data[offset + 2]) * mask.data[offset + 3] / 255;
+      if (coverage < 128) inradius = Math.min(inradius, Math.hypot(x - face.x, y - face.y));
+    }
+    // Enclosing every visible core pixel in a circle checks all angles, including between keyframes.
+    const clearance = inradius - Math.SQRT1_2 - (radius + Math.SQRT1_2) * face.scale;
+    assert.ok(clearance * 32 / 256 >= 3, `${id}: full-rotation clearance must remain at least 3px at sidebar size`);
+  }
+});
+
+test("真实外壳按CSS幅度连续摇摆和缩放，32px头像始终保留至少1px外边距", async () => {
+  const css = (await readFile(new URL("../public/style.css", import.meta.url), "utf8")).replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  const scalesFor = (selector) => Object.fromEntries(rules
+    .filter(([, selectors]) => selectors.split(",").some((value) => value.trim() === selector))
+    .flatMap(([, , body]) => [...body.matchAll(/--avatar-scale-([\w-]+)\s*:\s*([^;]+)/g)]
+      .map(([, name, value]) => [name, Number(value.trim())])));
+  const sway = css.match(/@keyframes\s+star-avatar-sway\s*\{((?:[^{}]|\{[^{}]*\})*)\}/)?.[1];
+  assert.ok(sway, "read the production sway keyframes before checking their geometry");
+  const transforms = [...sway.matchAll(/transform\s*:\s*([^;}]+)/g)].map(([, value]) => value.trim());
+  assert.ok(transforms.length > 0);
+  const angles = [], scaleNames = new Set();
+  for (const transform of transforms) {
+    const rotate = /rotate\(\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))deg\s*\)/;
+    const scale = /scale\(\s*var\(\s*--avatar-scale-([\w-]+)\s*\)\s*\)/;
+    assert.match(transform, rotate); assert.match(transform, scale);
+    assert.equal(transform.replace(rotate, "").replace(scale, "").trim(), "", "extend the geometry check when adding another transform");
+    angles.push(Number(transform.match(rotate)[1]) * Math.PI / 180);
+    scaleNames.add(transform.match(scale)[1]);
+  }
+  const minAngle = Math.min(...angles), maxAngle = Math.max(...angles), defaults = scalesFor(".star-avatar");
+  for (const { id } of avatarShapes) {
+    const scales = { ...defaults, ...scalesFor(`.star-avatar[data-shape="${id}"]`) };
+    const values = [...scaleNames].map((name) => scales[name]);
+    assert.ok(values.every((value) => Number.isFinite(value) && value > 0), `${id}: all sway scale parameters must be positive numbers`);
+    const peak = Math.max(...values);
+    const { data, info } = await sharp(await readFile(new URL(`../public/assets/avatars/${id}-mask.png`, import.meta.url)))
+      .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    let extent = 0, visiblePixels = 0;
+    for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) {
+      const offset = (y * info.width + x) * 4;
+      const coverage = (.2126 * data[offset] + .7152 * data[offset + 1] + .0722 * data[offset + 2]) * data[offset + 3] / 255;
+      if (coverage < 8) continue;
+      visiblePixels++;
+      for (const [cornerX, cornerY] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        const px = x + cornerX - info.width / 2, py = y + cornerY - info.height / 2;
+        const candidates = [minAngle, maxAngle];
+        // Coordinate extrema occur at interval endpoints or zero derivatives, so this covers every angle between keyframes.
+        for (const stationary of [Math.atan2(-py, px), Math.atan2(px, py)]) {
+          for (let turn = Math.ceil((minAngle - stationary) / Math.PI); turn <= Math.floor((maxAngle - stationary) / Math.PI); turn++)
+            candidates.push(stationary + turn * Math.PI);
+        }
+        for (const angle of candidates) {
+          const cosine = Math.cos(angle), sine = Math.sin(angle);
+          extent = Math.max(extent, Math.abs(px * cosine - py * sine), Math.abs(px * sine + py * cosine));
+        }
+      }
+    }
+    assert.ok(visiblePixels > 0, `${id}: the mask must contain a visible shell`);
+    const margin = (Math.min(info.width, info.height) / 2 - extent * peak) * 32 / info.width;
+    assert.ok(margin + 1e-6 >= 1, `${id}: CSS sway leaves ${margin.toFixed(3)}px; sidebar avatars need at least 1px outside the shell`);
   }
 });
 
@@ -129,6 +206,22 @@ test("真实委托控制器跟随、空闲停帧、离开复位且安装幂等",
   fixture.document.emit("pointerout", { relatedTarget: null }); fixture.settle();
   assert.match(fixture.world.style.transform, /rotateY\(0\.000deg\).*scale\(1\.00000\)/);
   dispose(); fixture.move(); assert.equal(fixture.frames.size, 0);
+});
+
+test("忙碌状态立即清除已停帧的鼠标姿态，持续移动不会叠加，待机后恢复跟随", () => {
+  const fixture = motionFixture(); installAvatarMotion(fixture.document, fixture.window);
+  fixture.move(); fixture.settle();
+  assert.match(fixture.world.style.transform, /rotateY\([1-9]/);
+  for (const activity of ["thinking", "working", "queued"]) {
+    fixture.element.dataset.activity = activity;
+    fixture.mutate({ attributeName: "data-activity", target: fixture.element });
+    assert.match(fixture.world.style.transform, /rotateY\(0\.000deg\).*scale\(1\.00000\)/);
+    assert.match(fixture.core.style.transform, /translate3d\(0\.000px, 0\.000px/);
+    fixture.move(); fixture.settle();
+    assert.match(fixture.world.style.transform, /rotateY\(0\.000deg\).*scale\(1\.00000\)/);
+  }
+  fixture.element.dataset.activity = "idle";
+  fixture.move(); fixture.settle(); assert.match(fixture.world.style.transform, /rotateY\([1-9]/);
 });
 
 test("触屏不触发跟随，减少动态效果即时回正，隐藏头像和页面也清理状态", () => {

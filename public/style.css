@@ -1123,7 +1123,29 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .agent-icon-options button { display: grid; place-items: center; width: 38px; height: 38px; padding: 4px; border: 1px solid transparent; border-radius: 8px; background: transparent; font-size: 20px; }
 .agent-icon-options button:hover { background: var(--surface-2); }
 .agent-icon-options button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
-.star-avatar { position: relative; display: block; width: 100%; height: 100%; perspective: 500px; }
+.star-avatar { --avatar-cycle: 3.6s; --avatar-scale-rest: .96; --avatar-scale-peak: 1.04; --avatar-scale-base: 1; position: relative; display: block; width: 100%; height: 100%; perspective: 500px; }
+.star-avatar[data-shape="trapezoid"] { --avatar-scale-rest: .91; --avatar-scale-peak: .98; --avatar-scale-base: .95; }
+.star-avatar[data-shape="disc"] { --avatar-scale-rest: .95; --avatar-scale-peak: 1.02; --avatar-scale-base: .985; }
+.star-avatar[data-activity="working"] { --avatar-cycle: 2.8s; }
+.star-avatar-core-activity { position: absolute; inset: 0; transform-style: preserve-3d; pointer-events: none; }
+.star-avatar:is([data-activity="thinking"], [data-activity="working"]) .star-avatar-core-activity { animation: star-avatar-think var(--avatar-cycle) cubic-bezier(.45, 0, .25, 1) infinite; }
+.star-avatar:is([data-activity="thinking"], [data-activity="working"]) .star-avatar-world { animation: star-avatar-sway var(--avatar-cycle) ease-in-out infinite; }
+@keyframes star-avatar-think {
+  0%, 12% { transform: rotate(0deg); }
+  42%, 56% { transform: rotate(160deg); }
+  90%, 100% { transform: rotate(360deg); }
+}
+@keyframes star-avatar-sway {
+  0%, 100% { transform: rotate(0deg) scale(var(--avatar-scale-base)); }
+  8% { transform: rotate(-4deg) scale(var(--avatar-scale-rest)); }
+  30% { transform: rotate(-7deg) scale(var(--avatar-scale-base)); }
+  51% { transform: rotate(7deg) scale(var(--avatar-scale-peak)); }
+  68% { transform: rotate(3deg) scale(var(--avatar-scale-base)); }
+  84% { transform: rotate(-5deg) scale(var(--avatar-scale-rest)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .star-avatar .star-avatar-world, .star-avatar .star-avatar-core-activity { animation: none !important; }
+}
 .star-avatar-world { position: absolute; inset: 0; display: block; transform-style: preserve-3d; }
 .star-avatar-shell, .star-avatar-core { position: absolute; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
 .star-avatar-shell {

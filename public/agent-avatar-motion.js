@@ -1,6 +1,7 @@
 const installed = new WeakMap();
 const fields = ["x", "y", "rx", "ry", "rz", "scale", "cx", "cy"];
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const isBusy = (element) => ["thinking", "working", "queued"].includes(element.dataset.activity);
 export const restingAvatarPose = () => ({ x: 0, y: 0, rx: 0, ry: 0, rz: 0, scale: 1, cx: 0, cy: 0 });
 
 export function avatarPointerPose({ dx, dy, size, shape }) {
@@ -45,6 +46,7 @@ export function installAvatarMotion(documentRef, windowRef) {
     if (!pointer || reduce.matches) return;
     const scope = documentRef.querySelector("dialog[open]") || documentRef;
     for (const element of scope.querySelectorAll('[data-star-avatar][data-avatar-motion="true"]')) {
+      if (isBusy(element)) continue;
       const bounds = element.getBoundingClientRect();
       if (!bounds.width || !bounds.height) continue;
       const target = avatarPointerPose({ dx: pointer.x - bounds.left - bounds.width / 2,
@@ -67,7 +69,7 @@ export function installAvatarMotion(documentRef, windowRef) {
     lastTime = time;
     let moving = false;
     for (const [element, state] of states) {
-      if (!element.isConnected || !element.getBoundingClientRect().width) {
+      if (isBusy(element) || !element.isConnected || !element.getBoundingClientRect().width) {
         state.pose = restingAvatarPose(); paint(state); states.delete(element); continue;
       }
       const next = reduce.matches ? { pose: restingAvatarPose(), moving: false } : advanceAvatarPose(state.pose, state.target, elapsed);
@@ -99,8 +101,13 @@ export function installAvatarMotion(documentRef, windowRef) {
   const observer = windowRef.MutationObserver ? new windowRef.MutationObserver((records) => {
     if (records.some((record) => record.attributeName === "open" && record.target.tagName === "DIALOG"
       || record.attributeName === "hidden" && [...states.keys()].some((element) => record.target.contains(element)))) stop();
+    for (const record of records) {
+      if (record.attributeName !== "data-activity" || !isBusy(record.target)) continue;
+      const state = states.get(record.target);
+      if (state) { state.pose = restingAvatarPose(); paint(state); states.delete(record.target); }
+    }
   }) : null;
-  observer?.observe(documentRef.documentElement, { subtree: true, attributes: true, attributeFilter: ["open", "hidden"] });
+  observer?.observe(documentRef.documentElement, { subtree: true, attributes: true, attributeFilter: ["open", "hidden", "data-activity"] });
   documentRef.addEventListener("pointermove", onPointerMove, { passive: true });
   documentRef.addEventListener("pointerout", onPointerOut, { passive: true });
   documentRef.addEventListener("pointercancel", reset);
