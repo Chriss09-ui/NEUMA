@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "policy": "deliverable_first",
+  "architectureSchemaVersion": 2,
+  "capabilityCatalogVersion": 2,
+  "publicCapabilityVersion": 1,
+  "businessCapabilities": [
+    {
+      "id": "conversation",
+      "status": "available",
+      "scope": "基于用户提供的文本进行对话与生成；不包含联网检索、外部动作或定时运行。",
+      "version": 1
+    },
+    {
+      "id": "list_workspace_files",
+      "status": "available",
+      "scope": "仅列出当前 Agent 专属工作目录内允许访问的文件。",
+      "version": 1
+    },
+    {
+      "id": "read_workspace_file",
+      "status": "available",
+      "scope": "仅读取当前 Agent 专属工作目录内的 UTF-8 文本；不访问外部目录、隐藏文件或凭据。",
+      "version": 1
+    },
+    {
+      "id": "write_workspace_file",
+      "status": "available",
+      "scope": "仅在当前 Agent 专属工作目录保存文本文件；不包含部署、发送、任意代码执行或外部系统写入。",
+      "version": 1
+    },
+    {
+      "id": "list_materials",
+      "version": 1,
+      "status": "available",
+      "scope": "仅列出当前 Agent 的上传材料及其实际处理状态；材料在同一 Agent 的不同对话间共享。"
+    },
+    {
+      "id": "read_material",
+      "version": 1,
+      "status": "available",
+      "scope": "仅按材料 ID 分页读取当前 Agent 上传文档、表格、演示文稿或 PDF 中实际提取的文本及来源位置；不访问任意本地路径。"
+    },
+    {
+      "id": "read_material_image",
+      "version": 1,
+      "status": "available",
+      "scope": "仅按材料 ID 读取当前 Agent 上传的图片或 PDF 页面图像；图片理解取决于实际模型支持，不包含独立 OCR 服务或联网检索。"
+    }
+  ],
+  "publicTools": [
+    "web_search",
+    "web_fetch",
+    "list_materials",
+    "read_material",
+    "read_material_image"
+  ],
+  "network": {
+    "allowNetwork": true,
+    "scope": "public_http_https",
+    "privateAddresses": "denied",
+    "searchKeyRequired": false,
+    "businessRequestsRequireDeclaredConnection": true
+  },
+  "deliveryRoutes": {
+    "downloadableFiles": {
+      "profile": "light",
+      "developmentRequired": false,
+      "format": "utf8_text",
+      "examples": [
+        "html",
+        "svg",
+        "markdown",
+        "csv"
+      ],
+      "executionProof": "write_and_read_back",
+      "browserResult": "unverified"
+    },
+    "hostedApplication": {
+      "developmentRequired": true,
+      "runtime": "node-action",
+      "protocolVersion": 2,
+      "entry": "application",
+      "resources": "manifest_and_hash_bound",
+      "operations": "host_capability_bridge"
+    },
+    "developedWorkflow": {
+      "profiles": [
+        "workflow",
+        "custom"
+      ],
+      "developmentRequired": true,
+      "runtime": "node-action",
+      "legacyRuntime": "node-json"
+    },
+    "browserExecution": {
+      "status": "unavailable",
+      "scope": "agent_browser_dom_and_file_url_execution"
+    }
+  },
+  "connections": {
+    "purposes": [
+      "search",
+      "model",
+      "business"
+    ],
+    "configuration": "user_settings_server_only",
+    "readiness": "configuration_required_actual_result_verifies",
+    "businessProtocol": "http_json",
+    "businessPaths": "declared_fixed_relative_paths",
+    "safeTestMethods": [
+      "GET"
+    ],
+    "publicSearchFallback": "automatic_provider_fallback",
+    "dedicatedSearchFallback": "explicit_consent_only",
+    "modelFallback": "no_silent_replacement",
+    "businessFallback": "no_silent_replacement"
+  },
+  "runtime": {
+    "modules": "node_builtin_only",
+    "isolation": "verified_os_isolation_required",
+    "directNetwork": false,
+    "listenPorts": false,
+    "subprocess": false,
+    "installDependencies": false,
+    "actionTimeoutMs": 120000,
+    "actionInputBytes": 131072,
+    "controlChannelBytes": 1048576,
+    "runtimeFileBytes": 20971520,
+    "workspaceTextWriteCharacters": 120000,
+    "sameAgentExecution": "serial"
+  },
+  "unsupported": [
+    "agent_browser_automation",
+    "dynamic_geometry_engine",
+    "automatic_dependency_installation",
+    "standalone_web_service",
+    "scheduled_background_trigger",
+    "external_event_trigger",
+    "other_code_runtimes"
+  ]
+}

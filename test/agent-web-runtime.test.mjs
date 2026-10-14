@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
 import { AgentConnectionStore } from "../src/agents/agent-connections.mjs";
-import { LEGACY_CAPABILITIES } from "../src/architecture/architecture-contract.mjs";
+import { LEGACY_CAPABILITIES, designHash } from "../src/architecture/architecture-contract.mjs";
+import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 import { createPiSession } from "../src/runtime/pi-runtime.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 
@@ -14,7 +15,7 @@ const deferred = () => { let resolve; const promise = new Promise((done) => { re
 const turn = (agentId = "alpha", message = "处理资料") => ({ agentId, sessionId: `runtime-${agentId}-conversation`, message });
 const textResult = { status: "ok", results: [{ url: "https://example.com", title: "Example", content: "真实摘录" }] };
 
-async function fixture(t, { work = async () => {}, web, draft = validDraft() } = {}) {
+async function fixture(t, { work = async () => {}, web, draft = validDraft(), design = validDesign } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-agent-web-")), records = [], roles = [];
   const sessionFactory = async (options) => {
     const tools = Object.fromEntries(options.customTools.map((tool) => [tool.name, tool]));
@@ -23,7 +24,7 @@ async function fixture(t, { work = async () => {}, web, draft = validDraft() } =
     const session = { messages: [], subscribe: () => () => {},
       async prompt(message) {
         record.prompts.push(message);
-        if (role === "designer") return tools.submit_architecture.execute("design", validDesign(JSON.parse(message).requirements));
+        if (role === "designer") return tools.submit_architecture.execute("design", design(JSON.parse(message).requirements));
         if (role === "reviewer") return tools.submit_architecture_review.execute("review", passingReview(JSON.parse(message).candidateHash));
         await options.beforeModelRequest?.({});
         await work(record, message, session);
@@ -31,12 +32,73 @@ async function fixture(t, { work = async () => {}, web, draft = validDraft() } =
       getLastAssistantText: () => "处理完成", abort: async () => {}, dispose() { record.disposed = true; } };
     record.session = session; (role === "worker" ? records : roles).push(record); return session;
   };
-  const agents = new PrototypeAgents({ config: { llmConfigured: true, chatUrl: "https://platform.example/v1/chat/completions", model: "platform-model", apiKey: "fixture-platform" },
-    cwd: root, dataDir: join(root, "data"), sessionFactory, ...(web ? { web } : {}) });
+  const options = { config: { llmConfigured: true, chatUrl: "https://platform.example/v1/chat/completions", model: "platform-model", apiKey: "fixture-platform" },
+    cwd: root, dataDir: join(root, "data"), sessionFactory, ...(web ? { web } : {}) };
+  const agents = new PrototypeAgents(options);
   t.after(async () => { await agents.close(); await rm(root, { recursive: true, force: true }); });
   await agents.build({ id: "alpha", name: "资料助手", draft });
-  return { agents, records, roles, root };
+  return { agents, records, roles, root, options };
 }
+
+test("链接与PDF助手从公共能力架构交付、重新加载到私聊和群工作，工具装配与逐次结果分开", async (t) => {
+  const url = "https://example.com/paper", calls = [], body = "# Introduction\n模拟论文正文\n# Results\n模拟结果";
+  const web = new WebCapabilities({
+    lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+    requestPublic: async (target, options) => {
+      assert.equal(target, url); assert.equal(options.method, "HEAD"); calls.push({ kind: "head", target });
+      return new Response(null, { status: 200 });
+    },
+    fetchImpl: async (target, options) => {
+      assert.equal(target, "https://api.tavily.com/extract");
+      assert.deepEqual(JSON.parse(options.body).urls, [url]); calls.push({ kind: "extract", target });
+      return new Response(JSON.stringify({ results: [{ url, title: "Fixture paper", raw_content: body }] }),
+        { headers: { "content-type": "application/json" } });
+    },
+  });
+  const draft = validDraft("按主要章节概括用户提供的论文链接或PDF");
+  draft.inputSource = { value: "公开论文链接或上传PDF", source: "user" };
+  const design = (requirements) => validDesign(requirements, {
+    schemaVersion: 2, connections: [], interaction: { defaultEntry: "conversation", page: false, operations: false,
+      inputs: "论文链接或PDF", results: "章节概括与真实读取范围", persistentData: "无" },
+    instructions: "链接输入先用 web_fetch 读取正文；PDF用 read_material/read_material_image。按实际读取顺序概括主要章节，保留来源与读取范围；读取失败请改传PDF，不虚构章节或完整性。",
+    capabilities: ["conversation", "web_fetch", "read_material", "read_material_image"].map((id) => ({ id, status: "available",
+      reason: "平台已装配的工具；具体论文的读取和图像效果仍需本次调用验证" })),
+    unknowns: [{ question: "具体论文站点是否可读并包含完整主要章节？", blocking: false,
+      resolution: "业务执行时核对 web_fetch 实际返回正文、截断状态和章节读取范围" }],
+  });
+  let workCalls = 0;
+  const { agents, records, roles, options } = await fixture(t, { draft, design, web, work: async (record) => {
+    workCalls++;
+    for (const name of ["web_search", "web_fetch"])
+      assert.equal(record.options.customTools.filter((tool) => tool.name === name).length, 1);
+    if (workCalls === 1) assert.ok(record.tools.read_material && record.tools.read_material_image);
+    const result = JSON.parse((await record.tools.web_fetch.execute("paper-read", { url })).content[0].text);
+    assert.equal(result.status, "ok"); assert.equal(result.results[0].content, body);
+    assert.equal(result.results[0].url, url); assert.equal(result.results[0].truncated, false);
+  } });
+  const architecture = await agents.getArchitecture("alpha"), before = await agents.get("alpha");
+  assert.equal(architecture.status, "passed"); assert.equal(architecture.delivery, "ready");
+  assert.equal(architecture.design.profile, "light"); assert.equal(architecture.design.interaction.page, false);
+  const fetchFact = architecture.platformSnapshot.publicCapabilities.find((item) => item.id === "web_fetch");
+  assert.equal(fetchFact.status, "available"); assert.equal(fetchFact.configuration, "not_required");
+  assert.equal(fetchFact.verification, "per_call"); assert.deepEqual(calls, [], "架构通过不要求提前读取未来业务网址");
+  assert.equal(architecture.issues.some((issue) => issue.blocking), false);
+  assert.equal(architecture.design.unknowns[0].blocking, false);
+  assert.equal(roles.length, 2); assert.ok(!roles.find((record) => record.role === "reviewer").tools.web_fetch);
+  await agents.close();
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.deepEqual(await restored.get("alpha"), before);
+  assert.equal((await restored.getArchitecture("alpha")).candidateHash, designHash(architecture.design));
+  assert.equal((await restored.capabilityCards()).agents.find((agent) => agent.id === "alpha").ready, true);
+  assert.equal((await restored.prompt(turn())).status, "complete");
+  await restored.executeCollaboration({ agentId: "alpha", revision: before.revision, sessionId: "runtime-group-alpha-conversation",
+    message: "概括提供的论文链接", scope: { groupId: "study", taskId: "paper" } });
+  assert.equal(records.length, 2); assert.equal(workCalls, 2);
+  assert.deepEqual(calls.map((call) => call.kind), ["head", "extract", "head", "extract"], "私聊与群范围分别取得实际正文，不共享缓存结果");
+  const after = await restored.getArchitecture("alpha");
+  assert.equal(after.candidateHash, architecture.candidateHash); assert.equal(after.platformHash, architecture.platformHash);
+  assert.deepEqual(after.design.unknowns, architecture.design.unknowns, "调用成功不自动声称完整论文业务验收通过或改写历史评估");
+});
 
 test("旧目录正式定义自动具备公共联网，候选摘要、指令和业务工具绑定不变", async (t) => {
   const requests = [];

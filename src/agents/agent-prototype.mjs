@@ -5,7 +5,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { ArchitectureDesigner } from "../architecture/architecture.mjs";
-import { supportedArchitectureVersion, requiresDevelopment, capabilitySnapshotCompatible, designHash } from "../architecture/architecture-contract.mjs";
+import { supportedArchitectureVersion, requiresDevelopment, designHash } from "../architecture/architecture-contract.mjs";
+import { platformCapabilitySnapshotCompatible } from "../architecture/platform-contract.mjs";
 import { DevelopmentController, developmentSummary } from "../development/development.mjs";
 import { AgentStorage } from "./agent-storage.mjs";
 import { AgentLibrary, normalizeAttachmentRefs } from "./agent-library.mjs";
@@ -315,7 +316,7 @@ export class PrototypeAgents {
       && JSON.stringify([...(agent.toolIds ?? [])].sort()) === JSON.stringify(toolIds.sort())
       && (!agent.execution || (["node-json", "node-action"].includes(agent.execution.kind)
         && agent.execution.buildId === agent.developmentRef?.id && agent.execution.codeHash === agent.developmentRef?.codeHash))
-      && capabilitySnapshotCompatible(architecture)
+      && platformCapabilitySnapshotCompatible(architecture)
       && agent.architectureRef?.version === architecture.version
       && agent.architectureRef?.candidateHash === architecture.candidateHash);
   }

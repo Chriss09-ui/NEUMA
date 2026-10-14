@@ -8,6 +8,8 @@ import { DevelopmentStore } from "../src/development/development-store.mjs";
 import { DevelopmentWorkspace } from "../src/development/development-workspace.mjs";
 import { hashValue } from "../src/development/development-contract.mjs";
 import { InputError } from "../src/requirements/core.mjs";
+import { createPlatformSnapshot, platformCapabilityCatalog, renderPlatformRules } from "../src/architecture/platform-contract.mjs";
+import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 import { developmentArchitecture, developmentPlan, developmentReview, developmentIssue, developmentWork } from "./helpers/development.mjs";
 
 const submissionNames = { planner: "submit_development_plan", developer: "submit_development_work", reviewer: "submit_development_review" };
@@ -86,11 +88,12 @@ function fakeExecutor({ onVerify, onProbe, onRun } = {}) {
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-controller-"));
   const dataDir = join(root, "data"), sessions = [], controllers = [];
-  const architecture = developmentArchitecture();
+  const architecture = options.architecture ?? developmentArchitecture();
   const executor = options.executor ?? fakeExecutor(options);
   const workspace = new DevelopmentWorkspace({ dataDir });
   const config = { config: { llmConfigured: true }, cwd: root, dataDir, workspace, executor,
     sessionFactory: modelFactory(sessions, options.onPrompt), getArchitecture: options.getArchitecture ?? (async () => architecture),
+    ...(options.web ? { web: options.web } : {}),
     ...(options.limits ? { limits: options.limits } : {}) };
   const controller = new DevelopmentController(config); controllers.push(controller);
   t.after(async () => {
@@ -107,6 +110,85 @@ async function fixture(t, options = {}) {
 const failReport = (report, marker = "raw-failure") => ({ ...report, status: "failed", summary: "模拟业务断言不匹配",
   results: report.results.map((item, index) => index ? item : { ...item, status: "failed", actual: { error: marker },
     stdout: JSON.stringify({ error: marker }), stderr: `${marker}-stderr`, reason: "assertion_mismatch" }) });
+
+function bindPlatform(architecture, snapshot) {
+  architecture.platformSnapshot = structuredClone(snapshot);
+  architecture.platformContractVersion = snapshot.version;
+  architecture.platformHash = hashValue(snapshot);
+  architecture.reviewContext = { candidateHash: architecture.candidateHash, platformHash: architecture.platformHash };
+  return architecture;
+}
+
+async function contextField(record, payload, section) {
+  if (Object.hasOwn(payload, section)) return payload[section];
+  assert.ok(payload.contextSections.some((item) => item.section === section), `压缩输入必须保留 ${section} 的读取入口`);
+  let offset = 0, text = "";
+  do {
+    const page = JSON.parse((await record.tools.read_development_context.execute("platform-context", { section, offset, limit: 8000 })).content[0].text);
+    text += page.text; offset = page.nextOffset;
+  } while (offset !== null);
+  return JSON.parse(text);
+}
+
+test("研发规划、开发与独立评审接收同一冻结平台事实，评审仍不能联网", async (t) => {
+  const snapshot = createPlatformSnapshot(), architecture = bindPlatform(developmentArchitecture(), snapshot), calls = [];
+  const { controller, sessions } = await fixture(t, { architecture,
+    web: { async fetch(input, options) { calls.push({ input, options }); return { status: "ok", results: [{ url: input.url, content: "模拟技术资料" }] }; } },
+    onPrompt: async ({ record, payload, respond }) => {
+      assert.deepEqual(await contextField(record, payload, "platformSnapshot"), snapshot);
+      assert.equal(await contextField(record, payload, "platformContractVersion"), snapshot.version);
+      assert.equal(await contextField(record, payload, "platformHash"), architecture.platformHash);
+      assert.deepEqual(await contextField(record, payload, "capabilities"), platformCapabilityCatalog(snapshot));
+      assert.ok(record.options.systemPrompt.includes(renderPlatformRules(snapshot)), `${record.role} 应使用同一平台规则`);
+      if (record.role === "reviewer") {
+        assert.equal(record.tools.web_fetch, undefined); assert.equal(record.tools.web_search, undefined);
+      } else {
+        for (const name of ["web_search", "web_fetch"])
+          assert.equal(record.options.customTools.filter((tool) => tool.name === name).length, 1);
+        const result = JSON.parse((await record.tools.web_fetch.execute("technical-read", { url: "https://example.com/spec" })).content[0].text);
+        assert.equal(result.status, "ok");
+      }
+      await respond();
+    } });
+  const result = await controller.run(architecture);
+  assert.equal(result.status, "completed");
+  assert.deepEqual([...new Set(sessions.map((item) => item.role))].sort(), ["developer", "planner", "reviewer"]);
+  assert.equal(calls.length, 3); assert.ok(calls.every((call) => call.options.allowNetwork === true));
+  assert.deepEqual(result.architecture.platformSnapshot, snapshot);
+  assert.equal(result.architecture.platformHash, architecture.platformHash);
+});
+
+test("研发不接受与已评估摘要不一致的平台事实，启动模型前阻止篡改快照", async (t) => {
+  const architecture = bindPlatform(developmentArchitecture(), createPlatformSnapshot());
+  architecture.platformSnapshot.network.allowNetwork = false;
+  const { controller, sessions } = await fixture(t, { architecture });
+  const result = await controller.run(architecture);
+  assert.equal(result.status, "failed"); assert.equal(result.delivery, "blocked");
+  assert.match(result.summary, /平台事实契约无效/); assert.equal(sessions.length, 0);
+});
+
+test("研发联网必须同时满足冻结平台许可和本轮需求，拒绝前不调用网络底座", async (t) => {
+  for (const policy of ["snapshot", "requirements"]) await t.test(policy, async (child) => {
+    const snapshot = createPlatformSnapshot({ allowNetwork: policy !== "snapshot" });
+    const architecture = bindPlatform(developmentArchitecture(), snapshot);
+    if (policy === "requirements") architecture.requirements.push({ id: "offline", text: "禁止联网", source: "user" });
+    let calls = 0;
+    const refusedRequest = async () => { calls++; throw new Error("不允许发出网络请求"); };
+    const { controller, sessions } = await fixture(child, { architecture,
+      web: new WebCapabilities({ lookup: refusedRequest, requestPublic: refusedRequest, fetchImpl: refusedRequest }),
+      onPrompt: async ({ record, payload, respond }) => {
+        assert.deepEqual(await contextField(record, payload, "platformSnapshot"), snapshot);
+        if (record.role !== "reviewer") {
+          assert.ok(record.tools.web_fetch, "宿主在工具入口执行授权判断");
+          await assert.rejects(record.tools.web_fetch.execute("offline-read", { url: "https://example.com/spec" }), /不联网/);
+        } else assert.equal(record.tools.web_fetch, undefined);
+        await respond();
+      } });
+    const result = await controller.run(architecture);
+    assert.equal(result.status, "completed", result.summary);
+    assert.equal(calls, 0); assert.ok(sessions.some((item) => item.role === "developer"));
+  });
+});
 
 test("两个任务使用独立会话，交接保留结果，评审均为全新只读会话", async (t) => {
   const { controller, sessions, architecture, executor, dataDir } = await fixture(t);

@@ -3,6 +3,7 @@ import { InputError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { designHash, supportedArchitectureVersion, requiresDevelopment } from "../architecture/architecture-contract.mjs";
+import { renderPlatformRules, platformCapabilityCatalog, validatePlatformMetadata } from "../architecture/platform-contract.mjs";
 import { PLAN_SCHEMA, PLAN_V2_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
@@ -120,6 +121,8 @@ export class DevelopmentController {
   }
 
   async role(ctx, { kind, tools = [], validate, counter, limit }) {
+    validatePlatformMetadata(ctx.record.architecture);
+    const platform = ctx.record.architecture.platformSnapshot;
     const name = kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review";
     const schemas = { planner: ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
     const handle = { kind, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false };
@@ -133,7 +136,8 @@ export class DevelopmentController {
         return { ...toolResult({ submitted: true }), terminate: true };
       } };
     const webTools = kind === "reviewer" ? [] : createWebTools({ web: this.web, agentId: ctx.record.agentId,
-      scope: `development:${ctx.record.id}`, signal: ctx.signal, allowNetwork: networkAllowed(ctx.record.architecture.requirements) });
+      scope: `development:${ctx.record.id}`, signal: ctx.signal,
+      allowNetwork: platform?.network.allowNetwork !== false && networkAllowed(ctx.record.architecture.requirements) });
     const guardedTools = [...tools, ...webTools, createContextReadTool(() => handle.payload)].map((tool) => ({ ...tool, execute: async (...args) => {
       this.guard(ctx);
       if (!handle.accepting || handle.submitted) throw new InputError("当前阶段不能继续修改或读取工具，请等待下一项工作");
@@ -142,7 +146,8 @@ export class DevelopmentController {
     } }));
     handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
-      systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind] + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT),
+      systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind]
+        + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT) + (platform ? "\n" + renderPlatformRules(platform) : ""),
       customTools: [...guardedTools, submit], maxOutputTokens: modelOutputBudget(this.config, { planner: 8192, developer: 16384, reviewer: 4096 }[kind]) });
     if (kind === "developer") handle.session.setAutoCompactionEnabled?.(false);
     ctx.handles.add(handle);
@@ -210,9 +215,12 @@ export class DevelopmentController {
 
   base(ctx) {
     const r = ctx.record;
+    const platform = r.architecture.platformSnapshot ? { platformSnapshot: clone(r.architecture.platformSnapshot),
+      platformContractVersion: r.architecture.platformContractVersion, platformHash: r.architecture.platformHash,
+      capabilities: platformCapabilityCatalog(r.architecture.platformSnapshot) } : {};
     return { architectureRef: r.architectureRef, requirements: r.architecture.requirements,
       design: r.architecture.design, entrypoint: r.plan?.entrypoint, runtime: r.plan?.runtime, application: r.plan?.application,
-      handoffs: r.handoffs.slice(-12), remaining: r.budgets };
+      ...platform, handoffs: r.handoffs.slice(-12), remaining: r.budgets };
   }
 
   async review(ctx, mode, payload, snapshot) {

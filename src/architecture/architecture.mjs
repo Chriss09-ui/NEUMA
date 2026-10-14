@@ -8,7 +8,7 @@ import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-res
 import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
 import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT } from "../runtime/web-capabilities.mjs";
 import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence,
-  validatePlatformMetadata } from "./platform-contract.mjs";
+  platformCapabilityCatalog, validatePlatformMetadata } from "./platform-contract.mjs";
 
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const text = (maxLength = 2000) => ({ type: "string", minLength: 1, maxLength });
@@ -225,7 +225,7 @@ export class ArchitectureDesigner {
         onProgress({ type: "status", phase: "designing", label: "正在检查局部设计…" });
         const settled = await Promise.allSettled(modules.map(async (assignment) => {
           const result = await this.role({ role: "specialist", agentId: definition.id, systemPrompt: `${SPECIALIST_PROMPT}\n${platformRules}`,
-            payload: { assignment, requirements, capabilities: record.capabilitySnapshot, evidence: record.evidence, ...platformContext },
+            payload: { assignment, requirements, capabilities: platformCapabilityCatalog(platformSnapshot), evidence: record.evidence, ...platformContext },
             submitName: "submit_module_design", parameters: moduleResultSchema, validate: (value) => {
               const checked = checkedModule(value);
               if (checked.evidenceIds.some((id) => !record.evidence.some((entry) => entry.id === id))) throw new InputError("模块引用了未核实的证据");
@@ -244,7 +244,7 @@ export class ArchitectureDesigner {
         record.status = "designing"; record.summary = attempt ? "正在修正未通过的问题" : "正在选择合适的实现方式";
         await this.save(record);
         onProgress({ type: "status", phase: "designing", label: record.summary + "…" });
-        const context = () => ({ draft: definition.draft, requirements, capabilities: record.capabilitySnapshot, evidence: record.evidence, ...platformContext });
+        const context = () => ({ draft: definition.draft, requirements, capabilities: platformCapabilityCatalog(platformSnapshot), evidence: record.evidence, ...platformContext });
         const design = await this.role({ role: "designer", agentId: definition.id, systemPrompt: `${DESIGN_PROMPT}\n${WEB_RUNTIME_PROMPT}\n${platformRules}`,
           payload: { requirement: { name: definition.name, draft: definition.draft }, ...context(),
             previousDesign: record.design, issues: record.issues, modules: record.modules,

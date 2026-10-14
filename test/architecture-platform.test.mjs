@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
 import { CAPABILITIES, checkDesign, designHash, requirementItems } from "../src/architecture/architecture-contract.mjs";
-import { renderPlatformRules } from "../src/architecture/platform-contract.mjs";
+import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformCapabilityCatalog,
+  platformCapabilitySnapshotCompatible } from "../src/architecture/platform-contract.mjs";
 import { InputError } from "../src/requirements/core.mjs";
 import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 import { passingReview, validDesign, validDraft } from "./helpers/architecture.mjs";
 import { mathDemoDesign, mathDemoDraft } from "./helpers/math-demo-fixture.mjs";
+import { paperOverviewDesign, paperOverviewDraft } from "./helpers/paper-overview-fixture.mjs";
 
 const submissionNames = { designer: "submit_architecture", reviewer: "submit_architecture_review", specialist: "submit_module_design" };
 const definition = (id = "platform", draft = validDraft()) => ({ id, name: draft.name.value, draft, fingerprint: "platform-requirements-v1" });
@@ -52,7 +54,9 @@ test("三个架构角色共享固定平台规则，局部模型修改其输入�
   const { designer, sessions } = await fixture(t, async ({ record, submit }) => {
     if (record.role === "designer") {
       firstSnapshot = structuredClone(record.payload.platformSnapshot);
+      assert.deepEqual(record.payload.capabilities, platformCapabilityCatalog(firstSnapshot));
       record.payload.platformSnapshot.modelInventedAbility = "任意浏览器自动运行";
+      record.payload.capabilities.find((item) => item.id === "web_fetch").status = "unverified";
       await record.tools.delegate_module.execute("module", { modules: [{ question: "文件交付是否需要页面研发",
         boundary: "只核对下载文件与 NEUMA 托管页面的边界", benefit: "避免错误选择研发路径" }] });
       return submit(validDesign(record.payload.requirements));
@@ -60,7 +64,7 @@ test("三个架构角色共享固定平台规则，局部模型修改其输入�
     assert.deepEqual(record.payload.platformSnapshot, firstSnapshot);
     if (record.role === "specialist") return submit({ proposal: "仅下载文本文件时保持 light",
       interfaces: "文本输入与文件产物", tradeoffs: "文件校验不等于浏览器运行验证",
-      evidenceIds: ["neuma-runtime-v1"], unknowns: [] });
+      evidenceIds: [`neuma-runtime-v${record.payload.platformContractVersion}`], unknowns: [] });
     assert.equal(record.tools.web_search, undefined);
     assert.equal(record.tools.web_fetch, undefined);
     return submit(passingReview(record.payload.candidateHash));
@@ -68,13 +72,14 @@ test("三个架构角色共享固定平台规则，局部模型修改其输入�
   const result = await designer.design(definition());
   assert.equal(result.status, "passed");
   assert.deepEqual(sessions.map((record) => record.role), ["designer", "specialist", "reviewer"]);
-  assert.equal(result.platformContractVersion, 1);
+  assert.equal(result.platformContractVersion, PLATFORM_CONTRACT_VERSION);
   assert.equal(result.platformHash, designHash(result.platformSnapshot));
   assert.deepEqual(result.platformSnapshot, firstSnapshot);
   const sharedRules = renderPlatformRules(result.platformSnapshot);
   assert.ok(sharedRules.length > 0);
   for (const record of sessions) {
     assert.deepEqual(record.originalPayload.platformSnapshot, result.platformSnapshot);
+    assert.deepEqual(record.originalPayload.capabilities, platformCapabilityCatalog(result.platformSnapshot));
     assert.equal(record.originalPayload.platformContractVersion, result.platformContractVersion);
     assert.equal(record.originalPayload.platformHash, result.platformHash);
     assert.ok(record.options.systemPrompt.includes(sharedRules), `${record.role} 必须收到同一份完整平台规则`);
@@ -134,10 +139,126 @@ test("数学文件演示修订只调整真实依赖，同轮评测绑定相同�
   assert.deepEqual((await designer.get("math-demo")).attempts, result.attempts);
 });
 
+test("论文链接与 PDF 的 light 方案无需预读目标网址即可通过，站点未知不冒充工具缺失或业务已验证", async (t) => {
+  let requests = 0;
+  let searches = 0;
+  const web = new WebCapabilities({ fetchImpl: async () => { requests++; throw new Error("设计期不应执行业务论文读取"); } });
+  const { designer, sessions, config } = await fixture(t, async ({ record, submit }) => {
+    assert.deepEqual(record.payload.capabilities, platformCapabilityCatalog(record.payload.platformSnapshot));
+    assert.equal(record.payload.capabilities.find((item) => item.id === "web_fetch").status, "available");
+    if (record.role === "designer") {
+      for (let index = 0; index < 3; index++) await record.tools.search_technical_sources.execute(`policy_${index}`,
+        { query: "现有读取路径边界", topics: ["sdk"] });
+      return submit(paperOverviewDesign(record.payload.requirements));
+    }
+    assert.equal(record.payload.design.schemaVersion, 2);
+    assert.equal(record.payload.design.profile, "light");
+    assert.ok(record.payload.design.steps.some((step) => step.id === "S2a"));
+    assert.ok(record.payload.design.steps.some((step) => step.id === "S2b"));
+    assert.equal(record.payload.deterministicIssues.some((issue) => issue.id === "capability_web_fetch"), false);
+    assert.ok(record.payload.deterministicIssues.some((issue) => issue.id === "unknown_1" && !issue.blocking));
+    assert.match(record.payload.design.acceptance.find((item) => item.id === "ACC_2").expected, /ACC_1.*无虚构章节.*实际读取范围/);
+    assert.match(record.payload.design.acceptance.find((item) => item.id === "ACC_3").expected, /明确索取.*无章节要点.*不生成或写入/);
+    return submit(passingReview(record.payload.candidateHash));
+  }, { web, research: { async search() { searches++; return { sources: [], gaps: [] }; } } });
+  const result = await designer.design(definition("paper-overview", paperOverviewDraft()));
+  assert.equal(result.requirements.length, 11);
+  assert.equal(result.status, "passed");
+  assert.equal(result.buildable, true);
+  assert.equal(result.delivery, "blocked", "架构通过仍不等于已经生成执行定义");
+  assert.equal(result.attempts.length, 1);
+  assert.equal(searches, 3, "架构检索预算用完也不改变底座工具实现与许可");
+  assert.equal(requests, 0, "目标网站结果留待运行期实际调用验证");
+  assert.deepEqual(result.capabilitySnapshot, CAPABILITIES);
+  assert.equal(platformCapabilitySnapshotCompatible(result), true);
+  assert.equal((await designer.markReady(result)).delivery, "ready");
+  const restarted = new ArchitectureDesigner(config);
+  assert.equal((await restarted.get("paper-overview")).candidateHash, result.candidateHash);
+  assert.equal(sessions.length, 2, "保存或重启不创建额外评测会话");
+});
+
+test("论文候选误把已实现公共正文工具标为 unverified 时仍阻断，修订能力状态后按同一快照通过", async (t) => {
+  let count = 0;
+  const { designer, sessions } = await fixture(t, async ({ record, submit }) => {
+    if (record.role === "designer") return submit(paperOverviewDesign(record.payload.requirements,
+      { webStatus: count++ === 0 ? "unverified" : "available" }));
+    const issue = record.payload.deterministicIssues.find((item) => item.id === "capability_web_fetch");
+    if (issue) {
+      assert.equal(issue.source, "program");
+      assert.equal(issue.blocking, true);
+      assert.ok(issue.candidateFields.includes("capabilities"));
+      assert.match(issue.remedy, /available/);
+      assert.match(issue.remedy, /unknowns/);
+      return submit(revisionReview(record.payload, [{ id: "availability_object", blocking: true,
+        description: "具体网址未实测不等于公共正文工具未实现；需修正 capabilities 的验证对象",
+        remedy: "按冻结事实把 web_fetch 设为 available，保留具体站点结果为运行期验证，不修改程序检查" }]));
+    }
+    return submit(passingReview(record.payload.candidateHash));
+  });
+  const result = await designer.design(definition("paper-revision", paperOverviewDraft()));
+  assert.equal(result.status, "passed");
+  assert.equal(result.buildable, true);
+  assert.equal(result.attempts.length, 2);
+  assert.ok(result.attempts[0].issues.some((issue) => issue.id === "capability_web_fetch" && issue.blocking));
+  assert.equal(result.design.capabilities.find((item) => item.id === "web_fetch").status, "available");
+  for (const attempt of result.attempts) assert.equal(attempt.platformHash, result.platformHash);
+  for (const session of sessions) assert.deepEqual(session.originalPayload.capabilities, platformCapabilityCatalog(result.platformSnapshot));
+  assert.equal(result.design.unknowns[0].blocking, false);
+});
+
+test("模型 pass 不能放行论文路径中保留的未核实工具状态", async (t) => {
+  const { designer } = await fixture(t, async ({ record, submit }) => record.role === "designer"
+    ? submit(paperOverviewDesign(record.payload.requirements, { webStatus: "unverified" }))
+    : submit(passingReview(record.payload.candidateHash)));
+  const result = await designer.design(definition("paper-unverified", paperOverviewDraft()));
+  assert.equal(result.status, "needs_changes");
+  assert.equal(result.delivery, "blocked");
+  assert.notEqual(result.buildable, true);
+  assert.ok(result.issues.some((issue) => issue.id === "capability_web_fetch" && issue.blocking && issue.source === "program"));
+  await assert.rejects(designer.markReady(result), InputError);
+});
+
+test("禁止联网的快照不接受公共正文 available，目录外工具也不能伪装可用", async (t) => {
+  for (const id of ["web_fetch", "invented_paper_reader"]) {
+    const draft = paperOverviewDraft();
+    if (id === "web_fetch") draft.constraints.push({ text: "禁止联网", source: "user" });
+    const { designer } = await fixture(t, async ({ record, submit }) => {
+      const candidate = paperOverviewDesign(record.payload.requirements);
+      candidate.capabilities.find((item) => item.id === "web_fetch").id = id;
+      return submit(candidate);
+    });
+    await assert.rejects(designer.design(definition(`paper-forbidden-${id}`, draft)), /未被工具目录证实可用/);
+    const saved = await designer.get(`paper-forbidden-${id}`);
+    assert.equal(saved.status, "failed");
+    assert.equal(saved.delivery, "blocked");
+    assert.notEqual(saved.buildable, true);
+  }
+});
+
+test("论文工具分类修正不能用仅 PDF 路径虚假覆盖已确认的链接输入", async (t) => {
+  const { designer } = await fixture(t, async ({ record, submit }) => {
+    if (record.role === "designer") return submit(paperOverviewDesign(record.payload.requirements, { pdfOnly: true }));
+    assert.ok(record.payload.requirements.some((item) => item.id === "capability_1" && item.text.includes("HTTP(S)")));
+    assert.equal(record.payload.design.capabilities.some((item) => item.id === "web_fetch"), false);
+    assert.equal(record.payload.design.steps.some((item) => item.id === "S2a"), false);
+    const review = revisionReview(record.payload, [{ id: "link_input_not_covered", blocking: true,
+      description: "capability_1 要求公开链接，当前仅 PDF 路径与覆盖声称不一致",
+      remedy: "恢复公共正文读取路径及同一章节验收口径，不能把建议上传 PDF 当作已完成链接输入" }]);
+    review.checks.find((item) => item.id === "requirements").passed = false;
+    return submit(review);
+  });
+  const result = await designer.design(definition("paper-fake-fallback", paperOverviewDraft()));
+  assert.equal(result.status, "needs_changes");
+  assert.equal(result.delivery, "blocked");
+  assert.equal(result.attempts.length, 2);
+  assert.ok(result.issues.some((issue) => issue.id === "link_input_not_covered" && issue.blocking && issue.source === "model"));
+  await assert.rejects(designer.markReady(result), InputError);
+});
+
 test("文件交付可直接落入 light，托管页面或操作必须进入研发交付", () => {
   const requirements = requirementItems(mathDemoDraft());
   const files = mathDemoDesign(requirements);
-  const context = { requirements, capabilities: CAPABILITIES, evidence: [{ id: "neuma-runtime-v1" }] };
+  const context = { requirements, capabilities: CAPABILITIES, evidence: [{ id: `neuma-runtime-v${PLATFORM_CONTRACT_VERSION}` }] };
   assert.equal(checkDesign(files, context).runnable, true);
   const hosted = structuredClone(files);
   hosted.interaction = { ...hosted.interaction, defaultEntry: "application", page: true };
@@ -201,6 +322,35 @@ test("后台触发尚无适配，custom 研发路径和模型 pass 也不能冒�
   assert.ok(result.issues.some((issue) => issue.id === "unsupported_trigger"
     && issue.blocking && issue.source === "program"));
   assert.equal(result.attempts.length, 2);
+});
+
+test("禁止联网不能被研发路径和待连接状态绕过，模型 pass 仍不能放行", async (t) => {
+  for (const [profile, toolId, status, page] of [
+    ["workflow", "web_fetch", "needs_connection", false],
+    ["custom", "web_search", "needs_development", false],
+    ["light", "web_fetch", "needs_connection", true],
+  ]) {
+    const draft = validDraft();
+    draft.constraints = [{ text: "禁止联网，仅使用本地资料", source: "user" }];
+    const { designer } = await fixture(t, async ({ record, submit }) => {
+      if (record.role === "designer") return submit(validDesign(record.payload.requirements, { profile,
+        schemaVersion: 2, connections: [], interaction: { defaultEntry: page ? "application" : "conversation",
+          page, operations: false, inputs: "本地资料", results: "整理结果", persistentData: "无" },
+        capabilities: [{ id: "conversation", status: "available", reason: "对话能力" },
+          { id: toolId, status, reason: "设计者试图通过连接或研发恢复联网" }],
+      }));
+      const blockers = record.payload.deterministicIssues.filter((entry) => entry.blocking);
+      assert.equal(blockers.filter((entry) => entry.id === `capability_${toolId}`).length, 1);
+      assert.match(blockers[0].description, /平台政策禁止/);
+      assert.match(blockers[0].remedy, /请求需求方确认变更/);
+      return submit(passingReview(record.payload.candidateHash));
+    });
+    const result = await designer.design(definition(`offline-${profile}`, draft));
+    assert.equal(result.status, "needs_changes");
+    assert.equal(result.delivery, "blocked");
+    assert.notEqual(result.buildable, true);
+    assert.equal(result.attempts.length, 2);
+  }
 });
 
 test("排除能力不能伪造降级覆盖用户明确要求的真实动态引擎", async (t) => {
@@ -311,4 +461,38 @@ test("旧记录没有平台元数据仍按历史状态读取，不自动重评�
   assert.deepEqual(loaded.capabilitySnapshot, CAPABILITIES);
   assert.equal(sessions.length, 2, "读取历史记录不创建模型会话");
   assert.equal(await readFile(path, "utf8"), before, "读取不重写历史记录");
+});
+
+test("持久化的 v1 平台记录保留原候选与历史结果，主动重设计才使用 v2 联网目录", async (t) => {
+  const { designer, config, sessions } = await fixture(t, async ({ record, submit }) => record.role === "designer"
+    ? submit(validDesign(record.payload.requirements)) : submit(passingReview(record.payload.candidateHash)));
+  const result = await designer.design(definition());
+  const legacy = structuredClone(result);
+  legacy.platformSnapshot = JSON.parse(await readFile(new URL("./helpers/platform-v1-fixture.json", import.meta.url), "utf8"));
+  legacy.platformContractVersion = 1;
+  legacy.platformHash = designHash(legacy.platformSnapshot);
+  legacy.reviewContext.platformHash = legacy.platformHash;
+  legacy.evidence = [{ id: "neuma-runtime-v1", title: "历史平台事实", kind: "local", excerpt: "旧版公共工具与业务目录分离" }];
+  for (const attempt of legacy.attempts) {
+    attempt.platformHash = legacy.platformHash;
+    attempt.reviewContext.platformHash = legacy.platformHash;
+  }
+  const path = join(config.dataDir, "agents/platform/architecture.json");
+  await writeFile(path, JSON.stringify({ version: 1, records: [legacy] }));
+  const before = await readFile(path, "utf8");
+  const restarted = new ArchitectureDesigner(config);
+  const loaded = await restarted.get("platform");
+  assert.deepEqual(loaded, legacy);
+  assert.equal(loaded.platformContractVersion, 1);
+  assert.equal(loaded.candidateHash, result.candidateHash);
+  assert.equal(platformCapabilitySnapshotCompatible(loaded), true);
+  assert.equal(sessions.length, 2);
+  assert.equal(await readFile(path, "utf8"), before);
+  const next = await restarted.design(definition());
+  assert.equal(next.version, legacy.version + 1);
+  assert.equal(next.platformContractVersion, 2);
+  assert.notEqual(next.platformHash, legacy.platformHash);
+  assert.equal(sessions.length, 4);
+  const stored = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(stored.records.find((item) => item.version === legacy.version), legacy);
 });
