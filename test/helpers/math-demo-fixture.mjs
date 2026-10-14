@@ -1,4 +1,5 @@
 import { emptyDraft } from "../../src/requirements/core.mjs";
+import { PLATFORM_CONTRACT_VERSION } from "../../src/architecture/platform-contract.mjs";
 
 export function mathDemoDraft() {
   const draft = emptyDraft();
@@ -71,7 +72,7 @@ export function mathDemoDesign(requirements, { includeExcludedCapabilities = fal
       { id: "runtime", problem: "怎样交付交互演示", choice: "light 生成自包含文件",
         alternatives: [{ option: "托管应用", reason: "用户明确只需下载后打开，不要求 NEUMA 内预览" },
           { option: "workflow/custom", reason: "当前不需要持久控制状态或独立操作程序" }],
-        reason: "复用现有文本与文件工具；用户端运行仍需验证", evidenceIds: ["neuma-runtime-v1"], uncertainties: [] },
+        reason: "复用现有文本与文件工具；用户端运行仍需验证", evidenceIds: [`neuma-runtime-v${PLATFORM_CONTRACT_VERSION}`], uncertainties: [] },
       { id: "geometry_engine", problem: "是否使用动态几何引擎或外站嵌入", choice: "只使用内联固定模板",
         alternatives: [{ option: "dynamic_geometry_rendering", reason: "needs_development；本次未采用，需要独立研发验收" },
           { option: "external_visualization_embed", reason: "needs_connection；out_of_scope，违反零外链交付边界" }],

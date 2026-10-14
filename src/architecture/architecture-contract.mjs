@@ -24,7 +24,7 @@ export const CAPABILITIES = Object.freeze([
   ...LEGACY_CAPABILITIES.map((item) => Object.freeze({ ...item, version: 1 })), ...PUBLIC_CAPABILITIES,
 ]);
 
-export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES) {
+export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES, publicCapabilities = []) {
   try {
     const declared = record?.design?.capabilities;
     if (!Array.isArray(declared) || !declared.length || new Set(declared.map((item) => item?.id)).size !== declared.length
@@ -40,7 +40,7 @@ export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES
         });
     }
     if (record.capabilityCatalogVersion !== CAPABILITY_CATALOG_VERSION || !Array.isArray(record.capabilitySnapshot)
-      || !Array.isArray(capabilities)) return false;
+      || !Array.isArray(capabilities) || !Array.isArray(publicCapabilities)) return false;
     const validEntry = (item) => item && typeof item === "object" && !Array.isArray(item)
       && Object.keys(item).length === 4 && ["id", "version", "status", "scope"].every((key) => Object.hasOwn(item, key))
       && typeof item.id === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(item.id)
@@ -48,12 +48,20 @@ export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES
       && ["available", "needs_connection", "needs_development", "unverified"].includes(item.status)
       && typeof item.scope === "string" && Boolean(item.scope.trim()) && !item.scope.includes("\0");
     if (record.capabilitySnapshot.some((item) => !validEntry(item)) || capabilities.some((item) => !validEntry(item))
+      || publicCapabilities.some((item) => !validEntry(item))
       || new Set(record.capabilitySnapshot.map((item) => item.id)).size !== record.capabilitySnapshot.length
-      || new Set(capabilities.map((item) => item.id)).size !== capabilities.length) return false;
+      || new Set(capabilities.map((item) => item.id)).size !== capabilities.length
+      || new Set(publicCapabilities.map((item) => item.id)).size !== publicCapabilities.length) return false;
     const snapshot = new Map(record.capabilitySnapshot.map((item) => [item.id, item]));
     const current = new Map(capabilities.map((item) => [item.id, item]));
-    return used.every(({ id }) => snapshot.get(id)?.status === "available" && current.get(id)?.status === "available"
-      && designHash(snapshot.get(id)) === designHash(current.get(id)));
+    const publicCurrent = new Map(publicCapabilities.map((item) => [item.id, item]));
+    const publicSnapshot = new Map(record.platformSnapshot?.version === 2 ? (record.platformSnapshot.publicCapabilities ?? [])
+      .map(({ id, version, status, scope }) => [id, { id, version, status, scope }]) : []);
+    return used.every(({ id }) => {
+      const saved = snapshot.has(id) ? snapshot.get(id) : publicSnapshot.get(id);
+      const active = snapshot.has(id) ? current.get(id) : publicCurrent.get(id);
+      return saved?.status === "available" && active?.status === "available" && designHash(saved) === designHash(active);
+    });
   } catch { return false; }
 }
 
@@ -264,12 +272,21 @@ export function checkDesign(value, context) {
     description: item.question, remedy: item.resolution,
   }));
   for (const capability of design.capabilities) {
+    if (context?.platformSnapshot?.publicCapabilities?.some((item) => item.id === capability.id && item.status === "forbidden")) {
+      issues.push({ id: `capability_${capability.id}`, blocking: true,
+        description: `能力 ${capability.id} 被本轮平台政策禁止，连接配置或研发不能解除该限制。`,
+        remedy: "修正 capabilities、steps、coverage 和 acceptance 中的执行路径；若已确认需求必须联网，保留冲突并请求需求方确认变更，不能改平台快照或用未就绪状态绕过禁止联网。" });
+      continue;
+    }
+    const provided = context?.capabilities?.some((item) => item.id === capability.id && item.status === "available");
     if (capability.status !== "available") issues.push({
       id: capability.id.length <= 69 ? `capability_${capability.id}`
         : `capability_${createHash("sha256").update(capability.id).digest("hex").slice(0, 24)}`,
       blocking: capability.status === "unverified" || !requiresDevelopment(design),
-      description: `能力 ${capability.id} 尚未可用：${capability.reason}`,
-      remedy: "若为实际执行依赖，选择真实可用的替代能力或现有研发通道，并核对步骤、需求覆盖及验收；仍缺能力时保留未就绪。若为未采用或未来方案，从 capabilities 移至 decisions，保留缺口事实；不能修改程序检查标记来放行。",
+      description: provided ? `候选把本轮目录已提供的能力 ${capability.id} 标为 ${capability.status}：${capability.reason}`
+        : `能力 ${capability.id} 尚未可用：${capability.reason}`,
+      remedy: provided ? "按宿主完整目录修正 capabilities.status 为 available；这只表示工具已提供且允许调用，不代表具体目标读取或业务验收成功。将目标与效果的未知写入 unknowns、失败处理和 acceptance，不改程序标记，也不虚构调用证据。"
+        : "若为实际执行依赖，选择真实可用的替代能力或现有研发通道，并核对步骤、需求覆盖及验收；仍缺能力时保留未就绪。若为未采用或未来方案，从 capabilities 移至 decisions，保留缺口事实；不能修改程序检查标记来放行。",
     });
   }
   if (!requiresDevelopment(design) && design.state.mode === "persistent") issues.push({

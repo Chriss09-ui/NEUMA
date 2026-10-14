@@ -1,20 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { InputError } from "../src/requirements/core.mjs";
 import { CAPABILITIES, CAPABILITY_CATALOG_VERSION, PUBLIC_TOOL_IDS, designHash } from "../src/architecture/architecture-contract.mjs";
-import { PUBLIC_CAPABILITY_VERSION } from "../src/runtime/web-capabilities.mjs";
+import { PUBLIC_CAPABILITY_VERSION, PUBLIC_WEB_CAPABILITIES, createWebTools } from "../src/runtime/web-capabilities.mjs";
 import { APPLICATION_PROTOCOL_VERSION } from "../src/applications/application-contract.mjs";
 import { MAX_RUNTIME_FILE_BYTES } from "../src/runtime/file-limits.mjs";
-import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence, validatePlatformMetadata } from "../src/architecture/platform-contract.mjs";
+import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence, validatePlatformMetadata,
+  platformCapabilityCatalog, platformCapabilitySnapshotCompatible } from "../src/architecture/platform-contract.mjs";
 import { passingReview } from "./helpers/architecture.mjs";
 
-function record({ candidate = true } = {}) {
-  const platformSnapshot = createPlatformSnapshot();
+function record({ candidate = true, platformSnapshot = createPlatformSnapshot() } = {}) {
   const platformHash = designHash(platformSnapshot);
   const design = { profile: "light", instructions: "测试候选" };
   const candidateHash = candidate ? designHash(design) : null;
   const reviewContext = candidate ? { candidateHash, platformHash } : null;
-  return { platformSnapshot, platformContractVersion: PLATFORM_CONTRACT_VERSION, platformHash, status: "evaluating", issues: [],
+  return { platformSnapshot, platformContractVersion: platformSnapshot.version, platformHash, status: "evaluating", issues: [],
     design: candidate ? design : null, candidateHash, reviewContext, review: candidate ? passingReview(candidateHash) : null, attempts: candidate
       ? [{ design: structuredClone(design), candidateHash, platformHash, reviewContext: structuredClone(reviewContext), review: passingReview(candidateHash) }] : [] };
 }
@@ -46,6 +47,34 @@ test("平台事实保留业务快照并单独声明公共工具与可交付路�
   assert.equal(snapshot.connections.dedicatedSearchFallback, "explicit_consent_only");
 });
 
+test("公共能力的实现许可与每次调用结果分别声明，有效候选目录包含联网但不改旧业务目录", () => {
+  const snapshot = createPlatformSnapshot();
+  assert.equal(snapshot.version, 2);
+  assert.deepEqual(snapshot.availabilitySemantics, { available: "implemented_and_permitted", verification: "result_specific" });
+  assert.deepEqual(snapshot.publicCapabilities.map((item) => item.id), snapshot.publicTools);
+  for (const item of snapshot.publicCapabilities) {
+    assert.deepEqual(Object.keys(item).sort(), ["id", "version", "status", "scope", "implementation", "configuration", "verification"].sort());
+    assert.equal(item.status, "available");
+    assert.equal(item.implementation, "runtime_tool");
+    assert.equal(item.configuration, "not_required");
+    assert.equal(item.verification, "per_call");
+    assert.equal(typeof item.scope, "string");
+    assert.ok(item.scope.trim());
+    assert.ok(Number.isSafeInteger(item.version) && item.version > 0);
+  }
+  const catalog = platformCapabilityCatalog(snapshot);
+  assert.equal(new Set(catalog.map((item) => item.id)).size, catalog.length);
+  assert.equal(catalog.find((item) => item.id === "web_fetch").status, "available");
+  assert.equal(catalog.find((item) => item.id === "web_search").status, "available");
+  assert.ok(catalog.every((item) => Object.keys(item).length === 4));
+  assert.equal(CAPABILITIES.some((item) => item.id === "web_fetch"), false, "保留业务目录 v2 的原有历史语义");
+  for (const business of CAPABILITIES) assert.deepEqual(catalog.find((item) => item.id === business.id), business);
+  const networkFacts = snapshot.publicCapabilities.filter((item) => ["web_search", "web_fetch"].includes(item.id));
+  assert.deepEqual(networkFacts.map(({ id, version, status, scope }) => ({ id, version, status, scope })), PUBLIC_WEB_CAPABILITIES);
+  assert.deepEqual(createWebTools({ web: {} }).map((tool) => tool.name), networkFacts.map((item) => item.id),
+    "快照声明与实际工具装配同源，不仅名称相同还核对版本和范围");
+});
+
 test("平台快照是可序列化且深度冻结的独立事实，不收集配置或凭据值", () => {
   const sentinel = "TEST_ONLY_PRIVATE_VALUE_MUST_NOT_APPEAR";
   const snapshot = createPlatformSnapshot({ config: { apiKey: sentinel }, credentials: sentinel });
@@ -66,9 +95,9 @@ test("共享规则和同源证据明确文件、托管应用、连接就绪与�
   const snapshot = createPlatformSnapshot();
   const rules = renderPlatformRules(snapshot);
   const evidence = platformEvidence(snapshot);
-  assert.equal(evidence.id, "neuma-runtime-v1");
-  assert.match(evidence.versionScope, /platform v1.*schema 2.*public capability v1.*catalog v2/);
-  assert.equal(evidence.excerpt, rules);
+  assert.equal(evidence.id, `neuma-runtime-v${snapshot.version}`);
+  assert.match(evidence.versionScope, new RegExp(`platform v${snapshot.version}.*schema 2.*public capability v1.*catalog v2`));
+  assert.equal(evidence.excerpt, rules.slice(0, 6000));
   assert.ok(evidence.excerpt.length <= 6000);
   for (const required of [/deliverable_first/, /schemaVersion:2/, /仅生成可下载 HTML\/SVG/, /node-action/, /浏览器\/DOM\/file:\/\//,
     /类型受支持不等于已经配置\/验证/, /本角色拥有它/, /coverage、acceptance/, /decisions\.evidenceIds/, /待需求方确认/])
@@ -82,9 +111,14 @@ test("禁止联网是本轮固定范围，同源规则不授予公开网页或�
   const rules = renderPlatformRules(snapshot);
   assert.match(rules, /用户禁止联网.*web_search\/web_fetch 和业务外部请求不可使用/);
   assert.doesNotMatch(rules, /本轮允许公开/);
-  assert.equal(platformEvidence(snapshot).excerpt, rules);
+  assert.equal(platformEvidence(snapshot).excerpt, rules.slice(0, 6000));
   assert.notEqual(designHash(snapshot), designHash(createPlatformSnapshot()));
   assert.throws(() => createPlatformSnapshot({ allowNetwork: "false" }), InputError);
+  for (const id of ["web_search", "web_fetch"]) {
+    assert.equal(snapshot.publicCapabilities.find((item) => item.id === id).status, "forbidden");
+    assert.equal(platformCapabilityCatalog(snapshot).some((item) => item.id === id), false);
+  }
+  assert.equal(snapshot.publicCapabilities.find((item) => item.id === "read_material").status, "available");
 });
 
 test("平台渲染拒绝同版本伪造的能力事实和额外敏感字段", () => {
@@ -104,6 +138,48 @@ test("旧记录完全缺平台字段时保持兼容，新记录允许尚未产�
   assert.deepEqual(legacy, before);
   assert.equal(validatePlatformMetadata(record({ candidate: false })), true);
   assert.equal(validatePlatformMetadata(JSON.parse(JSON.stringify(record()))), true);
+});
+
+test("固定保存的 v1 平台快照仍按原版本验证，不追加联网能力或改写历史摘要", async () => {
+  const snapshot = JSON.parse(await readFile(new URL("./helpers/platform-v1-fixture.json", import.meta.url), "utf8"));
+  const before = structuredClone(snapshot);
+  assert.equal(snapshot.version, 1);
+  assert.equal(Object.hasOwn(snapshot, "publicCapabilities"), false);
+  const legacy = record({ platformSnapshot: snapshot });
+  assert.equal(validatePlatformMetadata(legacy), true);
+  assert.equal(platformEvidence(snapshot).id, "neuma-runtime-v1");
+  assert.deepEqual(platformCapabilityCatalog(snapshot), CAPABILITIES);
+  assert.deepEqual(snapshot, before);
+  const forged = structuredClone(snapshot);
+  forged.publicCapabilities = createPlatformSnapshot().publicCapabilities;
+  assert.throws(() => renderPlatformRules(forged), InputError);
+});
+
+test("v2 能力兼容核对冻结公共目录，v1 和无平台记录仍使用旧业务规则", async () => {
+  const make = (snapshot, id = "web_fetch") => ({ ...record({ platformSnapshot: snapshot }), capabilityCatalogVersion: CAPABILITY_CATALOG_VERSION,
+    capabilitySnapshot: structuredClone(CAPABILITIES), design: { capabilities: [{ id, status: "available", reason: "实际依赖" }] } });
+  const bind = (value) => {
+    value.candidateHash = designHash(value.design);
+    value.reviewContext = { candidateHash: value.candidateHash, platformHash: value.platformHash };
+    value.review = passingReview(value.candidateHash);
+    value.attempts = [];
+    return value;
+  };
+  const online = bind(make(createPlatformSnapshot()));
+  assert.equal(platformCapabilitySnapshotCompatible(online), true);
+  assert.equal(platformCapabilitySnapshotCompatible(bind(make(createPlatformSnapshot({ allowNetwork: false })))), false);
+  assert.equal(platformCapabilitySnapshotCompatible(bind(make(createPlatformSnapshot(), "invented_browser"))), false);
+  const oldSnapshot = JSON.parse(await readFile(new URL("./helpers/platform-v1-fixture.json", import.meta.url), "utf8"));
+  assert.equal(platformCapabilitySnapshotCompatible(bind(make(oldSnapshot))), false);
+  assert.equal(platformCapabilitySnapshotCompatible(bind(make(oldSnapshot, "conversation"))), true);
+  const noPlatform = { capabilityCatalogVersion: CAPABILITY_CATALOG_VERSION, capabilitySnapshot: structuredClone(CAPABILITIES),
+    design: { capabilities: [{ id: "conversation", status: "available", reason: "文本" }] } };
+  assert.equal(platformCapabilitySnapshotCompatible(noPlatform), true);
+  noPlatform.design.capabilities.push({ id: "web_fetch", status: "available", reason: "未有新平台评估" });
+  assert.equal(platformCapabilitySnapshotCompatible(noPlatform), false);
+  const tampered = structuredClone(online);
+  tampered.platformSnapshot.publicCapabilities.find((item) => item.id === "web_fetch").scope = "允许私有地址";
+  assert.equal(platformCapabilitySnapshotCompatible(tampered), false);
 });
 
 test("平台元数据不能部分出现，版本与摘要必须匹配", () => {

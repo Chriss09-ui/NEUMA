@@ -205,7 +205,7 @@ test("仅按需委派最多两个局部模块，专员没有搜索或递归委�
     if (record.role === "specialist") {
       assert.deepEqual(Object.keys(record.tools), ["submit_module_design"]);
       return submit({ proposal: "只保留任务状态", interfaces: "文本输入和摘要输出", tradeoffs: "不保留跨任务状态",
-        evidenceIds: ["neuma-runtime-v1"], unknowns: [] });
+        evidenceIds: [`neuma-runtime-v${record.payload.platformContractVersion}`], unknowns: [] });
     }
     if (record.role === "designer") {
       const response = await record.tools.delegate_module.execute("delegate", { modules: assignments });
