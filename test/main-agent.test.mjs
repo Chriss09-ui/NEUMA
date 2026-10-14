@@ -222,7 +222,20 @@ test("群外管理使用当前用户引用、版本和幂等标识，群任务�
   assert.equal(f.calls[0].input.expectedVersion, 1); assert.match(f.calls[0].input.mutationId, /^main_[a-f0-9]{64}$/);
   assert.equal(f.calls[1].input.newTask, true); assert.equal(f.calls[1].input.senderAgentId, undefined);
   assert.equal(f.calls[1].metadata.source, "main");
+  assert.equal(f.calls[1].metadata.taskAllowNetwork, true);
   assert.equal(result.sources[1].type, "group_task"); assert.equal(result.sources[1].sourceLink, "#group/group_one");
+});
+
+test("主 Agent 派群保留用户原话的联网限制，模型转交摘要不能放宽", async (t) => {
+  const userRequest = "把整理报告的任务交给这个群，不要联网";
+  const f = await fixture(t, async ({ tools }) => {
+    await tools.assign_group_task.execute("offline-assignment", { groupId: "group_one", message: "查询公开资料并整理报告", userRequest });
+  });
+  await f.main.prompt(f.input(userRequest, "offline_group_task"));
+  const delegated = f.calls.find((item) => item.type === "group");
+  assert.equal(delegated.input.content, "查询公开资料并整理报告");
+  assert.deepEqual(delegated.metadata, { source: "main", taskAllowNetwork: false });
+  assert.equal(Object.hasOwn(delegated.input, "taskAllowNetwork"), false);
 });
 
 test("读取群消息或私聊不能提供管理和派发授权", async (t) => {

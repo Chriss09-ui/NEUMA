@@ -245,7 +245,7 @@ export class MainAgent {
           || attachmentIds.some((value) => !ctx.visibleAttachmentIds.has(value))) throw new InputError("只能转交本轮或当前主对话历史里已引用的材料");
         const copied = attachmentIds.length ? await this.materials.forward(ctx.conversationId, groupId, attachmentIds, metadata) : { attachmentIds: [] };
         const result = await this.collaboration.postMessage(groupId, { content: message, newTask: true, mutationId: metadata.mutationId,
-          attachmentIds: copied.attachmentIds }, { source: "main" });
+          attachmentIds: copied.attachmentIds }, { source: "main", taskAllowNetwork: networkAllowed(ctx.message) });
         await this.context(ctx, { type: "group", groupId, taskId: result.task?.id });
         await source({ type: "group_task", groupId, taskId: result.task?.id, sourceLink: link("group", groupId), status: result.task?.status ?? "submitted",
           attachmentIds: copied.attachmentIds, sourceAttachmentIds: attachmentIds }); return result;
