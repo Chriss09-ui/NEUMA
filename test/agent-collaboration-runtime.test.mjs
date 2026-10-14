@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
@@ -153,6 +153,108 @@ test("能力卡包含未生成成员而不泄露指令/记忆，活动摘要清�
   assert.equal(snapshot.activities.find((item) => item.id === pending.id).status, "interrupted");
   const file = JSON.parse(await readFile(join(options.dataDir, "agents/a/activities.json"), "utf8"));
   assert.equal(file.schemaVersion, 1); assert.equal(file.activities[0].status, "interrupted");
+});
+
+test("能力卡按成员投影，无模型会话、联网探测或任务目录创建，连接健康不改变能力身份", async (t) => {
+  const { agents, options, records } = await fixture(t);
+  await agents.saveRequirements("pending", input("pending", "等待开发"));
+  const count = records.length, calls = [], original = agents.connections.list.bind(agents.connections);
+  agents.connections.list = async (id, ...args) => { calls.push(id); return original(id, ...args); };
+  const snapshot = (await agents.capabilityCards({ agentIds: ["a"] })).agents;
+  assert.deepEqual(snapshot.map((item) => item.id), ["a"]);
+  assert.deepEqual(calls, ["a"]);
+  assert.equal(records.length, count);
+  await assert.rejects(lstat(join(options.dataDir, "agents/a/workspace")), { code: "ENOENT" });
+  await assert.rejects(lstat(join(options.dataDir, "agents/pending/private")), { code: "ENOENT" });
+  await agents.connections.save("a", { id: "model", kind: "model", provider: "openai-compatible", authType: "none",
+    baseUrl: "https://private-fixture.invalid", model: "PRIVATE_MODEL_FIXTURE" });
+  const configured = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0];
+  assert.notEqual(configured.capabilityVersion, snapshot[0].capabilityVersion);
+  assert.doesNotMatch(JSON.stringify(configured), /PRIVATE_MODEL_FIXTURE|private-fixture|baseUrl|provider|modelAuthType/);
+  await agents.connections.recordResult(await agents.connections.snapshot("a"), "model", false, "PRIVATE_DIAGNOSTIC_FIXTURE");
+  const failed = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0];
+  assert.equal(failed.capabilityVersion, configured.capabilityVersion);
+  assert.equal(failed.capabilities.find((item) => item.id === "conversation").availability, "callable");
+  assert.equal(failed.capabilities.find((item) => item.id === "conversation").verification.status, "last_call_failed");
+  assert.doesNotMatch(JSON.stringify(failed), /PRIVATE_DIAGNOSTIC_FIXTURE/);
+  assert.equal(records.length, count);
+});
+
+test("当前应用交付无法核对时公开卡不借旧 ready 声称群业务可执行，错误原文不公开", async (t) => {
+  const { agents } = await fixture(t);
+  agents.agents.set("a", { ...agents.agents.get("a"), execution: { kind: "node-action" } });
+  agents.approvedDefinition = () => true;
+  agents.applications.descriptor = async () => { throw new Error("PRIVATE_DELIVERY_DIAGNOSTIC_FIXTURE"); };
+  const card = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0];
+  assert.equal(card.ready, false);
+  assert.equal(card.capabilities.every((item) => item.availability === "unavailable"), true);
+  assert.doesNotMatch(JSON.stringify(card), /PRIVATE_DELIVERY_DIAGNOSTIC_FIXTURE/);
+});
+
+test("默认模型关闭和服务重载改变公开能力身份，定义与已保存产物保留，专属模型身份不受影响", async (t) => {
+  const { agents, options, records } = await fixture(t);
+  const definitionPath = join(options.dataDir, "agents/a/definition.json"), definition = await readFile(definitionPath, "utf8");
+  const file = join(await agents.workspace("a"), "saved-result.txt");
+  await writeFile(file, "已保存成果");
+  const initial = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0], count = records.length;
+  await agents.close();
+  const closed = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0];
+  assert.notEqual(closed.capabilityVersion, initial.capabilityVersion);
+  assert.equal(closed.revision, initial.revision);
+  assert.equal(closed.ready, true);
+  await assert.rejects(agents.executeCollaboration(round("a", "old-default-model-session-12345", {
+    capabilityVersion: initial.capabilityVersion })), (error) => error.reason === "capability_changed");
+  const restored = new PrototypeAgents(options);
+  try {
+    const restarted = (await restored.capabilityCards({ agentIds: ["a"] })).agents[0];
+    assert.notEqual(restarted.capabilityVersion, closed.capabilityVersion);
+    assert.equal(restarted.revision, initial.revision);
+    assert.equal(restarted.ready, true);
+  } finally { await restored.close(); }
+  await agents.connections.save("a", { id: "model", kind: "model", authType: "none",
+    baseUrl: "https://private-fixture.invalid", model: "PRIVATE_MODEL_FIXTURE" });
+  const dedicated = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0];
+  await agents.close();
+  assert.equal((await agents.capabilityCards({ agentIds: ["a"] })).agents[0].capabilityVersion, dedicated.capabilityVersion);
+  const dedicatedRestored = new PrototypeAgents(options);
+  try {
+    assert.equal((await dedicatedRestored.capabilityCards({ agentIds: ["a"] })).agents[0].capabilityVersion, dedicated.capabilityVersion);
+  } finally { await dedicatedRestored.close(); }
+  assert.equal(await readFile(definitionPath, "utf8"), definition);
+  assert.equal(await readFile(file, "utf8"), "已保存成果");
+  assert.equal(records.length, count);
+  assert.doesNotMatch(JSON.stringify(closed), new RegExp(agents.modelCapabilityInstance));
+});
+
+test("群执行绑定能力版本，配置变化阻止后续工具并保留已经写入的成果", async (t) => {
+  const { agents, options, executions } = await fixture(t, async (record) => {
+    await record.tools.write_workspace_file.execute("first", { file: "prior.txt", content: "变化前已完成的成果" });
+    agents.config.llmConfigured = false;
+    await record.tools.write_workspace_file.execute("second", { file: "blocked.txt", content: "不能写入" });
+  });
+  const capabilityVersion = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0].capabilityVersion;
+  await assert.rejects(agents.executeCollaboration(round("a", "changed-capability-session-12345", { capabilityVersion })), /能力或连接配置已改变/);
+  const root = join(options.dataDir, "agents/a/workspace/group-tasks/group-one/task-one/a");
+  assert.equal(await readFile(join(root, "prior.txt"), "utf8"), "变化前已完成的成果");
+  await assert.rejects(lstat(join(root, "blocked.txt")), { code: "ENOENT" });
+  assert.equal(executions()[0].disposed, true);
+  const count = executions().length;
+  await assert.rejects(agents.executeCollaboration(round("a", "stale-capability-session-12345", { capabilityVersion })), /能力或连接配置已改变/);
+  assert.equal(executions().length, count);
+  assert.equal(agents.scheduler.snapshot().running, 0);
+});
+
+test("群联网权限来自可信任务政策，其他成员能力卡文本不能误禁联网或绕过自身限制", async (t) => {
+  const policies = [];
+  const { agents } = await fixture(t, async (record) => { await record.tools.web_search.execute("search", { query: "群任务公开资料" }); });
+  agents.web.search = async (_input, options) => { policies.push(options.allowNetwork); return { status: "fixture" }; };
+  await agents.executeCollaboration(round("a", "other-policy-session-12345", { taskAllowNetwork: true,
+    message: JSON.stringify({ task: "搜索公开资料", members: [{ id: "offline-agent", boundaries: ["禁止联网"] }] }) }));
+  await agents.executeCollaboration(round("a", "user-policy-session-12345", { taskAllowNetwork: false, message: "请处理群任务资料" }));
+  await agents.build(input("a", "仅使用离线材料整理信息"));
+  await agents.executeCollaboration(round("a", "own-policy-session-12345", { revision: 2, taskAllowNetwork: true, message: "群任务资料" }));
+  assert.deepEqual(policies, [true, false, false]);
+  await assert.rejects(agents.executeCollaboration(round("a", "invalid-policy-session-12345", { revision: 2, taskAllowNetwork: "true" })), /参数无效/);
 });
 
 test("主 Agent 委派来源只接可信调用参数，普通请求正文不能注入且记录可恢复", async (t) => {

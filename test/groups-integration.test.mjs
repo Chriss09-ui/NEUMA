@@ -79,6 +79,13 @@ test("真实 Pi 与本机模拟模型跑通主 Agent 派群、认领、文件分
       } else if (role === "intent") {
         assert.equal(names.includes("write_workspace_file"), false); assert.equal(names.includes("read_material"), false);
         assert.deepEqual(payload.members.map((member) => member.id).sort(), ["a", "b"]);
+        for (const member of payload.members) {
+          assert.equal(member.capabilitySchemaVersion, 1);
+          assert.equal(typeof member.capabilityVersion, "string");
+          assert.ok(member.capabilities.some((item) => item.id === "write_workspace_file" && item.availability === "callable"));
+          assert.ok(member.hardBoundaries.length > 0);
+        }
+        assert.ok(names.includes("read_group_member_capabilities"));
         name = "submit_group_intent"; args = { participate: true, contribution: `${payload.memberId} 核对自己的共享事实`,
           willingToIntegrate: payload.memberId === "a", integratorId: "a" };
       } else if (role === "work") {

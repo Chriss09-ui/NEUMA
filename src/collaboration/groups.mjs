@@ -5,11 +5,16 @@ import { InputError } from "../requirements/core.mjs";
 import { MaterialStore } from "../materials/material-store.mjs";
 import { GroupStore, GROUP_LIMITS, TERMINAL_TASKS, id, text, conflict, fingerprint, event, message, now } from "./group-store.mjs";
 import { runGroup } from "./group-runtime.mjs";
+import { groupTaskAllowsNetwork } from "./group-tools.mjs";
 
 const publicGroup = ({ creationId, creationHash, ...group }) => group;
 const publicArtifact = ({ content, ...artifact }) => artifact;
 const system = { type: "system", id: "platform", name: "NEUMA" };
 const unfinished = (task) => !TERMINAL_TASKS.has(task.status);
+const matchesParticipant = (member, card) => card?.ready && card.revision === member.revision
+  && (!member.capabilityVersion || card.capabilityVersion === member.capabilityVersion);
+const memberCards = (record, cards) => record.group.memberIds.map((memberId) => cards.find((card) => card.id === memberId)
+  ?? { id: memberId, name: "已移除的 Agent", ready: false, description: "成员已不可用" });
 export const isLive = (task) => ["queued", "running", "negotiating", "waiting"].includes(task.status);
 const rootTask = (record, taskId) => {
   const task = record.tasks.find((value) => value.id === id(taskId, "任务"));
@@ -25,7 +30,27 @@ export class CollaborationService {
     this.ready = Promise.all([store.ready, agents.ready]); this.ready.catch(() => {});
     this.unsubscribeLifecycle = agents.onLifecycle?.((value) => this.invalidateAgent(value.agentId ?? value.id, value.reason ?? value.type));
   }
-  async cards() { await this.ready; return (await this.agents.capabilityCards()).agents; }
+  async cards(options) { await this.ready; return (await this.agents.capabilityCards(options)).agents; }
+  async groupMemberCards(groupId) {
+    const record = await this.store.get(groupId), cards = await this.cards({ agentIds: record.group.memberIds });
+    return memberCards(record, cards);
+  }
+  async validateTaskCapabilities(groupId, taskId, generation) {
+    const snapshot = await this.store.get(groupId), task = this.guard(snapshot, taskId, null, generation);
+    const cards = await this.cards({ agentIds: task.participants.map((member) => member.id) });
+    if (task.participants.every((member) => matchesParticipant(member, cards.find((card) => card.id === member.id)))) return cards;
+    const changed = await this.store.change(groupId, (record) => {
+      const task = this.guard(record, taskId, null, generation);
+      if (task.participants.every((member) => matchesParticipant(member, cards.find((card) => card.id === member.id)))) return false;
+      this.interrupt(record, task, "成员能力、执行条件或定义已变化，请检查已有成果后创建新任务重新分配");
+      return true;
+    });
+    if (changed) {
+      this.abort(groupId, taskId);
+      throw new InputError("成员能力、执行条件或定义已变化，请检查已有成果后重新分配");
+    }
+    return cards;
+  }
   async members(memberIds) {
     if (!Array.isArray(memberIds) || !memberIds.length || memberIds.length > 64 || new Set(memberIds).size !== memberIds.length) throw new InputError("请选择 1～64 个不同的群成员");
     const cards = await this.cards();
@@ -34,9 +59,8 @@ export class CollaborationService {
   }
   async listGroups() { await this.ready; return { groups: (await this.store.list()).map(publicGroup) }; }
   async getGroup(groupId) {
-    const record = await this.store.get(groupId), cards = await this.cards();
-    const members = record.group.memberIds.map((memberId) => cards.find((card) => card.id === memberId)
-      ?? { id: memberId, name: "已移除的 Agent", ready: false, description: "成员已不可用" });
+    const record = await this.store.get(groupId), cards = await this.cards({ agentIds: record.group.memberIds });
+    const members = memberCards(record, cards);
     return { group: publicGroup(record.group), members, tasks: record.tasks, messages: record.messages,
       materials: (await this.materials.list(groupId)).attachments.filter((value) => record.group.materialIds.includes(value.id)), artifacts: record.artifacts.map(publicArtifact), lastSequence: record.group.lastSequence };
   }
@@ -79,16 +103,33 @@ export class CollaborationService {
     if (task.jobs.some((job) => ["queued", "running"].includes(job.status) && job.agentId === agentId && job.childId === childId && job.kind === kind && job.messageId === messageId)) return;
     task.jobs.push({ id: randomUUID(), agentId, childId, kind, messageId, status: "queued", createdAt: now() });
   }
-  makeChild(task, { title, description = title, assigneeId = null, required = true, dependsOn = [] }) {
+  makeChild(task, { title, description = title, assigneeId = null, required = true, dependsOn = [], capabilityId, capabilityVersion, inputs, expectedOutput, acceptance }) {
     const child = { id: randomUUID(), title: text(title, "子任务", 500), description: text(description, "子任务说明", 4000), assigneeId,
-      required, dependsOn, pendingQuestions: [], status: "queued", result: "", artifactIds: [], createdAt: now(), updatedAt: now() };
+      required, dependsOn, pendingQuestions: [], status: "queued", result: "", artifactIds: [], createdAt: now(), updatedAt: now(),
+      ...(capabilityId ? { capabilityId, capabilityVersion } : {}),
+      ...(inputs !== undefined ? { inputs } : {}), ...(expectedOutput !== undefined ? { expectedOutput } : {}), ...(acceptance !== undefined ? { acceptance } : {}) };
     task.children.push(child); return child;
   }
-  async postMessage(groupId, input = {}, { source = "user" } = {}) {
+  async postMessage(groupId, input = {}, { source = "user", taskAllowNetwork } = {}) {
     if (this.closed) throw new InputError("协作服务正在关闭");
-    const content = text(input.content, "消息"), mutationId = id(input.mutationId, "操作"), hash = fingerprint({ ...input, source });
+    if (!["user", "main"].includes(source)) throw new InputError("群任务只能由用户或群外主 Agent 发起及补充");
+    if (taskAllowNetwork !== undefined && (source !== "main" || typeof taskAllowNetwork !== "boolean")) throw new InputError("可信任务联网策略仅由群外主 Agent 转交，并须为布尔值");
+    const content = text(input.content, "消息"), mutationId = id(input.mutationId, "操作"), hash = taskAllowNetwork === undefined
+      ? fingerprint({ ...input, source }) : `policy-v1:${fingerprint({ input, source, taskAllowNetwork })}`;
     const cards = await this.cards();
     const attachments = await this.materials.resolve(groupId, input.attachmentIds ?? []);
+    if (input.taskId && !input.newTask) {
+      const record = await this.store.get(groupId), task = rootTask(record, input.taskId);
+      if (!this.replay(record, mutationId, hash) && !TERMINAL_TASKS.has(task.status) && task.participants.some((member) => !matchesParticipant(member, cards.find((card) => card.id === member.id)))) {
+        await this.store.change(groupId, (record) => {
+          const current = rootTask(record, input.taskId);
+          if (!TERMINAL_TASKS.has(current.status)) this.interrupt(record, current, "成员能力、执行条件或定义已变化，请检查已有成果后创建新任务重新分配");
+        });
+        this.abort(groupId, input.taskId);
+        throw new InputError("成员能力、执行条件或定义已变化，请创建新任务重新分配");
+      }
+    }
+    let restrictedTaskId = null;
     const result = await this.store.change(groupId, (record) => {
       const replay = this.replay(record, mutationId, hash);
       if (replay) return { message: record.messages.find((value) => value.id === replay.messageId), task: rootTask(record, replay.taskId) };
@@ -100,21 +141,27 @@ export class CollaborationService {
       if (input.taskId && !input.newTask) {
         task = rootTask(record, input.taskId);
         if (TERMINAL_TASKS.has(task.status)) throw new InputError("任务已经结束，请以新任务继续");
-        if (task.participants.some((member) => !cards.some((card) => card.id === member.id && card.ready && card.revision === member.revision))) throw new InputError("成员定义已变化，请创建新任务重新分配");
+        if (task.participants.some((member) => !matchesParticipant(member, cards.find((card) => card.id === member.id)))) throw new InputError("成员能力或定义已变化，请创建新任务重新分配");
       } else {
         const timestamp = now();
         task = { id: randomUUID(), groupId, goal: content, status: "queued", phase: "negotiation", ownerId: null,
-          participants: cards.filter((card) => record.group.memberIds.includes(card.id) && card.ready).map((card) => ({ id: card.id, revision: card.revision, name: card.name })),
+          participants: cards.filter((card) => record.group.memberIds.includes(card.id) && card.ready).map((card) => ({ id: card.id, revision: card.revision, name: card.name,
+            ...(card.capabilityVersion ? { capabilityVersion: card.capabilityVersion } : {}) })),
           requestedRecipientId: input.recipientId ?? null, attachmentIds: attachments.map((value) => value.id),
           children: [], jobs: [], intents: [], requests: [], negotiationRound: 0, turnsUsed: 0, generation: 1,
-          result: "", reason: "", createdAt: timestamp, updatedAt: timestamp };
+          result: "", reason: "", createdAt: timestamp, updatedAt: timestamp, ...(taskAllowNetwork !== undefined ? { taskAllowNetwork } : {}) };
         record.tasks.push(task); event(record, "task", { taskId: task.id, status: task.status });
       }
+      const previouslyAllowedNetwork = input.taskId && !input.newTask && groupTaskAllowsNetwork(record, task);
       const posted = message(record, { type: source === "main" ? "main" : "user", id: source === "main" ? "main" : "user", name: source === "main" ? "主 Agent 转交" : "你" }, content,
         { taskId: task.id, recipientId: input.recipientId ?? null });
       if (input.taskId && !input.newTask) {
+        if (taskAllowNetwork !== undefined) task.taskAllowNetwork = task.taskAllowNetwork !== false && taskAllowNetwork;
         task.attachmentIds = [...new Set([...task.attachmentIds, ...attachments.map((value) => value.id)])];
-        if (task.status === "needs_input" && !task.ownerId) {
+        if (previouslyAllowedNetwork && !groupTaskAllowsNetwork(record, task)) {
+          this.interrupt(record, task, "联网限制已更新，旧任务已停止，已有成果和新消息已保留；请创建新任务按最新限制继续");
+          restrictedTaskId = task.id;
+        } else if (task.status === "needs_input" && !task.ownerId) {
           if (!input.recipientId) throw new InputError("请点名一位群成员承担整合，或创建新任务重新协商");
           const member = task.participants.find((value) => value.id === input.recipientId);
           if (!member) throw new InputError("点名成员尚未就绪，请创建新任务");
@@ -128,6 +175,7 @@ export class CollaborationService {
       record.mutations.push({ id: mutationId, hash, result: { messageId: posted.id, taskId: task.id } });
       return { message: posted, task };
     });
+    if (restrictedTaskId) this.abort(groupId, restrictedTaskId);
     this.start(groupId); return result;
   }
   async events(groupId, after = 0) {

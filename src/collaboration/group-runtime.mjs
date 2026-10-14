@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { event, message, now, fingerprint } from "./group-store.mjs";
-import { GROUP_SYSTEM, intentTool, groupTools } from "./group-tools.mjs";
+import { GROUP_SYSTEM, intentTool, groupTools, memberCapabilityTool, groupTaskAllowsNetwork } from "./group-tools.mjs";
 import { createContextReadTool } from "../development/development-context.mjs";
 
 const system = { type: "system", id: "platform", name: "NEUMA" };
@@ -19,13 +19,15 @@ function boundedContext(payload, maxChars = 14_000) {
   if (JSON.stringify(payload).length <= maxChars) return payload;
   const contextSections = Object.keys(payload).map((section) => ({ section, totalChars: JSON.stringify(payload[section])?.length ?? 0 }));
   const base = { contextTruncated: true, contextSections,
-    contextNotice: "这里只提供不完整摘要。调用 read_group_turn_context 按 section 分页读取完整目标、问题、成员、分工或消息；摘要不能代替完整输入。" };
-  for (const length of [1200, 600, 300, 120]) {
+    contextNotice: "这里只提供不完整摘要。成员索引始终保留全员完整 ID 和就绪状态，名称可能带截断标记，并省略职责、输入输出、能力和边界；选择协助对象前调用 read_group_member_capabilities 完整读卡以恢复名称和边界。子任务交接若有截断，须调用 read_group_turn_context(section:'child') 读取完整输入、输出和完成条件。其余完整目标、问题、成员、分工或消息按 section 分页读取；摘要不能代替完整输入。" };
+  for (const length of [1200, 600, 300, 120, 40, 0]) {
     const result = { ...base, kind: payload.kind, memberId: payload.memberId, integratorId: payload.integratorId, workDirectory: payload.workDirectory, selectedMaterialIds: payload.selectedMaterialIds,
       goal: excerpt(payload.goal, length * 2), instruction: payload.instruction,
       child: payload.child ? { id: payload.child.id, title: excerpt(payload.child.title, length), description: excerpt(payload.child.description, length),
-        status: payload.child.status, assigneeId: payload.child.assigneeId, dependsOn: payload.child.dependsOn, pendingQuestions: payload.child.pendingQuestions } : null,
-      members: (payload.members ?? []).slice(0, 20).map(({ id, name, description, ready }) => ({ id, name, description: excerpt(description, length), ready })),
+        status: payload.child.status, assigneeId: payload.child.assigneeId, dependsOn: payload.child.dependsOn, pendingQuestions: payload.child.pendingQuestions,
+        capabilityId: payload.child.capabilityId, capabilityVersion: payload.child.capabilityVersion, inputs: excerpt(payload.child.inputs, length),
+        expectedOutput: excerpt(payload.child.expectedOutput, length), acceptance: excerpt(payload.child.acceptance, length) } : null,
+      members: (payload.members ?? []).map(({ id, name, ready }) => ({ id, name: length < 120 ? excerpt(name, length) : name, ready })),
       tasks: (payload.tasks ?? []).slice(-15).map(({ id, title, assigneeId, status }) => ({ id, title: excerpt(title, length), assigneeId, status })),
       previousIntents: (payload.previousIntents ?? []).slice(-15).map(({ agentId, participate, integratorId, contribution }) => ({ agentId, participate, integratorId, contribution: excerpt(contribution, length) })),
       recentMessages: (payload.recentMessages ?? []).slice(-6).map(({ id, sender, content, taskId, recipientId }) => ({ id, sender, content: excerpt(content, length), taskId, recipientId })),
@@ -47,8 +49,7 @@ function selectIntegrator(intents) {
 }
 
 async function validateMembers(service, task) {
-  const cards = await service.cards();
-  if (task.participants.some((member) => !cards.some((card) => card.id === member.id && card.ready && card.revision === member.revision))) throw new InputError("参与成员已更新或不可用，请检查成果后重新分配");
+  const cards = await service.validateTaskCapabilities(task.groupId, task.id, task.generation);
   return cards.filter((card) => task.participants.some((member) => member.id === card.id));
 }
 
@@ -73,7 +74,7 @@ async function negotiate(service, groupId, taskId, worker) {
     }); return;
   }
   while (task.negotiationRound < service.limits.negotiationRounds && !task.ownerId) {
-    const cards = await validateMembers(service, task), round = task.negotiationRound + 1;
+    await validateMembers(service, task); const round = task.negotiationRound + 1;
     await service.store.change(groupId, (record) => {
       const task = service.guard(record, taskId, null, generation); task.negotiationRound = round; task.status = "negotiating";
       event(record, "task", { taskId, phase: "negotiation", round });
@@ -81,12 +82,13 @@ async function negotiate(service, groupId, taskId, worker) {
     for (let offset = 0; offset < task.participants.length; offset += service.limits.concurrentMembers) {
       const results = await Promise.allSettled(task.participants.slice(offset, offset + service.limits.concurrentMembers).map(async (member) => {
         signal.throwIfAborted(); let intent;
-        const payload = { goal: task.goal, members: cards, previousIntents: task.intents, memberId: member.id,
+        const payload = { goal: task.goal, members: await service.groupMemberCards(groupId), previousIntents: task.intents, memberId: member.id,
           instruction: "自愿提出互补贡献，避免重复劳动。愿意整合可支持自己；否则支持合适成员。第二轮应结合所有意向形成一致选择。" };
-        await service.agents.executeCollaboration({ agentId: member.id, revision: member.revision, sessionId: randomUUID(), allowBusinessTools: false, maxTurns: 3,
-          scope: { groupId, taskId }, systemContext: `${GROUP_SYSTEM}\n这是第 ${round} 轮认领协商，仅可分页读取本轮资料并使用 submit_group_intent 提交意向，不能执行业务。`,
+        const currentRecord = await service.store.get(groupId), taskAllowNetwork = groupTaskAllowsNetwork(currentRecord, currentRecord.tasks.find((value) => value.id === taskId));
+        await service.agents.executeCollaboration({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion, taskAllowNetwork, sessionId: randomUUID(), allowBusinessTools: false, maxTurns: 3,
+          scope: { groupId, taskId }, systemContext: `${GROUP_SYSTEM}\n这是第 ${round} 轮认领协商，仅可读取成员能力卡、分页读取本轮资料并使用 submit_group_intent 提交意向，不能执行业务。成员卡的 callable 不表示认领轮拥有业务权限。`,
           message: JSON.stringify(boundedContext(payload)),
-          customTools: [intentTool((value) => { intent = value; }), contextTool(payload)] }, () => {}, { signal });
+          customTools: [intentTool((value) => { intent = value; }), contextTool(payload), memberCapabilityTool(service, { groupId, taskId, agentId: member.id, generation, signal })] }, () => {}, { signal });
         if (!intent) throw new InputError("成员没有提交认领意向");
         if (intent.integratorId && !task.participants.some((value) => value.id === intent.integratorId)) throw new InputError("整合者必须是本群就绪成员");
         await service.store.change(groupId, (record) => {
@@ -190,7 +192,7 @@ async function executeJob(service, groupId, taskId, generation, job, signal) {
   let reserved = 0, turns = 0, submitted;
   try {
     let task = (await service.store.get(groupId)).tasks.find((value) => value.id === taskId);
-    const cards = await validateMembers(service, task);
+    await validateMembers(service, task);
     const canRun = await service.store.change(groupId, (record) => {
       const task = service.guard(record, taskId, job.agentId, generation), stored = task.jobs.find((value) => value.id === job.id);
       if (stored.status !== "queued") return false;
@@ -208,16 +210,16 @@ async function executeJob(service, groupId, taskId, generation, job, signal) {
     const member = task.participants.find((value) => value.id === job.agentId), shared = await service.sharedMaterials(groupId);
     const prompt = { goal: task.goal, kind: job.kind, memberId: job.agentId, integratorId: task.ownerId,
       workDirectory: ".",
-      child: task.children.find((value) => value.id === job.childId) ?? null, members: cards,
+      child: task.children.find((value) => value.id === job.childId) ?? null, members: await service.groupMemberCards(groupId),
       tasks: task.children, selectedMaterialIds: task.attachmentIds,
       sharedMaterials: shared.attachments.map((value) => ({ ...value, selectedForTask: task.attachmentIds.includes(value.id) })),
       recentMessages: record.messages.filter((value) => value.taskId === taskId).slice(-30),
       triggeringMessage: record.messages.find((value) => value.id === job.messageId) ?? null,
       instruction: job.kind === "integration" ? "检查各项真实结果，必要时继续求助，完成时提交最终综合成果。必需子任务未完成时只能明确部分交付或说明缺口。"
         : job.kind === "question" ? "回答触发消息中的信息问题。这是一个独立短轮次，不需要等待自己的原任务完成。提交后平台自动回复提问者。"
-          : job.kind === "claim" ? "仅判断是否愿意认领这个子任务。愿意时先调用 claim_group_task，然后提交本轮结果，平台随后安排执行。"
-            : job.kind === "message" || job.kind === "update" ? "处理新信息，按需安排协作。无需重复已完成的工作。" : "执行自己认领的工作；需要他人帮助时请求并结束本轮等待。" };
-    const output = await service.agents.executeCollaboration({ agentId: job.agentId, revision: member.revision,
+          : job.kind === "claim" ? "仅判断是否愿意认领这个子任务。涉及 capabilityId 时先完整读取自己的当前能力卡核对输入、输出和完成条件。愿意时先调用 claim_group_task，再提交本轮结果，平台随后安排执行；缺输入提交 needs_input，不适合提交 declined。"
+            : job.kind === "message" || job.kind === "update" ? "处理新信息，按需安排协作。无需重复已完成的工作。" : "执行自己认领的工作。交接摘要有截断时先用 read_group_turn_context(section:'child') 获取完整输入、输出和完成条件；需要他人帮助时请求并结束本轮等待。" };
+    const output = await service.agents.executeCollaboration({ agentId: job.agentId, revision: member.revision, capabilityVersion: member.capabilityVersion, taskAllowNetwork: groupTaskAllowsNetwork(record, task),
       sessionId: randomUUID(), scope: { groupId, taskId }, maxTurns: reserved, systemContext: GROUP_SYSTEM, allowBusinessTools: job.kind !== "claim",
       message: JSON.stringify(boundedContext(prompt)), customTools: [...groupTools(service, { groupId, taskId, agentId: job.agentId, generation, job, signal, capture: (value) => { submitted = value; } }), contextTool(prompt)] }, () => {}, { signal });
     turns = Math.max(1, output.turns ?? 1);
@@ -225,6 +227,11 @@ async function executeJob(service, groupId, taskId, generation, job, signal) {
     signal.throwIfAborted(); await finishJob(service, groupId, taskId, generation, job, submitted);
   } catch (error) {
     if (signal.aborted) return;
+    try { await service.validateTaskCapabilities(groupId, taskId, generation); }
+    catch {
+      const current = (await service.store.get(groupId)).tasks.find((value) => value.id === taskId);
+      if (!current || !live(current) || current.generation !== generation) return;
+    }
     turns ||= reserved;
     await service.store.change(groupId, (record) => {
       const task = record.tasks.find((value) => value.id === taskId);
