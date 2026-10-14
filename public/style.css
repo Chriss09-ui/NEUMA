@@ -874,6 +874,10 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .project-library .item-desc { font-size: 11px; }
 .project-list-entry { position: relative; }
 .project-list-entry .item { padding-right: 66px; }
+.project-list-addition .item-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.project-list-addition .item-top em { color: var(--accent); }
+.project-list-addition[data-addition-status="failed"] .item-top em { color: var(--danger); }
+.project-list-addition[data-addition-status="cancelled"] .item-top em { color: var(--muted); }
 .project-list-inspect {
   position: absolute; bottom: 10px; right: 4px; min-height: 28px; padding: 4px 6px;
   border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--accent); font-size: 11px;
@@ -908,6 +912,9 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .context-project:hover { text-decoration: underline; }
 .project-context .ghost-button { padding: 2px 8px; font-size: 18px; }
 .project-feedback { flex-shrink: 0; margin-bottom: 12px; padding: 10px 12px; border-left: 2px solid var(--brand); background: var(--brand-soft); color: var(--text-2); font-size: 12px; line-height: 1.6; }
+.project-operation-status { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-2); font-size: 12px; line-height: 1.6; }
+.project-operation-status > span { flex: 1; }
+.project-operation-status > button { flex-shrink: 0; min-height: 32px; padding: 6px 10px; font-size: 12px; }
 .reply-project-link { align-self: flex-start; margin-top: 12px; }
 .project-add-dialog { width: min(640px, calc(100vw - 80px)); max-height: calc(100dvh - 80px); padding: 0; border: 1px solid var(--border); border-radius: 16px; color: var(--text); background: var(--surface); box-shadow: 0 24px 80px #00000026; }
 .project-add-dialog::backdrop { background: #00000038; backdrop-filter: blur(3px); }

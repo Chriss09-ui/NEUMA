@@ -18,12 +18,13 @@ export function statusDot(status) {
   return node("i", `dot ${STATUS_TONE[status] ?? ""}`);
 }
 
-export function renderProjectList({ container, projects, selectedId, busy, onSelect, onInspect, onRemove, removeDisabled = false, emptyText, onClearSearch }) {
+export function renderProjectList({ container, projects, addition, onViewAddition, onCancelAddition, onDismissAddition, selectedId, busy, onSelect, onInspect, onRemove, removeDisabled = false, emptyText, onClearSearch }) {
   const focusedId = container.contains(document.activeElement) ? document.activeElement.dataset.projectId : null;
   const focusedRemoveId = container.contains(document.activeElement) ? document.activeElement.dataset.projectRemoveId : null;
   const focusedInspectId = container.contains(document.activeElement) ? document.activeElement.dataset.projectInspectId : null;
+  const focusedAdditionId = container.contains(document.activeElement) ? document.activeElement.dataset.projectAdditionId : null;
   container.replaceChildren();
-  if (!projects.length) {
+  if (!projects.length && !addition) {
     const empty = node("div", "library-empty");
     empty.append(node("strong", "", emptyText), node("p", "", onClearSearch ? "换个关键词，或清除搜索。" : "添加一个本地项目，\n以后就能在这里找到它。"));
     if (onClearSearch) {
@@ -35,17 +36,41 @@ export function renderProjectList({ container, projects, selectedId, busy, onSel
     container.append(empty);
     return;
   }
-  for (const project of projects) {
+  for (const project of addition ? [addition, ...projects] : projects) {
+    const isAddition = project === addition;
+    const adding = isAddition && project.status === "adding";
+    const label = isAddition ? adding ? project.cancelRequested ? "取消中…" : "添加中…"
+      : project.status === "failed" ? "添加失败" : "已取消" : STATUS_LABELS[project.status];
     const button = node("button", "item");
-    button.type = "button"; button.disabled = busy;
+    button.type = "button"; button.disabled = isAddition ? false : busy;
     button.dataset.projectId = project.id;
     button.setAttribute("aria-pressed", String(project.id === selectedId));
-    button.setAttribute("aria-label", `查看 ${project.name}`);
+    button.setAttribute("aria-label", `${isAddition ? "查看添加进度" : "查看"} ${project.name}`);
+    if (isAddition) button.setAttribute("aria-busy", String(adding));
     const top = node("span", "item-top");
-    top.append(statusDot(project.status), node("strong", "", project.name), node("em", "", STATUS_LABELS[project.status]));
-    button.append(top, node("span", "item-desc", project.description || KIND_LABELS[project.kind]));
-    button.addEventListener("click", () => onSelect(project.id));
+    top.append(statusDot(adding ? "starting" : project.status), node("strong", "", project.name), node("em", "", label));
+    button.append(top, node("span", "item-desc", isAddition ? project.progress || project.description : project.description || KIND_LABELS[project.kind]));
+    button.addEventListener("click", () => isAddition ? onViewAddition?.() : onSelect(project.id));
     const row = node("div", "project-list-entry"); row.append(button);
+    if (isAddition) {
+      row.className += " project-list-addition";
+      row.dataset.additionStatus = project.status;
+      const action = node("button", "project-list-inspect", adding ? "取消添加" : "重试添加");
+      action.type = "button"; action.disabled = adding && Boolean(project.cancelRequested);
+      action.dataset.projectAdditionId = project.id;
+      action.setAttribute("aria-label", `${adding ? "取消添加" : "重试添加"} ${project.name}`);
+      action.addEventListener("click", () => adding ? onCancelAddition?.() : onViewAddition?.());
+      row.append(action);
+      if (!adding && onDismissAddition) {
+        const dismiss = node("button", "project-list-delete", "移除"); dismiss.type = "button";
+        dismiss.setAttribute("aria-label", `移除添加记录 ${project.name}`);
+        dismiss.addEventListener("click", () => onDismissAddition()); row.append(dismiss);
+      }
+      container.append(row);
+      if (project.id === focusedId) button.focus({ preventScroll: true });
+      if (project.id === focusedAdditionId && !action.disabled) action.focus({ preventScroll: true });
+      continue;
+    }
     if (onInspect) {
       const checking = project.setup?.status === "checking";
       const inspect = node("button", "project-list-inspect", checking ? "识别中…" : "重新识别");
