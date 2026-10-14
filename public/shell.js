@@ -1,3 +1,5 @@
+import { createSidebarAvatarMotion } from "./sidebar-motion.js";
+
 const PAGES = ["chat", "groups", "group", "projects", "agents", "agent", "skills", "settings"];
 const route = { page: "chat", projectView: "assistant", agentId: null, groupId: null };
 const byId = (id) => document.getElementById(id);
@@ -35,6 +37,7 @@ document.addEventListener("neuma:project-library-open", () => setProjectLibraryC
 setProjectLibraryCollapsed(projectLibraryCollapsed, false);
 
 const SIDEBAR_KEY = "neuma-sidebar-collapsed";
+const sidebarAvatarMotion = createSidebarAvatarMotion({ document, window, reducedMotion });
 let sidebarCollapsed = false;
 try { sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "true"; } catch { /* Use the expanded layout when storage is unavailable. */ }
 
@@ -43,6 +46,7 @@ function setSidebarCollapsed(collapsed, remember = true) {
   const mainHistory = byId("main-history");
   if ((collapsed && (details.contains(document.activeElement) || (mainHistory?.contains(document.activeElement)
     && document.activeElement !== byId("sidebar-main-link")))) || (!collapsed && rails.some((rail) => rail.contains(document.activeElement)))) toggle.focus({ preventScroll: true });
+  if (remember && collapsed !== sidebarCollapsed) sidebarAvatarMotion.prepare(collapsed);
   sidebarCollapsed = collapsed;
   byId("app-shell").classList.toggle("sidebar-collapsed", collapsed);
   details.inert = collapsed;

@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { createSidebarAvatarMotion } from "../public/sidebar-motion.js";
 
-const source = await readFile(new URL("../public/shell.js", import.meta.url), "utf8");
+const source = (await readFile(new URL("../public/shell.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
 function setup({ compact = false, reduced = false, transitions = false, hash = "", configured = true, collapsed = false, sidebarCollapsed = false, storageBlocked = false, resizeObserver = false } = {}) {
   class Events {
@@ -16,7 +17,7 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
       for (const handler of this.listeners.get(event.type) ?? []) handler(event);
     }
   }
-  const document = new Events(), window = new Events();
+  const document = new Events(), window = new Events(), motionCalls = [];
   const nodes = new Map();
   class Element extends Events {
     constructor(id) {
@@ -91,13 +92,30 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     notify(width) { this.callback([{ target: this.target, contentRect: { width } }]); }
   }
   vm.runInNewContext(source, { document, window, location, history, localStorage, Event, CustomEvent: Event,
+    createSidebarAvatarMotion: (options) => {
+      const motion = createSidebarAvatarMotion(options);
+      return { ...motion, prepare(collapsed) {
+        motionCalls.push({ collapsed, beforeCollapsed: get("app-shell").classes.has("sidebar-collapsed") });
+        motion.prepare(collapsed);
+      } };
+    },
     MutationObserver: class { observe() {} },
     ...(resizeObserver ? { ResizeObserver: WidthObserver } : {}),
     fetch: async () => ({ ok: true, json: async () => ({ llmConfigured: configured, jevConfigured: true }) }),
   });
   const navigate = (detail) => document.dispatchEvent(new Event("neuma:navigate", { detail }));
-  return { get, document, window, location, media, pending, navigate, stored, resizeObservers };
+  return { get, document, window, location, media, pending, navigate, stored, resizeObservers, motionCalls };
 }
+
+test("恢复收起状态不播放头像动画，手动开合在布局切换前记录原位置", () => {
+  const { get, motionCalls } = setup({ sidebarCollapsed: true });
+  assert.equal(motionCalls.length, 0);
+  get("sidebar-toggle").click(); get("sidebar-toggle").click();
+  assert.deepEqual(motionCalls, [
+    { collapsed: false, beforeCollapsed: true },
+    { collapsed: true, beforeCollapsed: false },
+  ]);
+});
 
 test("Skills 支持直接访问、导航焦点和折叠侧栏后的页面切换", () => {
   const { get, navigate, location, window, document } = setup({ hash: "#skills", sidebarCollapsed: true });

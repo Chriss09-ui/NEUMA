@@ -332,14 +332,18 @@ a { color: inherit; }
 .nav-item svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar .nav-item > span { white-space: nowrap; }
 .sidebar-collapsed .nav-item { padding-left: 14px; padding-right: 14px; }
-.sidebar-agent-rail { display: flex; flex-direction: column; gap: 8px; width: 44px; min-height: 0; max-height: 0; margin-left: 1px; margin-top: 0; opacity: 0; visibility: hidden; overflow: hidden; transition: max-height 320ms cubic-bezier(.22, 1, .36, 1), margin-top 320ms cubic-bezier(.22, 1, .36, 1), opacity 120ms ease, visibility 0s linear 120ms; }
-.sidebar-collapsed .sidebar-agent-rail:not(:empty) { max-height: 252px; margin-top: 10px; opacity: 1; visibility: visible; overflow: visible; transition-delay: 0s, 0s, 70ms, 0s; }
+.sidebar-agent-rail { display: flex; flex-direction: column; gap: 8px; width: 44px; min-height: 0; max-height: 0; margin-left: 1px; margin-top: 0; opacity: 0; visibility: hidden; overflow: hidden; transition: opacity 180ms ease, visibility 0s linear 180ms; }
+.sidebar-collapsed .sidebar-agent-rail:not(:empty) { max-height: 252px; margin-top: 10px; opacity: 1; visibility: visible; overflow: visible; transition-delay: 0s; }
 .sidebar-collapsed .sidebar-group-rail:not(:empty) { max-height: 96px; margin-top: 12px; }
 .collapsed-agent-link { display: grid; place-items: center; flex-shrink: 0; width: 44px; height: 44px; border-radius: 10px; text-decoration: none; transition: background .15s; }
 .collapsed-agent-link:hover, .collapsed-agent-link[aria-current="page"] { background: var(--surface-2); }
 .collapsed-agent-link:focus-visible { outline-offset: -2px; }
 .collapsed-agent-link > .collapsed-agent-avatar.agent-avatar { width: 28px; height: 28px; }
 .collapsed-group-link > .collapsed-group-avatar { width: 28px; height: 28px; border-radius: 8px; }
+.sidebar-motion-measure, .sidebar-motion-measure * { visibility: hidden !important; transition: none !important; animation: none !important; pointer-events: none !important; }
+.sidebar-avatar-in-flight { visibility: hidden !important; }
+.sidebar-avatar-flight { position: fixed; z-index: 10; margin: 0; pointer-events: none !important; transform-origin: top left; }
+.sidebar-avatar-flight, .sidebar-avatar-flight * { animation: none !important; transition: none !important; }
 .nav-item:hover { background: var(--surface-2); color: var(--text); }
 .nav-item[aria-current="page"] { background: var(--surface-2); color: var(--text); font-weight: 600; }
 .nav-item[aria-current="page"] svg { color: var(--accent); }
