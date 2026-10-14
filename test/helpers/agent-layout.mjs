@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-function inspectAgentLayout({ markup, stylesheet }, initResize) {
+function inspectAgentLayout({ markup, stylesheet }, initResize, initHistory) {
   const style = document.createElement("style");
   style.textContent = stylesheet + "\n#test-result { display: none; }\n*, *::before, *::after { animation: none !important; transition: none !important; }";
   document.head.append(style);
@@ -19,26 +19,36 @@ function inspectAgentLayout({ markup, stylesheet }, initResize) {
   const capsule = byId("agent-panel-toggle"), title = byId("agent-title");
   const header = document.querySelector(".agent-chat-header"), conversation = byId("agent-conversation");
   const composer = byId("agent-chat-form"), textarea = byId("agent-message");
-  const history = byId("agent-history-list"), making = byId("agent-making-panel");
+  const navigationList = byId("sidebar-agent-list"), making = byId("agent-making-panel");
   const make = (tag, className, text = "") => {
     const node = document.createElement(tag); node.className = className; node.textContent = text; return node;
   };
   const storage = new Map();
+  const historyView = initHistory({ document, id: "layout-agent-history", title: "材料阅读测试", href: "#agent/layout",
+    icon: make("span", "sidebar-agent-avatar", "✦"),
+    storage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } });
+  navigationList.replaceChildren(historyView.root); historyView.setExpanded(true);
+  const history = historyView.list;
   const controls = initResize({ windowRef: { performance: window.performance, ResizeObserver, MutationObserver,
     addEventListener: window.addEventListener.bind(window), removeEventListener: window.removeEventListener.bind(window),
     getComputedStyle: window.getComputedStyle.bind(window),
     localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } } });
-  const refresh = () => { controls.sidebar.refresh(); controls.agentHistory.refresh(); };
-  const setCollapsed = (closed) => { workspace.classList.toggle("history-collapsed", closed); refresh(); };
+  const refresh = () => controls.sidebar.refresh();
+  const setCollapsed = (closed) => { byId("app-shell").classList.toggle("sidebar-collapsed", closed); refresh(); };
   const setSettings = (open) => {
     shell.classList.toggle("settings-open", open); panel.hidden = !open;
     capsule.setAttribute("aria-expanded", String(open)); refresh();
   };
-  const resizeHistory = (key) => byId("agent-history-resize").dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
-  for (let index = 0; index < 40; index++) {
-    const row = make("div", "agent-history-row"), button = make("button", "agent-history-select");
-    button.append(make("span", "agent-history-title", `历史对话 ${index + 1}`)); row.append(button); history.append(row);
-  }
+  const resizeNavigation = (key) => byId("sidebar-resize").dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  historyView.update({ records: Array.from({ length: 40 }, (_, index) => ({ id: `conversation-${index}`, title: `历史对话 ${index + 1}` })),
+    renderRow(record) {
+      const button = make("button", "sidebar-history-item", record.title); button.type = "button";
+      button.dataset.conversationId = record.id; return button;
+    } });
+  const historyDefaultCount = history.children.length;
+  historyView.more.click(); const historyExpandedCount = history.children.length;
+  historyView.setExpanded(false); const historyCollapsedInert = historyView.body.inert;
+  historyView.setExpanded(true);
   const fillMessages = (long) => {
     messages.replaceChildren();
     const date = make("time", "conversation-date", "2026/10/13 11:57");
@@ -93,8 +103,9 @@ function inspectAgentLayout({ markup, stylesheet }, initResize) {
       uploadVisible: visible(byId("agent-attachment-add")), pickerVisible: visible(byId("agent-attachment-pick")) },
     title: { ...rect(title), clientWidth: title.clientWidth, scrollWidth: title.scrollWidth,
       textOverflow: getComputedStyle(title).textOverflow, whiteSpace: getComputedStyle(title).whiteSpace },
-    history: rect(byId("agent-history-sidebar")),
-    historyToggleVisible: visible(byId("agent-history-toggle")), newChatVisible: visible(byId("agent-new-chat")),
+    navigation: rect(document.querySelector(".sidebar")), historyInNavigation: history.closest(".sidebar") !== null,
+    conversationColumns: getComputedStyle(workspace).gridTemplateColumns.split(" ").length,
+    navigationToggleVisible: visible(byId("sidebar-toggle")), newChatVisible: visible(byId("agent-new-chat")),
     settings: { ...rect(panel), hidden: panel.hidden,
       content: { ...rect(profile), clientHeight: profile.clientHeight, scrollHeight: profile.scrollHeight, scrollTop: profile.scrollTop } },
     messages: { ...rect(messages), clientHeight: messages.clientHeight, scrollHeight: messages.scrollHeight, scrollTop: messages.scrollTop },
@@ -107,11 +118,11 @@ function inspectAgentLayout({ markup, stylesheet }, initResize) {
   const scrolled = snapshot();
   fillMessages(false);
   const short = snapshot();
-  resizeHistory("Home"); const historyNarrow = snapshot();
-  resizeHistory("End"); const historyWide = snapshot();
+  resizeNavigation("Home"); const navigationNarrow = snapshot();
+  resizeNavigation("End"); const navigationWide = snapshot();
   setCollapsed(true); fillMessages(true);
   const collapsed = snapshot();
-  const resizeHandle = byId("agent-history-resize"), grip = resizeHandle.getBoundingClientRect();
+  const resizeHandle = byId("sidebar-resize"), grip = resizeHandle.getBoundingClientRect();
   resizeHandle.dispatchEvent(new PointerEvent("pointerdown", { button: 0, isPrimary: true, pointerId: 7,
     clientX: grip.left + grip.width / 2, clientY: grip.top + 100, bubbles: true }));
   window.dispatchEvent(new PointerEvent("pointermove", { isPrimary: true, pointerId: 7,
@@ -138,7 +149,7 @@ function inspectAgentLayout({ markup, stylesheet }, initResize) {
 
   workspace.classList.add("is-making"); making.hidden = false;
   byId("agent-conversation-actions").hidden = true;
-  byId("agent-history-sidebar").hidden = true; byId("agent-conversation").hidden = true;
+  byId("agent-conversation").hidden = true;
   refresh();
   for (let index = 0; index < 80; index++) {
     const paragraph = make("p", "muted-note", `研发阶段说明 ${index + 1}`);
@@ -149,26 +160,29 @@ function inspectAgentLayout({ markup, stylesheet }, initResize) {
     documentHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
     page: rect(byId("page-agent")), header: rect(document.querySelector(".agent-chat-header")),
     workspace: { ...rect(workspace), clientHeight: workspace.clientHeight, scrollHeight: workspace.scrollHeight, scrollTop: workspace.scrollTop } };
-  making.hidden = true; byId("agent-history-sidebar").hidden = false; byId("agent-conversation").hidden = false;
+  making.hidden = true; byId("agent-conversation").hidden = false;
   byId("agent-conversation-actions").hidden = false;
   workspace.classList.remove("is-making"); workspace.scrollTop = 0;
   fillMessages(true); messages.scrollTop = messages.scrollHeight;
   for (const control of Object.values(controls)) control?.dispose();
-  return { long, scrolled, short, historyNarrow, historyWide, collapsed, collapsedPreview, settingsCollapsed,
+  return { historyDefaultCount, historyExpandedCount, historyCollapsedInert, long, scrolled, short, navigationNarrow, navigationWide, collapsed, collapsedPreview, settingsCollapsed,
     settingsOpen, settingsLongContent, settingsScrolled, settingsLongName, settingsClosed, expandedComposer, recovery, preparing };
 }
 
 export async function agentLayoutScript() {
-  const [html, stylesheet, resizeSource] = await Promise.all(["index.html", "style.css", "panel-resize.js"].map((file) =>
+  const [html, stylesheet, resizeSource, historySource] = await Promise.all(["index.html", "style.css", "panel-resize.js", "sidebar-history.js"].map((file) =>
     readFile(new URL(`../../public/${file}`, import.meta.url), "utf8")));
   const markup = html.match(/<body>([\s\S]*)<\/body>/)[1].replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
   const data = JSON.stringify({ markup, stylesheet }).replaceAll("<", "\\u003c");
   const resize = resizeSource.replace(/^export /gm, "")
     .replace(/^if \(typeof document[^\n]*initWorkspaceResize\(\);$/m, "");
-  return `${resize}\nreturn (${inspectAgentLayout.toString()})(${data}, initWorkspaceResize);`;
+  return `${resize}\n${historySource.replace(/^export /gm, "")}\nreturn (${inspectAgentLayout.toString()})(${data}, initWorkspaceResize, createSidebarHistory);`;
 }
 
 export function assertAgentLayout(facts) {
+  assert.equal(facts.historyDefaultCount, 4, "展开 Agent 后默认只显示前四条对话");
+  assert.equal(facts.historyExpandedCount, 40, "展开显示后可查看全部历史");
+  assert.equal(facts.historyCollapsedInert, true, "收起的历史不应保留键盘操作入口");
   const close = (actual, expected, label) => assert.ok(Math.abs(actual - expected) <= 1, `${label}: ${actual} vs ${expected}`);
   const alpha = (color) => {
     if (color === "transparent") return 0;
@@ -183,7 +197,7 @@ export function assertAgentLayout(facts) {
     const colors = layer.backgroundImage.match(/(?:rgba?|color)\([^)]*\)|transparent/g) ?? [];
     return layer.backgroundImage === "none" || (colors.length > 0 && colors.every((color) => alpha(color) < 1));
   };
-  for (const name of ["long", "scrolled", "short", "historyNarrow", "historyWide", "collapsed", "collapsedPreview", "settingsCollapsed",
+  for (const name of ["long", "scrolled", "short", "navigationNarrow", "navigationWide", "collapsed", "collapsedPreview", "settingsCollapsed",
     "settingsOpen", "settingsLongContent", "settingsScrolled", "settingsLongName", "settingsClosed", "expandedComposer", "recovery"]) {
     const sample = facts[name];
     close(sample.page.height, sample.viewport.height, `${name} 页面高度`);
@@ -222,7 +236,9 @@ export function assertAgentLayout(facts) {
     close(sample.capsule.height, 36, `${name} 顶部胶囊高度`);
     close((sample.capsule.left + sample.capsule.right) / 2,
       (sample.conversation.left + sample.conversation.right) / 2, `${name} 胶囊应以当前对话列居中`);
-    assert.ok(sample.historyToggleVisible, `${name} 历史开合按钮应可见`);
+    assert.ok(sample.historyInNavigation, `${name} 历史应归入主导航`);
+    assert.equal(sample.conversationColumns, 1, `${name} 私聊工作区应只有对话列`);
+    assert.ok(sample.navigationToggleVisible, `${name} 主导航开合按钮应可见`);
     assert.ok(sample.newChatVisible, `${name} 新对话加号应可见`);
     close(sample.header.top, facts.long.header.top, `${name} 标题位置`);
     close(sample.composer.bottom, facts.long.composer.bottom, `${name} 输入框底部位置`);
@@ -231,10 +247,10 @@ export function assertAgentLayout(facts) {
   assert.ok(facts.scrolled.messages.scrollTop > 0, "消息区必须能实际滚动");
   assert.ok(facts.scrolled.date.bottom < facts.scrolled.messages.top, "对话日期应随长消息滚出顶部");
   assert.ok(facts.scrolled.overlay.topBandText > 0, "长消息滚动后应能在胶囊两侧显示顶部文字");
-  assert.ok(facts.collapsed.messages.width > facts.long.messages.width, "折叠历史栏后对话应使用更多空间");
-  assert.ok(facts.collapsedPreview.history.width > facts.collapsed.history.width, "折叠后的拉出预览应实时更新列宽");
-  assert.ok(facts.historyWide.history.width > facts.historyNarrow.history.width, "历史栏宽度应能实际调整");
-  assert.ok(facts.historyNarrow.conversation.width > facts.historyWide.conversation.width, "调整历史栏应更新对话列宽度");
+  assert.ok(facts.collapsed.messages.width > facts.long.messages.width, "折叠主导航后对话应使用更多空间");
+  assert.ok(facts.collapsedPreview.navigation.width > facts.collapsed.navigation.width, "折叠后的拉出预览应实时更新列宽");
+  assert.ok(facts.navigationWide.navigation.width > facts.navigationNarrow.navigation.width, "主导航宽度应能实际调整");
+  assert.ok(facts.navigationNarrow.conversation.width > facts.navigationWide.conversation.width, "调整主导航应更新对话列宽度");
   for (const name of ["settingsOpen", "settingsCollapsed", "settingsLongContent", "settingsScrolled", "settingsLongName"]) {
     assert.equal(facts[name].settings.hidden, false, `${name} 设置侧栏应展开`);
     close(facts[name].settings.width, 400, `${name} 设置侧栏宽度`);

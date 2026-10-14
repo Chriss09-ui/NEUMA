@@ -3,6 +3,7 @@ import { createGroupMaterials } from "./group-materials.js";
 import { renderAgentAvatar } from "./agent-avatar.js";
 import { renderGroupAvatar } from "./group-avatar.js";
 import { createSelectMenu } from "./select-menu.js";
+import { createSidebarHistory } from "./sidebar-history.js";
 import { button, node, notice, renderMembers, renderMessages, renderTasks, terminalTask } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = (id) => document.getElementById(id);
@@ -14,10 +15,12 @@ let listSequence = 0;
 let settingsGroupId = null, settingsSequence = 0, settingsTimer = null, removeSettingsListener = null;
 const drafts = new Map();
 const avatarMembers = new Map();
+const sidebarGroups = new Map(), taskHistories = new Map(), taskHistorySequences = new Map();
+const collapsedGroups = new Map();
+const COLLAPSED_GROUP_LIMIT = 2;
+let pendingSidebarTask = null;
 const materials = createGroupMaterials({ api, current: () => data, refresh: load, changed: controls });
 const navigate = (detail) => document.dispatchEvent(new CustomEvent("neuma:navigate", { detail }));
-const taskMenu = createSelectMenu({ select: byId("group-task-filter"), trigger: byId("group-task-trigger"),
-  menu: byId("group-task-menu"), value: byId("group-task-value"), document, window });
 const recipientMenu = createSelectMenu({ select: byId("group-recipient"), trigger: byId("group-recipient-trigger"),
   menu: byId("group-recipient-menu"), value: byId("group-recipient-value"), icon: byId("group-recipient-icon"),
   renderIcon: renderRecipientIcon, document, window });
@@ -60,7 +63,7 @@ function controls() {
   byId("group-panel-toggle").disabled = route.page !== "group" || data?.group?.id !== route.groupId;
   materials.syncControls();
   byId("group-recipient").disabled = Boolean(unavailable || sending);
-  recipientMenu.refresh(); taskMenu.refresh();
+  recipientMenu.refresh();
   const status = byId("group-compose-status");
   status.textContent = data?.group?.archived ? "群已归档，取消归档后可继续协作。"
     : sending ? "正在提交消息…" : "";
@@ -141,8 +144,105 @@ function restoreSettingsFocus(focused) {
   (target && ["BUTTON", "A", "SUMMARY"].includes(target.tagName) && !target.disabled ? target
     : byId(`group-details-${focused.kind}-tab`)).focus({ preventScroll: true });
 }
+function taskHistorySequence(id) {
+  const sequence = (taskHistorySequences.get(id) || 0) + 1;
+  taskHistorySequences.set(id, sequence); return sequence;
+}
+function rememberTaskHistory(result) {
+  const id = result.group.id;
+  taskHistorySequence(id);
+  taskHistories.set(id, { tasks: Array.isArray(result.tasks) ? result.tasks : [],
+    stamp: result.group.updatedAt || result.group.lastSequence || "", loading: false, error: "" });
+}
+async function loadTaskHistory(id) {
+  const cached = taskHistories.get(id);
+  if (cached?.loading || cached?.tasks || (route.page === "group" && route.groupId === id)) return;
+  if (!groups.some((group) => group.id === id && !group.archived)) return;
+  const sequence = taskHistorySequence(id);
+  taskHistories.set(id, { loading: true, error: "" }); renderSidebarGroups();
+  try {
+    const result = await api.group(id);
+    if (taskHistorySequences.get(id) !== sequence || !groups.some((group) => group.id === id && !group.archived)) return;
+    if (result.group?.id !== id || !Array.isArray(result.tasks)) throw new Error("群历史尚未确认，请重试。");
+    rememberTaskHistory(result); rememberAvatars(result.members); renderLibrary();
+  } catch (error) {
+    if (taskHistorySequences.get(id) !== sequence || !sidebarGroups.has(id)) return;
+    taskHistories.set(id, { loading: false, error: `${error.message} 收起后展开可重试。` }); renderSidebarGroups();
+  }
+}
+function openSidebarGroup(id, taskId) {
+  if (route.page === "group" && route.groupId === id && data?.group?.id === id) {
+    pendingSidebarTask = null; if (taskId !== undefined) chooseTask(taskId, { focus: false }); return;
+  }
+  pendingSidebarTask = { groupId: id, taskId };
+  navigate({ page: "group", groupId: id });
+}
+function renderCollapsedGroups(visible) {
+  const rail = byId("sidebar-group-rail"), shown = visible.slice(0, COLLAPSED_GROUP_LIMIT);
+  for (const [id, view] of collapsedGroups) if (!shown.some((group) => group.id === id)) {
+    if (view.link.contains(document.activeElement)) byId("sidebar-toggle").focus({ preventScroll: true });
+    view.link.remove(); collapsedGroups.delete(id);
+  }
+  rail.hidden = !shown.length;
+  for (const group of shown) {
+    let view = collapsedGroups.get(group.id);
+    if (!view) {
+      const link = node("a", "collapsed-agent-link collapsed-group-link"), mark = groupAvatar(group, "collapsed-group-avatar");
+      link.href = `#group/${encodeURIComponent(group.id)}`; link.dataset.groupId = group.id; link.append(mark);
+      link.addEventListener("click", (event) => {
+        if (event.defaultPrevented || (event.button ?? 0) !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); navigate({ page: "group", groupId: group.id });
+      });
+      view = { link, mark }; collapsedGroups.set(group.id, view);
+    }
+    view.link.title = group.name; view.link.setAttribute("aria-label", `打开${group.name}的群聊`);
+    if (route.page === "group" && route.groupId === group.id) view.link.setAttribute("aria-current", "page");
+    else view.link.removeAttribute("aria-current");
+    renderGroupAvatar(view.mark, group, [...avatarMembers.values()]);
+  }
+  if (shown.some((group, index) => rail.children[index] !== collapsedGroups.get(group.id).link)) {
+    const focused = rail.contains(document.activeElement) ? document.activeElement : null;
+    for (const group of shown) rail.append(collapsedGroups.get(group.id).link);
+    focused?.focus({ preventScroll: true });
+  }
+}
+function renderSidebarGroups() {
+  const rail = byId("sidebar-group-list"), visible = groups.filter((group) => !group.archived);
+  const ids = new Set(visible.map((group) => group.id));
+  for (const [id, entry] of sidebarGroups) {
+    if (ids.has(id)) continue;
+    entry.root.remove(); sidebarGroups.delete(id); taskHistories.delete(id); taskHistorySequence(id);
+  }
+  for (const group of visible) {
+    let entry = sidebarGroups.get(group.id);
+    if (!entry) {
+      entry = createSidebarHistory({ document, id: `group-${group.id}`, title: group.name,
+        href: `#group/${encodeURIComponent(group.id)}`, icon: groupAvatar(group, "sidebar-group-avatar"),
+        className: "sidebar-group-link", onExpand: (expanded) => { if (expanded) void loadTaskHistory(group.id); },
+        onOpen: () => openSidebarGroup(group.id, ""), storage: localStorage });
+      entry.root.dataset.groupId = group.id; sidebarGroups.set(group.id, entry);
+    }
+    renderGroupAvatar(entry.icon, group, [...avatarMembers.values()]);
+    const current = route.page === "group" && route.groupId === group.id, history = taskHistories.get(group.id);
+    entry.update({ title: group.name, active: current,
+      records: [...(history?.tasks || [])].reverse(),
+      status: history?.loading ? "正在读取历史…" : history?.error || (history?.tasks?.length === 0 ? "还没有任务对话" : ""),
+      renderRow: (task) => {
+        const row = button(task.goal || "协作任务", () => openSidebarGroup(group.id, task.id), "sidebar-history-item");
+        row.dataset.taskId = task.id; row.title = task.goal || "协作任务";
+        row.setAttribute("aria-current", current && selectedTask === task.id ? "page" : "false"); return row;
+      } });
+    if (entry.root.parentNode !== rail) rail.append(entry.root);
+  }
+  if (visible.some((group, index) => rail.children[index] !== sidebarGroups.get(group.id).root)) {
+    const focused = rail.contains(document.activeElement) ? document.activeElement : null;
+    for (const group of visible) rail.append(sidebarGroups.get(group.id).root);
+    focused?.focus({ preventScroll: true });
+  }
+  renderCollapsedGroups(visible);
+}
 function renderLibrary() {
-  const target = byId("groups-list"), rail = byId("sidebar-group-list"); target.replaceChildren(); rail.replaceChildren();
+  const target = byId("groups-list"); target.replaceChildren();
   const visible = groups.filter((group) => byId("groups-show-archived").checked || !group.archived);
   if (!visible.length) {
     const empty = node("div", "collaboration-empty groups-empty"); empty.append(node("span", "collaboration-empty-mark", "◎"),
@@ -157,11 +257,7 @@ function renderLibrary() {
     card.append(heading, node("p", "muted-note", group.purpose || "共同推进工作"),
       node("p", "group-library-meta", `${group.memberIds?.length || 0} 位成员 · ${group.updatedAt ? new Date(group.updatedAt).toLocaleDateString("zh-CN") : "刚刚创建"}`)); target.append(card);
   }
-  for (const group of groups.filter((item) => !item.archived)) {
-    const link = node("a", "sidebar-group-link"); link.href = `#group/${encodeURIComponent(group.id)}`;
-    link.append(groupAvatar(group, "sidebar-group-avatar"), node("span", "sidebar-group-name", group.name));
-    link.setAttribute("aria-current", route.page === "group" && route.groupId === group.id ? "page" : "false"); rail.append(link);
-  }
+  renderSidebarGroups();
   notice(byId("sidebar-groups-feedback"), "");
 }
 async function list() {
@@ -169,7 +265,14 @@ async function list() {
   try {
     const result = await api.groups(); if (!Array.isArray(result.groups)) throw new Error("群列表尚未确认。");
     if (sequence !== listSequence) return;
+    for (const group of result.groups) {
+      const history = taskHistories.get(group.id), stamp = group.updatedAt || group.lastSequence || "";
+      if (history?.tasks && history.stamp !== stamp && !(route.page === "group" && route.groupId === group.id)) {
+        taskHistories.delete(group.id); taskHistorySequence(group.id);
+      }
+    }
     groups = result.groups; renderLibrary(); notice(byId("groups-error"), "");
+    for (const [id, entry] of sidebarGroups) if (entry.expanded) void loadTaskHistory(id);
   } catch (error) {
     if (sequence !== listSequence) return;
     notice(byId("groups-error"), `${error.message} 重新进入群组页面可重试。`, true);
@@ -187,11 +290,7 @@ function render() {
   byId("group-message").placeholder = `给 ${group.name} 发消息…`;
   byId("group-archived").hidden = !group.archived; byId("group-archive").textContent = group.archived ? "取消归档" : "归档";
   byId("group-member-count").textContent = String(data.members?.length || 0);
-  const filter = byId("group-task-filter"); filter.replaceChildren();
-  const all = node("option", "", "全部消息"); all.value = ""; filter.append(all);
-  for (const task of data.tasks || []) { const option = node("option", "", task.goal || "协作任务"); option.value = task.id; filter.append(option); }
   if (selectedTask && !data.tasks?.some((task) => task.id === selectedTask)) selectedTask = "";
-  filter.value = selectedTask;
   const recipient = byId("group-recipient"), previous = recipient.value; recipient.replaceChildren();
   const everyone = node("option", "", "群内协作"); everyone.value = ""; recipient.append(everyone);
   for (const member of data.members || []) { const option = node("option", "", member.name + (member.ready ? "" : "（未就绪）")); option.value = member.id; option.disabled = !member.ready; recipient.append(option); }
@@ -200,24 +299,41 @@ function render() {
   renderMembers(byId("group-members"), data.members || []);
   renderTasks(byId("group-tasks"), data.tasks || [], selectedTask, { onSelect: chooseTask, onStop: stop, members: data.members || [] });
   for (const [index, task] of [...(data.tasks || [])].reverse().entries()) byId("group-tasks").children[index].dataset.taskId = task.id;
-  materials.render(); controls(); restoreSettingsFocus(focused);
+  materials.render(); controls(); renderSidebarGroups(); restoreSettingsFocus(focused);
 }
 async function load(id = route.groupId, { quiet = false } = {}) {
   if (!id) return;
   const sequence = ++requestSequence;
+  const historySequence = taskHistorySequence(id);
+  const history = taskHistories.get(id);
+  if (!quiet) { taskHistories.set(id, { ...history, loading: true, error: "" }); renderSidebarGroups(); }
   if (!quiet) { loading = true; controls(); }
   try {
     const result = await api.group(id);
-    if (requestSequence !== sequence || route.page !== "group" || route.groupId !== id) return;
     if (result.group?.id !== id) throw new Error("群组身份尚未确认，请重试。");
-    data = result; if (rememberAvatars(result.members)) renderLibrary();
+    if (taskHistorySequences.get(id) === historySequence
+      && groups.some((group) => group.id === id && !group.archived)) {
+      rememberTaskHistory(result); renderSidebarGroups();
+    }
+    if (requestSequence !== sequence || route.page !== "group" || route.groupId !== id) return;
+    data = result;
+    if (pendingSidebarTask?.groupId === id) {
+      selectedTask = result.tasks?.some((task) => task.id === pendingSidebarTask.taskId) ? pendingSidebarTask.taskId : "";
+      newTask = false; pendingSidebarTask = null;
+    }
+    if (rememberAvatars(result.members)) renderLibrary();
     notice(byId("group-error"), ""); render();
-  } catch (error) { if (requestSequence === sequence && route.groupId === id) notice(byId("group-error"), `${error.message} 点击右侧刷新重试。`, true); }
+  } catch (error) {
+    if (taskHistorySequences.get(id) === historySequence && sidebarGroups.has(id)) {
+      taskHistories.set(id, { ...history, loading: false, error: `${error.message} 点击群设置中的刷新重试。` }); renderSidebarGroups();
+    }
+    if (requestSequence === sequence && route.groupId === id) notice(byId("group-error"), `${error.message} 点击右侧刷新重试。`, true);
+  }
   finally { if (sequence === requestSequence) { loading = false; controls(); } }
 }
-function chooseTask(id) {
+function chooseTask(id, { focus = true } = {}) {
   const inSettings = settingsGroupId && groupPanel.contains(document.activeElement);
-  selectedTask = id; newTask = false; render(); if (!inSettings) byId("group-message").focus();
+  selectedTask = id; newTask = false; render(); if (focus && !inSettings) byId("group-message").focus();
 }
 async function stop(taskId) {
   const id = data?.group?.id; if (!id) return;
@@ -307,7 +423,6 @@ async function poll() {
   finally { polling = false; }
 }
 byId("group-chat-form").addEventListener("submit", (event) => { event.preventDefault(); void send(); });
-byId("group-task-filter").addEventListener("change", (event) => chooseTask(event.target.value));
 byId("group-new-task").addEventListener("click", () => { newTask = true; selectedTask = ""; render(); byId("group-message").focus(); });
 byId("group-edit").addEventListener("click", () => void editor(data?.group, byId("group-edit")));
 byId("group-refresh").addEventListener("click", () => void load());
@@ -335,12 +450,14 @@ byId("group-editor-close").addEventListener("click", closeEditor);
 byId("group-editor").addEventListener("cancel", (event) => { event.preventDefault(); closeEditor(); });
 document.addEventListener("neuma:route", (event) => {
   closeSettings({ restoreFocus: false, animate: false });
-  recipientMenu.close(); taskMenu.close();
+  recipientMenu.close();
   if (route.page === "group" && route.groupId) drafts.set(route.groupId, byId("group-message").value);
   const previous = route.groupId; route = event.detail; clearInterval(pollTimer); pollTimer = null; requestSequence++;
+  if (pendingSidebarTask && (route.page !== "group" || route.groupId !== pendingSidebarTask.groupId)) pendingSidebarTask = null;
   renderLibrary();
   if (route.page === "groups") void list();
   if (route.page === "group") {
+    sidebarGroups.get(route.groupId)?.setExpanded(true);
     if (previous !== route.groupId) {
       data = null; selectedTask = ""; newTask = false; materials.reset();
       byId("group-recipient").value = "";

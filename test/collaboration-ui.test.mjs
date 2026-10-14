@@ -7,6 +7,7 @@ import { renderAgentAvatar as renderAvatar, resolveAgentAvatar } from "../public
 import { renderGroupAvatar as renderGroup } from "../public/group-avatar.js";
 import { conversationDate } from "../public/group-view.js";
 import { createSelectMenu } from "../public/select-menu.js";
+import { createSidebarHistory } from "../public/sidebar-history.js";
 
 const read = async (file) => (await readFile(new URL(`../public/${file}`, import.meta.url), "utf8"))
   .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "");
@@ -74,7 +75,7 @@ function setup(source, request, initialStorage = [], { confirm = () => false, pa
     } }] : []; }
   }
   const get = (id) => {
-    if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(["group-task-filter", "group-recipient", "group-share-agent"].includes(id) ? "select"
+    if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(["group-recipient", "group-share-agent"].includes(id) ? "select"
       : ["group-editor", "group-files-dialog", "group-share-dialog", "main-material-dialog"].includes(id) ? "dialog" : "div"), {
       id, ...(id === "main-history-menu" ? { hidden: true } : {}), ...(id === "main-history-delete" ? { textContent: "删除对话" } : {}),
       ...(id === "group-panel" ? { hidden: true } : {}),
@@ -83,15 +84,22 @@ function setup(source, request, initialStorage = [], { confirm = () => false, pa
   };
   document.hidden = false; document.getElementById = get;
   document.createElement = (tag) => new Element(tag);
+  document.createElementNS = (_namespace, tag) => document.createElement(tag);
   document.createTextNode = (text) => ({ nodeType: 3, textContent: String(text), children: [],
     remove() { if (this.parent) { this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = null; } } });
   document.body = new Element("body");
   document.querySelector = (selector) => selector === "dialog[open]" ? [...nodes.values()].find((item) => item.tagName === "DIALOG" && item.open) || null : document.body.querySelector(selector);
   document.body.append(get("page-group"), get("page-chat"));
+  get("main-history").append(get("sidebar-main-heading"), get("main-history-body"));
+  get("sidebar-main-heading").className = "sidebar-history-heading";
+  get("sidebar-main-heading").append(get("sidebar-main-link"), get("main-history-toggle"));
+  get("sidebar-main-link").setAttribute("aria-controls", "main-history-body");
+  get("sidebar-main-link").append(document.createElement("svg"), document.createElement("span"));
+  get("main-history-body").append(get("main-history-list"), get("main-history-status"), get("main-history-more-toggle"));
   get("page-group").hidden = true;
   get("page-group").append(get("group-page-shell"), get("group-editor"), get("group-files-dialog"), get("group-share-dialog"));
   get("group-page-shell").append(get("group-primary"), get("group-panel"));
-  get("group-primary").append(get("group-panel-toggle"), get("group-messages"), get("group-chat-form"), get("group-task-trigger"), get("group-task-menu"), get("group-new-task"));
+  get("group-primary").append(get("group-panel-toggle"), get("group-messages"), get("group-chat-form"), get("group-new-task"));
   get("group-panel-toggle").append(get("group-avatar"), get("group-title"));
   get("group-panel").append(get("group-details-close"), get("group-details-avatar"), get("group-details-name"), get("group-purpose"), get("group-files-open"),
     ...["profile", "members", "tasks"].map((tab) => get(`group-details-${tab}-tab`)), ...["profile", "members", "tasks"].map((tab) => get(`group-details-${tab}`)));
@@ -118,7 +126,7 @@ function setup(source, request, initialStorage = [], { confirm = () => false, pa
     renderAgentAvatar: (target, agent, options = {}) => renderAvatar(target, agent, { ...options, document }),
     resolveAgentAvatar,
     renderGroupAvatar: (target, group, members) => renderGroup(target, group, members, { document }),
-    createSelectMenu,
+    createSelectMenu, createSidebarHistory,
     fetch: request, Response, ReadableStream, TextDecoder, TextEncoder, AbortController, structuredClone, URL, Blob,
     setTimeout: panelMotion ? (callback) => timeouts.push(callback) : setTimeout,
     clearTimeout: panelMotion ? (id) => clearedTimeouts.add(id) : clearTimeout,
@@ -137,6 +145,9 @@ function setup(source, request, initialStorage = [], { confirm = () => false, pa
 const textOf = (node) => `${node.textContent || ""}${(node.children || []).map(textOf).join("")}`;
 const isBubble = (node) => node.className.split(/\s+/).includes("bubble");
 const groupMessageRows = (ui) => ui.get("group-messages").children.filter((node) => node.classList.contains("message"));
+const sidebarGroup = (ui, id = "one") => ui.get("sidebar-group-list").children.find((entry) => entry.dataset.groupId === id);
+const sidebarGroupRows = (ui, id = "one") => sidebarGroup(ui, id).querySelector(".sidebar-history-list").children;
+const selectedGroupTask = (ui) => vm.runInContext("selectedTask", ui.context);
 const mainHistoryItems = (ui) => ui.get("main-history-list").querySelectorAll(".collaboration-history-item");
 const mainHistoryMore = (ui, id) => ui.get("main-history-list").children
   .find((row) => row.dataset.conversationId === id)?.querySelector(".main-history-more");
@@ -258,7 +269,7 @@ test("群任务选择和刷新保留侧栏成员或任务控件焦点，编辑�
   await ui.get("group-panel-toggle").click(); await ui.get("group-details-tasks-tab").click();
   ui.get("group-tasks").children[0].children[0].focus(); await ui.get("group-tasks").children[0].children[0].click();
   assert.equal(ui.document.activeElement, ui.get("group-tasks").children[0].children[0]);
-  assert.equal(ui.get("group-task-filter").value, "task-one");
+  assert.equal(selectedGroupTask(ui), "task-one");
   await ui.get("group-details-members-tab").click();
   ui.get("group-members").children[0].open = true; ui.get("group-members").children[0].children[0].focus();
   state.members.reverse(); await ui.get("group-refresh").click(); await settle();
@@ -276,7 +287,7 @@ test("群任务选择和刷新保留侧栏成员或任务控件焦点，编辑�
 });
 
 test("群发送完成保护侧栏和其他控件焦点，仍在发送按钮时才恢复输入", async () => {
-  for (const focused of ["group-edit", "group-task-trigger", "group-send"]) {
+  for (const focused of ["group-edit", "group-panel-toggle", "group-send"]) {
     let release;
     const ui = await readyGroup(detail(), { request: (path) => path.endsWith("/messages")
       ? new Promise((resolve) => { release = () => resolve(Response.json({ message: { id: "sent" } })); }) : undefined });
@@ -395,8 +406,9 @@ test("群头像在侧栏、列表和群标题使用同一静态组合，资料�
   const ui = setup(groupsSource, async (path) => { requests.push(path); return Response.json(path === "/api/groups" ? { groups: [state.group] } : state); });
   await settle(); await ui.document.dispatchEvent({ type: "neuma:agents-changed", detail: { items: state.members } });
   await ui.route({ page: "group", groupId: "one" }); await settle();
-  const avatars = () => [ui.get("sidebar-group-list").children[0].children[0],
-    ui.get("groups-list").children[0].children[0].children[0], ui.get("group-avatar"), ui.get("group-details-avatar")];
+  const avatars = () => [sidebarGroup(ui).querySelector(".sidebar-group-avatar"),
+    ui.get("sidebar-group-rail").children[0].children[0], ui.get("groups-list").children[0].children[0].children[0],
+    ui.get("group-avatar"), ui.get("group-details-avatar")];
   for (const avatar of avatars()) {
     assert.equal(avatar.dataset.memberCount, "2");
     assert.deepEqual(avatar.children.map((child) => child.dataset.avatarIcon), ["star:4:1", "star:0:2"]);
@@ -406,8 +418,244 @@ test("群头像在侧栏、列表和群标题使用同一静态组合，资料�
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "writer", profile: { icon: "star:1:7" } } });
   for (const avatar of avatars()) assert.equal(avatar.children[0].dataset.avatarIcon, "star:1:7");
   assert.equal(requests.length, before);
-  assert.equal(ui.get("sidebar-group-list").children[0].href, "#group/one");
-  assert.equal(ui.text("sidebar-group-list"), "研究小组");
+  assert.equal(sidebarGroup(ui).querySelector(".sidebar-group-link").href, "#group/one");
+  assert.equal(textOf(sidebarGroup(ui).querySelector(".sidebar-group-link")), "研究小组");
+});
+
+test("收起栏按群列表顺序展示前两个未归档群，稳定刷新不打断头像焦点", async () => {
+  let listed = [group("archived", "归档组"), group("one"), group("two", "设计小组"), group("three", "第三小组")];
+  listed[0].archived = true;
+  const requests = [], ui = setup(groupsSource, async (path) => {
+    requests.push(path); return Response.json({ groups: listed });
+  });
+  await settle();
+  const rail = ui.get("sidebar-group-rail"), first = rail.children[0], second = rail.children[1];
+  assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["one", "two"]);
+  assert.equal(rail.hidden, false); assert.equal(first.href, "#group/one");
+  assert.equal(first.title, "研究小组"); assert.equal(first.getAttribute("aria-label"), "打开研究小组的群聊");
+  assert.equal(requests.length, 1);
+  first.focus(); await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
+  assert.equal(rail.children[0], first); assert.equal(rail.children[1], second); assert.equal(ui.document.activeElement, first);
+  await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "writer", profile: { icon: "star:1:7" } } });
+  assert.equal(rail.children[0], first); assert.equal(first.children[0].children[0].dataset.avatarIcon, "star:1:7");
+  assert.equal(ui.document.activeElement, first); assert.equal(requests.length, 2);
+  listed = [listed[2], listed[1], listed[3]];
+  await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
+  assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["two", "one"]);
+  assert.equal(rail.children[0], second); assert.equal(rail.children[1], first); assert.equal(ui.document.activeElement, first);
+});
+
+test("收起栏群头像删除、归档或超出显示上限时将原头像焦点返回侧栏开关", async () => {
+  for (const change of ["delete", "archive", "limit"]) {
+    let listed = [group("one"), group("two", "设计小组"), group("three", "第三小组")];
+    const ui = setup(groupsSource, async () => Response.json({ groups: listed })); await settle();
+    const rail = ui.get("sidebar-group-rail"), removed = rail.children[0]; removed.focus();
+    if (change === "delete") listed = listed.slice(1);
+    else if (change === "archive") listed[0].archived = true;
+    else listed = [listed[1], listed[2], listed[0]];
+    await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
+    assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["two", "three"]);
+    assert.equal(ui.document.activeElement.id, "sidebar-toggle"); assert.equal(rail.contains(removed), false);
+    listed = [];
+    await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
+    assert.equal(rail.hidden, true); assert.equal(rail.children.length, 0);
+  }
+});
+
+test("收起栏群头像直接进入群聊、保留各群草稿，修饰键保留原生链接行为", async () => {
+  const first = detail(), second = detail("two", "设计小组"), requests = [];
+  const ui = setup(groupsSource, async (path, options = {}) => {
+    requests.push({ path, method: options.method });
+    return Response.json(path === "/api/groups" ? { groups: [first.group, second.group] }
+      : path === "/api/groups/two" ? second : first);
+  });
+  await settle();
+  const rail = ui.get("sidebar-group-rail"), firstLink = rail.children[0], secondLink = rail.children[1], navigations = [];
+  ui.document.addEventListener("neuma:navigate", (event) => { navigations.push(event.detail); return ui.route(event.detail); });
+  const body = sidebarGroup(ui).querySelector(".sidebar-history-body"); assert.equal(body.inert, true);
+  for (const fields of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }, { defaultPrevented: true }]) {
+    const event = { type: "click", target: firstLink, ...fields }; await firstLink.dispatchEvent(event);
+    if (!fields.defaultPrevented) assert.notEqual(event.defaultPrevented, true);
+  }
+  assert.equal(navigations.length, 0); assert.equal(body.inert, true);
+  await firstLink.click(); await settle(); assert.equal(firstLink.getAttribute("aria-current"), "page");
+  ui.get("group-message").value = "研究小组未发送的草稿";
+  await firstLink.click(); await settle(); assert.equal(body.inert, false);
+  assert.equal(ui.get("group-message").value, "研究小组未发送的草稿");
+  await secondLink.click(); await settle(); assert.equal(secondLink.getAttribute("aria-current"), "page");
+  assert.equal(firstLink.getAttribute("aria-current"), undefined); ui.get("group-message").value = "设计小组未发送的草稿";
+  await firstLink.click(); await settle(); assert.equal(ui.get("group-message").value, "研究小组未发送的草稿");
+  await secondLink.click(); await settle(); assert.equal(ui.get("group-message").value, "设计小组未发送的草稿");
+  assert.equal(requests.some((request) => request.method === "POST"), false);
+  await ui.route({ page: "chat" }); assert.equal(secondLink.getAttribute("aria-current"), undefined);
+});
+
+test("群导航按需读取任务历史，默认最近四条，更多与折叠不会新增任务或清除草稿", async () => {
+  const state = detail(), requests = [];
+  state.tasks = Array.from({ length: 6 }, (_, index) => ({ id: `topic-${index + 1}`, goal: `讨论 ${index + 1}`, status: "complete" }));
+  const ui = setup(groupsSource, async (path, options = {}) => {
+    requests.push({ path, method: options.method });
+    return Response.json(path === "/api/groups" ? { groups: [state.group] } : state);
+  });
+  await settle(); const entry = sidebarGroup(ui), toggle = entry.querySelector(".sidebar-history-toggle");
+  assert.equal(entry.querySelector(".sidebar-history-new"), undefined);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(requests.length, 1); ui.get("main-message").value = "未发送的主聊天草稿";
+  await toggle.click(); await settle();
+  assert.equal(requests.filter((request) => request.path === "/api/groups/one").length, 1);
+  assert.deepEqual(sidebarGroupRows(ui).map((row) => row.dataset.taskId), ["topic-6", "topic-5", "topic-4", "topic-3"]);
+  const more = entry.querySelector(".sidebar-history-show-more"); assert.equal(more.hidden, false);
+  await more.click(); assert.equal(sidebarGroupRows(ui).length, 6); assert.equal(more.textContent, "收起");
+  await toggle.click(); assert.equal(entry.querySelector(".sidebar-history-body").inert, true);
+  await toggle.click(); await ui.route({ page: "groups" }); await settle();
+  assert.equal(sidebarGroup(ui), entry); assert.equal(sidebarGroupRows(ui).length, 6);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(requests.filter((request) => request.path === "/api/groups/one").length, 1);
+  assert.equal(requests.some((request) => request.method === "POST"), false);
+  assert.equal(ui.get("main-message").value, "未发送的主聊天草稿");
+  assert.equal(ui.stored.get("neuma.sidebar.history-open.v1.group-one"), "true");
+});
+
+test("群导航整行标题、头像和空白可反复折叠，箭头不重复切换且空格支持键盘操作", async () => {
+  const ui = await readyGroup(), entry = sidebarGroup(ui), link = entry.querySelector(".sidebar-group-link");
+  const heading = entry.querySelector(".sidebar-history-heading"), toggle = entry.querySelector(".sidebar-history-toggle");
+  const body = entry.querySelector(".sidebar-history-body"), avatar = entry.querySelector(".sidebar-group-avatar");
+  const activate = async (target) => { const event = { type: "click", target, bubbles: true }; await target.dispatchEvent(event); await settle(); return event; };
+  const expanded = (open) => {
+    assert.equal(body.inert, !open); assert.equal(link.getAttribute("aria-expanded"), String(open));
+    assert.equal(toggle.getAttribute("aria-expanded"), String(open));
+  };
+  assert.equal(link.getAttribute("aria-controls"), body.id); expanded(true);
+  ui.get("group-message").value = "整行切换时保留群草稿";
+  await ui.get("group-panel-toggle").click(); ui.get("group-edit").focus();
+  const requests = ui.requests.length;
+  assert.equal((await activate(link)).defaultPrevented, true); expanded(false);
+  assert.notEqual((await activate(avatar)).defaultPrevented, true); expanded(true);
+  await activate(heading); expanded(false);
+  const opening = await ui.key(link, " "); await settle(); assert.equal(opening.defaultPrevented, true); expanded(true);
+  const repeating = await ui.key(link, " ", { repeat: true }); assert.equal(repeating.defaultPrevented, true); expanded(true);
+  await activate(link.querySelector(".sidebar-history-name")); expanded(false);
+  await activate(heading); expanded(true);
+  assert.equal(ui.get("group-message").value, "整行切换时保留群草稿");
+  assert.equal(ui.get("group-panel").hidden, false); assert.equal(ui.document.activeElement.id, "group-edit");
+  await activate(toggle); expanded(false); await activate(toggle); expanded(true);
+  assert.equal(ui.requests.length, requests); assert.equal(ui.requests.some((request) => request.settings.method === "POST"), false);
+});
+
+test("侧栏群话题保持设置、输入草稿与编辑焦点，父群标题返回全部消息", async () => {
+  const state = detail(); state.tasks.push({ id: "task-two", goal: "第二个话题", status: "complete" });
+  state.messages.push({ ...state.messages[0], id: "message-two", taskId: "task-two", content: "第二个话题的内容" });
+  const ui = await readyGroup(state), entry = sidebarGroup(ui);
+  ui.get("group-message").value = "留在当前群的输入草稿";
+  await ui.get("group-panel-toggle").click(); ui.get("group-edit").focus();
+  await sidebarGroupRows(ui).find((row) => row.dataset.taskId === "task-two").click();
+  assert.equal(selectedGroupTask(ui), "task-two");
+  assert.match(ui.text("group-messages"), /第二个话题的内容/); assert.doesNotMatch(ui.text("group-messages"), /研究小组的初稿/);
+  assert.equal(ui.get("group-message").value, "留在当前群的输入草稿");
+  assert.equal(ui.get("group-panel").hidden, false); assert.equal(ui.document.activeElement.id, "group-edit");
+  await entry.querySelector(".sidebar-group-link").click();
+  assert.equal(entry.querySelector(".sidebar-history-body").inert, true); assert.equal(selectedGroupTask(ui), "task-two");
+  assert.doesNotMatch(ui.text("group-messages"), /研究小组的初稿/);
+  assert.equal(ui.get("group-message").value, "留在当前群的输入草稿");
+  assert.equal(ui.get("group-panel").hidden, false); assert.equal(ui.document.activeElement.id, "group-edit");
+  await entry.querySelector(".sidebar-group-link").click();
+  assert.equal(selectedGroupTask(ui), "");
+  assert.match(ui.text("group-messages"), /第二个话题的内容/); assert.match(ui.text("group-messages"), /研究小组的初稿/);
+  assert.equal(ui.get("group-message").value, "留在当前群的输入草稿");
+  assert.equal(ui.get("group-panel").hidden, false); assert.equal(ui.document.activeElement.id, "group-edit");
+  const row = sidebarGroupRows(ui).find((candidate) => candidate.dataset.taskId === "task-one"); row.focus(); await row.click();
+  assert.equal(ui.document.activeElement.dataset.taskId, "task-one"); assert.equal(sidebarGroup(ui), entry);
+  assert.equal(sidebarGroupRows(ui).find((candidate) => candidate.dataset.taskId === "task-one").getAttribute("aria-current"), "page");
+  assert.equal(ui.requests.filter((request) => request.settings.method === "POST").length, 0);
+});
+
+test("从另一群的侧栏话题进入真实群任务，返回原群恢复草稿，群聊顶部新任务仅准备输入", async () => {
+  const first = detail(), second = detail("two", "设计小组");
+  second.tasks = [{ id: "design-topic", goal: "讨论页面", status: "complete" }];
+  second.messages = [{ ...second.messages[0], taskId: "design-topic", content: "设计话题的历史" }];
+  const requests = [], ui = setup(groupsSource, async (path, options = {}) => {
+    requests.push({ path, method: options.method });
+    return Response.json(path === "/api/groups" ? { groups: [first.group, second.group] }
+      : path === "/api/groups/two" ? second : first);
+  });
+  ui.document.addEventListener("neuma:navigate", (event) => ui.route(event.detail));
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  ui.get("group-message").value = "研究小组的草稿";
+  await sidebarGroup(ui, "two").querySelector(".sidebar-history-toggle").click(); await settle();
+  await sidebarGroupRows(ui, "two")[0].click(); await settle();
+  assert.equal(ui.text("group-title"), "设计小组"); assert.equal(selectedGroupTask(ui), "design-topic");
+  assert.match(ui.text("group-messages"), /设计话题的历史/); assert.equal(ui.get("group-message").value, "");
+  ui.get("group-message").value = "设计小组的草稿";
+  await sidebarGroup(ui).querySelector(".sidebar-group-link").click(); await settle();
+  assert.equal(ui.text("group-title"), "设计小组");
+  await sidebarGroup(ui).querySelector(".sidebar-group-link").click(); await settle();
+  assert.equal(ui.get("group-message").value, "研究小组的草稿");
+  await ui.route({ page: "group", groupId: "two" }); await settle();
+  assert.ok(ui.get("sidebar-group-list").children.every((entry) => !entry.querySelector(".sidebar-history-new")));
+  await ui.get("group-new-task").click(); await settle();
+  assert.equal(selectedGroupTask(ui), ""); assert.equal(ui.get("group-message").value, "设计小组的草稿");
+  assert.equal(vm.runInContext("newTask", ui.context), true);
+  assert.equal(requests.some((request) => request.method === "POST"), false);
+});
+
+test("导航懒加载的旧群历史不能覆盖后来打开群页读取的新任务", async () => {
+  let release, reads = 0;
+  const fresh = detail(); fresh.tasks = [{ id: "fresh-topic", goal: "最新任务", status: "complete" }];
+  const ui = setup(groupsSource, async (path) => {
+    if (path === "/api/groups") return Response.json({ groups: [fresh.group] });
+    if (++reads === 1) return new Promise((resolve) => { release = () => resolve(Response.json(detail())); });
+    return Response.json(fresh);
+  });
+  await settle(); await sidebarGroup(ui).querySelector(".sidebar-history-toggle").click(); await settle();
+  assert.match(textOf(sidebarGroup(ui).querySelector(".sidebar-history-status")), /正在读取/);
+  await ui.route({ page: "group", groupId: "one" }); await settle(); release(); await settle();
+  assert.deepEqual(sidebarGroupRows(ui).map((row) => row.dataset.taskId), ["fresh-topic"]);
+  assert.equal(sidebarGroup(ui).querySelector(".sidebar-history-status").hidden, true);
+  await ui.route({ page: "chat" }); await sidebarGroup(ui).querySelector(".sidebar-history-toggle").click();
+  await sidebarGroup(ui).querySelector(".sidebar-history-toggle").click(); await settle();
+  assert.equal(reads, 2); assert.equal(sidebarGroupRows(ui)[0].dataset.taskId, "fresh-topic");
+});
+
+test("群页读取未结束就离开时仍完成该群导航历史，不替换当前聊天或留下加载状态", async () => {
+  let release;
+  const ui = setup(groupsSource, async (path) => path === "/api/groups" ? Response.json({ groups: [group()] })
+    : new Promise((resolve) => { release = () => resolve(Response.json(detail())); }));
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  await ui.route({ page: "chat" }); ui.get("main-message").value = "离开群后编辑的草稿";
+  release(); await settle();
+  assert.equal(sidebarGroupRows(ui)[0].dataset.taskId, "task-one");
+  assert.equal(sidebarGroup(ui).querySelector(".sidebar-history-status").hidden, true);
+  assert.equal(ui.get("main-message").value, "离开群后编辑的草稿");
+  assert.equal(ui.text("group-title"), "正在读取群组…");
+});
+
+test("群历史读取失败可重新展开重试，归档移除条目后迟到详情不会复活导航", async () => {
+  let reads = 0, release, archived = false;
+  const ui = setup(groupsSource, async (path) => {
+    if (path === "/api/groups") return Response.json({ groups: [{ ...group(), archived }] });
+    if (++reads === 1) return Response.json({ error: "历史读取断开" }, { status: 503 });
+    return new Promise((resolve) => { release = () => resolve(Response.json(detail())); });
+  });
+  await settle(); const entry = sidebarGroup(ui), toggle = entry.querySelector(".sidebar-history-toggle");
+  await toggle.click(); await settle(); assert.match(textOf(entry.querySelector(".sidebar-history-status")), /历史读取断开/);
+  await toggle.click(); await toggle.click(); await settle(); assert.equal(reads, 2);
+  archived = true; await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
+  assert.equal(ui.get("sidebar-group-list").children.length, 0);
+  release(); await settle(); assert.equal(ui.get("sidebar-group-list").children.length, 0);
+  assert.equal(vm.runInContext("taskHistories.has('one')", ui.context), false);
+});
+
+test("群页刷新同步导航任务，更多展开和已聚焦话题保持，移除任务后筛选真实回退", async () => {
+  const state = detail(); state.tasks = Array.from({ length: 5 }, (_, index) => ({ id: `task-${index + 1}`, goal: `话题 ${index + 1}`, status: "complete" }));
+  const ui = await readyGroup(state), entry = sidebarGroup(ui), more = entry.querySelector(".sidebar-history-show-more");
+  await more.click(); const selected = sidebarGroupRows(ui).find((row) => row.dataset.taskId === "task-1");
+  selected.focus(); await selected.click(); assert.equal(selectedGroupTask(ui), "task-1");
+  state.tasks[0].goal = "话题一的最新名称"; await ui.get("group-refresh").click(); await settle();
+  assert.equal(sidebarGroup(ui), entry); assert.equal(sidebarGroupRows(ui).length, 5);
+  assert.equal(ui.document.activeElement.dataset.taskId, "task-1"); assert.match(textOf(ui.document.activeElement), /最新名称/);
+  state.tasks.shift(); await ui.get("group-refresh").click(); await settle();
+  assert.equal(selectedGroupTask(ui), ""); assert.equal(sidebarGroupRows(ui).some((row) => row.dataset.taskId === "task-1"), false);
+  assert.equal(more.hidden, true);
 });
 
 test("群成员自主协作、能力和任务分开显示，离开群页不会取消正在执行的任务", async () => {
@@ -458,12 +706,14 @@ test("群任务筛选后头部日期跟随第一条可见消息，清除筛选�
   state.tasks.push({ id: "task-two", goal: "另一项任务", status: "completed" }); state.lastSequence = 2;
   const ui = await readyGroup(state);
   assert.equal(ui.get("group-messages").children[0].dateTime, conversationDate(first).dateTime);
-  await ui.get("group-task-trigger").click(); await ui.get("group-task-menu").children[2].click();
+  await sidebarGroupRows(ui).find((row) => row.dataset.taskId === "task-two").click();
   assert.equal(ui.get("group-messages").children[0].dateTime, conversationDate(second).dateTime);
   assert.deepEqual(groupMessageRows(ui).map((row) => row.dataset.messageId), ["message-two"]);
   await ui.get("group-refresh").click(); await settle();
   assert.equal(ui.get("group-messages").children.filter((node) => node.className === "conversation-date").length, 1);
-  await ui.get("group-new-task").click();
+  await sidebarGroup(ui).querySelector(".sidebar-group-link").click();
+  assert.equal(ui.get("group-messages").children[0].dateTime, conversationDate(second).dateTime);
+  await sidebarGroup(ui).querySelector(".sidebar-group-link").click();
   assert.equal(ui.get("group-messages").children[0].dateTime, conversationDate(first).dateTime);
 });
 
@@ -542,7 +792,7 @@ test("群 Agent 身份使用当前头像与历史名称，已移除发送者和�
   assert.equal(historical.querySelector(".group-message-avatar").dataset.avatarIcon, expected.icon);
   assert.equal(historical.querySelector(".group-message-avatar").children[0].dataset.avatarMotion, "false");
   assert.equal(historical.querySelector(".group-message-sender").dataset.avatarColor, expected.color);
-  await ui.get("group-task-trigger").click(); await ui.get("group-task-menu").children[1].click();
+  await sidebarGroupRows(ui).find((row) => row.dataset.taskId === "task-one").click();
   assert.equal(groupMessageRows(ui).length, 1);
   assert.equal(groupMessageRows(ui)[0].querySelector(".group-message-mention").getAttribute("aria-label"), "@历史写手");
 });
@@ -666,20 +916,20 @@ test("定制接收者菜单发送选定成员，自主协作不传成员，未�
   assert.equal(Object.hasOwn(writes[1], "recipientId"), false);
 });
 
-test("定制任务菜单筛选消息，刷新保留选择，任务移除或新任务恢复全部", async () => {
+test("导航任务筛选消息并保留行焦点，刷新保留选择，任务移除或新任务恢复全部", async () => {
   const state = detail(); state.tasks.push({ id: "task-two", goal: "第二项任务", status: "completed" });
   state.messages.push({ ...state.messages[0], id: "message-two", taskId: "task-two", content: "第二份材料" });
   const ui = setup(groupsSource, async (path) => Response.json(path === "/api/groups" ? { groups: [group()] } : state));
   await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
-  await ui.get("group-task-trigger").click(); await ui.get("group-task-menu").children[2].click();
-  assert.equal(ui.get("group-task-filter").value, "task-two");
+  const row = sidebarGroupRows(ui).find((entry) => entry.dataset.taskId === "task-two"); row.focus(); await row.click();
+  assert.equal(selectedGroupTask(ui), "task-two");
   assert.match(ui.text("group-messages"), /第二份材料/); assert.doesNotMatch(ui.text("group-messages"), /研究小组的初稿/);
-  assert.equal(ui.document.activeElement, ui.get("group-message"));
-  await ui.get("group-refresh").click(); await settle(); assert.equal(ui.get("group-task-filter").value, "task-two");
+  assert.equal(ui.document.activeElement.dataset.taskId, "task-two");
+  await ui.get("group-refresh").click(); await settle(); assert.equal(selectedGroupTask(ui), "task-two");
   state.tasks.pop(); await ui.get("group-refresh").click(); await settle();
-  assert.equal(ui.get("group-task-filter").value, ""); assert.equal(ui.get("group-task-value").textContent, "全部消息");
-  await ui.get("group-task-trigger").click(); await ui.get("group-task-menu").children[1].click();
-  await ui.get("group-new-task").click(); assert.equal(ui.get("group-task-filter").value, "");
+  assert.equal(selectedGroupTask(ui), ""); assert.match(ui.text("group-messages"), /研究小组的初稿/);
+  await sidebarGroupRows(ui).find((entry) => entry.dataset.taskId === "task-one").click();
+  await ui.get("group-new-task").click(); assert.equal(selectedGroupTask(ui), "");
 });
 
 test("接收者菜单发送中禁用关闭，完成后恢复，跨群不继承旧收件人", async () => {
@@ -1151,7 +1401,8 @@ test("主助理空白页只显示宽对话和可折叠历史，不读取常驻�
   assert.equal(ui.get("main-history-toggle").title, "展开历史对话");
   assert.equal(ui.get("main-history-toggle").getAttribute("aria-expanded"), "false");
   assert.equal(ui.get("main-history-toggle").children[0], toggleIcon);
-  assert.equal(ui.get("main-workspace").classes.has("history-collapsed"), true);
+  assert.equal(ui.get("main-history").classes.has("history-collapsed"), true);
+  assert.equal(ui.get("main-workspace").classes.has("history-collapsed"), false);
   assert.equal(ui.stored.get("neuma.main.history-collapsed.v1"), "true");
   assert.equal(ui.get("main-message").value, "保留的草稿");
   const restored = setup(mainSource, async () => Response.json({ conversations: [] }), [...ui.stored]);
@@ -1179,7 +1430,8 @@ test("历史连续收起展开即时转移焦点，最终状态和草稿保持�
     const visible = index % 2 === 0;
     assertDisclosure(ui.get("main-history-body"), visible); assert.equal(ui.get("main-new-chat").hidden, false);
     assert.equal(ui.get("main-new-chat").inert === true, false); assert.equal(ui.document.activeElement, ui.get("main-new-chat"));
-    assert.equal(ui.get("main-workspace").classes.has("history-collapsed"), !visible);
+    assert.equal(ui.get("main-history").classes.has("history-collapsed"), !visible);
+    assert.equal(ui.get("main-workspace").classes.has("history-collapsed"), false);
     assert.equal(toggle.getAttribute("aria-expanded"), String(visible));
     assert.equal(ui.get("main-message").value, "动画期间保留的草稿");
   }
@@ -1202,6 +1454,123 @@ test("主对话历史保留完整标题提示，选中状态随切换更新", as
   ui.get("main-history-body").append(ui.get("main-history-list"));
   items[1].focus(); await ui.get("main-history-toggle").click();
   assert.equal(ui.document.activeElement, ui.get("main-history-toggle"));
+});
+
+test("主导航历史默认只展示前四条，展开全部及收起不改变主对话草稿", async () => {
+  const conversations = Array.from({ length: 6 }, (_, index) => ({ id: `main-${index}`, title: `对话 ${index + 1}`, messages: [] }));
+  const ui = setup(mainSource, async (path) => Response.json(path === "/api/main/conversations" ? { conversations }
+    : { conversation: conversations.find((record) => path.endsWith(record.id)) }));
+  await ui.route({ page: "agents" }); await settle();
+  const visible = () => ui.get("main-history-list").children.filter((row) => !row.hidden);
+  const more = ui.get("main-history-more-toggle");
+  assert.equal(visible().length, 4); assert.equal(more.hidden, false); assert.equal(more.getAttribute("aria-expanded"), "false");
+  ui.get("main-message").value = "独立的主对话草稿";
+  await more.click(); assert.equal(visible().length, 6); assert.equal(more.textContent, "收起显示");
+  assert.equal(more.getAttribute("aria-expanded"), "true");
+  mainHistoryItems(ui)[5].focus(); await more.click();
+  assert.equal(visible().length, 4); assert.equal(ui.document.activeElement, more); assert.equal(more.textContent, "展开显示");
+  assert.equal(ui.get("main-message").value, "独立的主对话草稿");
+  await ui.get("main-history-toggle").click(); await ui.route({ page: "projects" });
+  assertDisclosure(ui.get("main-history-body"), false);
+  await ui.get("sidebar-main-link").click(); assertDisclosure(ui.get("main-history-body"), true);
+  assert.equal(visible().length, 4); assert.equal(ui.get("main-message").value, "独立的主对话草稿");
+});
+
+test("NEUMA整行标题、图标和空白反复折叠，独立箭头只切换一次且空格不因长按重复", async () => {
+  const requests = [], ui = setup(mainSource, async (path) => { requests.push(path); return Response.json({ conversations: [] }); });
+  await ui.route({ page: "chat" }); await settle();
+  const link = ui.get("sidebar-main-link"), heading = ui.get("sidebar-main-heading"), toggle = ui.get("main-history-toggle");
+  const activate = async (target) => { const event = { type: "click", target, bubbles: true }; await target.dispatchEvent(event); return event; };
+  const expanded = (open) => {
+    assertDisclosure(ui.get("main-history-body"), open);
+    assert.equal(link.getAttribute("aria-expanded"), String(open)); assert.equal(toggle.getAttribute("aria-expanded"), String(open));
+  };
+  const reads = requests.length; expanded(true);
+  ui.get("main-message").value = "保留NEUMA草稿"; ui.get("main-create-group").focus();
+  assert.equal((await activate(link)).defaultPrevented, true); expanded(false);
+  assert.notEqual((await activate(link.children[0])).defaultPrevented, true); expanded(true);
+  await activate(link.children[1]); expanded(false); await activate(heading); expanded(true);
+  await activate(toggle); expanded(false); await activate(toggle); expanded(true);
+  const closing = await ui.key(link, " "); assert.equal(closing.defaultPrevented, true); expanded(false);
+  const repeating = await ui.key(link, " ", { repeat: true }); assert.equal(repeating.defaultPrevented, true); expanded(false);
+  await ui.key(link, " "); expanded(true);
+  assert.equal(ui.get("main-message").value, "保留NEUMA草稿"); assert.equal(ui.document.activeElement.id, "main-create-group");
+  assert.equal(requests.length, reads); assert.equal(ui.get("main-workspace").classes.has("history-collapsed"), false);
+});
+
+test("主导航中的历史离开主聊后仍可打开准确会话，切换保留各自主草稿", async () => {
+  const conversations = [{ id: "main-a", title: "主对话 A", messages: [] }, { id: "main-b", title: "主对话 B", messages: [] }], navigations = [], reads = [];
+  const ui = setup(mainSource, async (path) => {
+    reads.push(path); return Response.json(path === "/api/main/conversations" ? { conversations }
+      : { conversation: conversations.find((record) => path.endsWith(record.id)) });
+  });
+  ui.document.addEventListener("neuma:navigate", (event) => { navigations.push(event.detail); return ui.route(event.detail); });
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "草稿 A";
+  await ui.route({ page: "agents" }); await mainHistoryItems(ui)[1].click(); await settle();
+  assert.deepEqual(navigations.map((route) => route.page), ["chat"]);
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "main-b"); assert.equal(ui.get("main-message").value, "");
+  ui.get("main-message").value = "草稿 B";
+  await ui.route({ page: "projects" }); await mainHistoryItems(ui)[0].click(); await settle();
+  assert.equal(ui.get("main-message").value, "草稿 A");
+  await mainHistoryItems(ui)[1].click(); await settle(); assert.equal(ui.get("main-message").value, "草稿 B");
+  assert.equal(reads.filter((path) => path === "/api/main/conversations").length, 1);
+});
+
+test("首次列表仍在读取时主聊顶部新建不会被旧的自动恢复抢走", async () => {
+  const original = { id: "main-original", title: "旧对话", messages: [] }, created = { id: "main-created", title: "新对话", messages: [] };
+  let release, listReads = 0, createdOnServer = false;
+  const details = [], ui = setup(mainSource, async (path, options = {}) => {
+    if (path === "/api/main/conversations" && options.method === "POST") { createdOnServer = true; return Response.json({ conversation: created }); }
+    if (path === "/api/main/conversations") {
+      if (++listReads === 1) return new Promise((resolve) => { release = () => resolve(Response.json({ conversations: [original] })); });
+      return Response.json({ conversations: createdOnServer ? [created, original] : [original] });
+    }
+    details.push(path); return Response.json({ conversation: original });
+  });
+  ui.document.addEventListener("neuma:navigate", (event) => ui.route(event.detail));
+  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "首次未发送草稿";
+  await ui.get("main-new-chat").click(); await settle();
+  assert.equal(createdOnServer, true); release(); await settle();
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), created.id);
+  assert.equal(ui.get("main-message").value, ""); assert.deepEqual(details, []);
+  assert.equal(mainHistoryItems(ui).find((item) => item.dataset.conversationId === created.id).getAttribute("aria-current"), "true");
+});
+
+test("主聊顶部新建完成尊重离页或在主聊中另选控件后的焦点", async () => {
+  for (const nextPage of ["projects", "chat"]) {
+    const original = { id: "main-original", title: "旧对话", messages: [] }, created = { id: "main-created", title: "新对话", messages: [] };
+    let release, createdOnServer = false;
+    const ui = setup(mainSource, async (path, options = {}) => {
+      if (path === "/api/main/conversations" && options.method === "POST") return new Promise((resolve) => {
+        release = () => { createdOnServer = true; resolve(Response.json({ conversation: created })); };
+      });
+      return Response.json(path === "/api/main/conversations" ? { conversations: createdOnServer ? [created, original] : [original] }
+        : { conversation: original });
+    });
+    await ui.route({ page: "chat" }); await settle(); ui.get("main-new-chat").focus();
+    await ui.get("main-new-chat").click(); await settle(); await ui.route({ page: nextPage });
+    const target = ui.get(nextPage === "projects" ? "project-message" : "main-create-group"); target.focus();
+    release(); await settle();
+    assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), created.id);
+    assert.equal(ui.document.activeElement, target);
+  }
+});
+
+test("离页主历史删除失败返回仍可见的操作按钮，用户已移焦时保留外页焦点", async () => {
+  for (const moved of [false, true]) {
+    const conversation = { id: "main-one", title: "删除未完成的主对话", version: 1, messages: [] };
+    let release;
+    const ui = setup(mainSource, async (path) => path.endsWith("/remove") ? new Promise((resolve) => {
+      release = () => resolve(Response.json({ error: "服务暂时不可用" }, { status: 503 }));
+    }) : Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation }), [], { confirm: () => true });
+    await ui.route({ page: "projects" }); await settle();
+    await mainHistoryMore(ui, conversation.id).click();
+    const removing = ui.get("main-history-delete").click(); await settle();
+    const target = moved ? ui.get("project-message") : ui.document.body; target.focus();
+    release(); await removing; await settle();
+    assert.match(ui.text("main-history-status"), /删除未完成/);
+    assert.equal(ui.document.activeElement, moved ? target : mainHistoryMore(ui, conversation.id));
+  }
 });
 
 test("主历史删除菜单标识完整对话，键盘关闭归还焦点，取消确认不写入", async () => {
@@ -1467,8 +1836,8 @@ test("主聊天成功创建群后侧栏立即读取真实列表，不切页或�
   await ui.route({ page: "chat" }); await settle(); assert.equal(ui.get("sidebar-group-list").children.length, 0);
   ui.get("main-message").value = "帮我创建一个研究组"; await ui.submit("main-chat-form"); await settle();
   assert.equal(listReads, 2); assert.equal(turns, 1); assert.equal(navigations.length, 0);
-  assert.equal(ui.text("sidebar-group-list"), "新建研究组");
-  assert.equal(ui.get("sidebar-group-list").children[0].href, "#group/created-group");
+  assert.equal(textOf(sidebarGroup(ui, "created-group").querySelector(".sidebar-group-link")), "新建研究组");
+  assert.equal(sidebarGroup(ui, "created-group").querySelector(".sidebar-group-link").href, "#group/created-group");
   assert.match(ui.text("main-messages"), /研究组已创建/);
 });
 
@@ -1498,7 +1867,8 @@ test("群变更触发的新列表优先于迟到的初始列表，主草稿保�
     return Response.json({ groups: [group("new-group", "新的研究组")] }); });
   await settle(); ui.get("main-message").value = "下一条未发送主草稿";
   await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle(); release(); await settle();
-  assert.equal(ui.text("sidebar-group-list"), "新的研究组"); assert.equal(ui.get("main-message").value, "下一条未发送主草稿");
+  assert.equal(textOf(sidebarGroup(ui, "new-group").querySelector(".sidebar-group-link")), "新的研究组");
+  assert.equal(ui.get("main-message").value, "下一条未发送主草稿");
 });
 
 test("历史折叠后顶部新对话仍能创建空白会话，旧草稿按会话独立恢复", async () => {
@@ -1832,6 +2202,7 @@ test("桌面主聊天统一需求输入，旧创建表单仅作为隐藏档案�
   const groupHeader = html.slice(html.indexOf('<section id="page-group"'), html.indexOf('<dialog id="group-editor"')).match(/<header[\s\S]*?<\/header>/)?.[0];
   assert.ok(groupHeader); assert.match(groupHeader, /id="group-title"/);
   assert.doesNotMatch(groupHeader, /id="group-purpose"|page-subtitle/);
+  assert.doesNotMatch(html, /id="group-task-(?:filter|trigger|menu|value|label)"/);
   const tags = [...html.matchAll(/<([a-z][\w-]*)\b[^>]*>/g)];
   const attribute = (tag, key) => [...tag.matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)].find((match) => match[1] === key)?.[3];
   const element = (id) => { const matches = tags.filter(([tag]) => attribute(tag, "id") === id); assert.equal(matches.length, 1, `${id} 唯一`); return matches[0]; };
@@ -1854,6 +2225,9 @@ test("桌面主聊天统一需求输入，旧创建表单仅作为隐藏档案�
   assert.equal(attribute(element("group-upload")[0], "role"), "menuitem");
   assert.equal(attribute(element("group-share-open")[0], "role"), "menuitem");
   assert.equal(attribute(element("sidebar-manage-groups")[0], "href"), "#groups");
+  assert.doesNotMatch(html, /id="sidebar-main-new-chat"/);
+  assert.equal(element("sidebar-create-agent")[1], "button");
+  assert.equal(element("sidebar-create-group")[1], "button");
   assert.match(html, /id="group-purpose-input"/);
   const formStart = html.indexOf('<form id="group-chat-form"');
   const groupForm = html.slice(formStart, html.indexOf('</form>', formStart));

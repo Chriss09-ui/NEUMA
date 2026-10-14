@@ -5,6 +5,7 @@ import vm from "node:vm";
 import * as state from "../public/state.js";
 import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "../public/agent-avatar.js";
 import { conversationDate } from "../public/group-view.js";
+import { createSidebarHistory } from "../public/sidebar-history.js";
 
 const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-build-view.js", "agent-conversations.js", "agent-attachments.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
@@ -169,6 +170,11 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
     get textContent() { return this._textContent; }
     set textContent(value) { this._textContent = value; this.children = []; }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
+    insertBefore(child, reference) {
+      child.remove(); child.parent = this;
+      const index = reference ? this.children.indexOf(reference) : this.children.length;
+      this.children.splice(index, 0, child);
+    }
     prepend(...children) { for (const child of children) child.parent = this; this.children.unshift(...children); }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = null; }
     replaceChildren(...children) { this.children = []; this.append(...children); this.versions++; }
@@ -183,6 +189,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
       return this.tagName?.toLowerCase() === selector.toLowerCase();
     }
     closest(selector) { return this.matches(selector) ? this : this.parent?.closest?.(selector) || null; }
+    querySelectorAll(selector) { return this.children.flatMap((child) => [child, ...child.querySelectorAll("*")]).filter((child) => selector === "*" || selector.split(",").some((part) => child.matches(part.trim()))); }
     querySelector(selector) { return this.children.find((child) => child.matches(selector)) || this.children.map((child) => child.querySelector(selector)).find(Boolean) || null; }
     getBoundingClientRect() { return { x: 0, y: 0, left: 0, top: 0, right: 240, bottom: 200, width: 240, height: 200 }; }
     focus() { if (!this.disabled) document.activeElement = this; }
@@ -196,6 +203,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
   };
   document.getElementById = get;
   document.createElement = (tag) => Object.assign(new Element(), { tagName: tag.toUpperCase() });
+  document.createElementNS = (_namespace, tag) => document.createElement(tag);
   get("agent-history-menu").append(get("agent-history-delete"));
   class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
   document.addEventListener("neuma:agent-runtime-change", (event) => runtimeEvents.push(event.detail));
@@ -206,12 +214,12 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
     static now() { return new Date(clock).getTime(); }
   };
   const context = vm.createContext({ ...state, document, Date: Clock, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
-    conversationDate,
+    conversationDate, createSidebarHistory,
     renderRichText: (container, content) => { container.textContent = String(content || ""); },
     renderAgentAvatar: (target, agent, options) => renderAgentAvatar(target, agent, { ...options, document }), avatarColors, resolveAgentAvatar, installAvatarMotion, setAgentAvatarActivity,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: (id) => timers.delete(id),
-    window: { confirm: (message) => { confirmations.push(message); return confirm(message); }, localStorage: {
+    window: { innerHeight: 900, confirm: (message) => { confirmations.push(message); return confirm(message); }, localStorage: {
       getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key),
     } },
     crypto: { randomUUID: () => `session-${++ids}` },
@@ -270,6 +278,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
       return inspect?.(path) ?? Response.json(readyResult(definition(path.split("/").at(-1))));
     },
   });
+  document.addEventListener("neuma:navigate", (event) => document.dispatchEvent(new Event("neuma:route", { detail: event.detail })));
   vm.runInContext(source, context);
   const emit = (type, detail) => document.dispatchEvent(new Event(type, { detail }));
   await emit("neuma:agents-changed", { items: initialItems, busy: false });
@@ -278,6 +287,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
   return { get, requests, savedConversations, records, stored, emit, route, document, runtimeEvents, profileEvents, confirmations,
     timers, poll: async () => { const pending = [...timers.values()]; timers.clear(); await Promise.all(pending.map((callback) => callback())); await settle(); },
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context),
+    sidebar: (id) => vm.runInContext(`sidebarHistories.get(${JSON.stringify(id)} || route.agentId || "one")`, context),
     history: (id = "one") => vm.runInContext(`history.records(${JSON.stringify(id)})`, context),
     select: (cid, id = "one") => vm.runInContext(`selectConversation(${JSON.stringify(id)}, ${JSON.stringify(cid)})`, context),
     remove: (cid, id = "one") => vm.runInContext(`deleteConversation(${JSON.stringify(id)}, ${JSON.stringify(cid)})`, context),
@@ -351,10 +361,10 @@ const developmentResult = (record, overrides = {}) => ({ agent: null, architectu
   development: record, ...overrides });
 const treeText = (node) => [node.textContent, ...node.children.map(treeText)].join(" ");
 const developmentButton = (ui) => ui.get("agent-making-content").children[0]?.children.at(-1).children.at(-1);
-const avatarTargets = (ui) => [ui.get("sidebar-agent-list").children[0].children[0],
+const avatarTargets = (ui) => [ui.sidebar("one").icon,
   ui.get("agent-messages").children[0].children[0], ui.get("agent-icon")];
 const treeNodes = (node) => [node, ...node.children.flatMap(treeNodes)];
-const historyRows = (ui) => treeNodes(ui.get("agent-history-list")).filter((node) => node.matches(".agent-history-row"));
+const historyRows = (ui) => treeNodes(ui.sidebar().list).filter((node) => node.matches(".agent-history-row"));
 const historyMore = (ui, cid) => historyRows(ui).find((row) => row.children[0].dataset.conversationId === cid)?.children[1];
 function assertStarAvatar(target, icon) {
   assert.equal(target.dataset.avatarKind, "star");
@@ -390,7 +400,56 @@ test("默认小星核使用稳定智能体 ID，侧栏、欢迎区和标题使�
 });
 
 const avatarState = (target) => target.querySelector(".star-avatar")?.dataset.activity;
-const sidebarAvatar = (ui, index = 0) => ui.get("sidebar-agent-list").children[index].children[0];
+const sidebarAvatar = (ui, index = 0) => ui.sidebar(index ? "two" : "one").icon;
+
+test("收起栏显示前五个Agent自己的头像，保持列表顺序且资料更新保留节点与焦点", async () => {
+  const items = Array.from({ length: 8 }, (_, index) => ({ ...requirements[0], id: `agent-${index}`, name: `助手 ${index + 1}`,
+    profile: { icon: `star:${index % 6}:${index % 8}` } }));
+  const ui = await setup({ initialItems: items, initialAgentId: null });
+  const rail = ui.get("sidebar-agent-rail");
+  assert.equal(rail.children.length, 5);
+  assert.deepEqual(rail.children.map((link) => link.dataset.agentId), items.slice(0, 5).map((agent) => agent.id));
+  for (const [index, link] of rail.children.entries()) {
+    assert.equal(link.href, `#agent/${items[index].id}`);
+    assert.equal(link.title, items[index].name);
+    assert.equal(link.getAttribute("aria-label"), `打开${items[index].name}的对话`);
+    assertStarAvatar(link.children[0], items[index].profile.icon);
+  }
+  const link = rail.children[0], star = link.children[0].children[0]; link.focus();
+  await ui.emit("neuma:agents-changed", { items, busy: false });
+  assert.equal(rail.children[0], link); assert.equal(link.children[0].children[0], star);
+  assert.equal(ui.document.activeElement, link);
+  const updated = items.map((item, index) => index ? item : { ...item, profile: { name: "新星河伙伴", icon: "star:4:6" } });
+  await ui.emit("neuma:agents-changed", { items: updated, busy: false });
+  assert.equal(rail.children[0], link); assert.equal(link.title, "新星河伙伴");
+  assertStarAvatar(link.children[0], "star:4:6"); assert.equal(ui.document.activeElement, link);
+  await ui.emit("neuma:agents-changed", { items: [...updated].reverse(), busy: false });
+  assert.deepEqual(rail.children.map((entry) => entry.dataset.agentId), items.slice(0, 5).map((agent) => agent.id));
+  assert.equal(ui.document.activeElement, link);
+  await ui.emit("neuma:agents-changed", { items: updated.slice(1), busy: false });
+  assert.deepEqual(rail.children.map((entry) => entry.dataset.agentId), items.slice(1, 6).map((agent) => agent.id));
+  assert.equal(ui.document.activeElement, ui.get("sidebar-toggle"));
+  await ui.emit("neuma:agents-changed", { items: [], busy: false });
+  assert.equal(rail.children.length, 0); assert.equal(rail.hidden, true);
+});
+
+test("收起栏头像直接进入Agent对话并保留各自草稿，修饰键点击保留原链接行为", async () => {
+  const ui = await setup();
+  ui.get("agent-message").value = "第一位伙伴的草稿";
+  const [one, two] = ui.get("sidebar-agent-rail").children;
+  await two.click();
+  assert.equal(ui.get("agent-title").textContent, requirements[1].name);
+  assert.equal(two.getAttribute("aria-current"), "page");
+  assert.equal(one.getAttribute("aria-current"), null);
+  ui.get("agent-message").value = "第二位伙伴的草稿";
+  await one.click();
+  assert.equal(ui.get("agent-message").value, "第一位伙伴的草稿");
+  const modified = { type: "click", ctrlKey: true };
+  await two.dispatchEvent(modified);
+  assert.equal(modified.defaultPrevented, undefined);
+  assert.equal(ui.get("agent-title").textContent, requirements[0].name);
+  await two.click(); assert.equal(ui.get("agent-message").value, "第二位伙伴的草稿");
+});
 
 test("头像随排队、思考、工具执行和回复切换，连续文本不重建动画节点，完成即复位", async () => {
   const partial = stream(), ui = await setup({ turn: () => partial.response });
@@ -398,10 +457,12 @@ test("头像随排队、思考、工具执行和回复切换，连续文本不�
   const pending = ui.submit("整理材料"); await settle();
   assert.equal(avatarState(header), "thinking");
   assert.equal(avatarState(sidebarAvatar(ui)), "thinking");
+  assert.equal(avatarState(ui.get("sidebar-agent-rail").children[0].children[0]), "thinking");
   assert.equal(avatarState(sidebarAvatar(ui, 1)), "idle");
   for (const [phase, expected] of [["queued", "queued"], ["thinking", "thinking"], ["tool", "working"], ["thinking", "thinking"]]) {
     partial.send({ type: "status", phase }); await settle();
     assert.equal(avatarState(header), expected); assert.equal(avatarState(sidebarAvatar(ui)), expected);
+    assert.equal(avatarState(ui.get("sidebar-agent-rail").children[0].children[0]), expected);
     assert.equal(header.children[0], star);
   }
   partial.send({ type: "text-start" }); partial.send({ type: "text-delta", delta: "已整理" }); await settle();
@@ -412,6 +473,7 @@ test("头像随排队、思考、工具执行和回复切换，连续文本不�
   partial.send({ type: "done", result: completed(ui.requests.find((request) => request.path.endsWith("/turn")).body) });
   partial.close(); await pending;
   assert.equal(avatarState(header), "idle"); assert.equal(avatarState(sidebarAvatar(ui)), "idle");
+  assert.equal(avatarState(ui.get("sidebar-agent-rail").children[0].children[0]), "idle");
   assert.match(treeText(ui.get("sidebar-agent-list").children[0]), /可以运行/);
 });
 
@@ -1124,7 +1186,7 @@ test("左栏逐条显示当前智能体历史，切换继续聊天并刷新恢�
   const ui = await setup();
   await ui.submit("第一条对话"); const first = ui.item().id;
   await ui.get("agent-new-chat").click();
-  assert.equal(ui.get("agent-history-count").textContent, "1");
+  assert.equal(String(ui.sidebar().list.children.length), "1");
   await ui.submit("第二条对话"); const second = ui.item().id;
   assert.notEqual(first, second);
   assert.equal(historyRows(ui).length, 2);
@@ -1139,10 +1201,10 @@ test("左栏逐条显示当前智能体历史，切换继续聊天并刷新恢�
   assert.equal(restored.item().id, first);
   assert.equal(restored.item().messages.length, 4);
   await restored.route("two");
-  assert.equal(restored.get("agent-history-count").textContent, "0");
+  assert.equal(String(restored.sidebar().list.children.length), "0");
 });
 
-test("历史记录按本地日期分组，近7天含前6天并按年月展示更早记录", async () => {
+test("历史默认显示最近4条，展开显示其余记录并保留时间与同步信息", async () => {
   const clock = new Date(2026, 9, 11, 12).getTime();
   const stamp = (year, month, day) => new Date(year, month - 1, day, 10, 30).toISOString();
   const entries = [
@@ -1156,17 +1218,100 @@ test("历史记录按本地日期分组，近7天含前6天并按年月展示更
     messages: [{ role: "user", content: title, delivery: "sent", revision: "1" },
       { role: "assistant", content: "已完成", status: "complete", revision: "1" }] }]));
   const ui = await setup({ clock, records });
-  const titles = ui.get("agent-history-list").children.filter((node) => node.matches(".agent-history-group-title"));
-  assert.deepEqual(titles.map((node) => node.textContent), ["今天", "昨天", "近7天", "10月", "2025年9月", "更早"]);
-  assert.ok(titles.every((node) => node.tagName === "H3"));
+  assert.equal(historyRows(ui).length, 4);
+  assert.equal(ui.sidebar().more.hidden, false);
+  ui.get("agent-message").value = "尚未发送";
+  await ui.sidebar().more.click();
   assert.equal(historyRows(ui).length, 6);
+  assert.equal(ui.get("agent-message").value, "尚未发送");
   const today = historyRows(ui).find((row) => row.children[0].dataset.conversationId === "today");
   const month = historyRows(ui).find((row) => row.children[0].dataset.conversationId === "month");
   const recent = historyRows(ui).find((row) => row.children[0].dataset.conversationId === "recent");
   assert.match(today.children[0].children[1].textContent, /^\d{2}:\d{2}$/);
   assert.match(month.children[0].children[1].textContent, /10\/4/);
   assert.match(recent.children[0].children[1].textContent, /待同步/);
-  assert.doesNotMatch(ui.get("agent-history-feedback").textContent, /按最近更新排列/);
+  assert.doesNotMatch(ui.sidebar().status.textContent, /按最近更新排列/);
+});
+
+test("主导航按Agent懒加载历史，跨Agent选择保留各自输入草稿", async () => {
+  const record = (agentId, id) => ({ schemaVersion: 4, agentId, id, title: `记录-${id}`, saveVersion: 1,
+    mutationId: id, createdAt: "2026-10-14T00:00:00Z", updatedAt: "2026-10-14T00:00:00Z",
+    messages: [{ role: "user", content: `记录-${id}`, revision: "1", delivery: "sent" }] });
+  const ui = await setup({ records: new Map([["two/two-first", record("two", "two-first")],
+    ["two/two-second", record("two", "two-second")]]) });
+  assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/two/conversations").length, 0);
+  const other = ui.sidebar("two");
+  assert.equal(treeNodes(ui.sidebar("one").root).some((node) => node.matches(".sidebar-history-new")), false);
+  assert.equal(treeNodes(other.root).some((node) => node.matches(".sidebar-history-new")), false);
+  assert.equal(ui.get("agent-new-chat").hidden, false);
+  await other.toggle.click();
+  assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/two/conversations").length, 1);
+  assert.equal(other.list.children.length, 2);
+  assert.equal(ui.get("agent-title").textContent, "会议助手");
+  ui.get("agent-message").value = "会议草稿";
+  await other.list.children[1].children[0].click(); await settle();
+  assert.equal(ui.item("two").id, "two-second");
+  assert.equal(ui.get("agent-title").textContent, "日报助手");
+  ui.get("agent-message").value = "日报草稿";
+  await ui.route("one"); assert.equal(ui.get("agent-message").value, "会议草稿");
+  await ui.route("two"); assert.equal(ui.get("agent-message").value, "日报草稿");
+});
+
+test("整个Agent标题区域反复点击开合，头像与空白有效，箭头不会冒泡切换两次", async () => {
+  const ui = await setup(); await ui.submit("已经保存的对话");
+  const view = ui.sidebar("one"), header = view.root.children[0], active = ui.item();
+  ui.get("agent-message").value = "未发送草稿";
+  const reads = ui.requests.filter((entry) => entry.path === "/api/agents/one/conversations").length;
+  for (const [target, open] of [[view.link.children[1], false], [view.icon, true], [header, false], [view.link, true],
+    [view.toggle, false], [view.toggle.children[0].children[0], true]]) {
+    await target.click(); await settle();
+    assert.equal(view.expanded, open);
+    assert.equal(view.link.getAttribute("aria-expanded"), String(open));
+    assert.equal(view.body.inert, !open);
+    assert.equal(ui.item(), active);
+    assert.equal(ui.get("agent-message").value, "未发送草稿");
+  }
+  const closing = { type: "click", bubbles: true }; await view.link.dispatchEvent(closing);
+  assert.equal(closing.defaultPrevented, true, "收起不能导航或切走当前会话");
+  assert.equal(view.expanded, false);
+  const key = { type: "keydown", key: " ", bubbles: true }; await view.link.dispatchEvent(key);
+  assert.equal(key.defaultPrevented, true); assert.equal(view.expanded, true);
+  await view.link.dispatchEvent({ type: "keydown", key: " ", repeat: true, bubbles: true });
+  assert.equal(view.expanded, true, "长按空格不能反复闪动");
+  await view.list.children[0].children[0].click(); assert.equal(view.expanded, true, "点击历史不收起标题");
+  assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/one/conversations").length, reads);
+});
+
+test("刷新恢复未选中Agent的展开历史，删除到4条时更多按钮归还焦点", async () => {
+  const stored = new Map([["neuma.sidebar.history-open.v1.sidebar-agent-history-two", "true"]]);
+  const records = new Map(Array.from({ length: 5 }, (_, index) => {
+    const id = `saved-${index}`, date = new Date(2026, 9, 14, index).toISOString();
+    return [`two/${id}`, { schemaVersion: 4, id, agentId: "two", title: id, saveVersion: 1, mutationId: id,
+      createdAt: date, updatedAt: date, messages: [{ role: "user", content: id, revision: "1", delivery: "sent" }] }];
+  }));
+  const ui = await setup({ stored, records }); await settle();
+  const other = ui.sidebar("two");
+  assert.equal(other.expanded, true); assert.equal(other.list.children.length, 4);
+  assert.equal(other.more.hidden, false); other.more.focus();
+  await ui.remove("saved-0", "two");
+  assert.equal(other.more.hidden, true);
+  assert.equal(ui.document.activeElement, other.toggle);
+  assert.equal(ui.get("agent-title").textContent, "会议助手");
+});
+
+test("首次历史读取迟到时，跨Agent切换仍保留临时空对话的输入草稿", async () => {
+  let release;
+  const record = { schemaVersion: 4, id: "saved-one", agentId: "one", title: "已保存历史", saveVersion: 1,
+    mutationId: "saved-one", createdAt: "2026-10-14T00:00:00Z", updatedAt: "2026-10-14T00:00:00Z",
+    messages: [{ role: "user", content: "已保存历史", delivery: "sent", revision: "1" }] };
+  const ui = await setup({ initialAgentId: null, records: new Map([["one/saved-one", record]]),
+    historyRequest: (path) => path === "/api/agents/one/conversations" ? new Promise((done) => { release = done; }) : undefined });
+  const opening = ui.route("one"); await settle();
+  ui.get("agent-message").value = "会议未发送草稿";
+  await ui.route("two"); ui.get("agent-message").value = "日报未发送草稿";
+  release(Response.json({ conversations: [record] })); await opening;
+  await ui.route("one"); assert.equal(ui.get("agent-message").value, "会议未发送草稿");
+  await ui.route("two"); assert.equal(ui.get("agent-message").value, "日报未发送草稿");
 });
 
 test("历史操作菜单按记录切换且互斥，Esc返回触发按钮，外部点击关闭", async () => {
@@ -1246,7 +1391,7 @@ test("删除非当前历史时焦点避开禁用按钮，成功或失败都保�
     const deleting = ui.get("agent-history-delete").click(); await settle();
     assert.equal(ui.item().id, current);
     assert.equal(historyMore(ui, removed).disabled, true);
-    assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+    assert.equal(ui.document.activeElement, ui.sidebar().toggle);
     assert.equal(ui.document.activeElement.disabled, false);
     if (success) {
       ui.records.set(`one/${removed}`, { id: removed, agentId: "one", deletedAt: new Date().toISOString() });
@@ -1255,11 +1400,11 @@ test("删除非当前历史时焦点避开禁用按钮，成功或失败都保�
     await deleting;
     assert.equal(ui.item().id, current);
     assert.equal(ui.get("agent-conversation-title").textContent, "当前对话");
-    assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+    assert.equal(ui.document.activeElement, ui.sidebar().toggle);
     if (success) assert.equal(ui.history().some((item) => item.id === removed), false);
     else {
       assert.equal(ui.history().some((item) => item.id === removed), true);
-      assert.match(`${ui.get("agent-error").textContent} ${ui.get("agent-history-feedback").textContent}`, /删除失败/);
+      assert.match(`${ui.get("agent-error").textContent} ${ui.sidebar().status.textContent}`, /删除失败/);
     }
   }
 });
@@ -1283,14 +1428,14 @@ test("删除当前历史打开剩余记录，删除最后一条回到空白，�
   await ui.get("agent-new-chat").click(); await ui.submit("删除的对话"); const second = ui.item().id;
   await ui.remove(second);
   assert.equal(ui.item().id, first);
-  assert.equal(ui.get("agent-history-count").textContent, "1");
+  assert.equal(String(ui.sidebar().list.children.length), "1");
   assert.equal(ui.records.get(`one/${second}`).messages, undefined);
   const restored = await setup({ stored: ui.stored, records: ui.records });
   assert.equal(restored.item().id, first);
   assert.equal(restored.history().some((entry) => entry.id === second), false);
   await restored.remove(first);
   assert.equal(restored.item().messages.length, 0);
-  assert.equal(restored.get("agent-history-count").textContent, "0");
+  assert.equal(String(restored.sidebar().list.children.length), "0");
 });
 
 test("切换历史对话即停止原任务，保存部分回复且忽略迟到文本", async () => {
@@ -1312,27 +1457,27 @@ test("切换历史对话即停止原任务，保存部分回复且忽略迟到�
 
 test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存", async () => {
   const ui = await setup({ stored: new Map([["neuma-agent-artifacts-collapsed", "true"]]) });
-  assert.equal(ui.get("agent-history-body").hidden, false);
-  assert.equal(ui.get("agent-history-body").inert, false);
-  assert.equal(ui.get("agent-history-body").attributes.get("aria-hidden"), "false");
-  await ui.get("agent-history-toggle").click();
-  assert.equal(ui.get("agent-workspace").classes.has("history-collapsed"), true);
-  assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+  assert.equal(ui.sidebar().body.hidden, false);
+  assert.equal(ui.sidebar().body.inert, false);
+  assert.equal(ui.sidebar().body.attributes.get("aria-hidden"), "false");
+  await ui.sidebar().toggle.click();
+  assert.equal(ui.sidebar().root.classes.has("history-collapsed"), true);
+  assert.equal(ui.document.activeElement, ui.sidebar().toggle);
   const previous = ui.item().id;
   ui.get("agent-message").value = "旧对话草稿";
   await ui.get("agent-new-chat").click();
   assert.notEqual(ui.item().id, previous);
   assert.equal(ui.get("agent-message").value, "");
   assert.equal(ui.document.activeElement, ui.get("agent-message"));
-  assert.equal(ui.get("agent-history-body").hidden, false);
-  assert.equal(ui.get("agent-history-body").inert, true);
-  assert.equal(ui.get("agent-history-body").attributes.get("aria-hidden"), "true");
+  assert.equal(ui.sidebar().body.hidden, false);
+  assert.equal(ui.sidebar().body.inert, true);
+  assert.equal(ui.sidebar().body.attributes.get("aria-hidden"), "true");
   assert.equal(ui.get("agent-conversation").hidden, false);
   const restored = await setup({ stored: ui.stored });
-  assert.equal(restored.get("agent-history-body").hidden, false);
-  assert.equal(restored.get("agent-history-body").inert, true);
-  assert.equal(restored.get("agent-history-body").attributes.get("aria-hidden"), "true");
-  assert.equal(restored.get("agent-history-toggle").attributes.get("aria-expanded"), "false");
+  assert.equal(restored.sidebar().body.hidden, false);
+  assert.equal(restored.sidebar().body.inert, true);
+  assert.equal(restored.sidebar().body.attributes.get("aria-hidden"), "true");
+  assert.equal(restored.sidebar().toggle.attributes.get("aria-expanded"), "false");
 });
 
 test("历史栏从列表内收起返还焦点，反复开合不改变对话和输入草稿", async () => {
@@ -1344,17 +1489,17 @@ test("历史栏从列表内收起返还焦点，反复开合不改变对话和�
   ui.get("agent-message").value = "尚未发送的任务草稿";
   historyRows(ui)[0].children[0].focus();
   for (let index = 0; index < 4; index++) {
-    await ui.get("agent-history-toggle").click();
-    assert.equal(ui.get("agent-history-body").inert, index % 2 === 0);
-    assert.equal(ui.get("agent-history-body").attributes.get("aria-hidden"), String(index % 2 === 0));
-    assert.equal(ui.get("agent-history-body").hidden, false);
+    await ui.sidebar().toggle.click();
+    assert.equal(ui.sidebar().body.inert, index % 2 === 0);
+    assert.equal(ui.sidebar().body.attributes.get("aria-hidden"), String(index % 2 === 0));
+    assert.equal(ui.sidebar().body.hidden, false);
     assert.equal(ui.get("agent-message").value, "尚未发送的任务草稿");
     assert.equal(ui.item(), item); assert.equal(item.title, title);
     assert.equal(JSON.stringify(item.messages), messages); assert.equal(JSON.stringify([...ui.records]), records);
     assert.equal(ui.requests.length, requests);
-    if (index % 2 === 0) assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+    if (index % 2 === 0) assert.equal(ui.document.activeElement, ui.sidebar().toggle);
   }
-  assert.equal(ui.stored.get("neuma.agent.history-collapsed.v1"), "false");
+  assert.equal(ui.stored.get("neuma.sidebar.history-open.v1.sidebar-agent-history-one"), "true");
 });
 
 test("磁盘对话优先于浏览器旧备份，读取不会覆盖服务器已有内容", async () => {
@@ -1397,7 +1542,7 @@ test("读取失败保留完整浏览器备份，后续任务不会被再次进�
   const ui = await setup({ stored: original.stored, records: original.records,
     historyRequest: (_path, body) => !body ? Response.json({ error: "服务未响应" }, { status: 503 }) : undefined });
   assert.equal(ui.item().messages[0].content, "备份消息");
-  assert.match(ui.get("agent-history-feedback").textContent, /历史对话暂时无法读取.*服务未响应/);
+  assert.match(ui.sidebar().status.textContent, /历史对话暂时无法读取.*服务未响应/);
   await ui.submit("新任务");
   await ui.route(null); await ui.route("one");
   assert.equal(ui.item().messages.at(-2).content, "新任务");
@@ -1494,7 +1639,7 @@ test("构建只切换指定工作区，按真实阶段展示制作并在就绪�
   ui.get("agent-message").value = "保留下一项任务草稿";
   const pending = ui.get("agent-build").click(); await settle();
   assert.equal(ui.get("agent-making-panel").hidden, false);
-  assert.equal(ui.get("agent-history-sidebar").hidden, true);
+  assert.ok(ui.sidebar("one").root);
   assert.equal(ui.get("agent-conversation").hidden, true);
   assert.equal(ui.get("agent-conversation-actions").hidden, true);
   assert.equal(ui.get("agent-title").textContent, requirements[0].name);
@@ -1508,7 +1653,7 @@ test("构建只切换指定工作区，按真实阶段展示制作并在就绪�
   assert.match(treeText(stage()), /架构设计/);
   partial.send({ type: "done", result: readyResult(designedDefinition()) }); partial.close(); await pending;
   assert.equal(ui.get("agent-making-panel").hidden, true);
-  assert.equal(ui.get("agent-history-sidebar").hidden, false);
+  assert.ok(ui.sidebar("one").root);
   assert.equal(ui.get("agent-conversation").hidden, false);
   assert.equal(ui.get("agent-conversation-actions").hidden, false);
   assert.equal(ui.get("agent-message").value, "保留下一项任务草稿");
@@ -1603,14 +1748,14 @@ test("展示 overlay 同步标题、简介、emoji和消息标签，不改变构
   assert.equal(ui.get("agent-title").textContent, "我的会议伙伴");
   assert.equal(ui.get("agent-subtitle").textContent, "");
   assert.equal(ui.get("agent-icon").textContent, "📝");
-  assert.equal(ui.get("sidebar-agent-list").children[0].children[0].textContent, "📝");
+  assert.equal(ui.sidebar("one").icon.textContent, "📝");
   for (const target of avatarTargets(ui)) {
     assert.equal(target.textContent, "📝");
     assert.equal(target.dataset.avatarKind, "text");
     assert.equal(target.classes.has("has-star-avatar"), false);
     assert.equal(target.children.length, 0);
   }
-  assert.equal(ui.get("sidebar-agent-list").children[0].children[1].children[0].textContent, "我的会议伙伴");
+  assert.equal(ui.sidebar("one").link.children[1].textContent, "我的会议伙伴");
   assert.equal(ui.get("agent-messages").children[0].children[1].textContent, "这里是「我的会议伙伴」的对话");
   assert.equal(ui.runtime().status, "ready");
   assert.equal(ui.runtime().definition.revision, 1);

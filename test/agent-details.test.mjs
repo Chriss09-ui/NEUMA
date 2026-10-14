@@ -723,19 +723,20 @@ test("空产物库可关闭，刷新失败保留旧列表和预览，文件读�
   assert.equal(ui.get("agent-file-content").children[0].textContent, "已生成的成果");
 });
 
-test("产物列表位于独立文件库弹窗，历史对话栏不再承载文件", async () => {
+test("产物列表位于独立文件库弹窗，主导航历史不承载文件", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const start = html.indexOf('<dialog id="agent-file-dialog"');
   const library = html.slice(start, html.indexOf("</dialog>", start));
   assert.match(library, /aria-labelledby="agent-artifacts-title"/);
   for (const id of ["agent-file-list", "agent-files-refresh", "agent-file-content", "agent-file-download"])
     assert.ok(library.includes(`id="${id}"`));
-  assert.match(html, /id="agent-history-sidebar"/);
+  assert.match(html, /id="sidebar-agent-list"/);
+  assert.doesNotMatch(html, /id="agent-history-sidebar"/);
   assert.match(html, /id="agent-artifacts-open"[^>]*aria-controls="agent-file-dialog"/);
   assert.doesNotMatch(html, /id="agent-artifacts-sidebar"|id="agent-save-chat"/);
 });
 
-test("胶囊、历史加号和侧栏产物入口唯一且保留 ARIA 关联与对话恢复顺序", async () => {
+test("胶囊、顶部加号和侧栏产物入口唯一且保留 ARIA 关联与对话恢复顺序", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const tags = [...html.matchAll(/<([a-z][\w-]*)\b[^>]*>/g)];
   const attribute = (tag, name) => [...tag[0].matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)].find((match) => match[1] === name)?.[3];
@@ -765,8 +766,9 @@ test("胶囊、历史加号和侧栏产物入口唯一且保留 ARIA 关联与�
   const newChat = element("agent-new-chat"), error = element("agent-error"), recovery = element("agent-save-actions");
   assert.equal(newChat[1], "button"); assert.equal(attribute(newChat, "type"), "button");
   assert.ok(attribute(newChat, "aria-label"));
-  const history = element("agent-history-sidebar");
-  assert.ok(html.slice(history.index, html.indexOf("</aside>", history.index)).includes(newChat[0]));
+  const actions = element("agent-chat-actions");
+  assert.ok(header.includes(actions[0])); assert.ok(header.includes(newChat[0]));
+  assert.doesNotMatch(html, /id="agent-history-(?:sidebar|heading|resize)"/);
   for (const control of [error, recovery, element("agent-chat-form")]) assert.ok(conversation.includes(control[0]));
   assert.ok(newChat.index < element("agent-messages").index);
   assert.equal(conversation.includes(element("agent-artifacts-open")[0]), false);

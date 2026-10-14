@@ -23,7 +23,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
     conversation.inert = appMode && !assistantVisible;
     conversation.setAttribute("aria-hidden", String(conversation.inert));
     const actions = byId("agent-conversation-actions");
-    const actionsHost = byId(assistantVisible ? "agent-assistant-actions" : "agent-history-heading");
+    const actionsHost = byId(assistantVisible ? "agent-assistant-actions" : "agent-chat-actions");
     if (actions.parentElement !== actionsHost) actionsHost.append(actions);
     byId("agent-view-switch").hidden = !available;
     byId("agent-assistant-toggle").hidden = !appMode || settingsOpen;
