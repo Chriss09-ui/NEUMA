@@ -11,6 +11,7 @@ let route = { page: "chat", projectView: "list" };
 let contextId = null, listSignature = "";
 let folderController = null, suggestedProjectName = "";
 let adding = false, addFailed = false, renderedConfiguration;
+let addTask = null;
 let listVersion = 0;
 let inspectingId = null;
 
@@ -22,18 +23,21 @@ function displayedReply(reply) { return { ...reply, content: nuemaText(reply.con
 
 function addFailureMessage(failure) {
   if (failure?.diagnostic && typeof failure.message === "string") {
-    return /^添加失败/.test(failure.message) ? failure.message : `添加失败：${failure.message.replace(/[。.!！\s]+$/, "")}。项目未加入列表。`;
+    return (/^添加失败/.test(failure.message) ? failure.message : `添加失败：${failure.message.replace(/[。.!！\s]+$/, "")}。项目尚未添加成功。`)
+      .replace(/项目未加入列表/g, "项目尚未添加成功");
   }
   if (/failed to fetch|fetch failed|load failed|network|连接中断/i.test(failure?.message ?? "")) {
     return "添加失败：与本机服务的连接中断，请确认 NEUMA 正在运行后重试。";
   }
-  return "添加失败：项目检查未完成，请稍后重试。项目未加入列表。";
+  return "添加失败：项目检查未完成，请稍后重试。项目尚未添加成功。";
 }
 
-async function api(path, body) {
+async function api(path, body, { signal, onProgress } = {}) {
   const setup = body !== undefined && (path === "/api/projects" || path.endsWith("/inspect"));
-  const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json", ...(setup ? { accept: "application/x-ndjson" } : {}) }, body: JSON.stringify(body) });
+  const response = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json", ...(setup ? { accept: "application/x-ndjson" } : {}) }, body: JSON.stringify(body), ...(signal ? { signal } : {}) });
   if (setup) return readReply(response, (event) => {
+    if (signal?.aborted) return;
+    if (onProgress) { onProgress(event); return; }
     if (event.type !== "status" || !event.label) return;
     if (adding) byId("project-folder-status").textContent = nuemaText(event.label);
     else feedback(event.label);
@@ -112,19 +116,24 @@ function renderMessages(scrollToEnd = true) {
 
 function render() {
   const query = byId("project-search").value.trim().toLowerCase();
+  const hasAddition = addTask && addTask.status !== "complete" && !projects.some((item) => item.path === addTask.path);
+  const addition = hasAddition && `${addTask.name} ${addTask.path} ${addTask.description}`.toLowerCase().includes(query)
+    ? { id: addTask.id, name: addTask.name, path: addTask.path, status: addTask.status,
+      description: addTask.description, progress: addTask.progress, cancelRequested: addTask.cancelRequested } : null;
   const presented = projects.map((item) => item.id === inspectingId
     ? { ...item, canLaunch: false, setup: { status: "checking", summary: "NEUMA 正在检查最新的项目说明和启动入口…" } } : item);
   const shown = presented.filter((item) => `${item.name} ${item.description ?? ""}`.toLowerCase().includes(query));
   const activeId = route.projectView === "list" || (route.projectView === "add" && !byId("manage-projects").hidden) ? selectedId : null;
-  const signature = JSON.stringify([shown, activeId, query, projects.length, busy]);
+  const signature = JSON.stringify([shown, addition, activeId, query, projects.length, busy]);
   if (signature !== listSignature) {
     listSignature = signature;
     renderProjectList({ container: byId("projects-list"), selectedId: activeId, busy: false, projects: shown,
+      addition, onViewAddition: viewAddTask, onCancelAddition: cancelAdd, onDismissAddition: dismissAddTask,
       emptyText: projects.length ? "没有匹配的项目" : "还没有项目",
       onClearSearch: query ? () => { byId("project-search").value = ""; render(); byId("project-search").focus(); } : null,
       onSelect: openProject, onInspect: (id) => runAction("inspect", {}, id), removeDisabled: busy, onRemove: (id) => runAction("remove", {}, id) });
   }
-  byId("project-count").textContent = projects.length;
+  byId("project-count").textContent = projects.length + (hasAddition ? 1 : 0);
   const project = presented.find((item) => item.id === selectedId);
   const configuration = JSON.stringify([project?.setup, project?.launch, project?.allowLaunch, project?.root]);
   if (renderedId !== selectedId || renderedConfiguration !== configuration) {
@@ -148,12 +157,57 @@ function render() {
   byId("project-add-submit").disabled = busy || Boolean(folderController);
   byId("project-add-submit").textContent = adding ? "正在识别…" : addFailed ? "重试添加" : "添加并自动配置";
   byId("project-add-form").setAttribute("aria-busy", String(adding));
+  byId("project-add-cancel").disabled = false;
+  byId("project-add-cancel").textContent = adding ? "后台继续" : "关闭";
+  byId("project-add-stop").hidden = !adding;
+  byId("project-add-stop").disabled = Boolean(addTask?.cancelRequested);
+  byId("project-add-stop").textContent = addTask?.cancelRequested ? "取消中…" : "取消添加";
   byId("project-send").disabled = byId("project-new-chat").disabled = busy;
   input.disabled = busy && !chatting;
   byId("project-send").hidden = chatting;
   byId("project-cancel").hidden = !chatting;
   byId("project-cancel").disabled = cancelling;
+  byId("project-operation-status").hidden = !busy || (chatting && route.projectView === "assistant");
+  byId("project-operation-label").textContent = chatting
+    ? cancelling ? "正在停止项目助手…" : "项目助手正在处理请求，完成后可重新识别或删除项目。"
+    : adding ? "正在添加并识别项目，完成后可操作项目。"
+      : inspectingId ? "正在重新识别项目，完成后可操作项目。" : "正在处理项目操作，请稍候。";
+  byId("project-operation-assistant").hidden = !chatting;
+  byId("project-operation-cancel").hidden = !chatting;
+  byId("project-operation-cancel").disabled = cancelling;
+  byId("project-operation-cancel").textContent = cancelling ? "停止中…" : "停止回复";
   byId("project-compose-hint").textContent = chatting ? "可以先写下一条消息" : "Enter 发送 · Shift + Enter 换行";
+}
+
+function cancelAdd() {
+  if (!adding || !addTask || addTask.cancelRequested) return;
+  addTask.cancelRequested = true;
+  addTask.progress = "正在停止项目检查…";
+  render();
+  addTask.controller.abort();
+}
+
+function waitForAdd(request, signal) {
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    if (signal.aborted) aborted();
+    request.then((result) => {
+      signal.removeEventListener("abort", aborted); resolve(result);
+    }, (failure) => {
+      signal.removeEventListener("abort", aborted); reject(failure);
+    });
+  });
+}
+byId("project-add-stop").addEventListener("click", cancelAdd);
+function viewAddTask() {
+  if (!addTask) return;
+  if (addTask.status === "complete") openProject(addTask.projectId);
+  else navigate({ page: "projects", projectView: "add" });
+}
+function dismissAddTask() {
+  if (adding) return;
+  addTask = null; render();
 }
 
 async function refresh() {
@@ -187,17 +241,16 @@ async function runAction(action, body = {}, actionId = selectedId) {
       const message = `无法停止“${target.name}”。\n\n${nuemaText(failure.message)}\n\n是否仅从 NEUMA 中移除这个项目？本地文件不会删除。`;
       if (!window.confirm(message)) {
         showError("manage-error", "已保留项目记录。停止未完成，可以修复停止脚本后重试，或再次删除并选择仅移除记录。");
-        await refresh(); return;
+        return;
       }
       result = await api(`/api/projects/${actionId}/remove`, { confirm: true, removeOnly: true });
     }
     if (action === "remove") removeFromView(actionId);
-    if (action === "inspect") {
+    if (action !== "remove" && result.project?.id === actionId) {
       listVersion++;
       projects = projects.map((project) => project.id === actionId ? result.project : project);
     }
     if (["configure", "inspect", "remove"].includes(action)) renderedId = undefined;
-    await refresh();
     feedback(action === "inspect" ? result.project.canLaunch ? "NEUMA 已更新启动方式，可以打开项目了。"
       : result.project.setup?.status === "paused" ? "检查已暂停，可以稍后继续。" : "项目检查已结束，请查看下方结果。"
       : { configure: "启动方式已保存", start: "", stop: "项目已停止", remove: result.project?.servicesMayBeRunning
@@ -205,7 +258,11 @@ async function runAction(action, body = {}, actionId = selectedId) {
         : `已删除“${target?.name}”，本地项目文件已保留。` }[action]);
     if (action === "remove") byId("project-assistant-home").focus({ preventScroll: true });
   } catch (failure) { showError(route.projectView === "assistant" ? "project-error" : "manage-error", failure.message); }
-  finally { inspectingId = null; busy = false; render(); }
+  finally {
+    inspectingId = null; busy = false; render();
+    // Updating the list must not keep a completed operation's controls locked.
+    void refresh();
+  }
 }
 
 async function chooseProjectFolder() {
@@ -254,33 +311,55 @@ byId("project-path").addEventListener("input", () => {
 
 byId("project-add-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (busy || folderController) return;
+  const name = byId("project-name").value.trim(), description = byId("project-description").value.trim();
+  const path = byId("project-path").value.trim();
+  const task = { id: `adding-${crypto.randomUUID()}`, controller: new AbortController(), path, description,
+    name: name || path.split(/[\\/]/).filter(Boolean).at(-1) || "本地项目",
+    status: "adding", progress: "正在读取项目说明和启动入口…", cancelRequested: false };
+  addTask = task;
+  byId("project-search").value = "";
   busy = adding = true; addFailed = false; showError("add-error"); feedback();
   byId("project-folder-status").textContent = "正在添加并检查项目…"; render();
   try {
-    const name = byId("project-name").value.trim(), description = byId("project-description").value.trim();
-    const result = await api("/api/projects", { path: byId("project-path").value.trim(),
-      ...(name ? { name } : {}), ...(description ? { description } : {}) });
+    const result = await waitForAdd(api("/api/projects", { path, ...(name ? { name } : {}), ...(description ? { description } : {}) }, {
+      signal: task.controller.signal,
+      onProgress: (progress) => {
+        if (addTask !== task || task.cancelRequested || progress.type !== "status" || !progress.label) return;
+        task.progress = nuemaText(progress.label);
+        byId("project-folder-status").textContent = task.progress;
+        render();
+      },
+    }), task.controller.signal);
+    if (addTask !== task) return;
+    task.controller.signal.throwIfAborted();
     if (!result.project?.id || result.project.canLaunch !== true) throw new Error("添加未完成");
+    task.status = "complete"; task.projectId = result.project.id;
+    task.progress = "启动方式已配好，可以查看项目。";
     listVersion++;
     projects = projects.some((project) => project.id === result.project.id)
       ? projects.map((project) => project.id === result.project.id ? result.project : project) : [...projects, result.project];
     for (const id of ["project-path", "project-name", "project-description"]) byId(id).value = "";
     suggestedProjectName = "";
     byId("project-folder-status").textContent = "选择项目所在的文件夹，也可以直接填写本机路径。";
-    await refresh();
+    void refresh();
     if (route.page === "projects" && route.projectView === "add") {
       byId("project-search").value = ""; renderedId = undefined;
       openProject(result.project.id);
     }
     feedback("项目已添加，启动方式已配好。点击“打开项目”即可使用。");
   } catch (failure) {
-    addFailed = true;
-    const message = addFailureMessage(failure);
-    showError("add-error", message);
-    byId("project-folder-status").textContent = "输入已保留，可以稍后直接重试。";
+    if (addTask !== task) return;
+    const stopped = task.cancelRequested && task.controller.signal.aborted;
+    addFailed = !stopped;
+    task.status = stopped ? "cancelled" : "failed";
+    const message = stopped ? "已取消添加。输入已保留，可以重新添加。" : addFailureMessage(failure);
+    task.progress = message;
+    showError("add-error", stopped ? "" : message);
+    byId("project-folder-status").textContent = message;
     if (route.page === "projects" && route.projectView !== "add") feedback(message);
+    if (stopped) void refresh();
   }
-  finally { busy = adding = false; render(); }
+  finally { if (addTask === task) { busy = adding = false; render(); } }
 });
 
 byId("project-chat-form").addEventListener("submit", async (event) => {
@@ -323,7 +402,7 @@ byId("project-chat-form").addEventListener("submit", async (event) => {
     reply.status = stopped ? "stopped" : "error";
     reply.error = stopped ? "已执行的项目操作会保留，可在项目列表查看状态。" : failure.message;
     if (!stopped && !input.value.trim()) { input.value = message; input.dispatchEvent(new Event("input")); }
-    await refresh();
+    void refresh();
   } finally {
     if (requestSession === sessionId) {
       busy = chatting = cancelling = false; pendingReply = replyView = activeController = null;
@@ -332,15 +411,21 @@ byId("project-chat-form").addEventListener("submit", async (event) => {
     }
   }
 });
-byId("project-cancel").addEventListener("click", async () => {
+async function cancelReply() {
   if (!chatting || cancelling) return;
   const requestSession = sessionId, reply = pendingReply, previous = reply.status, controller = activeController;
   cancelling = true; reply.cancelRequested = true; reply.status = "stopping"; replyView?.update(displayedReply(reply)); render();
   try { await api("/api/projects/cancel", { sessionId: requestSession }); controller?.abort(); }
   catch (failure) {
-    if (sessionId === requestSession && chatting) { reply.cancelRequested = false; reply.status = previous; replyView?.update(displayedReply(reply)); showError("project-error", failure.message); }
+    if (sessionId === requestSession && chatting) {
+      reply.cancelRequested = false; reply.status = previous; replyView?.update(displayedReply(reply));
+      showError(route.projectView === "assistant" ? "project-error" : "manage-error", failure.message);
+    }
   } finally { if (sessionId === requestSession) { cancelling = false; render(); } }
-});
+}
+byId("project-cancel").addEventListener("click", cancelReply);
+byId("project-operation-cancel").addEventListener("click", cancelReply);
+byId("project-operation-assistant").addEventListener("click", () => navigate({ page: "projects", projectView: "assistant" }));
 byId("project-new-chat").addEventListener("click", () => {
   if (busy) return;
   sessionId = crypto.randomUUID(); messages = []; contextId = null; input.value = ""; showError("project-error"); feedback(); render(); renderMessages(); input.focus();
@@ -373,7 +458,7 @@ document.addEventListener("neuma:route", (event) => {
 document.addEventListener("neuma:settings-changed", () => {
   activeController?.abort(); activeController = null;
   sessionId = crypto.randomUUID(); messages = []; pendingReply = replyView = null;
-  busy = chatting = cancelling = false; render(); renderMessages();
+  busy = adding; chatting = cancelling = false; render(); renderMessages();
 });
 setInterval(() => { if (watching() && document.visibilityState === "visible") void refresh(); }, 3000);
 render(); renderMessages();
