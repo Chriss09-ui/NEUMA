@@ -79,6 +79,9 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   const sidebar = await invoke(handler, "GET", "/sidebar-history.js");
   assert.equal(sidebar.status, 200);
   assert.match(sidebar.text, /export function createSidebarHistory/);
+  const capabilities = await invoke(handler, "GET", "/group-capabilities.js");
+  assert.equal(capabilities.status, 200);
+  assert.match(capabilities.headers["content-type"], /javascript/);
   assert.match(page.text, /id="reset"[^>]*>＋ 新对话/);
   assert.match(page.text, /id="diagnostics"[^>]*>导出诊断记录/);
 

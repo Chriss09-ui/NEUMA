@@ -4,7 +4,8 @@ import { renderAgentAvatar } from "./agent-avatar.js";
 import { renderGroupAvatar } from "./group-avatar.js";
 import { createSelectMenu } from "./select-menu.js";
 import { createSidebarHistory } from "./sidebar-history.js";
-import { button, node, notice, renderMembers, renderMessages, renderTasks, terminalTask } from "./group-view.js";
+import { createGroupCapabilities } from "./group-capabilities.js";
+import { button, node, notice, renderMessages, renderTasks, terminalTask } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = (id) => document.getElementById(id);
 const groupPanel = byId("group-panel"), groupShell = byId("group-page-shell"), groupMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -20,6 +21,7 @@ const collapsedGroups = new Map();
 const COLLAPSED_GROUP_LIMIT = 2;
 let pendingSidebarTask = null;
 const materials = createGroupMaterials({ api, current: () => data, refresh: load, changed: controls });
+const memberCapabilities = createGroupCapabilities(byId("group-members"));
 const navigate = (detail) => document.dispatchEvent(new CustomEvent("neuma:navigate", { detail }));
 const recipientMenu = createSelectMenu({ select: byId("group-recipient"), trigger: byId("group-recipient-trigger"),
   menu: byId("group-recipient-menu"), value: byId("group-recipient-value"), icon: byId("group-recipient-icon"),
@@ -132,12 +134,16 @@ function settingsFocus() {
   if (!settingsGroupId || !groupPanel.contains(focused)) return null;
   for (const [kind, key] of [["members", "memberId"], ["tasks", "taskId"]]) {
     const card = [...byId(`group-${kind}`).children].find((item) => item.contains(focused));
-    if (card?.dataset[key]) return { kind, id: card.dataset[key], first: card.children[0].contains(focused) };
+    if (card?.dataset[key]) return { kind, id: card.dataset[key], first: card.children[0].contains(focused), element: focused };
   }
   return null;
 }
 function restoreSettingsFocus(focused) {
   if (!focused || settingsGroupId !== route.groupId) return;
+  if (groupPanel.contains(focused.element)) {
+    if (document.activeElement !== focused.element) focused.element.focus({ preventScroll: true });
+    return;
+  }
   const key = focused.kind === "members" ? "memberId" : "taskId";
   const card = [...byId(`group-${focused.kind}`).children].find((item) => item.dataset[key] === focused.id);
   const target = focused.first ? card?.children[0] : card?.children[card.children.length - 1];
@@ -296,7 +302,7 @@ function render() {
   for (const member of data.members || []) { const option = node("option", "", member.name + (member.ready ? "" : "（未就绪）")); option.value = member.id; option.disabled = !member.ready; recipient.append(option); }
   if (data.members?.some((member) => member.id === previous && member.ready)) recipient.value = previous;
   renderMessages(byId("group-messages"), data.messages || [], selectedTask, data.members || [], data.tasks || []);
-  renderMembers(byId("group-members"), data.members || []);
+  memberCapabilities.render(data.members || [], group.id);
   renderTasks(byId("group-tasks"), data.tasks || [], selectedTask, { onSelect: chooseTask, onStop: stop, members: data.members || [] });
   for (const [index, task] of [...(data.tasks || [])].reverse().entries()) byId("group-tasks").children[index].dataset.taskId = task.id;
   materials.render(); controls(); renderSidebarGroups(); restoreSettingsFocus(focused);
@@ -453,6 +459,7 @@ document.addEventListener("neuma:route", (event) => {
   recipientMenu.close();
   if (route.page === "group" && route.groupId) drafts.set(route.groupId, byId("group-message").value);
   const previous = route.groupId; route = event.detail; clearInterval(pollTimer); pollTimer = null; requestSequence++;
+  if (route.page !== "group" || previous !== route.groupId) memberCapabilities.reset();
   if (pendingSidebarTask && (route.page !== "group" || route.groupId !== pendingSidebarTask.groupId)) pendingSidebarTask = null;
   renderLibrary();
   if (route.page === "groups") void list();
@@ -467,7 +474,7 @@ document.addEventListener("neuma:route", (event) => {
       byId("group-details-name").textContent = ""; byId("group-purpose").textContent = "";
       byId("group-panel-toggle").title = ""; byId("group-title").title = "";
       byId("group-messages").replaceChildren(node("p", "muted-note", "正在加载群消息…"));
-      byId("group-members").replaceChildren(); byId("group-tasks").replaceChildren();
+      byId("group-tasks").replaceChildren();
     }
     byId("group-message").value = drafts.get(route.groupId) || "";
     void load(); pollTimer = setInterval(() => void poll(), 2500);
