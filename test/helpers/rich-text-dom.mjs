@@ -3,15 +3,24 @@ export function richTextDocument(t) {
   const document = { compatMode: "CSS1Compat" };
   class Node {
     constructor(tagName, text) { this.tagName = tagName; this.ownerDocument = document; this.nodeValue = text; }
-    children = []; attributes = new Map(); className = ""; style = {}; replacements = 0;
+    children = []; attributes = new Map(); className = ""; style = {}; dataset = {}; replacements = 0;
+    scrollHeight = 0; scrollTop = 0; clientHeight = 0;
     classList = {
       add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(" "); },
       contains: (name) => this.className.split(/\s+/).includes(name),
+      toggle: (name, force) => {
+        const enabled = force ?? !this.classList.contains(name);
+        if (enabled) this.classList.add(name);
+        else this.className = this.className.split(/\s+/).filter((value) => value && value !== name).join(" ");
+        return enabled;
+      },
     };
+    get firstElementChild() { return this.children.find((child) => child.tagName); }
     get textContent() { return this.nodeValue ?? this.children.map((child) => child.textContent).join(""); }
     set textContent(value) { this.nodeValue = undefined; this.children = value ? [document.createTextNode(String(value))] : []; }
     set innerHTML(_value) { throw new Error("Rich text must not parse HTML strings"); }
     append(...nodes) { for (const node of nodes) this.appendChild(typeof node === "string" ? document.createTextNode(node) : node); }
+    prepend(...nodes) { const previous = this.children; this.children = []; this.append(...nodes); this.children.push(...previous); }
     appendChild(node) {
       if (node.isFragment) { this.append(...node.children); node.children = []; }
       else { this.children.push(node); node.parentNode = this; }

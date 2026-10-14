@@ -6,6 +6,7 @@ import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, c
 import { createDevelopmentView } from "./agent-details-view.js";
 import { createAgentMakingView } from "./agent-build-view.js";
 import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "./agent-avatar.js";
+import { conversationDate } from "./group-view.js";
 
 installAvatarMotion(document, window);
 
@@ -37,6 +38,7 @@ const history = new AgentConversationHistory({ api, storage, exists: (id) => age
     if (messagesChanged) renderMessages(current());
     renderControls(current());
     const item = conversation(id);
+    renderConversationDate(item);
     byId("agent-conversation-title").textContent = item.messages.length || item.saveVersion ? item.title : agentDisplayName(current());
     renderStorageNote(current());
   } });
@@ -129,7 +131,8 @@ function renderHistory(agent) {
     || historyActionErrors.get(agent.id)
     || (!records.length ? "还没有对话\n发送第一条消息后，会保存在这里。" : "");
   byId("agent-workspace").classList.toggle("history-collapsed", historyCollapsed);
-  byId("agent-history-body").hidden = historyCollapsed;
+  const body = byId("agent-history-body");
+  body.hidden = false; body.inert = historyCollapsed; body.setAttribute("aria-hidden", String(historyCollapsed));
   const toggle = byId("agent-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
   toggle.setAttribute("aria-expanded", String(!historyCollapsed));
   toggle.setAttribute("aria-label", label); toggle.title = label;
@@ -284,11 +287,24 @@ function renderSidebar() {
   }
 }
 
+function renderConversationDate(item) {
+  const container = byId("agent-messages"), date = item.messages.length ? conversationDate(item.createdAt) : null;
+  let label = container.querySelector(".conversation-date");
+  if (!date) { label?.remove(); return; }
+  if (!label) {
+    label = element("time", "conversation-date", date.label);
+    container.prepend(label);
+  }
+  if (label.textContent !== date.label) label.textContent = date.label;
+  if (label.getAttribute("datetime") !== date.dateTime) label.setAttribute("datetime", date.dateTime);
+}
+
 function renderMessages(agent) {
   const container = byId("agent-messages"), item = conversation(agent.id);
   container.replaceChildren();
   item.replyView = null;
   item.userRows = new Map();
+  renderConversationDate(item);
   attachments.hydrate(agent.id, item.messages.flatMap((message) => message.role === "user" ? message.attachments || [] : []));
   if (!item.messages.length) {
     const welcome = element("div", "welcome", "");
@@ -382,7 +398,7 @@ function renderMaking(agent) {
       return development.canStart || development.canResume ? developAgent(agent.id) : buildAgent(agent.id);
     },
     onDetails: () => {
-      byId("agent-panel-toggle").click();
+      if (byId("agent-panel-toggle").getAttribute("aria-expanded") !== "true") byId("agent-panel-toggle").click();
       byId("agent-details-profile-tab").click();
       const details = byId("agent-brief").closest?.("details");
       if (details) details.open = true;
@@ -509,6 +525,10 @@ function renderWorkspace({ renderConversation = true } = {}) {
   byId("agent-conversation-actions").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
   byId("agent-title").textContent = agent ? agentDisplayName(agent) : "找不到智能体";
+  const identity = byId("agent-panel-toggle");
+  identity.disabled = !agent;
+  identity.title = agent ? agentDisplayName(agent) : "找不到智能体";
+  identity.setAttribute("aria-label", agent ? `${agentDisplayName(agent)}的设置` : "找不到智能体");
   renderAgentAvatar(byId("agent-icon"), agent, { activity: agent ? avatarActivity(agent) : "idle" });
   const avatar = agent && resolveAgentAvatar(agent);
   const color = avatar?.type === "star" ? avatarColors.find((item) => item.id === avatar.color) : null;
@@ -516,10 +536,12 @@ function renderWorkspace({ renderConversation = true } = {}) {
   messageStyle.setProperty("--user-bubble-background", color?.hex || "var(--text)");
   messageStyle.setProperty("--user-bubble-color", "var(--surface)");
   byId("agent-subtitle").textContent = agent ? agentDisplayDescription(agent) : "请回到 NEUMA 创建或确认需求。";
+  byId("agent-subtitle").hidden = Boolean(agent);
   if (!agent) return;
   byId("agent-conversation-title").textContent = conversation(agent.id).messages.length || conversation(agent.id).saveVersion
     ? conversation(agent.id).title : agentDisplayName(agent);
   byId("agent-message-label").textContent = `给 ${agentDisplayName(agent)} 的任务`;
+  input.placeholder = `给 ${agentDisplayName(agent)} 发消息…`;
   byId("agent-iterate").disabled = mainBusy;
   byId("agent-save-entry").disabled = mainBusy || (agent.persisted && !agent.dirty);
   byId("agent-save-entry").textContent = agent.persisted && !agent.dirty ? "需求已保存" : "保存智能体需求";

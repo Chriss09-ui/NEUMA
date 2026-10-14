@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../public/shell.js", import.meta.url), "utf8");
 
-function setup({ compact = false, reduced = false, transitions = false, hash = "", configured = true, collapsed = false, sidebarCollapsed = false, storageBlocked = false } = {}) {
+function setup({ compact = false, reduced = false, transitions = false, hash = "", configured = true, collapsed = false, sidebarCollapsed = false, storageBlocked = false, resizeObserver = false } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, handler) {
@@ -50,9 +50,11 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     return nodes.get(id);
   };
   const inputs = ["message", "project-message", "agent-message", "main-message", "group-message"].map(get);
-  const links = ["chat", "groups", "projects", "agents", "skills", "settings"].map((page) => {
+  const links = ["chat", "projects", "agents", "skills", "settings"].map((page) => {
     const link = get(`nav-${page}`); link.dataset.page = page; return link;
   });
+  const groupsManage = get("sidebar-manage-groups"); groupsManage.className = "sidebar-manage"; groupsManage.dataset.page = "groups";
+  links.push(groupsManage);
   document.getElementById = (id) => ["llm-dot", "llm-state", "jev-dot", "jev-state"].includes(id) ? null : get(id);
   document.querySelectorAll = (selector) => selector === ".nav-item, .sidebar-manage" ? links : inputs;
   get("setup-banner").firstElementChild = get("banner-text");
@@ -79,12 +81,19 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     getItem(key) { if (storageBlocked) throw new Error("Unavailable"); return stored.get(key); },
     setItem(key, value) { if (storageBlocked) throw new Error("Unavailable"); stored.set(key, value); },
   };
+  const resizeObservers = [];
+  class WidthObserver {
+    constructor(callback) { this.callback = callback; resizeObservers.push(this); }
+    observe(target) { this.target = target; }
+    notify(width) { this.callback([{ target: this.target, contentRect: { width } }]); }
+  }
   vm.runInNewContext(source, { document, window, location, history, localStorage, Event, CustomEvent: Event,
     MutationObserver: class { observe() {} },
+    ...(resizeObserver ? { ResizeObserver: WidthObserver } : {}),
     fetch: async () => ({ ok: true, json: async () => ({ llmConfigured: configured, jevConfigured: true }) }),
   });
   const navigate = (detail) => document.dispatchEvent(new Event("neuma:navigate", { detail }));
-  return { get, document, window, location, media, pending, navigate, stored };
+  return { get, document, window, location, media, pending, navigate, stored, resizeObservers };
 }
 
 test("Skills 支持直接访问、导航焦点和折叠侧栏后的页面切换", () => {
@@ -116,12 +125,28 @@ test("旧创建入口统一到主聊天，群详情保持群导航选中且主�
   navigate({ page: "group", groupId: "group-one" });
   assert.equal(location.hash, "#group/group-one");
   assert.equal(get("page-group").hidden, false);
-  assert.equal(get("nav-groups").getAttribute("aria-current"), "page");
+  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), "page");
   assert.equal(document.activeElement.id, "group-message");
   navigate({ page: "chat" });
   assert.equal(get("main-message").value, "主助理下一条草稿");
   assert.equal(get("message").value, "正在整理创建需求");
   assert.equal(document.activeElement.id, "main-message");
+});
+
+test("群组管理从我的群组标题进入，群详情与管理页都选中同一入口", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const navigation = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
+  assert.doesNotMatch(navigation, /data-page="groups"/);
+  const manage = html.match(/<a\b[^>]*id="sidebar-manage-groups"[^>]*>/)[0];
+  assert.match(manage, /class="sidebar-manage"/); assert.match(manage, /href="#groups"/);
+  assert.match(manage, /data-page="groups"/);
+  const { get, navigate } = setup();
+  navigate({ page: "groups" });
+  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), "page");
+  navigate({ page: "group", groupId: "one" });
+  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), "page");
+  navigate({ page: "chat" });
+  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), null);
 });
 
 test("主导航折叠保留页面与草稿，隐藏控件归还焦点，露出智能体图标入口", () => {
@@ -399,6 +424,32 @@ test("输入法确认和 Shift+Enter 不提交，普通 Enter 提交一次", () 
   assert.equal(input.submissions, undefined);
   input.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {} });
   assert.equal(input.submissions, 1);
+});
+
+test("Agent 与群输入框随宽度重新增高，同宽高度通知不递归，隐藏后恢复仍重新计算", () => {
+  const { get, resizeObservers } = setup({ resizeObserver: true });
+  assert.equal(resizeObservers.length, 2);
+  assert.deepEqual(resizeObservers.map((observer) => observer.target.id), ["agent-message", "group-message"]);
+  for (const id of ["agent-message", "group-message"]) {
+    const input = get(id), observer = resizeObservers.find((item) => item.target === input);
+    let height = 34, reads = 0;
+    Object.defineProperty(input, "scrollHeight", { get() { reads++; return height; } });
+    input.style.height = "previous"; input.hidden = true;
+    observer.notify(0);
+    assert.equal(reads, 0); assert.equal(input.style.height, "previous");
+    input.hidden = false; observer.notify(420);
+    assert.equal(reads, 1); assert.equal(input.style.height, "34px");
+    height = 86; observer.notify(300);
+    assert.equal(reads, 2); assert.equal(input.style.height, "86px");
+    height = 112; observer.notify(300);
+    assert.equal(reads, 2); assert.equal(input.style.height, "86px");
+    height = 220; observer.notify(280);
+    assert.equal(reads, 3); assert.equal(input.style.height, "180px");
+    input.hidden = true; observer.notify(0);
+    assert.equal(reads, 3); assert.equal(input.style.height, "180px");
+    input.hidden = false; height = 34; observer.notify(420);
+    assert.equal(reads, 4); assert.equal(input.style.height, "34px");
+  }
 });
 
 test("智能体说明不再跟随主需求面板展开，进入智能体仍聚焦对话输入", () => {

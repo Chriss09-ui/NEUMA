@@ -114,6 +114,7 @@ export function createAgentAttachmentView({ document, api, attachments, onChange
   const byId = (id) => document.getElementById(id);
   const list = byId("agent-attachment-list"), error = byId("agent-attachment-error"), chooser = byId("agent-attachment-input");
   const add = byId("agent-attachment-add"), picker = byId("agent-attachment-pick"), form = byId("agent-chat-form");
+  const menuToggle = byId("agent-attachment-menu-toggle"), menu = byId("agent-attachment-menu");
   const dialog = byId("agent-material-dialog"), materials = byId("agent-material-list"), feedback = byId("agent-material-feedback");
   const preview = byId("agent-material-preview"), name = byId("agent-material-name"), download = byId("agent-material-download");
   let context = null, generation = 0, reading = null, returnFocus = null, pageImageUrl = null;
@@ -127,21 +128,43 @@ export function createAgentAttachmentView({ document, api, attachments, onChange
     preview.replaceChildren();
     if (pageImageUrl) { urlApi.revokeObjectURL(pageImageUrl); pageImageUrl = null; }
   };
-  const close = () => {
+  const canAttach = () => context && !context.disabled
+    && attachments.state(context.agentId, context.conversationId).items.length < MAX_MESSAGE_ATTACHMENTS;
+  function closeMenu({ restoreFocus = false } = {}) {
+    menu.hidden = true; menuToggle.setAttribute("aria-expanded", "false");
+    if (restoreFocus && !menuToggle.disabled) menuToggle.focus({ preventScroll: true });
+  }
+  function openMenu(last = false) {
+    if (!canAttach()) return;
+    menu.hidden = false; menuToggle.setAttribute("aria-expanded", "true");
+    (last ? picker : add).focus({ preventScroll: true });
+  }
+  closeMenu(); add.tabIndex = picker.tabIndex = -1;
+  const close = ({ restoreFocus = true } = {}) => {
+    closeMenu();
     generation++; reading?.abort(); reading = null;
     if (dialog.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
     clearPreview(); materials.replaceChildren(); download.hidden = true;
     name.textContent = "选择一份材料"; feedback.textContent = "";
-    returnFocus?.focus?.(); returnFocus = null;
+    if (restoreFocus && returnFocus) {
+      const target = returnFocus === menuToggle && menuToggle.disabled ? byId("agent-message") : returnFocus;
+      if (!target.disabled) target.focus?.({ preventScroll: true });
+    }
+    returnFocus = null;
   };
 
   function render() {
-    if (!context) return;
-    const { agentId, conversationId, disabled } = context, state = attachments.state(agentId, conversationId);
+    const unavailable = !canAttach(), focusedInMenu = menu.contains(document.activeElement);
+    menuToggle.disabled = add.disabled = picker.disabled = unavailable;
+    chooser.disabled = unavailable;
+    if (unavailable) {
+      closeMenu();
+      if (focusedInMenu && !byId("agent-message").disabled) byId("agent-message").focus({ preventScroll: true });
+    }
+    if (!context) { list.replaceChildren(); list.hidden = true; error.hidden = true; error.textContent = ""; return; }
+    const { agentId, conversationId } = context, state = attachments.state(agentId, conversationId);
     list.replaceChildren(); list.hidden = !state.items.length;
     error.textContent = state.error || ""; error.hidden = !state.error;
-    add.disabled = picker.disabled = disabled || state.items.length >= MAX_MESSAGE_ATTACHMENTS;
-    chooser.disabled = disabled;
     for (const item of state.items) {
       const material = attachments.material(agentId, item.id) || { name: item.name, size: item.size };
       const tag = createAttachmentCard(document, material, { className: "agent-attachment-tag", status: item.status,
@@ -164,10 +187,11 @@ export function createAgentAttachmentView({ document, api, attachments, onChange
   }
 
   async function loadMaterials() {
-    if (!context || context.disabled) return;
+    if (!canAttach()) return;
+    closeMenu();
     const captured = context, sequence = ++generation;
     reading?.abort(); reading = new AbortController();
-    openDialog(picker); materials.replaceChildren(); clearPreview(); download.hidden = true;
+    openDialog(menuToggle); materials.replaceChildren(); clearPreview(); download.hidden = true;
     name.textContent = "选择一份材料"; feedback.textContent = "正在读取材料…";
     try {
       const result = await api.listAttachments(captured.agentId, { signal: reading.signal });
@@ -190,6 +214,7 @@ export function createAgentAttachmentView({ document, api, attachments, onChange
 
   async function showPreview(agentId, id, offset = 0, append = false, pdfPage = 1) {
     if (!id || context?.agentId !== agentId) return;
+    closeMenu();
     const captured = context, sequence = ++generation, pageFocus = document.activeElement?.dataset?.pageAction;
     reading?.abort(); const controller = new AbortController(); reading = controller;
     openDialog(document.activeElement);
@@ -235,7 +260,35 @@ export function createAgentAttachmentView({ document, api, attachments, onChange
     } catch (failure) { if (sequence === generation && context === captured) feedback.textContent = failure.message || "预览失败，可以下载原文件。"; }
   }
 
-  add.addEventListener("click", () => { if (context && !context.disabled) chooser.click(); });
+  menuToggle.addEventListener("click", () => menu.hidden ? openMenu() : closeMenu({ restoreFocus: true }));
+  const outsideMenu = (event) => {
+    if (!menu.hidden && !menu.contains(event.target) && !menuToggle.contains(event.target)) closeMenu();
+  };
+  document.addEventListener("click", outsideMenu);
+  document.addEventListener("focusin", outsideMenu);
+  document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) return;
+    const onToggle = menuToggle.contains(event.target);
+    if (menu.hidden) {
+      if (onToggle && ["ArrowDown", "ArrowUp"].includes(event.key) && canAttach()) {
+        event.preventDefault(); openMenu(event.key === "ArrowUp");
+      }
+      return;
+    }
+    if (event.key === "Escape") { event.preventDefault(); closeMenu({ restoreFocus: true }); return; }
+    if (event.key === "Tab") { closeMenu(); return; }
+    if ((!onToggle && !menu.contains(event.target)) || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const choices = [add, picker].filter((item) => !item.disabled), current = choices.indexOf(document.activeElement);
+    const index = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1
+      : current < 0 ? event.key === "ArrowUp" ? choices.length - 1 : 0
+      : event.key === "ArrowDown" ? (current + 1) % choices.length : (current + choices.length - 1) % choices.length;
+    choices[index]?.focus({ preventScroll: true });
+  });
+  add.addEventListener("click", () => {
+    if (!canAttach()) return;
+    closeMenu({ restoreFocus: true }); chooser.click();
+  });
   chooser.addEventListener("change", () => {
     if (!context || context.disabled) return;
     const { agentId, conversationId } = context, files = Array.from(chooser.files || []); chooser.value = "";
@@ -253,9 +306,9 @@ export function createAgentAttachmentView({ document, api, attachments, onChange
   dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
   return {
     setContext(next) {
-      if (context?.agentId !== next?.agentId || context?.conversationId !== next?.conversationId) { close(); context = next; }
+      if (context?.agentId !== next?.agentId || context?.conversationId !== next?.conversationId) { close({ restoreFocus: false }); context = next; }
       else if (context) context.disabled = next.disabled;
-      if (context) render();
+      render();
     },
     render, showPreview, close,
   };

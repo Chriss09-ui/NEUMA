@@ -7,13 +7,24 @@ const file = (name = "论文.pdf", size = 100) => ({ name, size, type: "applicat
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const descriptor = (id = "material-one", name = "论文.pdf") => ({ id, name, size: 100, mimeType: "application/pdf", kind: "pdf", status: "uploaded" });
 
-test("待发送附件在任务文字输入上方，并保留独立的上传及材料选择操作", async () => {
+test("待发送附件在输入上方，加号菜单保留上传和当前 Agent 材料入口", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const composer = html.match(/<form id="agent-chat-form"[\s\S]*?<\/form>/)?.[0];
   assert.ok(composer);
   const attachments = composer.indexOf('id="agent-attachment-list"'), input = composer.indexOf('id="agent-message"');
   assert.ok(attachments >= 0 && input > attachments);
-  assert.match(composer, /id="agent-attachment-add"/); assert.match(composer, /id="agent-attachment-pick"/);
+  const tags = [...composer.matchAll(/<[a-z][\w-]*\b[^>]*>/g)];
+  const attribute = (tag, key) => [...tag.matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)].find((match) => match[1] === key)?.[3];
+  const element = (id) => { const matches = tags.filter(([tag]) => attribute(tag, "id") === id); assert.equal(matches.length, 1); return matches[0][0]; };
+  const toggle = element("agent-attachment-menu-toggle");
+  assert.equal(attribute(toggle, "aria-haspopup"), "menu");
+  assert.equal(attribute(toggle, "aria-controls"), "agent-attachment-menu");
+  assert.equal(attribute(toggle, "aria-expanded"), "false");
+  assert.ok(attribute(toggle, "aria-label"));
+  assert.equal(attribute(element("agent-attachment-menu"), "role"), "menu");
+  assert.match(element("agent-attachment-menu"), /\bhidden\b/);
+  assert.equal(attribute(element("agent-attachment-add"), "role"), "menuitem");
+  assert.equal(attribute(element("agent-attachment-pick"), "role"), "menuitem");
 });
 
 test("上传20MiB和每消息10份材料限制在发请求前校验", async () => {
@@ -68,25 +79,177 @@ test("发送消耗当前对话附件，失败恢复去重并保留后续材料",
 
 function documentFixture() {
   const nodes = new Map();
-  const document = { activeElement: null };
-  class Element {
-    children = []; listeners = new Map(); attributes = new Map(); dataset = {}; hidden = false; disabled = false;
+  class Events {
+    listeners = new Map();
+    addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
+    dispatchEvent(event) {
+      event.target ??= this;
+      event.preventDefault ||= function () { this.defaultPrevented = true; };
+      const pending = (this.listeners.get(event.type) ?? []).map((callback) => callback(event));
+      if (event.bubbles && this !== document) pending.push((this.parent || document).dispatchEvent(event));
+      return Promise.all(pending);
+    }
+  }
+  const document = new Events(); document.activeElement = null;
+  class Element extends Events {
+    children = []; attributes = new Map(); dataset = {}; hidden = false; disabled = false;
     classList = { add() {}, remove() {} };
-    append(...items) { this.children.push(...items); }
-    replaceChildren(...items) { this.children = items; }
+    append(...items) { for (const item of items) { item.remove(); item.parent = this; this.children.push(item); } }
+    remove() { if (this.parent) { this.parent.children = this.parent.children.filter((item) => item !== this); this.parent = null; } }
+    replaceChildren(...items) { for (const child of this.children) child.parent = null; this.children = []; this.append(...items); }
+    contains(target) { return this === target || this.children.some((child) => child.contains(target)); }
     setAttribute(name, value) { this.attributes.set(name, value); }
-    addEventListener(name, callback) { this.listeners.set(name, callback); }
-    click() { return this.listeners.get("click")?.({}); }
-    focus() { document.activeElement = this; }
+    click() { if (!this.disabled) return this.dispatchEvent({ type: "click", bubbles: true }); }
+    focus() { if (!this.disabled) { document.activeElement = this; this.dispatchEvent({ type: "focusin", bubbles: true }); } }
     showModal() { this.open = true; } close() { this.open = false; }
   }
   document.getElementById = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   document.createElement = (tag) => Object.assign(new Element(), { tagName: tag.toUpperCase() });
-  return { document, get: document.getElementById };
+  const get = document.getElementById;
+  get("page-agent").append(get("agent-messages"), get("agent-chat-form"), get("agent-material-dialog"));
+  get("agent-chat-form").append(get("agent-attachment-list"), get("agent-attachment-error"), get("agent-message"), get("agent-attachment-input"), get("agent-composer-tools"));
+  get("agent-composer-tools").append(get("agent-attachment-menu-toggle"), get("agent-attachment-menu"));
+  get("agent-attachment-menu").append(get("agent-attachment-add"), get("agent-attachment-pick"));
+  get("agent-material-dialog").append(get("agent-material-list"), get("agent-material-preview"), get("agent-material-feedback"), get("agent-material-name"), get("agent-material-download"), get("agent-material-refresh"), get("agent-material-close"));
+  return { document, get, key: async (target, key, fields = {}) => {
+    const event = { type: "keydown", key, bubbles: true, ...fields };
+    await target.dispatchEvent(event); return event;
+  } };
 }
 
 const attachmentNodes = (node) => [node, ...node.children.flatMap(attachmentNodes)];
 const attachmentText = (node) => [node.textContent || "", ...node.children.map(attachmentText)].join(" ");
+
+function menuFixture(api = {}) {
+  const fixture = documentFixture(); let view;
+  const attachments = new AgentAttachments({ api, onChange: () => view?.render() });
+  view = createAgentAttachmentView({ document: fixture.document, api, attachments });
+  view.setContext({ agentId: "one", conversationId: "chat", disabled: false });
+  return { ...fixture, attachments, view };
+}
+
+test("加号选择本地文件关闭菜单并触发原上传输入，上传仍属于当前 Agent 和对话", async () => {
+  const calls = [], ui = menuFixture({ uploadAttachment: async (agentId, selected) => {
+    calls.push([agentId, selected]); return { attachment: descriptor() };
+  } });
+  let chooserClicks = 0;
+  ui.get("agent-attachment-input").addEventListener("click", () => chooserClicks++);
+  await ui.get("agent-attachment-menu-toggle").click();
+  assert.equal(ui.get("agent-attachment-menu").hidden, false);
+  assert.equal(ui.get("agent-attachment-menu-toggle").attributes.get("aria-expanded"), "true");
+  assert.equal(ui.document.activeElement, ui.get("agent-attachment-add"));
+  await ui.get("agent-attachment-add").click();
+  assert.equal(chooserClicks, 1);
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(ui.get("agent-attachment-menu-toggle").attributes.get("aria-expanded"), "false");
+  assert.equal(ui.document.activeElement, ui.get("agent-attachment-menu-toggle"));
+  const selected = file(); ui.get("agent-attachment-input").files = [selected];
+  await ui.get("agent-attachment-input").dispatchEvent({ type: "change", bubbles: true });
+  assert.deepEqual(calls, [["one", selected]]);
+  assert.deepEqual(ui.attachments.refs("one", "chat"), [{ id: "material-one" }]);
+  assert.match(attachmentText(ui.get("agent-attachment-list")), /论文\.pdf/);
+});
+
+test("加号的材料选择只读取当前 Agent，选择和关闭材料库返回可见加号", async () => {
+  const reads = [], ui = menuFixture({ listAttachments: async (agentId) => {
+    reads.push(agentId); return { attachments: [descriptor(`${agentId}-material`, `${agentId}.pdf`)] };
+  } });
+  await ui.get("agent-attachment-menu-toggle").click(); await ui.get("agent-attachment-pick").click();
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(ui.get("agent-material-dialog").open, true);
+  assert.equal(ui.get("agent-material-list").children[0].children[0].textContent, "one.pdf");
+  await ui.get("agent-material-list").children[0].children[1].click();
+  assert.deepEqual(ui.attachments.refs("one", "chat"), [{ id: "one-material" }]);
+  assert.equal(ui.document.activeElement, ui.get("agent-attachment-menu-toggle"));
+  ui.view.setContext({ agentId: "two", conversationId: "other", disabled: false });
+  await ui.get("agent-attachment-menu-toggle").click(); await ui.get("agent-attachment-pick").click();
+  assert.deepEqual(reads, ["one", "two"]);
+  assert.equal(ui.get("agent-material-list").children[0].children[0].textContent, "two.pdf");
+  assert.equal(ui.attachments.material("two", "one-material"), undefined);
+  const cancelled = { type: "cancel" }; await ui.get("agent-material-dialog").dispatchEvent(cancelled);
+  assert.equal(cancelled.defaultPrevented, true);
+  assert.equal(ui.get("agent-material-dialog").open, false);
+  assert.equal(ui.document.activeElement, ui.get("agent-attachment-menu-toggle"));
+  assert.deepEqual(ui.attachments.refs("two", "other"), []);
+});
+
+test("加号菜单支持方向键循环和首尾定位，Esc 返回加号且不传递关闭动作", async () => {
+  const ui = menuFixture(), toggle = ui.get("agent-attachment-menu-toggle"), add = ui.get("agent-attachment-add"), pick = ui.get("agent-attachment-pick");
+  toggle.focus(); assert.equal((await ui.key(toggle, "ArrowDown")).defaultPrevented, true);
+  assert.equal(ui.document.activeElement, add);
+  await ui.key(add, "ArrowUp"); assert.equal(ui.document.activeElement, pick);
+  await ui.key(pick, "ArrowDown"); assert.equal(ui.document.activeElement, add);
+  await ui.key(add, "End"); assert.equal(ui.document.activeElement, pick);
+  await ui.key(pick, "Home"); assert.equal(ui.document.activeElement, add);
+  assert.equal((await ui.key(add, "Escape")).defaultPrevented, true);
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(ui.document.activeElement, toggle);
+  await ui.key(toggle, "ArrowUp"); assert.equal(ui.document.activeElement, pick);
+  await toggle.click(); assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(ui.document.activeElement, toggle);
+});
+
+test("外部点击、焦点离开和 Tab 关闭菜单，不阻止正常移焦或抢回加号", async () => {
+  const ui = menuFixture(), toggle = ui.get("agent-attachment-menu-toggle"), menu = ui.get("agent-attachment-menu"), input = ui.get("agent-message");
+  await toggle.click();
+  await input.click();
+  assert.equal(menu.hidden, true);
+  await toggle.click(); input.focus();
+  assert.equal(menu.hidden, true); assert.equal(ui.document.activeElement, input);
+  await toggle.click();
+  assert.notEqual((await ui.key(ui.get("agent-attachment-add"), "Tab")).defaultPrevented, true);
+  input.focus(); assert.equal(menu.hidden, true); assert.equal(ui.document.activeElement, input);
+  await toggle.click();
+  assert.notEqual((await ui.key(ui.get("agent-attachment-add"), "Tab", { shiftKey: true })).defaultPrevented, true);
+  input.focus(); assert.equal(ui.document.activeElement, input);
+});
+
+test("切 Agent 或新对话关闭菜单和材料库，保留外部焦点且不混入旧材料", async () => {
+  const ui = menuFixture({ listAttachments: async () => ({ attachments: [descriptor()] }) });
+  await ui.get("agent-attachment-menu-toggle").click();
+  ui.view.setContext({ agentId: "one", conversationId: "new", disabled: false });
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  await ui.get("agent-attachment-menu-toggle").click(); await ui.get("agent-attachment-pick").click();
+  ui.get("agent-message").focus();
+  ui.view.setContext({ agentId: "two", conversationId: "chat", disabled: false });
+  assert.equal(ui.get("agent-material-dialog").open, false);
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.deepEqual(ui.attachments.refs("two", "chat"), []);
+  assert.equal(ui.get("agent-attachment-menu-toggle").disabled, false);
+});
+
+test("禁用或达到十份材料立即关闭菜单并同步禁用入口，移除后恢复且空上下文不留旧附件", async () => {
+  const ui = menuFixture(), toggle = ui.get("agent-attachment-menu-toggle"), add = ui.get("agent-attachment-add"), pick = ui.get("agent-attachment-pick");
+  await toggle.click();
+  ui.view.setContext({ agentId: "one", conversationId: "chat", disabled: true });
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(toggle.disabled, true); assert.equal(add.disabled, true); assert.equal(pick.disabled, true);
+  ui.view.setContext({ agentId: "one", conversationId: "chat", disabled: false });
+  assert.equal(toggle.disabled, false); assert.equal(add.disabled, false); assert.equal(pick.disabled, false);
+  await toggle.click();
+  ui.attachments.restore("one", "chat", Array.from({ length: 10 }, (_unused, index) => ({ id: `saved-${index}` })));
+  assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  assert.equal(toggle.disabled, true); assert.equal(add.disabled, true); assert.equal(pick.disabled, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  await toggle.click(); assert.equal(ui.get("agent-attachment-menu").hidden, true);
+  ui.attachments.remove("one", "chat", ui.attachments.state("one", "chat").items[0]);
+  assert.equal(toggle.disabled, false); assert.equal(add.disabled, false); assert.equal(pick.disabled, false);
+  ui.view.setContext(null);
+  assert.equal(toggle.disabled, true); assert.equal(ui.get("agent-attachment-list").hidden, true);
+  assert.equal(ui.get("agent-attachment-list").children.length, 0);
+});
+
+test("材料选择达到十份后加号不可用，关闭文件库返回可用输入框", async () => {
+  const ui = menuFixture({ listAttachments: async () => ({ attachments: [descriptor()] }) });
+  ui.attachments.restore("one", "chat", Array.from({ length: 9 }, (_unused, index) => ({ id: `saved-${index}` })));
+  await ui.get("agent-attachment-menu-toggle").click(); await ui.get("agent-attachment-pick").click();
+  await ui.get("agent-material-list").children[0].children[1].click();
+  assert.equal(ui.attachments.refs("one", "chat").length, 10);
+  assert.equal(ui.get("agent-attachment-menu-toggle").disabled, true);
+  assert.equal(ui.get("agent-material-dialog").open, false);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+});
 
 test("待发送材料使用文件卡片，显示真实类型大小且上传取消操作独立可用", async () => {
   const { document, get } = documentFixture(), pending = deferred();
@@ -141,7 +304,7 @@ test("PDF使用有界页图分页，不嵌入受CSP限制的原文件，关闭�
   const view = createAgentAttachmentView({ document, api, attachments,
     urlApi: { createObjectURL: () => `blob:fixture-${++created}`, revokeObjectURL: (url) => revoked.push(url) } });
   view.setContext({ agentId: "one", conversationId: "chat", disabled: false });
-  get("agent-attachment-add").focus();
+  const trigger = document.createElement("button"); get("agent-messages").append(trigger); trigger.focus();
   await view.showPreview("one", attachment.id);
   const first = get("agent-material-preview").children;
   assert.equal(first[0].children[0].disabled, true);
@@ -156,7 +319,7 @@ test("PDF使用有界页图分页，不嵌入受CSP限制的原文件，关闭�
   assert.equal(document.activeElement, second[0].children[0]);
   await get("agent-material-close").click();
   assert.deepEqual(revoked, ["blob:fixture-1", "blob:fixture-2"]);
-  assert.equal(document.activeElement, get("agent-attachment-add"));
+  assert.equal(document.activeElement, trigger);
 });
 
 test("切换对话后的迟到PDF页图不创建URL或进入新预览", async () => {

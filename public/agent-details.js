@@ -4,14 +4,15 @@ import { agentIconChoices, fileDescription, newestFiles, staticArtifactDocument 
 import { avatarShapes, avatarColors, avatarIcon, resolveAgentAvatar, renderAgentAvatar } from "./agent-avatar.js";
 
 const api = createAgentRuntime(), states = new Map();
-const byId = (id) => document.getElementById(id), dialog = byId("agent-panel"), fileDialog = byId("agent-file-dialog");
+const byId = (id) => document.getElementById(id), panel = byId("agent-panel"), fileDialog = byId("agent-file-dialog"), shell = byId("agent-page-shell");
 const emit = (type, detail) => document.dispatchEvent(new CustomEvent(type, { detail }));
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let viewTransitions = [];
-let route = { page: "chat", agentId: null }, runtime = null, view = "profile", returnFocus = "agent-panel-toggle";
+let panelTransitionSequence = 0, panelTransitionTimer = null, removePanelTransitionListener = null;
+let route = { page: "chat", agentId: null }, runtime = null, view = "profile";
 let fileFocus = null, settingsAgentId = null;
 const currentId = () => route.page === "agent" ? route.agentId : null;
-const showing = (id, tab) => currentId() === id && dialog.open && (!tab || view === tab);
+const showing = (id, tab) => Boolean(id) && currentId() === id && settingsAgentId === id && (!tab || view === tab);
 const showingFile = (id) => currentId() === id && fileDialog.open && fileFocus?.agentId === id;
 
 function state(id) {
@@ -28,6 +29,14 @@ function message(id, text, error = false) {
 
 function profileFor(agent) {
   return { name: agentDisplayName(agent), description: agentDisplayDescription(agent).slice(0, 240), icon: agent.profile?.icon || "" };
+}
+
+function renderIdentity() {
+  byId("agent-details-name").textContent = agentDisplayName(runtime.agent);
+  const description = agentDisplayDescription(runtime.agent);
+  byId("agent-details-description").textContent = description;
+  byId("agent-details-description").hidden = !description;
+  renderAgentAvatar(byId("agent-details-avatar"), runtime.agent, { document, motion: false });
 }
 
 function refreshAvailability() {
@@ -89,52 +98,110 @@ function stopViewTransitions() {
   for (const animation of viewTransitions) animation.cancel();
   viewTransitions = [];
 }
-reducedMotion.addEventListener("change", stopViewTransitions);
+reducedMotion.addEventListener("change", () => {
+  stopViewTransitions();
+  if (reducedMotion.matches) panelVisibility(Boolean(settingsAgentId), { animate: false });
+});
 
 function selectView(next) {
+  if (!currentId() || runtime?.agentId !== currentId()) return;
   const changed = next !== view;
-  const animate = changed && dialog.open && !reducedMotion.matches && typeof dialog.animate === "function";
-  const previousHeight = animate ? dialog.getBoundingClientRect().height : 0;
+  const content = byId(`agent-details-${next}`);
+  const animate = changed && showing(currentId()) && !reducedMotion.matches && typeof content.animate === "function";
   if (changed) stopViewTransitions();
-  view = next; dialog.dataset.view = view;
+  view = next; panel.dataset.view = view;
   for (const tab of ["memory", "profile", "connections"]) {
     byId(`agent-details-${tab}`).hidden = tab !== view;
     byId(`agent-details-${tab}-tab`).setAttribute("aria-pressed", String(tab === view));
   }
   byId("agent-details-title").textContent = "智能体设置";
-  byId("agent-details-name").textContent = agentDisplayName(runtime.agent);
+  renderIdentity();
   refreshAvailability();
   if (view === "profile") renderProfile();
   if (view === "memory") { renderMemory(); if (runtime.definition) void loadMemory(currentId()); }
   emit("neuma:agent-connections-view", { agentId: currentId(), active: view === "connections" });
   if (animate) {
-    const nextHeight = dialog.getBoundingClientRect().height;
-    viewTransitions = [
-      dialog.animate([{ height: `${previousHeight}px` }, { height: `${nextHeight}px` }],
-        { duration: 280, easing: "cubic-bezier(.22, 1, .36, 1)" }),
-      byId(`agent-details-${view}`).animate([
-        { opacity: 0, transform: `translateX(${view === "memory" ? 8 : -8}px)` },
-        { opacity: 1, transform: "translateX(0)" },
-      ], { duration: 200, delay: 40, easing: "ease-out", fill: "backwards" }),
-    ];
+    viewTransitions = [content.animate([
+      { opacity: 0, transform: `translateX(${view === "memory" ? 8 : -8}px)` },
+      { opacity: 1, transform: "translateX(0)" },
+    ], { duration: 200, easing: "ease-out", fill: "backwards" })];
   }
 }
 
-function openPanel(next, trigger) {
+function cancelPanelTransition() {
+  const sequence = ++panelTransitionSequence;
+  if (panelTransitionTimer !== null) clearTimeout(panelTransitionTimer);
+  panelTransitionTimer = null;
+  removePanelTransitionListener?.(); removePanelTransitionListener = null;
+  return sequence;
+}
+
+function finishPanelTransition(sequence) {
+  if (sequence !== panelTransitionSequence) return;
+  if (panelTransitionTimer !== null) clearTimeout(panelTransitionTimer);
+  panelTransitionTimer = null;
+  removePanelTransitionListener?.(); removePanelTransitionListener = null;
+  shell.classList.remove("is-settings-animating");
+  panel.hidden = !settingsAgentId;
+}
+
+function panelVisibility(active, { animate = true } = {}) {
+  const sequence = cancelPanelTransition();
+  panel.inert = !active;
+  panel.setAttribute("aria-hidden", String(!active));
+  if (active && panel.hidden) {
+    panel.hidden = false;
+    // Commit the closed position before changing the grid and transform targets.
+    shell.getBoundingClientRect();
+  }
+  const durations = animate && !reducedMotion.matches && window.getComputedStyle
+    ? (window.getComputedStyle(shell).transitionDuration || "").split(",") : [];
+  const duration = Math.max(0, ...durations.map((value) => (Number.parseFloat(value) || 0) * (value.trim().endsWith("ms") ? 1 : 1000)));
+  if (duration) shell.classList.add("is-settings-animating");
+  shell.classList.toggle("settings-open", active);
+  byId("agent-panel-toggle").setAttribute("aria-expanded", String(active));
+  if (!duration) {
+    shell.getBoundingClientRect();
+    for (const animation of shell.getAnimations?.() || []) animation.finish();
+    finishPanelTransition(sequence); return;
+  }
+  const ended = (event) => {
+    if (event.target === shell && event.propertyName === "grid-template-columns") finishPanelTransition(sequence);
+  };
+  shell.addEventListener("transitionend", ended);
+  removePanelTransitionListener = () => shell.removeEventListener("transitionend", ended);
+  panelTransitionTimer = setTimeout(() => finishPanelTransition(sequence), duration + 50);
+}
+
+function closePanel({ restoreFocus = true, animate = true } = {}) {
+  if (!settingsAgentId) { if (!animate) panelVisibility(false, { animate: false }); return; }
+  const id = settingsAgentId;
+  settingsAgentId = null;
+  if (fileDialog.open) { fileFocus = null; fileDialog.close(); }
+  panelVisibility(false, { animate });
+  stopViewTransitions();
+  emit("neuma:agent-connections-view", { agentId: id, active: false });
+  emit("neuma:agent-settings-view", { agentId: id, active: false });
+  if (restoreFocus && currentId() === id && states.has(id)) byId("agent-panel-toggle").focus({ preventScroll: true });
+}
+
+function openPanel(next, { focus = true } = {}) {
   if (!currentId() || runtime?.agentId !== currentId()) return;
-  returnFocus = trigger;
+  const opened = !settingsAgentId;
   settingsAgentId = currentId();
   if (fileDialog.open) { fileFocus = null; fileDialog.close(); }
   selectView(next);
-  if (!dialog.open) dialog.showModal();
+  if (opened) panelVisibility(true);
+  if (opened) emit("neuma:agent-settings-view", { agentId: currentId(), active: true });
+  if (focus) byId("agent-details-close").focus({ preventScroll: true });
 }
 
 function openArtifacts() {
   const id = currentId();
   if (!id || runtime?.agentId !== id) return;
   const item = state(id);
+  if (!settingsAgentId) openPanel("profile", { focus: false });
   fileFocus = { agentId: id, selectOnLoad: !item.filesLoaded };
-  if (dialog.open) { settingsAgentId = null; dialog.close(); }
   renderFiles(); renderFile();
   if (!fileDialog.open) fileDialog.showModal();
   const path = item.filePath || item.files[0]?.path;
@@ -328,14 +395,13 @@ byId("agent-profile-form").addEventListener("submit", async (event) => {
   finally { item.profileSaving = false; if (showing(id, "profile")) { renderProfile(); refreshAvailability(); } }
 });
 
-for (const trigger of ["agent-panel-toggle", "agent-identity-edit"]) byId(trigger).addEventListener("click", () => openPanel("profile", trigger));
+byId("agent-panel-toggle").addEventListener("click", () => settingsAgentId ? closePanel() : openPanel("profile"));
 for (const tab of ["memory", "profile", "connections"]) byId(`agent-details-${tab}-tab`).addEventListener("click", () => selectView(tab));
-document.addEventListener("neuma:agent-connections-open", () => openPanel("connections", "agent-panel-toggle"));
-byId("agent-details-close").addEventListener("click", () => dialog.close());
-dialog.addEventListener("close", () => {
-  stopViewTransitions();
-  emit("neuma:agent-connections-view", { agentId: currentId(), active: false });
-  if (currentId() && currentId() === settingsAgentId) byId(returnFocus).focus({ preventScroll: true });
+document.addEventListener("neuma:agent-connections-open", () => openPanel("connections"));
+byId("agent-details-close").addEventListener("click", () => closePanel());
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.defaultPrevented || !settingsAgentId || document.querySelector("dialog[open]")) return;
+  event.preventDefault(); closePanel();
 });
 byId("agent-file-close").addEventListener("click", () => fileDialog.close());
 byId("agent-artifacts-open").addEventListener("click", openArtifacts);
@@ -345,7 +411,7 @@ document.addEventListener("neuma:agent-artifacts-changed", (event) => {
 fileDialog.addEventListener("close", () => {
   if (fileDialog.open) return;
   const id = fileFocus?.agentId; fileFocus = null;
-  if (currentId() === id && states.has(id)) byId("agent-artifacts-open").focus({ preventScroll: true });
+  if (currentId() === id && states.has(id) && showing(id)) byId("agent-artifacts-open").focus({ preventScroll: true });
 });
 byId("agent-build-shortcut").addEventListener("click", () => runtime?.developmentAction
   ? emit("neuma:agent-develop", { id: currentId() }) : byId("agent-build").click());
@@ -369,21 +435,23 @@ document.addEventListener("neuma:agent-runtime-change", (event) => {
   if (!item.profileDirty && !item.profileSaving) item.profile = profileFor(detail.agent);
   refreshAvailability();
   if (detail.definition && (!previous?.definition || (previous.busy && !detail.busy))) void loadFiles(currentId());
-  if (dialog.open) {
-    byId("agent-details-name").textContent = agentDisplayName(detail.agent);
+  if (showing(currentId())) {
+    renderIdentity();
     if (view === "profile" && !item.profileDirty && !item.profileSaving) renderProfile();
     if (!previous?.definition && detail.definition) selectView(view);
   }
 });
 document.addEventListener("neuma:route", (event) => {
+  closePanel({ restoreFocus: false, animate: false });
+  if (fileDialog.open) { fileFocus = null; fileDialog.close(); }
   route = event.detail; runtime = null;
-  if (dialog.open) dialog.close();
-  if (fileDialog.open) fileDialog.close();
   if (currentId()) renderFiles();
   emit("neuma:agent-runtime-request", { agentId: currentId() });
 });
 document.addEventListener("neuma:agent-removed", (event) => {
   states.delete(event.detail.id);
-  if (event.detail.id === currentId() && dialog.open) dialog.close();
-  if (event.detail.id === currentId() && fileDialog.open) fileDialog.close();
+  if (event.detail.id !== currentId()) return;
+  closePanel({ restoreFocus: false, animate: false });
+  if (fileDialog.open) { fileFocus = null; fileDialog.close(); }
+  runtime = null;
 });

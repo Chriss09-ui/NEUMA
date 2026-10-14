@@ -26,10 +26,6 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z"/></svg>
             <span>NEUMA</span>
           </a>
-          <a class="nav-item" href="#groups" data-page="groups" aria-label="群组协作" title="群组协作">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5"/></svg>
-            <span>群组协作</span>
-          </a>
           <a class="nav-item" href="#projects/assistant" data-page="projects" aria-label="管理项目" title="管理项目">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
             <span>管理项目</span>
@@ -58,7 +54,13 @@
         </section>
 
         <section class="sidebar-groups" aria-labelledby="sidebar-groups-title">
-          <div class="sidebar-section-heading"><h2 id="sidebar-groups-title">我的群组</h2><button id="sidebar-create-group" class="ghost-button" type="button" aria-label="创建群组">＋</button></div>
+          <div class="sidebar-section-heading">
+            <h2 id="sidebar-groups-title">我的群组</h2>
+            <div class="sidebar-section-actions">
+              <a id="sidebar-manage-groups" class="sidebar-manage" href="#groups" data-page="groups" aria-label="管理我的群组">管理</a>
+              <button id="sidebar-create-group" class="ghost-button" type="button" aria-label="创建群组">＋</button>
+            </div>
+          </div>
           <nav id="sidebar-group-list" class="sidebar-agent-list" aria-label="我的群组"></nav>
           <p id="sidebar-groups-feedback" class="sidebar-empty" role="status" hidden></p>
         </section>
@@ -117,13 +119,69 @@
         <dialog id="main-material-dialog" class="collaboration-dialog" aria-labelledby="main-material-title"><header class="collaboration-dialog-heading"><h2 id="main-material-title">这份对话的材料</h2><button id="main-material-close" class="ghost-button" type="button" aria-label="关闭主助理材料">关闭</button></header><p id="main-material-feedback" class="muted-note" role="status"></p><div id="main-material-list" class="collaboration-file-list"></div></dialog>
 
         <section id="page-groups" class="page page-groups" data-page="groups" aria-labelledby="groups-title" hidden>
-          <header class="page-header"><div><h1 id="groups-title">群组协作</h1><p class="page-subtitle">把不同能力的智能体放在一起，让它们共同完成工作。</p></div><div class="header-actions"><label class="groups-archive-filter"><input id="groups-show-archived" type="checkbox"> 显示归档</label><button id="groups-create" class="primary" type="button">＋ 创建群组</button></div></header><div id="groups-error" class="error" role="alert" hidden></div><div id="groups-list" class="groups-library" aria-live="polite"></div>
+          <header class="page-header"><div><h1 id="groups-title">我的群组</h1><p class="page-subtitle">把不同能力的智能体放在一起，让它们共同完成工作。</p></div><div class="header-actions"><label class="groups-archive-filter"><input id="groups-show-archived" type="checkbox"> 显示归档</label><button id="groups-create" class="primary" type="button">＋ 创建群组</button></div></header><div id="groups-error" class="error" role="alert" hidden></div><div id="groups-list" class="groups-library" aria-live="polite"></div>
         </section>
 
-        <section id="page-group" class="page page-group" data-page="group" aria-labelledby="group-title" hidden>
-          <header class="page-header"><div><div class="identity-heading"><span id="group-avatar" class="group-identity-avatar" aria-hidden="true"></span><h1 id="group-title">群组</h1><span id="group-archived" class="identity-badge" hidden>已归档</span></div></div><div class="header-actions"><button id="group-files-open" class="secondary" type="button" aria-haspopup="dialog" aria-controls="group-files-dialog">材料与成果 <span id="group-files-count" class="count">0</span></button><button id="group-edit" class="secondary" type="button">编辑群组</button><button id="group-archive" class="ghost-button" type="button">归档</button></div></header>
-          <div id="group-error" class="error" role="alert" hidden></div>
-          <div class="group-workspace"><section class="conversation" aria-label="群组消息"><div class="conversation-bar"><div class="group-filter-label"><span id="group-task-label">查看任务</span><div class="select-menu"><select id="group-task-filter" hidden tabindex="-1" aria-hidden="true"><option value="">全部消息</option></select><button id="group-task-trigger" class="select-menu-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-controls="group-task-menu" aria-expanded="false" aria-labelledby="group-task-label group-task-value"><span id="group-task-value" class="select-menu-value">全部消息</span><span class="select-menu-chevron" aria-hidden="true"></span></button><div id="group-task-menu" class="select-menu-popup" role="listbox" aria-labelledby="group-task-label" hidden></div></div></div><button id="group-new-task" class="new-chat-button" type="button">＋ 新任务</button></div><div id="group-messages" class="messages collaboration-messages" aria-live="polite"></div><form id="group-chat-form" class="composer" autocomplete="off"><div id="group-pending-materials" class="group-pending-materials" aria-label="本轮材料" hidden></div><label class="sr-only" for="group-message">群组消息或任务</label><textarea id="group-message" rows="2" maxlength="4000" placeholder="给出目标，或补充这项任务的信息…"></textarea><div id="group-compose-status" class="muted-note small" role="status" hidden></div><div class="composer-footer"><div class="group-compose-controls"><div class="group-recipient-field"><span id="group-recipient-label">发送给</span><div class="select-menu"><select id="group-recipient" hidden tabindex="-1" aria-hidden="true"><option value="">群内成员自主协作</option></select><button id="group-recipient-trigger" class="select-menu-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-controls="group-recipient-menu" aria-expanded="false" aria-labelledby="group-recipient-label group-recipient-value"><span id="group-recipient-icon" class="select-menu-icon" aria-hidden="true"></span><span id="group-recipient-value" class="select-menu-value">群内成员自主协作</span><span class="select-menu-chevron" aria-hidden="true"></span></button><div id="group-recipient-menu" class="select-menu-popup" role="listbox" aria-labelledby="group-recipient-label" hidden></div></div></div><div class="agent-attachment-actions"><button id="group-upload" class="ghost-button" type="button">＋ 上传材料</button><button id="group-share-open" class="ghost-button" type="button" aria-haspopup="dialog" aria-controls="group-share-dialog">分享私人材料或成果</button></div></div><button id="group-send" class="primary" type="submit">发送</button></div><input id="group-file-input" type="file" multiple hidden aria-label="上传群材料"></form></section><aside class="collaboration-rail group-rail" aria-label="群成员与任务"><section><div class="collaboration-rail-heading"><h2>成员能力</h2><span id="group-member-count" class="count">0</span></div><div id="group-members"></div></section><section><div class="collaboration-rail-heading"><h2>协作任务</h2><button id="group-refresh" class="ghost-button" type="button" aria-label="刷新群任务">↻</button></div><div id="group-tasks"></div></section></aside></div>
+        <section id="page-group" class="page page-group group-chat-page" data-page="group" aria-labelledby="group-title" hidden>
+          <h1 class="sr-only">群组对话</h1>
+          <div id="group-page-shell" class="agent-page-shell group-page-shell">
+            <div id="group-primary" class="group-primary">
+              <header class="group-chat-header">
+                <div class="agent-heading">
+                  <button id="group-panel-toggle" class="agent-identity-capsule" type="button" aria-label="打开群组设置" aria-controls="group-panel" aria-expanded="false" disabled><span id="group-avatar" class="group-identity-avatar" aria-hidden="true"></span><span id="group-title">群组</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+                </div>
+                <div class="group-filter-label">
+                  <span id="group-task-label" class="sr-only">查看任务</span>
+                  <div class="select-menu"><select id="group-task-filter" hidden tabindex="-1" aria-hidden="true"><option value="">全部消息</option></select><button id="group-task-trigger" class="select-menu-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-controls="group-task-menu" aria-expanded="false" aria-labelledby="group-task-label group-task-value"><span id="group-task-value" class="select-menu-value">全部消息</span><span class="select-menu-chevron" aria-hidden="true"></span></button><div id="group-task-menu" class="select-menu-popup" role="listbox" aria-labelledby="group-task-label" hidden></div></div>
+                </div>
+                <button id="group-new-task" class="ghost-button group-new-task" type="button" aria-label="新任务" title="新任务">＋</button>
+              </header>
+              <div id="group-error" class="error" role="alert" hidden></div>
+              <div id="group-workspace" class="group-workspace">
+                <section id="group-conversation" class="conversation" aria-label="群组消息">
+                  <div id="group-messages" class="messages collaboration-messages" aria-live="polite"></div>
+                  <form id="group-chat-form" class="composer" autocomplete="off">
+                    <div id="group-pending-materials" class="group-pending-materials" aria-label="本轮材料" hidden></div>
+                    <label class="sr-only" for="group-message">群组消息或任务</label>
+                    <div class="agent-compose-row">
+                      <div class="agent-composer-tools">
+                        <button id="group-attachment-menu-toggle" class="agent-composer-add" type="button" aria-label="添加群材料" title="添加群材料" aria-haspopup="menu" aria-controls="group-attachment-menu" aria-expanded="false">＋</button>
+                        <div id="group-attachment-menu" class="agent-attachment-menu" role="menu" aria-label="添加群材料" hidden>
+                          <button id="group-upload" type="button" role="menuitem">从电脑上传</button>
+                          <button id="group-share-open" type="button" role="menuitem" aria-haspopup="dialog" aria-controls="group-share-dialog">分享 Agent 的材料或成果</button>
+                          <p>只有明确分享到这个群的文件，成员才能使用。</p>
+                          <p class="agent-upload-limit">单份 20 MiB · 本轮最多 10 份</p>
+                        </div>
+                      </div>
+                      <div class="group-recipient-field">
+                        <span id="group-recipient-label" class="sr-only">发送给</span>
+                        <div class="select-menu"><select id="group-recipient" hidden tabindex="-1" aria-hidden="true"><option value="">群内协作</option></select><button id="group-recipient-trigger" class="select-menu-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-controls="group-recipient-menu" aria-expanded="false" aria-labelledby="group-recipient-label group-recipient-value"><span id="group-recipient-icon" class="select-menu-icon" aria-hidden="true"></span><span id="group-recipient-value" class="select-menu-value">群内协作</span><span class="select-menu-chevron" aria-hidden="true"></span></button><div id="group-recipient-menu" class="select-menu-popup" role="listbox" aria-labelledby="group-recipient-label" hidden></div></div>
+                      </div>
+                      <textarea id="group-message" rows="1" maxlength="4000" placeholder="给当前群组发消息…"></textarea>
+                      <button id="group-send" class="primary agent-composer-send" type="submit" aria-label="发送" title="发送"><span class="sr-only">发送</span></button>
+                    </div>
+                    <div id="group-compose-status" class="muted-note small" role="status" hidden></div>
+                    <input id="group-file-input" type="file" multiple hidden aria-label="上传群材料">
+                  </form>
+                </section>
+              </div>
+            </div>
+            <aside id="group-panel" class="agent-settings-panel group-settings-panel" aria-labelledby="group-details-title" hidden>
+              <header class="agent-settings-header">
+                <h2 id="group-details-title" class="sr-only">群组设置</h2>
+                <button id="group-details-close" class="agent-settings-close" type="button" aria-label="关闭群组设置" title="关闭群组设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+                <div id="group-details-avatar" class="agent-settings-avatar" aria-hidden="true"></div>
+                <h3 id="group-details-name"></h3>
+                <span id="group-archived" class="identity-badge" hidden>已归档</span>
+                <p id="group-purpose" class="muted-note"></p>
+                <button id="group-files-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="group-files-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>材料与成果</span><span id="group-files-count" class="agent-artifacts-badge">0</span></button>
+              </header>
+              <nav class="agent-details-tabs" aria-label="群组设置分类"><button id="group-details-profile-tab" type="button" aria-pressed="true">基本资料</button><button id="group-details-members-tab" type="button" aria-pressed="false">成员</button><button id="group-details-tasks-tab" type="button" aria-pressed="false">任务</button></nav>
+              <section id="group-details-profile" class="agent-detail-section" aria-label="群组基本资料"><p class="muted-note">设置群组的名称、共同目标与参与成员。</p><div class="panel-actions"><button id="group-edit" class="secondary" type="button">编辑群组</button><button id="group-archive" class="ghost-button" type="button">归档</button></div></section>
+              <section id="group-details-members" class="agent-detail-section" aria-label="群成员能力" hidden><div class="collaboration-rail-heading"><h2>成员能力</h2><span id="group-member-count" class="count">0</span></div><div id="group-members"></div></section>
+              <section id="group-details-tasks" class="agent-detail-section" aria-label="协作任务" hidden><div class="collaboration-rail-heading"><h2>协作任务</h2><button id="group-refresh" class="ghost-button" type="button" aria-label="刷新群任务">↻</button></div><div id="group-tasks"></div></section>
+            </aside>
+          </div>
         </section>
 
         <dialog id="group-editor" class="collaboration-dialog" aria-labelledby="group-editor-title"><header class="collaboration-dialog-heading"><h2 id="group-editor-title">创建群组</h2><button id="group-editor-close" class="ghost-button" type="button" aria-label="关闭群组编辑">×</button></header><form id="group-editor-form"><label class="field"><span class="field-name">群组名称</span><input id="group-name" type="text" maxlength="120" required placeholder="例如：内容与研究小组"></label><label class="field"><span class="field-name">一起做什么</span><textarea id="group-purpose-input" rows="3" maxlength="2000" placeholder="说明共同目标、合作方式或长期关注的事情…"></textarea></label><fieldset class="group-member-picker"><legend>选择智能体</legend><p class="muted-note small">成员依据能力自主认领任务，主助理在群外管理工作。</p><div id="group-member-picker"></div></fieldset><div id="group-editor-error" class="error" role="alert" hidden></div><div class="form-actions"><button id="group-editor-save" class="primary" type="submit">创建群组</button></div></form></dialog>
@@ -226,21 +284,19 @@
 
         <!-- 用户智能体：可替换原型的真实运行入口 -->
         <section id="page-agent" class="page page-chat agent-chat-page" data-page="agent" aria-labelledby="agent-title" hidden>
+          <div id="agent-page-shell" class="agent-page-shell">
+          <div id="agent-primary" class="agent-primary">
           <header class="page-header agent-chat-header">
             <div class="agent-heading">
-              <button id="agent-identity-edit" class="agent-identity-icon" type="button" aria-label="修改智能体图标和资料" aria-haspopup="dialog" aria-controls="agent-panel"><span id="agent-icon" aria-hidden="true">A</span></button>
-              <div><h1 id="agent-title">我的智能体</h1><p id="agent-subtitle" class="page-subtitle"></p></div>
+              <button id="agent-panel-toggle" class="agent-identity-capsule" type="button" aria-label="打开智能体设置" aria-controls="agent-panel" aria-expanded="false"><span id="agent-icon" aria-hidden="true">A</span><span id="agent-title">我的智能体</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
             </div>
-            <div class="header-actions">
+            <div class="header-actions agent-application-actions">
               <span id="agent-application-state" class="application-delivery-state" role="status" hidden></span>
               <div id="agent-view-switch" class="agent-view-switch" role="group" aria-label="智能体使用方式" hidden><button id="agent-view-application" type="button" aria-pressed="true">应用</button><button id="agent-view-chat" type="button" aria-pressed="false">对话</button></div>
               <button id="agent-assistant-toggle" class="secondary" type="button" aria-controls="agent-conversation" aria-expanded="false" hidden>助手</button>
-              <div id="agent-conversation-actions" class="agent-conversation-actions" hidden>
-                <button id="agent-artifacts-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="agent-file-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>产物</span><span id="agent-artifacts-count" class="agent-artifacts-badge">0</span></button>
-              </div>
-              <button id="agent-panel-toggle" class="secondary agent-settings-button" type="button" aria-haspopup="dialog" aria-controls="agent-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M18 7h2M4 17h3M12 17h8"/><circle cx="15.5" cy="7" r="2.5"/><circle cx="9.5" cy="17" r="2.5"/></svg><span>智能体设置</span></button>
             </div>
           </header>
+          <p id="agent-subtitle" class="page-subtitle" hidden></p>
           <div id="agent-missing" class="empty-state card" hidden>
             <p>这个智能体入口已移除，或需求尚未保存。</p>
             <a class="text-link" href="#chat">回到 NEUMA</a>
@@ -256,7 +312,7 @@
               <div id="agent-development" class="agent-development" hidden></div>
             </div>
             <aside id="agent-history-sidebar" class="agent-history-sidebar" aria-label="历史对话">
-              <div class="agent-history-heading"><h2>历史对话 <span id="agent-history-count" class="count">0</span></h2><button id="agent-history-toggle" class="library-toggle" type="button" aria-label="收起历史对话" title="收起历史对话" aria-expanded="true" aria-controls="agent-history-body"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="library-toggle-arrow" d="m16 9-3 3 3 3"/></svg></button></div>
+              <div id="agent-history-heading" class="agent-history-heading"><h2>历史对话 <span id="agent-history-count" class="count">0</span></h2><div id="agent-conversation-actions" class="agent-conversation-actions" hidden><button id="agent-new-chat" class="agent-new-chat" type="button" aria-label="新对话" title="新对话">＋</button></div><button id="agent-history-toggle" class="library-toggle" type="button" aria-label="收起历史对话" title="收起历史对话" aria-expanded="true" aria-controls="agent-history-body"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/><path class="library-toggle-arrow" d="m16 9-3 3 3 3"/></svg></button></div>
               <span class="agent-history-rail-label" aria-hidden="true">对话</span>
               <div id="agent-history-body" class="agent-history-body">
                 <p id="agent-history-feedback" class="muted-note small" role="status"></p>
@@ -267,7 +323,8 @@
               </div>
             </aside>
             <section id="agent-conversation" class="conversation" aria-label="用户智能体的独立对话">
-              <div class="conversation-bar"><button id="agent-new-chat" class="conversation-new-chat" type="button">新对话</button><span id="agent-conversation-title" class="conversation-title" hidden></span></div>
+              <div id="agent-assistant-actions" class="agent-assistant-actions"></div>
+              <span id="agent-conversation-title" class="conversation-title" hidden></span>
               <div class="agent-status-line" hidden><p id="agent-runtime-status" role="status" aria-live="polite">智能体界面尚未加载。若此提示持续显示，请刷新页面；更新代码后需重启本机服务。</p><button id="agent-build-shortcut" class="text-link link-button" type="button" hidden>生成智能体</button></div>
               <div id="agent-messages" class="messages" aria-live="polite"></div>
               <div id="agent-error" class="error" role="alert" hidden></div>
@@ -276,18 +333,23 @@
                 <div id="agent-attachment-list" class="agent-attachment-list" aria-label="待发送材料" hidden></div>
                 <p id="agent-attachment-error" class="error small" role="alert" hidden></p>
                 <label id="agent-message-label" class="sr-only" for="agent-message">给当前智能体的任务</label>
-                <textarea id="agent-message" rows="3" maxlength="4000" placeholder="输入任务，或拖入 PDF、Word、图片等材料…"></textarea>
                 <input id="agent-attachment-input" type="file" multiple aria-label="上传材料" hidden>
-                <div class="composer-footer">
-                  <div class="agent-attachment-actions"><button id="agent-attachment-add" class="ghost-button" type="button">＋ 上传材料</button><button id="agent-attachment-pick" class="ghost-button" type="button" aria-haspopup="dialog" aria-controls="agent-material-dialog">已有材料</button><span>单份 20 MiB · 最多 10 份</span></div>
-                  <button id="agent-send" class="primary" type="submit" disabled>发送</button>
+                <div class="agent-compose-row">
+                  <div class="agent-composer-tools">
+                    <button id="agent-attachment-menu-toggle" class="agent-composer-add" type="button" aria-label="添加材料" title="添加材料" aria-haspopup="menu" aria-controls="agent-attachment-menu" aria-expanded="false">＋</button>
+                    <div id="agent-attachment-menu" class="agent-attachment-menu" role="menu" aria-label="添加材料" hidden><button id="agent-attachment-add" type="button" role="menuitem">从电脑上传</button><button id="agent-attachment-pick" type="button" role="menuitem" aria-haspopup="dialog" aria-controls="agent-material-dialog">从此 Agent 的材料中选择</button><p>以前上传给这个 Agent 的文件，可以再次选用。</p><p class="agent-upload-limit">单份 20 MiB · 最多 10 份</p></div>
+                  </div>
+                  <textarea id="agent-message" rows="1" maxlength="4000" placeholder="给当前智能体发消息…"></textarea>
+                  <button id="agent-send" class="primary agent-composer-send" type="submit" aria-label="发送" title="发送" disabled><span class="sr-only">发送</span></button>
                   <button id="agent-cancel-reply" class="cancel-reply" type="button" aria-label="停止当前操作" title="停止当前操作" hidden>■</button>
                 </div>
               </form>
             </section>
+            <div id="agent-history-resize" class="panel-resizer agent-history-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整智能体历史对话栏宽度" aria-controls="agent-history-sidebar" title="向右拖动可展开或调宽，达到最窄后继续向左拖动可折叠；双击恢复默认宽度"></div>
           </div>
-          <dialog id="agent-panel" class="agent-details-dialog" aria-labelledby="agent-details-title">
-            <header class="agent-details-header"><div><h2 id="agent-details-title">智能体设置</h2><p id="agent-details-name" class="muted-note"></p></div><button id="agent-details-close" class="ghost-button" type="button" aria-label="关闭智能体面板">关闭</button></header>
+          </div>
+          <aside id="agent-panel" class="agent-settings-panel" aria-labelledby="agent-details-title" hidden>
+            <header class="agent-settings-header"><h2 id="agent-details-title" class="sr-only">智能体设置</h2><button id="agent-details-close" class="agent-settings-close" type="button" aria-label="关闭智能体设置" title="关闭智能体设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button><div id="agent-details-avatar" class="agent-settings-avatar" aria-hidden="true"></div><h3 id="agent-details-name"></h3><p id="agent-details-description" class="muted-note"></p><button id="agent-artifacts-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="agent-file-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>产物</span><span id="agent-artifacts-count" class="agent-artifacts-badge">0</span></button></header>
             <nav class="agent-details-tabs" aria-label="智能体设置分类"><button id="agent-details-profile-tab" type="button" aria-pressed="true">基本资料</button><button id="agent-details-memory-tab" type="button" aria-pressed="false">记忆</button><button id="agent-details-connections-tab" type="button" aria-pressed="false">连接与模型</button></nav>
             <section id="agent-details-connections" class="agent-detail-section" aria-label="连接与模型" hidden><div id="agent-connections-content"></div></section>
             <div id="agent-details-unavailable" class="agent-detail-note" role="status" hidden>智能体生成后，就可以管理记忆和资料。</div>
@@ -310,9 +372,10 @@
               </form>
               <details class="agent-requirements-details"><summary>需求与运行设置</summary><div id="agent-brief" class="draft-content"></div><div class="panel-actions"><button id="agent-iterate" class="secondary" type="button">让 NEUMA 帮我迭代</button><button id="agent-save-entry" class="secondary" type="button">保存智能体需求</button><button id="agent-build" class="primary" type="button" disabled>生成智能体</button></div><p id="agent-storage-note" class="muted-note small" aria-live="polite"></p></details>
             </section>
-          </dialog>
+          </aside>
+          </div>
           <dialog id="agent-material-dialog" class="agent-file-dialog" aria-labelledby="agent-material-title">
-            <header class="agent-file-heading"><div><h2 id="agent-material-title">材料</h2><p class="muted-note small">这个智能体收到的文件，供选择与只读预览。</p></div><button id="agent-material-close" class="ghost-button" type="button" aria-label="关闭材料库">关闭</button></header>
+            <header class="agent-file-heading"><div><h2 id="agent-material-title">这个 Agent 的材料</h2><p class="muted-note small">以前上传给这个 Agent 的文件，可以再次选用。</p></div><button id="agent-material-close" class="ghost-button" type="button" aria-label="关闭材料库">关闭</button></header>
             <div class="agent-file-library">
               <aside class="agent-files-panel" aria-label="已有材料"><div class="agent-files-heading"><p>当前智能体的材料</p><button id="agent-material-refresh" class="ghost-button" type="button">刷新</button></div><p id="agent-material-feedback" class="muted-note small" role="status"></p><div id="agent-material-list" class="agent-file-list"></div></aside>
               <section class="agent-file-preview" aria-label="材料预览"><header class="agent-file-preview-heading"><h3 id="agent-material-name">选择一份材料</h3><a id="agent-material-download" class="secondary" hidden>下载原文件</a></header><div id="agent-material-preview" class="agent-file-content"></div></section>

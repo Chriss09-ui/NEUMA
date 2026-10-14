@@ -16,13 +16,16 @@ const agents = {
 const runtimeFor = (id, overrides = {}) => ({ agentId: id, agent: agents[id], definition: { ...agents[id], revision: 1 },
   status: "ready", ready: true, busy: false, error: "", ...overrides });
 
-async function setup({ files, file, memory, saveMemory, saveProfile, initial = "one", stored = new Map(), initialRuntime = {}, reduceMotion = false } = {}) {
+async function setup({ files, file, memory, saveMemory, saveProfile, initial = "one", stored = new Map(), initialRuntime = {}, reduceMotion = false, panelMotion = false } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
-    dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) ?? []).map((callback) => callback(event))); }
+    removeEventListener(type, callback) { this.listeners.set(type, (this.listeners.get(type) ?? []).filter((listener) => listener !== callback)); }
+    dispatchEvent(event) { event.target ??= this; return Promise.all((this.listeners.get(event.type) ?? []).map((callback) => callback(event))); }
   }
   const document = new Events(), nodes = new Map(), requests = [], emitted = [], downloads = [], urls = [], timers = [], animations = [];
+  const clearedTimers = new Set(), timerDurations = [], layoutReads = [];
+  const animationReads = [], geometryFinishes = []; let settingsWidth = 0;
   const motion = Object.assign(new Events(), { matches: reduceMotion });
   class Element extends Events {
     constructor(tag = "div") { super(); this.tag = tag; }
@@ -41,17 +44,28 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
     replaceChildren(...children) { this.children = children; }
     contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
     setAttribute(name, value) { this.attributes.set(name, value); }
-    getBoundingClientRect() { return { height: this.presentedHeight ?? (get("agent-details-profile").hidden ? 500 : 640) }; }
+    getBoundingClientRect() {
+      layoutReads.push({ target: this, settingsOpen: get("agent-page-shell").classes.has("settings-open"), panelHidden: get("agent-panel").hidden });
+      return { width: 1200, height: 720 };
+    }
+    getAnimations() {
+      animationReads.push(this);
+      return this === get("agent-page-shell") && panelMotion ? [{ finish() {
+        settingsWidth = get("agent-page-shell").classes.has("settings-open") ? 400 : 0;
+        geometryFinishes.push(settingsWidth);
+      } }] : [];
+    }
     animate(keyframes, options) {
       const animation = { target: this, keyframes, options, cancelled: false,
-        cancel() { this.cancelled = true; delete this.target.presentedHeight; } };
+        cancel() { this.cancelled = true; } };
       animations.push(animation);
       return animation;
     }
     focus() { document.activeElement = this; }
     modalOpens = 0;
     showModal() {
-      assert.equal([...nodes.values()].some((node) => node !== this && node.open), false, "不能嵌套设置与产物弹窗");
+      assert.equal(this.tag, "dialog", "设置侧栏不能使用模态弹窗");
+      assert.equal([...nodes.values()].some((node) => node !== this && node.tag === "dialog" && node.open), false, "不能嵌套模态弹窗");
       this.open = true; this.modalOpens++;
     }
     close() { this.open = false; return this.dispatchEvent({ type: "close" }); }
@@ -65,8 +79,15 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
   const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   document.getElementById = get;
   document.createElement = (tag) => new Element(tag);
+  document.querySelector = (selector) => selector === "dialog[open]" ? [...nodes.values()].find((node) => node.tag === "dialog" && node.open) ?? null : null;
+  get("agent-panel").tag = "aside"; get("agent-panel").hidden = true;
+  get("agent-panel-toggle").setAttribute("aria-expanded", "false");
+  get("agent-file-dialog").tag = "dialog";
   get("agent-file-dialog").append(get("agent-files-refresh"), get("agent-file-list"), get("agent-file-content"), get("agent-file-close"));
-  class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
+  class Event {
+    constructor(type, fields = {}) { this.type = type; this.defaultPrevented = false; Object.assign(this, fields); }
+    preventDefault() { this.defaultPrevented = true; }
+  }
   const dispatch = document.dispatchEvent.bind(document);
   document.dispatchEvent = (event) => { emitted.push({ type: event.type, detail: event.detail }); return dispatch(event); };
   const emit = (type, detail) => document.dispatchEvent(new Event(type, { detail }));
@@ -94,10 +115,12 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
   };
   const context = vm.createContext({ ...view, ...avatar, agentDisplayName, agentDisplayDescription, document, Event, CustomEvent: Event, Blob,
     renderAgentAvatar: (target, agent, options) => avatar.renderAgentAvatar(target, agent, { ...options, document, motion: false }),
-    window: { matchMedia: () => motion, localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) } },
+    window: { matchMedia: () => motion, localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },
+      ...(panelMotion ? { getComputedStyle: () => ({ transitionDuration: motion.matches ? "0s" : "0.42s" }) } : {}) },
     staticArtifactDocument: (content) => `safe-preview:${content}`,
     URL: { createObjectURL: (blob) => { urls.push(blob); return `blob:${urls.length}`; }, revokeObjectURL: (url) => urls.push(url) },
-    setTimeout: (callback) => timers.push(callback),
+    setTimeout: (callback, duration) => { timerDurations.push(duration); return timers.push(callback); },
+    clearTimeout: (id) => clearedTimers.add(id),
     createAgentRuntime: () => ({
       listFiles: (id) => call("listFiles", [id], files, { files: [] }),
       readFile: (id, path) => call("readFile", [id, path], file, { path, content: `${id}的文件内容`, truncated: false }),
@@ -109,8 +132,11 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
   vm.runInContext(source, context);
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route(initial); await settle();
-  return { get, emit, route, requests, emitted, downloads, urls, timers, document, stored, animations, motion,
+  return { get, emit, route, requests, emitted, downloads, urls, timers, clearedTimers, timerDurations, layoutReads, animationReads, geometryFinishes, document, stored, animations, motion,
+    settingsWidth: () => settingsWidth, setSettingsWidth: (width) => { settingsWidth = width; },
     click: async (id) => { await get(id).click(); await settle(); },
+    key: async (key, fields = {}) => { const event = new Event("keydown", { key, ...fields }); await document.dispatchEvent(event); await settle(); return event; },
+    endPanelMotion: async (fields = {}) => { await get("agent-page-shell").dispatchEvent(new Event("transitionend", { propertyName: "grid-template-columns", ...fields })); await settle(); },
     input: (id, value) => { get(id).value = value; return get(id).dispatchEvent(new Event("input")); },
     submit: (id) => get(id).dispatchEvent({ type: "submit", preventDefault() {} }),
     broadcast: async (id, overrides = {}) => { const detail = runtimeFor(id, overrides); runtimes.set(id, detail); await emit("neuma:agent-runtime-change", detail); await settle(); },
@@ -141,21 +167,266 @@ test("研发快捷入口沿用当前Agent归属，待连接交付可以重新检
   assert.equal(ui.get("agent-build-shortcut").hidden, true);
 });
 
-test("初次路由主动握手并自动读取成果，设置默认关闭且只有资料和记忆", async () => {
+test("初次路由主动握手并自动读取成果，胶囊展开非模态设置侧栏", async () => {
   const ui = await setup();
-  assert.equal(ui.get("agent-panel").open, false);
+  assert.equal(ui.get("agent-panel").hidden, true);
   assert.ok(ui.emitted.some((event) => event.type === "neuma:agent-runtime-request" && event.detail.agentId === "one"));
-  await ui.click("agent-identity-edit");
-  assert.equal(ui.get("agent-panel").open, true);
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-page-shell").classes.has("settings-open"), true);
+  assert.equal(ui.get("agent-panel-toggle").attributes.get("aria-expanded"), "true");
+  assert.equal(ui.get("agent-panel").modalOpens, 0);
+  assert.equal(ui.document.activeElement, ui.get("agent-details-close"));
   assert.equal(ui.get("agent-panel").dataset.view, "profile");
   assert.equal(ui.get("agent-profile-name").value, "会议助手");
   assert.equal(ui.get("agent-details-title").textContent, "智能体设置");
   await ui.click("agent-details-close");
+  assert.equal(ui.get("agent-panel-toggle").attributes.get("aria-expanded"), "false");
+  assert.equal(ui.document.activeElement, ui.get("agent-panel-toggle"));
   assert.equal(ui.requests.some((request) => request.method === "listFiles" && request.args[0] === "one"), true);
   await ui.openMemory();
   assert.equal(ui.get("agent-panel").dataset.view, "memory");
   assert.equal(ui.get("agent-details-title").textContent, "智能体设置");
   assert.equal(ui.get("agent-memory-input").value, "one的记忆");
+});
+
+test("胶囊反复开合只更新展示，聊天仍可聚焦且保留双方草稿与设置归属事件", async () => {
+  const ui = await setup(), requests = ui.requests.length;
+  ui.get("agent-message").value = "尚未发送的任务";
+  await ui.click("agent-panel-toggle");
+  await ui.input("agent-profile-name", "尚未保存的名字");
+  ui.get("agent-message").focus();
+  await ui.broadcast("one", { busy: true, ready: false });
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-message").disabled, false);
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.get("agent-page-shell").classes.has("settings-open"), false);
+  assert.equal(ui.get("agent-panel-toggle").attributes.get("aria-expanded"), "false");
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-profile-name").value, "尚未保存的名字");
+  assert.equal(ui.get("agent-message").value, "尚未发送的任务");
+  assert.equal(ui.requests.length, requests);
+  assert.deepEqual(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view")
+    .map(({ detail }) => [detail.agentId, detail.active]), [["one", true], ["one", false], ["one", true]]);
+});
+
+test("侧栏横移先提交关闭位置，关闭立即停用控件，结束后隐藏且不再抢焦点", async () => {
+  const ui = await setup({ panelMotion: true });
+  const previousReads = ui.layoutReads.length;
+  await ui.click("agent-panel-toggle");
+  const panel = ui.get("agent-panel"), shell = ui.get("agent-page-shell");
+  assert.equal(ui.layoutReads.length, previousReads + 1);
+  assert.equal(ui.layoutReads.at(-1).target, shell);
+  assert.equal(ui.layoutReads.at(-1).settingsOpen, false);
+  assert.equal(ui.layoutReads.at(-1).panelHidden, false);
+  assert.equal(shell.classes.has("is-settings-animating"), true);
+  assert.equal(panel.inert, false); assert.equal(panel.attributes.get("aria-hidden"), "false");
+  await ui.endPanelMotion({ target: ui.get("agent-details-profile") });
+  await ui.endPanelMotion({ propertyName: "transform" });
+  assert.equal(shell.classes.has("is-settings-animating"), true);
+  await ui.endPanelMotion();
+  assert.equal(shell.classes.has("is-settings-animating"), false);
+  assert.equal(panel.hidden, false);
+  await ui.click("agent-details-close");
+  assert.equal(panel.hidden, false, "关闭过渡期间保留侧栏供 CSS 横移");
+  assert.equal(panel.inert, true); assert.equal(panel.attributes.get("aria-hidden"), "true");
+  assert.equal(shell.classes.has("settings-open"), false);
+  assert.equal(shell.classes.has("is-settings-animating"), true);
+  assert.equal(ui.get("agent-panel-toggle").attributes.get("aria-expanded"), "false");
+  assert.equal(ui.document.activeElement, ui.get("agent-panel-toggle"));
+  const events = ui.emitted.filter((event) => event.type === "neuma:agent-settings-view").length;
+  ui.get("agent-message").focus(); await ui.endPanelMotion();
+  assert.equal(panel.hidden, true);
+  assert.equal(shell.classes.has("is-settings-animating"), false);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view").length, events);
+});
+
+test("快速反向开合保留当前横移，取消旧回调，迟到结束不能隐藏重新展开的侧栏", async () => {
+  const ui = await setup({ panelMotion: true });
+  const previousReads = ui.layoutReads.length;
+  await ui.click("agent-panel-toggle");
+  const shell = ui.get("agent-page-shell"), firstEnd = shell.listeners.get("transitionend")[0], firstTimer = ui.timers[0];
+  await ui.input("agent-profile-name", "横移期间的名称草稿");
+  await ui.click("agent-panel-toggle");
+  const closingEnd = shell.listeners.get("transitionend")[0], closingTimer = ui.timers[1];
+  assert.equal((await ui.key("Escape")).defaultPrevented, false, "已经逻辑关闭时 Esc 不应重复关闭");
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.layoutReads.length, previousReads + 1, "反向展开不能重新提交零位而跳回起点");
+  assert.equal(ui.clearedTimers.has(1), true); assert.equal(ui.clearedTimers.has(2), true);
+  assert.equal(shell.listeners.get("transitionend").length, 1);
+  firstTimer(); closingTimer();
+  firstEnd({ target: shell, propertyName: "grid-template-columns" });
+  closingEnd({ target: shell, propertyName: "grid-template-columns" });
+  assert.equal(shell.classes.has("settings-open"), true);
+  assert.equal(shell.classes.has("is-settings-animating"), true);
+  assert.equal(ui.get("agent-panel").hidden, false); assert.equal(ui.get("agent-panel").inert, false);
+  assert.equal(ui.get("agent-profile-name").value, "横移期间的名称草稿");
+  assert.equal(ui.get("agent-panel-toggle").attributes.get("aria-expanded"), "true");
+  await ui.endPanelMotion();
+  assert.equal(shell.classes.has("is-settings-animating"), false);
+  assert.deepEqual(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view")
+    .map(({ detail }) => [detail.agentId, detail.active]), [["one", true], ["one", false], ["one", true]]);
+});
+
+test("没有收到横移结束事件时兜底隐藏，计时完成不重复发布关闭或恢复旧焦点", async () => {
+  const ui = await setup({ panelMotion: true });
+  await ui.click("agent-panel-toggle"); await ui.endPanelMotion();
+  await ui.click("agent-details-close");
+  const count = ui.emitted.filter((event) => event.type === "neuma:agent-settings-view").length;
+  assert.equal(ui.timerDurations.at(-1), 470);
+  ui.get("agent-message").focus(); ui.timers.at(-1)();
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.get("agent-page-shell").classes.has("is-settings-animating"), false);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view").length, count);
+});
+
+test("关闭横移途中打开产物先重新启用侧栏，旧计时不能破坏文件库关闭后的焦点", async () => {
+  const ui = await setup({ panelMotion: true });
+  await ui.click("agent-panel-toggle"); await ui.endPanelMotion();
+  await ui.click("agent-details-close");
+  const closingTimer = ui.timers.at(-1);
+  await ui.openArtifacts();
+  closingTimer();
+  assert.equal(ui.get("agent-panel").hidden, false); assert.equal(ui.get("agent-panel").inert, false);
+  assert.equal(ui.get("agent-panel").attributes.get("aria-hidden"), "false");
+  assert.equal(ui.get("agent-file-dialog").open, true);
+  assert.equal((await ui.key("Escape")).defaultPrevented, false);
+  await ui.get("agent-file-dialog").cancel();
+  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
+  await ui.endPanelMotion();
+  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
+  assert.equal(ui.get("agent-panel").hidden, false);
+});
+
+test("关闭横移期间切 Agent 或离页立即清理，旧回调不影响新侧栏或新页面焦点", async () => {
+  const ui = await setup({ panelMotion: true });
+  await ui.click("agent-panel-toggle"); await ui.endPanelMotion();
+  await ui.click("agent-details-close");
+  const oldTimer = ui.timers.at(-1), oldEnd = ui.get("agent-page-shell").listeners.get("transitionend")[0];
+  const previousFinishes = ui.geometryFinishes.length;
+  ui.setSettingsWidth(170);
+  ui.get("agent-message").focus(); await ui.route("two");
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.get("agent-page-shell").classes.has("is-settings-animating"), false);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.geometryFinishes.length, previousFinishes + 1);
+  assert.equal(ui.settingsWidth(), 0, "路由切换必须立即恢复完整聊天宽度");
+  assert.equal(ui.animationReads.every((target) => target === ui.get("agent-page-shell")), true);
+  await ui.click("agent-panel-toggle");
+  oldTimer(); oldEnd({ target: ui.get("agent-page-shell"), propertyName: "grid-template-columns" });
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-details-name").textContent, "周报助手");
+  assert.equal(ui.get("agent-page-shell").classes.has("is-settings-animating"), true);
+  const newTimer = ui.timers.at(-1);
+  ui.get("agent-message").focus(); await ui.route(null); newTimer();
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+});
+
+test("展开横移途中删除 Agent 立即隐藏和停用，迟到计时不能恢复已删除设置", async () => {
+  const ui = await setup({ panelMotion: true });
+  await ui.click("agent-panel-toggle");
+  const timer = ui.timers.at(-1);
+  const previousFinishes = ui.geometryFinishes.length;
+  ui.setSettingsWidth(230);
+  ui.get("agent-message").focus(); await ui.emit("neuma:agent-removed", { id: "one" }); timer();
+  assert.equal(ui.get("agent-panel").hidden, true); assert.equal(ui.get("agent-panel").inert, true);
+  assert.equal(ui.get("agent-panel-toggle").attributes.get("aria-expanded"), "false");
+  assert.equal(ui.get("agent-page-shell").classes.has("is-settings-animating"), false);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.geometryFinishes.length, previousFinishes + 1);
+  assert.equal(ui.settingsWidth(), 0, "删除时不能残留关闭中的轨道");
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.item(), undefined);
+});
+
+test("减少动效立即达到逻辑目标，中途改变偏好取消横移且不丢失焦点或草稿", async () => {
+  const reduced = await setup({ panelMotion: true, reduceMotion: true });
+  await reduced.click("agent-panel-toggle"); await reduced.click("agent-details-close");
+  assert.equal(reduced.get("agent-panel").hidden, true); assert.equal(reduced.timers.length, 0);
+  const ui = await setup({ panelMotion: true });
+  await ui.click("agent-panel-toggle");
+  const opening = ui.timers.at(-1);
+  await ui.input("agent-profile-name", "保留设置草稿");
+  ui.setSettingsWidth(180);
+  ui.motion.matches = true; await ui.motion.dispatchEvent({ type: "change" }); opening();
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-page-shell").classes.has("is-settings-animating"), false);
+  assert.equal(ui.get("agent-profile-name").value, "保留设置草稿");
+  assert.equal(ui.settingsWidth(), 400, "开启减少动效时立即到达展开位置");
+  ui.motion.matches = false; await ui.click("agent-details-close");
+  const closing = ui.timers.at(-1);
+  ui.setSettingsWidth(240);
+  ui.get("agent-message").focus(); ui.motion.matches = true;
+  await ui.motion.dispatchEvent({ type: "change" }); closing();
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.get("agent-page-shell").classes.has("is-settings-animating"), false);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.settingsWidth(), 0, "关闭途中减少动效应立即释放设置轨道");
+});
+
+test("侧栏身份使用已保存资料，编辑预览与后台资料变化不会覆盖当前草稿", async () => {
+  const profile = { name: "我的会议伙伴", description: "整理会议与后续行动", icon: "📝" };
+  const ui = await setup({ initialRuntime: { one: { agent: { ...agents.one, profile } } } });
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-details-name").textContent, profile.name);
+  assert.equal(ui.get("agent-details-description").textContent, profile.description);
+  assert.equal(ui.get("agent-details-description").hidden, false);
+  assert.equal(ui.get("agent-details-avatar").textContent, "📝");
+  await ui.input("agent-profile-name", "未保存的名字");
+  await ui.input("agent-profile-custom-icon", "🌟");
+  assert.equal(ui.get("agent-details-name").textContent, profile.name);
+  assert.equal(ui.get("agent-details-avatar").textContent, "📝");
+  await ui.broadcast("one", { agent: { ...agents.one, profile: { name: "保存后的名字", description: "", icon: "📚" } } });
+  assert.equal(ui.get("agent-details-name").textContent, "保存后的名字");
+  assert.equal(ui.get("agent-details-description").hidden, true);
+  assert.equal(ui.get("agent-details-avatar").textContent, "📚");
+  assert.equal(ui.get("agent-profile-name").value, "未保存的名字");
+  assert.equal(ui.get("agent-avatar-preview").textContent, "🌟");
+});
+
+test("应用配置入口选择连接标签且不重复广播展开，切 Agent 和离页关闭时不抢焦点", async () => {
+  const ui = await setup();
+  await ui.emit("neuma:agent-connections-open");
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-panel").dataset.view, "connections");
+  assert.equal(ui.get("agent-details-connections-tab").attributes.get("aria-pressed"), "true");
+  await ui.emit("neuma:agent-connections-open");
+  assert.equal(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view" && event.detail.active).length, 1);
+  ui.get("agent-message").focus(); await ui.route("two");
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.deepEqual(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view")
+    .map(({ detail }) => [detail.agentId, detail.active]), [["one", true], ["one", false]]);
+  await ui.click("agent-panel-toggle");
+  assert.equal(ui.get("agent-details-name").textContent, "周报助手");
+  ui.get("agent-message").focus(); await ui.route(null);
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(ui.emitted.filter((event) => event.type === "neuma:agent-settings-view").at(-1).detail.agentId, "two");
+});
+
+test("Esc 优先关闭模态文件库或材料库，已处理按键不折叠设置，之后再关闭侧栏", async () => {
+  const ui = await setup(); await ui.openArtifacts();
+  const filesEscape = await ui.key("Escape");
+  assert.equal(filesEscape.defaultPrevented, false);
+  assert.equal(ui.get("agent-panel").hidden, false);
+  await ui.get("agent-file-dialog").cancel();
+  assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
+  const materials = ui.get("agent-material-dialog"); materials.tag = "dialog"; materials.showModal();
+  assert.equal((await ui.key("Escape")).defaultPrevented, false);
+  assert.equal(ui.get("agent-panel").hidden, false);
+  await materials.cancel();
+  await ui.key("Escape", { defaultPrevented: true });
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal((await ui.key("Escape")).defaultPrevented, true);
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-panel-toggle"));
 });
 
 test("资料草稿跨标签保留，切 Agent 后使用各自草稿并忽略后台运行状态", async () => {
@@ -166,7 +437,7 @@ test("资料草稿跨标签保留，切 Agent 后使用各自草稿并忽略后�
   await ui.click("agent-details-memory-tab"); await ui.click("agent-details-profile-tab");
   assert.equal(ui.get("agent-profile-name").value, "会议名称草稿");
   await ui.route("two");
-  assert.equal(ui.get("agent-panel").open, false);
+  assert.equal(ui.get("agent-panel").hidden, true);
   await ui.click("agent-panel-toggle"); await ui.input("agent-profile-name", "周报名称草稿");
   await ui.broadcast("one", { busy: true, ready: false });
   assert.equal(ui.get("agent-profile-name").value, "周报名称草稿");
@@ -390,7 +661,7 @@ test("完整网页使用隔离预览，下载文件后释放 URL", async () => {
   assert.equal(ui.urls.at(-1), "blob:1");
 });
 
-test("产物从顶栏打开，默认预览最新文件，同一弹窗切换并保留各 Agent 的选择", async () => {
+test("产物先展开设置侧栏再打开文件库，默认预览最新文件并保留各 Agent 的选择", async () => {
   const ui = await setup({ files: (id) => ({ files: id === "one" ? [
     { path: "旧产物.md", size: 20, updatedAt: "2026-10-08T10:00:00Z" },
     { path: "最新产物.md", size: 20, updatedAt: "2026-10-09T10:00:00Z" },
@@ -399,6 +670,8 @@ test("产物从顶栏打开，默认预览最新文件，同一弹窗切换并�
   assert.equal(ui.get("agent-artifacts-count").textContent, "2");
   assert.equal(ui.requests.some((request) => request.method === "readFile"), false);
   await ui.openArtifacts();
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-panel").modalOpens, 0);
   assert.equal(ui.get("agent-file-name").textContent, "最新产物.md");
   await ui.get("agent-file-list").children[1].click(); await settle();
   assert.equal(ui.get("agent-file-name").textContent, "旧产物.md");
@@ -462,7 +735,7 @@ test("产物列表位于独立文件库弹窗，历史对话栏不再承载文�
   assert.doesNotMatch(html, /id="agent-artifacts-sidebar"|id="agent-save-chat"/);
 });
 
-test("工作区必要控件唯一且归属正确，弹窗入口保留 ARIA 关联与对话恢复顺序", async () => {
+test("胶囊、历史加号和侧栏产物入口唯一且保留 ARIA 关联与对话恢复顺序", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const tags = [...html.matchAll(/<([a-z][\w-]*)\b[^>]*>/g)];
   const attribute = (tag, name) => [...tag[0].matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)].find((match) => match[1] === name)?.[3];
@@ -472,17 +745,29 @@ test("工作区必要控件唯一且归属正确，弹窗入口保留 ARIA 关�
   };
   const header = html.slice(element("page-agent").index).match(/<header\b[^>]*>[\s\S]*?<\/header>/)?.[0];
   assert.ok(header);
-  for (const [id, dialogId] of [["agent-identity-edit", "agent-panel"], ["agent-artifacts-open", "agent-file-dialog"], ["agent-panel-toggle", "agent-panel"]]) {
-    const control = element(id);
-    assert.equal(control[1], "button"); assert.ok(header.includes(control[0]));
-    assert.equal(attribute(control, "type"), "button"); assert.equal(attribute(control, "aria-haspopup"), "dialog");
-    assert.equal(attribute(control, "aria-controls"), dialogId); assert.equal(element(dialogId)[1], "dialog");
-  }
+  const capsule = element("agent-panel-toggle"), panel = element("agent-panel"), artifacts = element("agent-artifacts-open");
+  assert.equal(capsule[1], "button"); assert.ok(header.includes(capsule[0]));
+  assert.equal(attribute(capsule, "type"), "button"); assert.equal(attribute(capsule, "aria-controls"), "agent-panel");
+  assert.equal(attribute(capsule, "aria-expanded"), "false"); assert.equal(attribute(capsule, "aria-haspopup"), undefined);
+  const identity = html.slice(capsule.index, html.indexOf("</button>", capsule.index));
+  assert.ok(identity.includes(element("agent-icon")[0])); assert.ok(identity.includes(element("agent-title")[0]));
+  assert.equal(panel[1], "aside"); assert.match(panel[0], /\bhidden\b/);
+  assert.equal(attribute(panel, "aria-labelledby"), "agent-details-title");
+  const settings = html.slice(panel.index, html.indexOf("</aside>", panel.index));
+  for (const id of ["agent-details-name", "agent-details-avatar", "agent-details-description", "agent-artifacts-open", "agent-artifacts-count"])
+    assert.ok(settings.includes(element(id)[0]));
+  assert.equal(artifacts[1], "button"); assert.equal(attribute(artifacts, "type"), "button");
+  assert.equal(attribute(artifacts, "aria-haspopup"), "dialog"); assert.equal(attribute(artifacts, "aria-controls"), "agent-file-dialog");
+  assert.equal(element("agent-file-dialog")[1], "dialog"); assert.equal(header.includes(artifacts[0]), false);
+  assert.doesNotMatch(html, /id="agent-identity-edit"/);
   const start = element("agent-conversation").index;
   const conversation = html.slice(start, html.indexOf("</section>", start));
   const newChat = element("agent-new-chat"), error = element("agent-error"), recovery = element("agent-save-actions");
   assert.equal(newChat[1], "button"); assert.equal(attribute(newChat, "type"), "button");
-  for (const control of [newChat, error, recovery, element("agent-chat-form")]) assert.ok(conversation.includes(control[0]));
+  assert.ok(attribute(newChat, "aria-label"));
+  const history = element("agent-history-sidebar");
+  assert.ok(html.slice(history.index, html.indexOf("</aside>", history.index)).includes(newChat[0]));
+  for (const control of [error, recovery, element("agent-chat-form")]) assert.ok(conversation.includes(control[0]));
   assert.ok(newChat.index < element("agent-messages").index);
   assert.equal(conversation.includes(element("agent-artifacts-open")[0]), false);
   assert.match(element("agent-conversation-title")[0], /\bhidden\b/);
@@ -505,14 +790,15 @@ test("进入已生成 Agent 自动读取文件，首次生成和任务结束刷�
   await ui.route("two"); await settle();
   assert.equal(ui.requests.filter((request) => request.method === "listFiles").at(-1).args[0], "two");
   assert.equal(ui.get("agent-file-list").children[0].dataset.path, "two.md");
-  assert.equal(ui.get("agent-panel").open, false);
+  assert.equal(ui.get("agent-panel").hidden, true);
 });
 
-test("产物关闭和原生 Esc 取消均返回顶栏按钮，设置与文件库不嵌套", async () => {
+test("产物关闭和原生 Esc 取消均返回可见侧栏按钮，文件库与非模态设置并存", async () => {
   const ui = await setup({ files: () => ({ files: [{ path: "成果.md", size: 20 }] }) });
   await ui.click("agent-panel-toggle"); await ui.openArtifacts();
   assert.equal(ui.get("agent-file-dialog").open, true);
-  assert.equal(ui.get("agent-panel").open, false);
+  assert.equal(ui.get("agent-panel").hidden, false);
+  assert.equal(ui.get("agent-page-shell").classes.has("settings-open"), true);
   await ui.click("agent-file-close");
   assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
   await ui.openArtifacts(); await ui.get("agent-file-dialog").cancel();
@@ -520,7 +806,8 @@ test("产物关闭和原生 Esc 取消均返回顶栏按钮，设置与文件库
   assert.equal(ui.document.activeElement, ui.get("agent-artifacts-open"));
   await ui.openArtifacts(); await ui.click("agent-panel-toggle");
   assert.equal(ui.get("agent-file-dialog").open, false);
-  assert.equal(ui.get("agent-panel").open, true);
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.document.activeElement, ui.get("agent-panel-toggle"));
 });
 
 test("切 Agent 关闭独立预览不抢新页面焦点，迟到读取不覆盖新 Agent 文件", async () => {
@@ -536,8 +823,9 @@ test("切 Agent 关闭独立预览不抢新页面焦点，迟到读取不覆盖�
   firstFile.resolve({ path: "one.md", content: "迟到会议内容" }); await settle();
   assert.equal(ui.get("agent-file-name").textContent, "two.md");
   assert.equal(ui.get("agent-file-content").children[0].textContent, "周报内容");
-  await ui.click("agent-file-close"); await ui.click("agent-panel-toggle");
+  await ui.click("agent-file-close");
   composer.focus(); await ui.route("one");
+  assert.equal(ui.get("agent-panel").hidden, true);
   assert.equal(ui.document.activeElement, composer);
 });
 
@@ -547,33 +835,38 @@ test("删除 Agent 或离开页面关闭产物库，迟到文件不恢复已删�
   const composer = ui.get("agent-message"); composer.focus();
   await ui.emit("neuma:agent-removed", { id: "one" });
   assert.equal(ui.get("agent-file-dialog").open, false);
+  assert.equal(ui.get("agent-panel").hidden, true);
   assert.equal(ui.document.activeElement, composer);
   pending.resolve({ path: "成果.md", content: "迟到文件" }); await settle();
   await ui.click("agent-file-download");
   assert.equal(ui.item(), undefined);
   assert.equal(ui.downloads.length, 0);
+  await ui.click("agent-panel-toggle"); await ui.openArtifacts();
+  assert.equal(ui.get("agent-panel").hidden, true);
+  assert.equal(ui.get("agent-file-dialog").open, false);
   await ui.route("two"); await ui.openArtifacts();
   composer.focus(); await ui.route(null);
   assert.equal(ui.get("agent-file-dialog").open, false);
   assert.equal(ui.document.activeElement, composer);
 });
 
-test("快速切换设置标签取消旧过渡，从当前高度续接并保留草稿，关闭后清理动画", async () => {
+test("快速切换设置标签只过渡内容且保留草稿，关闭后清理动画", async () => {
   const ui = await setup();
   await ui.click("agent-panel-toggle");
   await ui.input("agent-profile-name", "尚未保存的新名字");
   await ui.click("agent-details-memory-tab");
   const previous = [...ui.animations];
-  assert.equal(previous.length, 2);
-  ui.get("agent-panel").presentedHeight = 586;
+  assert.equal(previous.length, 1);
+  assert.equal(previous[0].target, ui.get("agent-details-memory"));
   await ui.click("agent-details-profile-tab");
   assert.equal(previous.every((animation) => animation.cancelled), true);
-  assert.equal(ui.animations.at(-2).keyframes[0].height, "586px");
+  assert.equal(ui.animations.every((animation) => animation.target !== ui.get("agent-panel")
+    && animation.keyframes.every((frame) => !Object.hasOwn(frame, "height"))), true);
   assert.equal(ui.get("agent-details-profile").hidden, false);
   assert.equal(ui.get("agent-details-memory").hidden, true);
   assert.equal(ui.get("agent-profile-name").value, "尚未保存的新名字");
   await ui.click("agent-details-profile-tab");
-  assert.equal(ui.animations.length, 4);
+  assert.equal(ui.animations.length, 2);
   assert.equal(ui.animations.at(-1).cancelled, false);
   await ui.click("agent-details-close");
   assert.equal(ui.animations.every((animation) => animation.cancelled), true);
@@ -588,13 +881,13 @@ test("减少动态效果时标签立即可用，中途更改偏好或离开 Agen
   assert.equal(ui.get("agent-memory-input").disabled, false);
   ui.motion.matches = false;
   await ui.click("agent-details-profile-tab");
-  assert.equal(ui.animations.length, 2);
+  assert.equal(ui.animations.length, 1);
   ui.motion.matches = true;
   await ui.motion.dispatchEvent({ type: "change" });
   assert.equal(ui.animations.every((animation) => animation.cancelled), true);
   ui.motion.matches = false;
   await ui.click("agent-details-memory-tab");
   await ui.route("two");
-  assert.equal(ui.get("agent-panel").open, false);
+  assert.equal(ui.get("agent-panel").hidden, true);
   assert.equal(ui.animations.every((animation) => animation.cancelled), true);
 });

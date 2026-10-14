@@ -6,10 +6,12 @@ import { createSelectMenu } from "./select-menu.js";
 import { button, node, notice, renderMembers, renderMessages, renderTasks, terminalTask } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = (id) => document.getElementById(id);
+const groupPanel = byId("group-panel"), groupShell = byId("group-page-shell"), groupMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let route = { page: "chat", groupId: null }, groups = [], data = null, requestSequence = 0;
 let loading = false, sending = false, selectedTask = "", newTask = false, pollTimer = null, polling = false;
 let editing = null, editorTrigger = null, editorSaving = false, editorSequence = 0, editorRetry = null, retry = null;
 let listSequence = 0;
+let settingsGroupId = null, settingsSequence = 0, settingsTimer = null, removeSettingsListener = null;
 const drafts = new Map();
 const avatarMembers = new Map();
 const materials = createGroupMaterials({ api, current: () => data, refresh: load, changed: controls });
@@ -42,7 +44,8 @@ function groupAvatar(group, className) {
   const avatar = node("span", className); renderGroupAvatar(avatar, group, [...avatarMembers.values()]); return avatar;
 }
 function renderGroupIdentity() {
-  if (data?.group?.id === route.groupId) renderGroupAvatar(byId("group-avatar"), data.group, [...avatarMembers.values()]);
+  if (data?.group?.id !== route.groupId) return;
+  for (const id of ["group-avatar", "group-details-avatar"]) renderGroupAvatar(byId(id), data.group, [...avatarMembers.values()]);
 }
 function syncAvatars(members) {
   if (!rememberAvatars(members)) return;
@@ -54,12 +57,89 @@ function controls() {
   byId("group-send").disabled = Boolean(unavailable || sending || materials.busy());
   byId("group-new-task").disabled = Boolean(unavailable || sending);
   byId("group-message").disabled = Boolean(unavailable || sending);
+  byId("group-panel-toggle").disabled = route.page !== "group" || data?.group?.id !== route.groupId;
+  materials.syncControls();
   byId("group-recipient").disabled = Boolean(unavailable || sending);
   recipientMenu.refresh(); taskMenu.refresh();
   const status = byId("group-compose-status");
   status.textContent = data?.group?.archived ? "群已归档，取消归档后可继续协作。"
     : sending ? "正在提交消息…" : "";
   status.hidden = !status.textContent;
+}
+
+function cancelSettingsTransition() {
+  const sequence = ++settingsSequence;
+  if (settingsTimer !== null) clearTimeout(settingsTimer);
+  settingsTimer = null; removeSettingsListener?.(); removeSettingsListener = null;
+  return sequence;
+}
+function finishSettingsTransition(sequence) {
+  if (sequence !== settingsSequence) return;
+  if (settingsTimer !== null) clearTimeout(settingsTimer);
+  settingsTimer = null; removeSettingsListener?.(); removeSettingsListener = null;
+  groupShell.classList.remove("is-settings-animating"); groupPanel.hidden = !settingsGroupId;
+}
+function settingsVisibility(active, { animate = true } = {}) {
+  const sequence = cancelSettingsTransition();
+  groupPanel.inert = !active; groupPanel.setAttribute("aria-hidden", String(!active));
+  if (active && groupPanel.hidden) { groupPanel.hidden = false; groupShell.getBoundingClientRect(); }
+  const durations = animate && !groupMotion.matches && window.getComputedStyle
+    ? (window.getComputedStyle(groupShell).transitionDuration || "").split(",") : [];
+  const duration = Math.max(0, ...durations.map((value) => (Number.parseFloat(value) || 0) * (value.trim().endsWith("ms") ? 1 : 1000)));
+  if (duration) groupShell.classList.add("is-settings-animating");
+  groupShell.classList.toggle("settings-open", active);
+  byId("group-panel-toggle").setAttribute("aria-expanded", String(active));
+  if (!duration) {
+    groupShell.getBoundingClientRect();
+    for (const animation of groupShell.getAnimations?.() || []) animation.finish();
+    finishSettingsTransition(sequence); return;
+  }
+  const ended = (event) => {
+    if (event.target === groupShell && event.propertyName === "grid-template-columns") finishSettingsTransition(sequence);
+  };
+  groupShell.addEventListener("transitionend", ended);
+  removeSettingsListener = () => groupShell.removeEventListener("transitionend", ended);
+  settingsTimer = setTimeout(() => finishSettingsTransition(sequence), duration + 50);
+}
+function selectSettingsTab(next) {
+  groupPanel.dataset.view = next;
+  for (const tab of ["profile", "members", "tasks"]) {
+    byId(`group-details-${tab}`).hidden = tab !== next;
+    byId(`group-details-${tab}-tab`).setAttribute("aria-pressed", String(tab === next));
+  }
+}
+function openSettings({ focus = true } = {}) {
+  if (route.page !== "group" || data?.group?.id !== route.groupId) return;
+  if (!settingsGroupId) {
+    settingsGroupId = route.groupId; selectSettingsTab("profile"); settingsVisibility(true);
+  }
+  if (focus) byId("group-details-close").focus({ preventScroll: true });
+}
+function closeSettings({ restoreFocus = true, animate = true } = {}) {
+  const id = settingsGroupId; settingsGroupId = null;
+  if (!id && animate) return;
+  settingsVisibility(false, { animate });
+  if (restoreFocus && route.page === "group" && route.groupId === id) byId("group-panel-toggle").focus({ preventScroll: true });
+}
+groupPanel.inert = true; groupPanel.setAttribute("aria-hidden", "true");
+groupMotion.addEventListener("change", () => { if (groupMotion.matches) settingsVisibility(Boolean(settingsGroupId), { animate: false }); });
+
+function settingsFocus() {
+  const focused = document.activeElement;
+  if (!settingsGroupId || !groupPanel.contains(focused)) return null;
+  for (const [kind, key] of [["members", "memberId"], ["tasks", "taskId"]]) {
+    const card = [...byId(`group-${kind}`).children].find((item) => item.contains(focused));
+    if (card?.dataset[key]) return { kind, id: card.dataset[key], first: card.children[0].contains(focused) };
+  }
+  return null;
+}
+function restoreSettingsFocus(focused) {
+  if (!focused || settingsGroupId !== route.groupId) return;
+  const key = focused.kind === "members" ? "memberId" : "taskId";
+  const card = [...byId(`group-${focused.kind}`).children].find((item) => item.dataset[key] === focused.id);
+  const target = focused.first ? card?.children[0] : card?.children[card.children.length - 1];
+  (target && ["BUTTON", "A", "SUMMARY"].includes(target.tagName) && !target.disabled ? target
+    : byId(`group-details-${focused.kind}-tab`)).focus({ preventScroll: true });
 }
 function renderLibrary() {
   const target = byId("groups-list"), rail = byId("sidebar-group-list"); target.replaceChildren(); rail.replaceChildren();
@@ -98,9 +178,13 @@ async function list() {
 }
 function render() {
   if (!data?.group || route.page !== "group" || data.group.id !== route.groupId) return;
-  const group = data.group;
+  const group = data.group, focused = settingsFocus();
   renderGroupIdentity();
   byId("group-title").textContent = group.name;
+  byId("group-panel-toggle").title = group.name; byId("group-title").title = group.name;
+  byId("group-details-name").textContent = group.name;
+  byId("group-purpose").textContent = group.purpose || ""; byId("group-purpose").hidden = !group.purpose;
+  byId("group-message").placeholder = `给 ${group.name} 发消息…`;
   byId("group-archived").hidden = !group.archived; byId("group-archive").textContent = group.archived ? "取消归档" : "归档";
   byId("group-member-count").textContent = String(data.members?.length || 0);
   const filter = byId("group-task-filter"); filter.replaceChildren();
@@ -109,13 +193,14 @@ function render() {
   if (selectedTask && !data.tasks?.some((task) => task.id === selectedTask)) selectedTask = "";
   filter.value = selectedTask;
   const recipient = byId("group-recipient"), previous = recipient.value; recipient.replaceChildren();
-  const everyone = node("option", "", "群内成员自主协作"); everyone.value = ""; recipient.append(everyone);
+  const everyone = node("option", "", "群内协作"); everyone.value = ""; recipient.append(everyone);
   for (const member of data.members || []) { const option = node("option", "", member.name + (member.ready ? "" : "（未就绪）")); option.value = member.id; option.disabled = !member.ready; recipient.append(option); }
   if (data.members?.some((member) => member.id === previous && member.ready)) recipient.value = previous;
-  renderMessages(byId("group-messages"), data.messages || [], selectedTask, data.members || []);
+  renderMessages(byId("group-messages"), data.messages || [], selectedTask, data.members || [], data.tasks || []);
   renderMembers(byId("group-members"), data.members || []);
   renderTasks(byId("group-tasks"), data.tasks || [], selectedTask, { onSelect: chooseTask, onStop: stop, members: data.members || [] });
-  materials.render(); controls();
+  for (const [index, task] of [...(data.tasks || [])].reverse().entries()) byId("group-tasks").children[index].dataset.taskId = task.id;
+  materials.render(); controls(); restoreSettingsFocus(focused);
 }
 async function load(id = route.groupId, { quiet = false } = {}) {
   if (!id) return;
@@ -130,7 +215,10 @@ async function load(id = route.groupId, { quiet = false } = {}) {
   } catch (error) { if (requestSequence === sequence && route.groupId === id) notice(byId("group-error"), `${error.message} 点击右侧刷新重试。`, true); }
   finally { if (sequence === requestSequence) { loading = false; controls(); } }
 }
-function chooseTask(id) { selectedTask = id; newTask = false; render(); byId("group-message").focus(); }
+function chooseTask(id) {
+  const inSettings = settingsGroupId && groupPanel.contains(document.activeElement);
+  selectedTask = id; newTask = false; render(); if (!inSettings) byId("group-message").focus();
+}
 async function stop(taskId) {
   const id = data?.group?.id; if (!id) return;
   try { await api.cancelTask(id, taskId); await load(id); }
@@ -157,7 +245,12 @@ async function send() {
     if (result.task?.id && body.newTask) selectedTask = result.task.id;
     await load(id); await list();
   } catch (error) { if (route.groupId === id) notice(byId("group-error"), `${error.message} 当前消息与材料仍保留，可重试。`, true); }
-  finally { sending = false; controls(); if (route.page === "group" && route.groupId === id) byId("group-message").focus(); }
+  finally {
+    sending = false; controls();
+    const focused = document.activeElement;
+    if (route.page === "group" && route.groupId === id && (!focused || focused === document.body
+      || focused === byId("group-send") || focused === byId("group-message"))) byId("group-message").focus();
+  }
 }
 async function editor(group = null, trigger = byId("groups-create")) {
   const sequence = ++editorSequence; editing = group ? { ...group } : null; editorTrigger = trigger; editorRetry = null;
@@ -219,6 +312,14 @@ byId("group-new-task").addEventListener("click", () => { newTask = true; selecte
 byId("group-edit").addEventListener("click", () => void editor(data?.group, byId("group-edit")));
 byId("group-refresh").addEventListener("click", () => void load());
 byId("group-archive").addEventListener("click", () => void archive());
+byId("group-panel-toggle").addEventListener("click", () => settingsGroupId ? closeSettings() : openSettings());
+byId("group-details-close").addEventListener("click", () => closeSettings());
+byId("group-files-open").addEventListener("click", () => openSettings({ focus: false }));
+for (const tab of ["profile", "members", "tasks"]) byId(`group-details-${tab}-tab`).addEventListener("click", () => selectSettingsTab(tab));
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.defaultPrevented || !settingsGroupId || document.querySelector("dialog[open]")) return;
+  event.preventDefault(); closeSettings();
+});
 byId("groups-show-archived").addEventListener("change", renderLibrary);
 for (const id of ["groups-create", "sidebar-create-group"]) byId(id).addEventListener("click", () => void editor(null, byId(id)));
 document.addEventListener("neuma:create-group", () => void editor(null, byId("main-create-group")));
@@ -233,6 +334,7 @@ byId("group-editor-form").addEventListener("submit", (event) => { event.preventD
 byId("group-editor-close").addEventListener("click", closeEditor);
 byId("group-editor").addEventListener("cancel", (event) => { event.preventDefault(); closeEditor(); });
 document.addEventListener("neuma:route", (event) => {
+  closeSettings({ restoreFocus: false, animate: false });
   recipientMenu.close(); taskMenu.close();
   if (route.page === "group" && route.groupId) drafts.set(route.groupId, byId("group-message").value);
   const previous = route.groupId; route = event.detail; clearInterval(pollTimer); pollTimer = null; requestSequence++;
@@ -243,7 +345,10 @@ document.addEventListener("neuma:route", (event) => {
       data = null; selectedTask = ""; newTask = false; materials.reset();
       byId("group-recipient").value = "";
       renderGroupAvatar(byId("group-avatar"), null);
+      renderGroupAvatar(byId("group-details-avatar"), null);
       byId("group-title").textContent = "正在读取群组…";
+      byId("group-details-name").textContent = ""; byId("group-purpose").textContent = "";
+      byId("group-panel-toggle").title = ""; byId("group-title").title = "";
       byId("group-messages").replaceChildren(node("p", "muted-note", "正在加载群消息…"));
       byId("group-members").replaceChildren(); byId("group-tasks").replaceChildren();
     }

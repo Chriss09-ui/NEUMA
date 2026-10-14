@@ -1,11 +1,18 @@
 import { renderRichText } from "./rich-text.js";
-import { renderAgentAvatar } from "./agent-avatar.js";
+import { renderAgentAvatar, resolveAgentAvatar } from "./agent-avatar.js";
 
 export const taskLabels = { queued: "等待认领", pending: "等待认领", running: "协作中", discussing: "正在讨论", planning: "正在分工",
   working: "正在处理", completed: "已完成", complete: "已完成", partial: "部分交付", failed: "失败", blocked: "等待处理", cancelled: "已停止", interrupted: "已中断",
   negotiating: "正在协商", negotiation: "成员协商", execution: "执行任务", integration: "整合成果", delivery: "交付成果",
   waiting: "等待成员回应", needs_input: "待你补充", declined: "未认领" };
 export const terminalTask = (task) => ["completed", "complete", "partial", "failed", "cancelled", "interrupted"].includes(task?.status);
+
+export function conversationDate(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  return { label: date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" }), dateTime: date.toISOString() };
+}
 
 export function node(tag, className = "", text = "") {
   const value = document.createElement(tag); value.className = className; value.textContent = text; return value;
@@ -29,9 +36,37 @@ export function internalLinks(content, actions = []) {
   for (const [href, label] of links) { const link = node("a", "text-link", label); link.href = href; row.append(link); }
   return row;
 }
-export function messageRow(message, { attachmentUrl, bubble = false } = {}) {
+function agentIdentity(target, agent) {
+  target.dataset.agentId = agent.id;
+  const avatar = resolveAgentAvatar(agent);
+  if (avatar.type === "star") target.dataset.avatarColor = avatar.color;
+}
+function messageAvatar(agent, className) {
+  const avatar = node("span", className);
+  avatar.setAttribute("aria-hidden", "true");
+  renderAgentAvatar(avatar, agent, { motion: false });
+  return avatar;
+}
+function prependRecipient(body, agent) {
+  const mention = node("span", "group-message-mention group-agent-identity");
+  agentIdentity(mention, agent); mention.setAttribute("aria-label", `@${agent.name}`); mention.title = `@${agent.name}`;
+  mention.append(messageAvatar(agent, "group-mention-avatar"), node("span", "group-mention-name", agent.name));
+  const first = body.firstElementChild;
+  if (first?.tagName === "P") first.prepend(mention, document.createTextNode(" "));
+  else {
+    const opening = node("p"); opening.append(mention); body.prepend(opening);
+  }
+}
+export function messageRow(message, { attachmentUrl, bubble = false, senderAgent, recipientAgent } = {}) {
   const isUser = message.sender?.type === "user" || message.role === "user";
+  const showAgent = bubble && !isUser && senderAgent && message.sender?.type === "agent";
   const row = node("article", bubble ? `message ${isUser ? "user" : "assistant"}` : `collaboration-message ${isUser ? "is-user" : ""}`);
+  if (showAgent) {
+    row.classList.add("group-agent-message");
+    const name = node("span", "group-message-sender group-agent-identity", senderAgent.name);
+    agentIdentity(name, senderAgent);
+    row.append(messageAvatar(senderAgent, "group-message-avatar"), name);
+  }
   row.dataset.messageId = message.id || "";
   if (bubble) {
     row.setAttribute("role", "group"); row.setAttribute("aria-label", isUser ? "发送的消息" : "助理的回复");
@@ -57,6 +92,7 @@ export function messageRow(message, { attachmentUrl, bubble = false } = {}) {
   const displayedContent = content || (message.status === "running" ? "正在处理…" : "");
   if (isUser) body.textContent = displayedContent;
   else renderRichText(body, displayedContent);
+  if (showAgent && recipientAgent && displayedContent) prependRecipient(body, recipientAgent);
   if (bubble) {
     body.hidden = !content && message.status !== "running";
     body.classList.toggle("streaming", message.status === "running" && Boolean(content));
@@ -66,7 +102,7 @@ export function messageRow(message, { attachmentUrl, bubble = false } = {}) {
   row.append(internalLinks(message.content, [...(message.actions || []), ...(message.sources || [])]));
   return row;
 }
-export function renderMessages(target, messages, selectedTask = "", members = []) {
+export function renderMessages(target, messages, selectedTask = "", members = [], tasks = []) {
   const atBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
   target.replaceChildren();
   const visible = selectedTask ? messages.filter((message) => message.taskId === selectedTask) : messages;
@@ -76,11 +112,21 @@ export function renderMessages(target, messages, selectedTask = "", members = []
       node("p", "muted-note", "给出目标，成员会根据自己的能力讨论、认领并推进任务。你可以随时补充信息。"));
     target.append(welcome);
   }
+  const date = conversationDate(visible[0]?.createdAt);
+  if (date) {
+    const time = node("time", "conversation-date", date.label);
+    time.dateTime = date.dateTime; target.append(time);
+  }
   for (const message of visible) {
     const isUser = message.sender?.type === "user" || message.role === "user";
     const sender = isUser ? "你" : message.sender?.name || members.find((member) => member.id === message.sender?.id)?.name || "NEUMA";
-    const recipient = members.find((member) => member.id === message.recipientId)?.name || message.recipientId;
-    const row = messageRow(message, { bubble: true });
+    const senderAgent = message.sender?.type === "agent"
+      ? { ...members.find((member) => member.id === message.sender.id), id: message.sender.id, name: sender } : null;
+    const recipientAgent = message.recipientId === "main" ? null : members.find((member) => member.id === message.recipientId)
+      || tasks.find((task) => task.id === message.taskId)?.participants?.find((member) => member.id === message.recipientId)
+      || messages.find((item) => item.sender?.type === "agent" && item.sender.id === message.recipientId)?.sender;
+    const recipient = recipientAgent?.name || message.recipientId;
+    const row = messageRow(message, { bubble: true, senderAgent, recipientAgent });
     row.setAttribute("aria-label", `${sender}发送的消息${recipient ? `，定向发送给${recipient}` : ""}`);
     row.setAttribute("title", `${sender}${recipient ? ` → ${recipient}` : ""}`);
     target.append(row);
