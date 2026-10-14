@@ -27,7 +27,7 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
       toggle: (value, active) => active ? names.add(value) : names.delete(value), contains: (value) => names.has(value) };
   };
   let clock = 0;
-  const properties = new Map(), attributes = new Map(), captures = new Set(), writes = [], releases = [], observations = [], collapses = [], expands = [], callbacks = [];
+  const properties = new Map(), attributes = new Map(), captures = new Set(), writes = [], releases = [], observations = [], collapses = [], expands = [], callbacks = [], renders = [];
   const layout = new Events(); layout.classList = makeClasses();
   layout.style = { setProperty: (key, value) => properties.set(key, String(value)), getPropertyValue: (key) => properties.get(key) ?? "",
     removeProperty: (key) => properties.delete(key) };
@@ -70,7 +70,7 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
   const rememberCallback = (kind, state) => callbacks.push({ kind, ...state, revealing: layout.classList.contains("is-panel-revealing") });
   const controller = context.initPanelResize({ layout, handle, variable: VARIABLE, storageKey: STORAGE_KEY, label: "测试栏",
     defaultWidth, minWidth, maxWidth, getMax: () => availableMax, isEnabled: () => enabled, isCollapsed: () => collapsed,
-    collapsedWidth, windowRef, storage, now: () => clock, watch: [watchTarget],
+    collapsedWidth, windowRef, storage, now: () => clock, watch: [watchTarget], onRender: (width) => renders.push(width),
     collapse() { const state = callbackState(); collapsed = true; collapses.push(state); rememberCallback("collapse", state); },
     expand() { const state = callbackState(); collapsed = false; expands.push(state); rememberCallback("expand", state); } });
   const emit = (type, fields = {}, target = handle) => {
@@ -83,7 +83,7 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
     if (observer) { for (const item of observations) if (!item.disconnected) item.callback([{ target: layout }]); }
     else windowRef.dispatchEvent({ type: "resize" });
   };
-  return { controller, layout, handle, windowRef, watchTarget, document, values, writes, releases, observations, collapses, expands, callbacks, emit, applied, notify,
+  return { controller, layout, handle, windowRef, watchTarget, document, values, writes, releases, observations, collapses, expands, callbacks, renders, emit, applied, notify,
     grip: () => handle.style.getPropertyValue("--panel-grip-y") || "50%", setRect: (value) => { handleRect = { ...handleRect, ...value }; },
     time: (value) => { clock = value; }, setMax: (value) => { availableMax = value; notify(); },
     setEnabled: (value) => { enabled = value; controller.refresh(); },
@@ -100,6 +100,19 @@ test("列宽默认值与存储偏好更新可访问范围，初始化不保存",
   const navigation = setup({ defaultWidth: 232, minWidth: 175, maxWidth: 320 });
   assert.equal(navigation.applied(), 232); assert.equal(navigation.handle.getAttribute("aria-valuemin"), "175");
   assert.equal(navigation.handle.getAttribute("aria-valuemax"), "320");
+});
+
+test("宽度回调同步夹紧、拖动与折叠预览值，取消后恢复偏好", () => {
+  const ui = setup({ defaultWidth: 212, stored: 300, collapsedWidth: 44 });
+  assert.equal(ui.renders.at(-1), 300);
+  ui.setMax(220); assert.equal(ui.renders.at(-1), 220); assert.equal(ui.writes.length, 0);
+  ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 380 }, ui.windowRef);
+  assert.equal(ui.renders.at(-1), 200);
+  ui.controller.cancel(); assert.equal(ui.renders.at(-1), 220);
+  ui.setCollapsed(true); ui.emit("pointerdown"); ui.emit("pointermove", { clientX: 416 }, ui.windowRef);
+  assert.equal(ui.renders.at(-1), 60);
+  ui.controller.cancel(); ui.setMax(360); assert.equal(ui.renders.at(-1), 300);
+  assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
 });
 
 test("手柄纵向跟随悬停并夹紧边缘，滚动与刷新重算相对坐标，离开后键盘焦点使用中心", () => {
@@ -324,10 +337,11 @@ test("存储不可用或损坏不会阻止交互", () => {
 
 const foldedProfiles = [
   { defaultWidth: 208, minWidth: 160, maxWidth: 360, collapsedWidth: 40, stored: 300 },
-  { defaultWidth: 232, minWidth: 175, maxWidth: 320, collapsedWidth: 72, stored: 280 }
+  { defaultWidth: 232, minWidth: 175, maxWidth: 320, collapsedWidth: 72, stored: 280 },
+  { defaultWidth: 212, minWidth: 160, maxWidth: 360, collapsedWidth: 44, stored: 300 }
 ];
 
-test("两栏折叠态手柄仍可操作，当前值和最小值显示真实折叠宽度", () => {
+test("各栏折叠态手柄仍可操作，当前值和最小值显示真实折叠宽度", () => {
   for (const profile of foldedProfiles) {
     const ui = setup({ ...profile, collapsed: true });
     assert.equal(ui.handle.getAttribute("aria-valuenow"), String(profile.collapsedWidth));
@@ -337,7 +351,7 @@ test("两栏折叠态手柄仍可操作，当前值和最小值显示真实折�
   }
 });
 
-test("两栏折叠右拉每1px立即预览，零时钟下无死区或动画等待", () => {
+test("各栏折叠右拉每1px立即预览，零时钟下无死区或动画等待", () => {
   for (const profile of foldedProfiles) {
     const ui = setup({ ...profile, collapsed: true }); ui.emit("pointerdown");
     assert.equal(ui.applied(), profile.collapsedWidth); assert.equal(ui.handle.hasPointerCapture(7), true);
@@ -367,7 +381,7 @@ test("不足32px右拉或向左预览后松手回到折叠，不保存宽度", (
   }
 });
 
-test("两栏右拉32px仍实时预览，松手才吸附展开原偏好且不落盘", () => {
+test("各栏右拉32px仍实时预览，松手才吸附展开原偏好且不落盘", () => {
   for (const profile of foldedProfiles) {
     const ui = setup({ ...profile, collapsed: true }); ui.emit("pointerdown");
     ui.emit("pointermove", { clientX: 432 }, ui.windowRef);
@@ -381,7 +395,7 @@ test("两栏右拉32px仍实时预览，松手才吸附展开原偏好且不落�
   }
 });
 
-test("两栏触及可读最小宽度立即展开，恰好最小值松手保留原偏好", () => {
+test("各栏触及可读最小宽度立即展开，恰好最小值松手保留原偏好", () => {
   for (const profile of foldedProfiles) {
     const ui = setup({ ...profile, collapsed: true }); const boundary = 400 + profile.minWidth - profile.collapsedWidth;
     ui.emit("pointerdown"); ui.emit("pointermove", { clientX: boundary }, ui.windowRef);
@@ -396,7 +410,7 @@ test("两栏触及可读最小宽度立即展开，恰好最小值松手保留�
   }
 });
 
-test("两栏直接跨过最小值后连续增减始终跟随总位移，释放才保存选定宽度", () => {
+test("各栏直接跨过最小值后连续增减始终跟随总位移，释放才保存选定宽度", () => {
   for (const profile of foldedProfiles) {
     const ui = setup({ ...profile, collapsed: true }); const boundary = 400 + profile.minWidth - profile.collapsedWidth;
     ui.emit("pointerdown"); ui.emit("pointermove", { clientX: boundary + 80 }, ui.windowRef);
@@ -455,15 +469,16 @@ test("预览和恰好开到最小值后的纯纵向移动不算调宽，不丢�
 });
 
 test("取消预览或实际展开调宽都回到最初折叠偏好，状态回调前清理拖拽", () => {
-  for (const phase of ["revealing", "resizing"]) for (const kind of ["pointercancel", "lostpointercapture", "blur", "Escape", "cancel"]) {
-    const ui = setup({ collapsed: true, stored: 300 }); ui.emit("pointerdown");
-    const clientX = phase === "revealing" ? 416 : 530; ui.emit("pointermove", { clientX }, ui.windowRef);
+  for (const profile of foldedProfiles) for (const phase of ["revealing", "resizing"]) for (const kind of ["pointercancel", "lostpointercapture", "blur", "Escape", "cancel"]) {
+    const ui = setup({ ...profile, collapsed: true }); ui.emit("pointerdown");
+    const clientX = phase === "revealing" ? 416 : 400 + profile.minWidth - profile.collapsedWidth + 10;
+    ui.emit("pointermove", { clientX }, ui.windowRef);
     assert.equal(ui.collapsed(), phase === "revealing");
     if (kind === "Escape") ui.emit("keydown", { key: "Escape" });
     else if (kind === "cancel") ui.controller.cancel();
     else ui.emit(kind, {}, kind === "lostpointercapture" ? ui.handle : ui.windowRef);
-    assert.equal(ui.collapsed(), true, phase + "/" + kind); assert.equal(ui.applied(), 300, phase + "/" + kind);
-    assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
+    assert.equal(ui.collapsed(), true, phase + "/" + kind); assert.equal(ui.applied(), profile.stored, phase + "/" + kind);
+    assert.equal(ui.values.get(STORAGE_KEY), String(profile.stored)); assert.equal(ui.writes.length, 0);
     assert.equal(ui.handle.hasPointerCapture(7), false); assert.equal(ui.layout.classList.contains("is-panel-revealing"), false);
     assert.equal(ui.layout.classList.contains("is-panel-resizing"), false);
     if (phase === "resizing") {
@@ -503,17 +518,17 @@ test("外部开合取消临时预览或宽度但保留外部状态，不调用�
 });
 
 test("页面不可用取消预览或调宽，保留当时开合且移除手柄入口", () => {
-  for (const phase of ["revealing", "resizing", "ordinary"]) {
-    const ui = setup({ collapsed: phase !== "ordinary", stored: 300 }); ui.emit("pointerdown");
-    const clientX = phase === "revealing" ? 416 : phase === "resizing" ? 530 : 440;
+  for (const profile of foldedProfiles) for (const phase of ["revealing", "resizing", "ordinary"]) {
+    const ui = setup({ ...profile, collapsed: phase !== "ordinary" }); ui.emit("pointerdown");
+    const clientX = phase === "revealing" ? 416 : phase === "resizing" ? 400 + profile.minWidth - profile.collapsedWidth + 10 : 440;
     ui.emit("pointermove", { clientX }, ui.windowRef); ui.setEnabled(false);
-    assert.equal(ui.collapsed(), phase === "revealing"); assert.equal(ui.applied(), 300); assert.equal(ui.writes.length, 0);
+    assert.equal(ui.collapsed(), phase === "revealing"); assert.equal(ui.applied(), profile.stored); assert.equal(ui.writes.length, 0);
     assert.equal(ui.collapses.length, 0); assert.equal(ui.expands.length, phase === "resizing" ? 1 : 0);
     assert.equal(ui.handle.hasPointerCapture(7), false); assert.equal(ui.handle.inert, true); assert.equal(ui.handle.tabIndex, -1);
     assert.equal(ui.handle.getAttribute("aria-hidden"), "true"); assert.equal(ui.layout.classList.contains("is-panel-revealing"), false);
     assert.equal(ui.layout.classList.contains("is-panel-resizing"), false);
     ui.emit("pointerup", { clientX }, ui.windowRef); ui.setEnabled(true);
-    assert.equal(ui.collapsed(), phase === "revealing"); assert.equal(ui.values.get(STORAGE_KEY), "300");
+    assert.equal(ui.collapsed(), phase === "revealing"); assert.equal(ui.values.get(STORAGE_KEY), String(profile.stored));
   }
 });
 
@@ -529,16 +544,18 @@ test("dispose取消折叠预览并清理监听观察，之后不响应或保存"
 });
 
 test("折叠态方向键、回车和空格可展开，End展开到最大，双击展开恢复默认", () => {
-  for (const key of ["ArrowRight", "Enter", " "]) {
-    const ui = setup({ collapsed: true, stored: 300 });
-    assert.equal(ui.emit("keydown", { key }).defaultPrevented, true);
-    assert.equal(ui.collapsed(), false); assert.equal(ui.applied(), 300); assert.equal(ui.expands.length, 1); assert.equal(ui.writes.length, 0);
+  for (const profile of foldedProfiles) {
+    for (const key of ["ArrowRight", "Enter", " "]) {
+      const ui = setup({ ...profile, collapsed: true });
+      assert.equal(ui.emit("keydown", { key }).defaultPrevented, true);
+      assert.equal(ui.collapsed(), false); assert.equal(ui.applied(), profile.stored); assert.equal(ui.expands.length, 1); assert.equal(ui.writes.length, 0);
+    }
+    const end = setup({ ...profile, collapsed: true }); end.emit("keydown", { key: "End" });
+    assert.equal(end.collapsed(), false); assert.equal(end.applied(), profile.maxWidth); assert.equal(end.values.get(STORAGE_KEY), String(profile.maxWidth));
+    const reset = setup({ ...profile, collapsed: true }); reset.emit("dblclick");
+    assert.equal(reset.collapsed(), false); assert.equal(reset.applied(), profile.defaultWidth); assert.equal(reset.values.get(STORAGE_KEY), String(profile.defaultWidth));
+    assert.equal(reset.expands.length, 1);
   }
-  const end = setup({ collapsed: true, stored: 300 }); end.emit("keydown", { key: "End" });
-  assert.equal(end.collapsed(), false); assert.equal(end.applied(), 360); assert.equal(end.values.get(STORAGE_KEY), "360");
-  const reset = setup({ collapsed: true, stored: 300 }); reset.emit("dblclick");
-  assert.equal(reset.collapsed(), false); assert.equal(reset.applied(), 208); assert.equal(reset.values.get(STORAGE_KEY), "208");
-  assert.equal(reset.expands.length, 1);
 });
 
 test("需求说明打开时历史栏开合与拉出预览不改变主导航宽度预算", () => {
@@ -572,4 +589,145 @@ test("需求说明打开时历史栏开合与拉出预览不改变主导航宽�
   workspace.classList.toggle("context-open", true);
   shellWidth = 1000; assert.equal(controllers.sidebar.getMax(), 175);
   page.hidden = true; shellWidth = 700; assert.equal(controllers.sidebar.getMax(), 175);
+});
+
+test("智能体历史栏复用独立宽度偏好，保留对话宽度且在隐藏和应用模式禁用", () => {
+  const classes = () => {
+    const names = new Set();
+    return { contains: (name) => names.has(name), toggle: (name, active) => active ? names.add(name) : names.delete(name) };
+  };
+  let workspaceWidth = 900, shellWidth = 1200, applicationExtra = 0, columnGap = "28px", clicks = 0, focusCount = 0;
+  const shell = { classList: classes(), getBoundingClientRect: () => ({ width: shellWidth }) };
+  const main = { classList: classes(), getBoundingClientRect: () => ({ width: 900 }) };
+  const workspace = { hidden: false, classList: classes(), getBoundingClientRect: () => ({ width: workspaceWidth }) };
+  const page = { hidden: false }, sidebar = { hidden: false }, handle = {};
+  const primaryProperties = new Map();
+  const primary = { style: { setProperty: (key, value) => primaryProperties.set(key, value) },
+    getBoundingClientRect: () => ({ width: workspaceWidth + 24 }) };
+  const agentShell = { classList: classes(), getBoundingClientRect: () => ({ width: 924 }) };
+  const panel = { hidden: true, getBoundingClientRect: () => ({ width: 400 }) };
+  const applicationPanel = { getBoundingClientRect: () => ({ width: workspaceWidth - applicationExtra }) };
+  const toggle = { click() { clicks++; workspace.classList.toggle("history-collapsed", !workspace.classList.contains("history-collapsed")); },
+    focus() { focusCount++; } };
+  const elements = new Map([["app-shell", shell], ["main-workspace", main], ["page-chat", { hidden: true }], ["main-history", {}],
+    ["sidebar-resize", {}], ["main-history-resize", {}], ["page-agent", page], ["agent-workspace", workspace],
+    ["agent-history-sidebar", sidebar], ["agent-history-resize", handle], ["agent-history-toggle", toggle],
+    ["agent-primary", primary], ["agent-page-shell", agentShell], ["agent-panel", panel],
+    ["agent-application", applicationPanel]]);
+  const documentRef = { getElementById: (id) => elements.get(id) ?? null };
+  const windowRef = { getComputedStyle: (target) => target === workspace ? { columnGap }
+    : target === page ? { paddingLeft: "10px", paddingRight: "0px" }
+    : target === primary ? { paddingLeft: "0px", paddingRight: "24px" }
+    : { paddingLeft: "16px", paddingRight: "36px" } };
+  const context = vm.createContext({ document: { getElementById: () => null }, window: {} });
+  vm.runInContext(source, context);
+  const captured = []; context.initPanelResize = (options) => { captured.push(options); return options; };
+  const controllers = context.initWorkspaceResize({ documentRef, windowRef }), agent = controllers.agentHistory;
+  assert.equal(captured.length, 3); assert.equal(agent, captured[2]);
+  assert.equal(agent.layout, workspace); assert.equal(agent.handle, handle); assert.equal(agent.variable, "--agent-history-width");
+  assert.equal(agent.storageKey, "neuma.agent.history-width.v1");
+  assert.deepEqual([agent.defaultWidth, agent.minWidth, agent.maxWidth, agent.collapsedWidth], [212, 160, 360, 44]);
+  assert.ok(agent.watch.includes(shell)); assert.ok(agent.watch.includes(page)); assert.ok(agent.watch.includes(sidebar));
+  assert.ok(agent.watch.includes(primary)); assert.ok(agent.watch.includes(agentShell)); assert.ok(agent.watch.includes(panel));
+  agent.onRender(220); assert.equal(primaryProperties.get("--agent-history-width"), "220px");
+  agent.onRender(60); assert.equal(primaryProperties.get("--agent-history-width"), "60px");
+  assert.ok(controllers.sidebar.watch.includes(agentShell)); assert.ok(controllers.sidebar.watch.includes(primary));
+  assert.ok(controllers.sidebar.watch.includes(panel));
+  assert.ok(controllers.sidebar.watch.includes(applicationPanel));
+  assert.equal(agent.getMax(), 508);
+  columnGap = "40px"; assert.equal(agent.getMax(), 496);
+  columnGap = "0px"; assert.equal(agent.getMax(), 536);
+  columnGap = "normal"; assert.equal(agent.getMax(), 508);
+  assert.equal(controllers.sidebar.getMax(), 614);
+  const navPreference = setup({ defaultWidth: 232, minWidth: 175, maxWidth: 320, stored: 300 });
+  const historyPreference = setup({ defaultWidth: 212, collapsedWidth: 44, stored: 340 });
+  panel.hidden = false;
+  for (const settingsWidth of [0, 200, 400, 200, 0]) {
+    workspaceWidth = 900 - settingsWidth;
+    assert.equal(controllers.sidebar.getMax(), 614 - settingsWidth, `轨道占宽${settingsWidth}时应按实际轨道预算`);
+    navPreference.setMax(controllers.sidebar.getMax()); historyPreference.setMax(agent.getMax());
+    assert.equal(navPreference.applied(), Math.min(300, 614 - settingsWidth));
+    assert.equal(historyPreference.applied(), Math.min(340, Math.max(160, workspaceWidth - 28 - 364)));
+    assert.equal(navPreference.values.get(STORAGE_KEY), "300"); assert.equal(navPreference.writes.length, 0);
+    assert.equal(historyPreference.values.get(STORAGE_KEY), "340"); assert.equal(historyPreference.writes.length, 0);
+  }
+  assert.equal(navPreference.applied(), 300); assert.equal(historyPreference.applied(), 340);
+  panel.hidden = false; workspaceWidth = 500;
+  assert.equal(agent.getMax(), 160); assert.equal(controllers.sidebar.getMax(), 214);
+  panel.hidden = true; workspaceWidth = 900;
+  assert.equal(agent.getMax(), 508); assert.equal(controllers.sidebar.getMax(), 614);
+  workspace.classList.toggle("is-application", true);
+  assert.equal(controllers.sidebar.getMax(), 802);
+  workspace.classList.toggle("application-assistant-open", true); columnGap = "20px"; applicationExtra = 380;
+  assert.equal(controllers.sidebar.getMax(), 422);
+  workspace.classList.toggle("application-assistant-open", false);
+  assert.equal(controllers.sidebar.getMax(), 422, "助手尚未收起时不能按class提前恢复预算");
+  shellWidth = 1060;
+  for (const [index, [settingsWidth, assistantWidth, gap]] of [[400, 0, 0], [200, 180, 10], [0, 360, 20],
+    [200, 180, 10], [400, 0, 0]].entries()) {
+    workspaceWidth = 900 - settingsWidth; applicationExtra = assistantWidth + gap; columnGap = `${gap}px`;
+    workspace.classList.toggle("application-assistant-open", index < 3);
+    const budget = 662 - settingsWidth - assistantWidth - gap;
+    assert.equal(controllers.sidebar.getMax(), budget, `设置${settingsWidth}/助手${assistantWidth}时预算应跟随实际轨道`);
+    navPreference.setMax(controllers.sidebar.getMax()); assert.equal(navPreference.applied(), budget);
+    assert.equal(navPreference.values.get(STORAGE_KEY), "300"); assert.equal(navPreference.writes.length, 0);
+  }
+  shellWidth = 1200; workspaceWidth = 900; applicationExtra = 0;
+  navPreference.setMax(controllers.sidebar.getMax()); assert.equal(navPreference.applied(), 300);
+  panel.hidden = false; workspaceWidth = 500;
+  assert.equal(controllers.sidebar.getMax(), 402);
+  workspace.classList.toggle("is-application", false); workspace.classList.toggle("is-making", true);
+  assert.equal(controllers.sidebar.getMax(), 402);
+  workspace.classList.toggle("is-making", false); panel.hidden = true; columnGap = "28px";
+  workspaceWidth = 500; assert.equal(agent.getMax(), 160);
+  assert.equal(agent.isEnabled(), true);
+  for (const node of [page, workspace, sidebar]) {
+    node.hidden = true; assert.equal(agent.isEnabled(), false); node.hidden = false;
+    assert.equal(agent.isEnabled(), true);
+  }
+  for (const mode of ["is-making", "is-application"]) {
+    workspace.classList.toggle(mode, true); assert.equal(agent.isEnabled(), false);
+    workspace.classList.toggle(mode, false); assert.equal(agent.isEnabled(), true);
+  }
+  assert.equal(agent.isCollapsed(), false); agent.collapse(); assert.equal(agent.isCollapsed(), true);
+  agent.expand(); assert.equal(agent.isCollapsed(), false); assert.equal(clicks, 2); assert.ok(focusCount >= 1);
+  elements.delete("page-agent"); captured.length = 0;
+  const legacy = context.initWorkspaceResize({ documentRef, windowRef });
+  assert.equal(captured.length, 2); assert.equal(legacy.agentHistory == null, true);
+});
+
+test("群组设置实际轨道连续更新导航预算，夹紧和关闭都不覆盖偏好", () => {
+  const classes = () => {
+    const names = new Set();
+    return { contains: (name) => names.has(name), toggle: (name, active) => active ? names.add(name) : names.delete(name) };
+  };
+  let settingsWidth = 0;
+  const shell = { classList: classes(), getBoundingClientRect: () => ({ width: 1000 }) };
+  const workspace = { classList: classes(), getBoundingClientRect: () => ({ width: 800 }) };
+  const page = { hidden: true }, groupPage = { hidden: false };
+  const groupShell = { classList: classes(), getBoundingClientRect: () => ({ width: 800 }) };
+  const primary = { getBoundingClientRect: () => ({ width: 800 - settingsWidth }) };
+  const panel = { hidden: false, getBoundingClientRect: () => ({ width: 400 }) };
+  const elements = new Map([["app-shell", shell], ["main-workspace", workspace], ["page-chat", page], ["main-history", {}],
+    ["sidebar-resize", {}], ["main-history-resize", {}], ["page-group", groupPage], ["group-page-shell", groupShell],
+    ["group-primary", primary], ["group-panel", panel]]);
+  const documentRef = { getElementById: (id) => elements.get(id) ?? null };
+  const windowRef = { getComputedStyle: (target) => target === primary
+    ? { paddingLeft: "24px", paddingRight: "24px" } : { paddingLeft: "0px", paddingRight: "0px" } };
+  const context = vm.createContext({ document: { getElementById: () => null }, window: {} });
+  vm.runInContext(source, context);
+  const captured = []; context.initPanelResize = (options) => { captured.push(options); return options; };
+  const controllers = context.initWorkspaceResize({ documentRef, windowRef });
+  assert.equal(captured.length, 2);
+  for (const target of [groupPage, groupShell, primary, panel]) assert.ok(controllers.sidebar.watch.includes(target));
+  const preference = setup({ defaultWidth: 232, minWidth: 175, maxWidth: 320, stored: 300 });
+  for (const width of [0, 200, 400, 200, 0]) {
+    settingsWidth = width; groupShell.classList.toggle("settings-open", width !== 400);
+    const budget = 588 - width;
+    assert.equal(controllers.sidebar.getMax(), budget, `设置占宽${width}时只扣实际轨道`);
+    preference.setMax(controllers.sidebar.getMax()); assert.equal(preference.applied(), Math.min(300, budget));
+    assert.equal(preference.values.get(STORAGE_KEY), "300"); assert.equal(preference.writes.length, 0);
+  }
+  assert.equal(preference.applied(), 300);
+  groupPage.hidden = true; assert.equal(controllers.sidebar.getMax(), 360);
 });

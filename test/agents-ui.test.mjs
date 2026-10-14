@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import * as state from "../public/state.js";
 import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "../public/agent-avatar.js";
+import { conversationDate } from "../public/group-view.js";
 
 const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-build-view.js", "agent-conversations.js", "agent-attachments.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
@@ -82,7 +83,7 @@ test("附件和文字一起发送时，文件卡片始终位于文字气泡上�
   ui.get("agent-attachment-input").files = [new File(["fixture"], "阅读材料.docx")];
   await ui.get("agent-attachment-input").dispatchEvent({ type: "change" });
   await ui.submit("请分析材料");
-  const row = ui.get("agent-messages").children[0];
+  const row = ui.get("agent-messages").querySelector(".user");
   assert.equal(row.children[0].className, "message-attachments");
   assert.equal(row.children[1].className, "bubble");
   const card = row.children[0].children[0]; assert.match(card.className, /attachment-card/);
@@ -107,7 +108,7 @@ test("历史附件元数据迟到后更新当前文件卡片，切换Agent时不
     await settle();
     if (switchAgent) assert.doesNotMatch(treeText(ui.get("agent-messages")), /恢复的研究材料/);
     else {
-      const row = ui.get("agent-messages").children[0];
+      const row = ui.get("agent-messages").querySelector(".user");
       assert.equal(row.children[0].className, "message-attachments");
       assert.match(treeText(row.children[0]), /恢复的研究材料\.docx/);
       assert.match(treeText(row.children[0]), /512\s*(?:B|bytes|字节)/);
@@ -168,6 +169,8 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
     get textContent() { return this._textContent; }
     set textContent(value) { this._textContent = value; this.children = []; }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
+    prepend(...children) { for (const child of children) child.parent = this; this.children.unshift(...children); }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = null; }
     replaceChildren(...children) { this.children = []; this.append(...children); this.versions++; }
     replaceWith(next) { this.parent.children[this.parent.children.indexOf(this)] = next; next.parent = this.parent; }
     setAttribute(key, value) { this.attributes.set(key, value); }
@@ -203,6 +206,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
     static now() { return new Date(clock).getTime(); }
   };
   const context = vm.createContext({ ...state, document, Date: Clock, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
+    conversationDate,
     renderRichText: (container, content) => { container.textContent = String(content || ""); },
     renderAgentAvatar: (target, agent, options) => renderAgentAvatar(target, agent, { ...options, document }), avatarColors, resolveAgentAvatar, installAvatarMotion, setAgentAvatarActivity,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
@@ -454,6 +458,7 @@ test("头像展示资料变更同步侧栏、欢迎区和标题，不改变智�
   assert.deepEqual(selected, { icon: profile.icon, shape: "diamond", color: "lime" });
   for (const target of avatarTargets(ui)) assert.deepEqual(assertStarAvatar(target, profile.icon), selected);
   assert.equal(ui.get("agent-title").textContent, profile.name);
+  assert.equal(ui.get("agent-message").placeholder, `给 ${profile.name} 发消息…`);
   assert.equal(ui.runtime().status, "ready");
   assert.equal(ui.runtime().definition.revision, 1);
   assert.equal(ui.requests.some((request) => request.path.endsWith("/build")), false);
@@ -928,13 +933,13 @@ test("停止发送取消请求并保留部分回复，迟到完成不会把任�
   assert.equal(ui.item().messages[0].delivery, "stopped");
   assert.equal(ui.item().messages[1].status, "stopped");
   assert.equal(ui.item().messages[1].content, "部分结果");
-  const recovery = ui.get("agent-messages").children[0].children.at(-1).children[1];
+  const recovery = ui.get("agent-messages").querySelector(".user").children.at(-1).children[1];
   ui.get("agent-message").value = "下一条草稿"; await recovery.click();
   assert.equal(ui.get("agent-message").value, "下一条草稿\n\n当前任务");
 });
 
-test("任务结束保留产物弹窗或历史栏的操作焦点，发送按钮上的焦点才恢复到输入框", async () => {
-  for (const focusedId of ["agent-artifacts-open", "agent-files-refresh", "agent-history-toggle", "agent-send"]) {
+test("任务结束保留设置编辑、产物或历史栏焦点，发送按钮上的焦点才恢复到输入框", async () => {
+  for (const focusedId of ["agent-panel-toggle", "agent-profile-name", "agent-memory-input", "agent-artifacts-open", "agent-files-refresh", "agent-history-toggle", "agent-send"]) {
     const partial = stream(), ui = await setup({ turn: () => partial.response });
     if (focusedId === "agent-send") ui.get(focusedId).focus();
     const pending = ui.submit("当前任务"); await settle();
@@ -1030,6 +1035,69 @@ test("自动保存真实问答，刷新恢复时仅把同版本成功对话带�
     { role: "user", content: "已保存任务", revision: "1" },
     { role: "assistant", content: "任务已完成", revision: "1" },
   ]);
+});
+
+test("首次发送在会话日期下显示首句，流式和后续通知保留单个日期且不写入消息", async () => {
+  const partial = stream(), ui = await setup({ turn: () => partial.response });
+  const container = ui.get("agent-messages");
+  assert.equal(container.querySelector(".conversation-date"), null);
+  const pending = ui.submit("这是第一句话"); await settle();
+  const date = container.querySelector(".conversation-date"), user = container.querySelector(".user");
+  assert.ok(date); assert.equal(date.tagName, "TIME"); assert.equal(container.children[0], date);
+  assert.equal(container.children[1], user); assert.match(treeText(user), /这是第一句话/);
+  assert.equal(date.getAttribute("datetime"), new Date(ui.item().createdAt).toISOString());
+  assert.equal(date.textContent, new Date(ui.item().createdAt).toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" }));
+  assert.deepEqual(Array.from(ui.item().messages, (entry) => entry.role), ["user", "assistant"]);
+  assert.equal(ui.item().userRows.get(ui.item().messages[0]), user);
+  partial.send({ type: "text-delta", delta: "正在回复首句" }); await settle();
+  assert.equal(container.querySelector(".conversation-date"), date);
+  assert.equal(container.querySelector(".user"), user);
+  assert.equal(container.children.filter((child) => child.matches(".conversation-date")).length, 1);
+  const request = ui.requests.find((entry) => entry.path.endsWith("/turn"));
+  partial.send({ type: "done", result: completed(request.body) }); partial.close(); await pending;
+  assert.equal(container.querySelector(".conversation-date"), date);
+  assert.equal(ui.records.values().next().value.messages.length, 2);
+  assert.equal(ui.records.values().next().value.messages.some((entry) => entry.role === "date" || entry.dateTime), false);
+});
+
+test("切换历史和刷新按当前会话createdAt显示日期，重复渲染不叠加日期", async () => {
+  const saved = (id, createdAt, content) => ({ schemaVersion: 4, id, agentId: "one", title: content,
+    createdAt, updatedAt: createdAt, saveVersion: 1, mutationId: `saved-${id}`,
+    messages: [{ role: "user", content, delivery: "sent", revision: "1" }, { role: "assistant", content: "已完成", status: "complete", revision: "1" }] });
+  const records = new Map([["one/first", saved("first", "2026-10-10T08:00:00.000Z", "第一场会议")],
+    ["one/second", saved("second", "2026-10-12T08:00:00.000Z", "第二场会议")]]);
+  const ui = await setup({ records }), container = ui.get("agent-messages");
+  const assertDate = (view, stamp, content) => {
+    const messages = view.get("agent-messages"), dates = messages.children.filter((child) => child.matches(".conversation-date"));
+    assert.equal(dates.length, 1); assert.equal(dates[0].getAttribute("datetime"), stamp);
+    assert.equal(messages.children[0], dates[0]); assert.match(treeText(messages.children[1]), new RegExp(content));
+  };
+  assertDate(ui, "2026-10-12T08:00:00.000Z", "第二场会议");
+  await ui.select("first"); assertDate(ui, "2026-10-10T08:00:00.000Z", "第一场会议");
+  await ui.emit("neuma:agents-changed", { items: requirements, busy: false });
+  assertDate(ui, "2026-10-10T08:00:00.000Z", "第一场会议");
+  await ui.route("two"); await ui.route("one");
+  assertDate(ui, "2026-10-10T08:00:00.000Z", "第一场会议");
+  const restored = await setup({ stored: ui.stored, records });
+  assertDate(restored, "2026-10-10T08:00:00.000Z", "第一场会议");
+  await ui.get("agent-new-chat").click();
+  assert.equal(container.querySelector(".conversation-date"), null);
+});
+
+test("旧会话缺少或无效日期时保留首句，日期恢复后只补显示标记", async () => {
+  const ui = await setup(), item = ui.item();
+  item.messages.push({ role: "user", content: "旧会话第一句话", delivery: "sent" },
+    { role: "assistant", content: "旧会话回复", status: "complete" });
+  for (const createdAt of [undefined, "无效日期"]) {
+    item.createdAt = createdAt;
+    await ui.emit("neuma:agents-changed", { items: requirements, busy: false });
+    assert.equal(ui.get("agent-messages").querySelector(".conversation-date"), null);
+    assert.match(treeText(ui.get("agent-messages").children[0]), /旧会话第一句话/);
+  }
+  item.createdAt = "2026-10-10T08:00:00.000Z";
+  await ui.emit("neuma:agents-changed", { items: requirements, busy: false });
+  assert.equal(ui.get("agent-messages").querySelector(".conversation-date").getAttribute("datetime"), item.createdAt);
+  assert.equal(item.messages.length, 2);
 });
 
 test("自动保存到独立记录，清除浏览器后可恢复，新建空白不会增加记录", async () => {
@@ -1245,6 +1313,8 @@ test("切换历史对话即停止原任务，保存部分回复且忽略迟到�
 test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存", async () => {
   const ui = await setup({ stored: new Map([["neuma-agent-artifacts-collapsed", "true"]]) });
   assert.equal(ui.get("agent-history-body").hidden, false);
+  assert.equal(ui.get("agent-history-body").inert, false);
+  assert.equal(ui.get("agent-history-body").attributes.get("aria-hidden"), "false");
   await ui.get("agent-history-toggle").click();
   assert.equal(ui.get("agent-workspace").classes.has("history-collapsed"), true);
   assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
@@ -1254,11 +1324,37 @@ test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存",
   assert.notEqual(ui.item().id, previous);
   assert.equal(ui.get("agent-message").value, "");
   assert.equal(ui.document.activeElement, ui.get("agent-message"));
-  assert.equal(ui.get("agent-history-body").hidden, true);
+  assert.equal(ui.get("agent-history-body").hidden, false);
+  assert.equal(ui.get("agent-history-body").inert, true);
+  assert.equal(ui.get("agent-history-body").attributes.get("aria-hidden"), "true");
   assert.equal(ui.get("agent-conversation").hidden, false);
   const restored = await setup({ stored: ui.stored });
-  assert.equal(restored.get("agent-history-body").hidden, true);
+  assert.equal(restored.get("agent-history-body").hidden, false);
+  assert.equal(restored.get("agent-history-body").inert, true);
+  assert.equal(restored.get("agent-history-body").attributes.get("aria-hidden"), "true");
   assert.equal(restored.get("agent-history-toggle").attributes.get("aria-expanded"), "false");
+});
+
+test("历史栏从列表内收起返还焦点，反复开合不改变对话和输入草稿", async () => {
+  const ui = await setup();
+  await ui.submit("已保存的对话内容");
+  const item = ui.item(), records = JSON.stringify([...ui.records]);
+  const messages = JSON.stringify(item.messages), requests = ui.requests.length;
+  const title = item.title;
+  ui.get("agent-message").value = "尚未发送的任务草稿";
+  historyRows(ui)[0].children[0].focus();
+  for (let index = 0; index < 4; index++) {
+    await ui.get("agent-history-toggle").click();
+    assert.equal(ui.get("agent-history-body").inert, index % 2 === 0);
+    assert.equal(ui.get("agent-history-body").attributes.get("aria-hidden"), String(index % 2 === 0));
+    assert.equal(ui.get("agent-history-body").hidden, false);
+    assert.equal(ui.get("agent-message").value, "尚未发送的任务草稿");
+    assert.equal(ui.item(), item); assert.equal(item.title, title);
+    assert.equal(JSON.stringify(item.messages), messages); assert.equal(JSON.stringify([...ui.records]), records);
+    assert.equal(ui.requests.length, requests);
+    if (index % 2 === 0) assert.equal(ui.document.activeElement, ui.get("agent-history-toggle"));
+  }
+  assert.equal(ui.stored.get("neuma.agent.history-collapsed.v1"), "false");
 });
 
 test("磁盘对话优先于浏览器旧备份，读取不会覆盖服务器已有内容", async () => {
@@ -1483,6 +1579,21 @@ test("被新需求中断的构建先收尾再生成最新版本，迟到旧产�
   assert.equal(ui.runtime().definition.draft.goal.value, "构建中的新需求");
   assert.equal(ui.runtime().status, "ready");
   assert.equal(ui.runtime().rebuildRequested, false);
+});
+
+test("聊天抬头隐藏简介，返回正常入口后仍保留资料与缺失提示的正确状态", async () => {
+  const profile = { name: "我的会议伙伴", description: "整理会议记录与后续行动", icon: "📝" };
+  const ui = await setup({ initialItems: requirements.map((item) => item.id === "one" ? { ...item, profile } : item) });
+  assert.equal(ui.get("agent-subtitle").hidden, true);
+  assert.equal(ui.get("agent-subtitle").textContent, profile.description);
+  assert.match(treeText(ui.get("agent-messages")), /整理会议记录与后续行动/);
+  await ui.route("missing");
+  assert.equal(ui.get("agent-subtitle").hidden, false);
+  assert.match(ui.get("agent-subtitle").textContent, /请回到 NEUMA/);
+  await ui.route("one");
+  assert.equal(ui.get("agent-title").textContent, profile.name);
+  assert.equal(ui.get("agent-subtitle").hidden, true);
+  assert.equal(ui.get("agent-subtitle").textContent, profile.description);
 });
 
 test("展示 overlay 同步标题、简介、emoji和消息标签，不改变构建来源或运行版本", async () => {

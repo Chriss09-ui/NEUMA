@@ -69,9 +69,9 @@ const [stylesheet, html, runtimeSource, makingSource, agentsSource] = await Prom
 const stripModule = (source) => source.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "");
 const literal = (value) => JSON.stringify(value).replaceAll("<", "\\u003c");
 const pageStart = html.indexOf('<section id="page-agent"');
-const pageEnd = html.indexOf('<dialog id="agent-panel"', pageStart);
+const pageEnd = html.indexOf('<section id="page-projects"', pageStart);
 assert.ok(pageStart >= 0 && pageEnd > pageStart);
-const pageMarkup = `${html.slice(pageStart, pageEnd)}</section>`;
+const pageMarkup = html.slice(pageStart, pageEnd);
 const renderStart = agentsSource.indexOf("function renderMaking(");
 const renderEnd = agentsSource.indexOf("\nfunction clearInspectionTimer", renderStart);
 assert.ok(renderStart >= 0 && renderEnd > renderStart);

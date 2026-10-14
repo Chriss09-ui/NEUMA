@@ -206,6 +206,15 @@ for (const textarea of document.querySelectorAll(".composer textarea")) {
     textarea.form.requestSubmit();
   });
   new MutationObserver(resize).observe(textarea, { attributes: true, attributeFilter: ["disabled"] });
+  if (["agent-message", "group-message"].includes(textarea.id) && typeof ResizeObserver !== "undefined") {
+    let previousWidth = null;
+    new ResizeObserver(([entry]) => {
+      const width = entry?.contentRect.width;
+      if (!Number.isFinite(width) || width === previousWidth) return;
+      previousWidth = width;
+      resize();
+    }).observe(textarea);
+  }
 }
 
 fromLocation();

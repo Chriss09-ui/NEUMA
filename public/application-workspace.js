@@ -9,7 +9,7 @@ export function applicationMode(storage, id) {
 
 export function createApplicationWorkspace({ document, window, api, storage }) {
   const byId = (id) => document.getElementById(id), root = byId("agent-workspace"), panel = byId("agent-application");
-  let currentId = null, current = null, mode = "application", assistant = false, instance = null, frame = null;
+  let currentId = null, current = null, mode = "application", assistant = false, settingsOpen = false, instance = null, frame = null;
   let detachBridge = null, generation = 0, opening = false, materialResolve = null;
   const settings = () => document.dispatchEvent(new CustomEvent("neuma:agent-connections-open"));
   const artifacts = () => byId("agent-artifacts-open").click();
@@ -18,14 +18,23 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
   function render() {
     const available = Boolean(current?.pageReady && current.manifest?.page);
     const appMode = available && mode === "application";
+    const assistantVisible = appMode && assistant && !settingsOpen;
+    const conversation = byId("agent-conversation");
+    conversation.inert = appMode && !assistantVisible;
+    conversation.setAttribute("aria-hidden", String(conversation.inert));
+    const actions = byId("agent-conversation-actions");
+    const actionsHost = byId(assistantVisible ? "agent-assistant-actions" : "agent-history-heading");
+    if (actions.parentElement !== actionsHost) actionsHost.append(actions);
     byId("agent-view-switch").hidden = !available;
-    byId("agent-assistant-toggle").hidden = !appMode;
-    byId("agent-assistant-toggle").setAttribute("aria-expanded", String(assistant && appMode));
+    byId("agent-assistant-toggle").hidden = !appMode || settingsOpen;
+    byId("agent-assistant-toggle").disabled = settingsOpen;
+    byId("agent-new-chat").hidden = appMode && !assistantVisible;
+    byId("agent-assistant-toggle").setAttribute("aria-expanded", String(assistantVisible));
     byId("agent-view-application").setAttribute("aria-pressed", String(mode === "application"));
     byId("agent-view-chat").setAttribute("aria-pressed", String(mode === "chat"));
     root.classList.toggle("has-application", available);
     root.classList.toggle("is-application", appMode);
-    root.classList.toggle("application-assistant-open", appMode && assistant);
+    root.classList.toggle("application-assistant-open", assistantVisible);
     panel.hidden = !appMode;
     const missing = (current?.actions || []).filter((action) => action.ready === false);
     byId("agent-application-connection-note").hidden = !missing.length;
@@ -94,7 +103,14 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
     mode = selected; try { storage?.setItem(`neuma.agent.application-mode.v1.${currentId}`, mode); } catch {}
     render(); if (mode === "application") void openResource(); else byId("agent-message").focus();
   });
-  byId("agent-assistant-toggle").addEventListener("click", () => { assistant = !assistant; render(); if (assistant) byId("agent-message").focus(); });
+  byId("agent-assistant-toggle").addEventListener("click", () => {
+    if (settingsOpen) return;
+    assistant = !assistant; render(); if (assistant) byId("agent-message").focus();
+  });
+  document.addEventListener("neuma:agent-settings-view", (event) => {
+    if (!currentId || event.detail?.agentId !== currentId) return;
+    settingsOpen = Boolean(event.detail.active); render();
+  });
   byId("agent-application-configure").addEventListener("click", settings);
   byId("agent-application-retry").addEventListener("click", () => { closeResource(); void openResource(); });
   byId("application-material-confirm").addEventListener("click", () => {
@@ -105,7 +121,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
   byId("application-material-dialog").addEventListener("close", () => { materialResolve?.resolve({ materials: [] }); materialResolve = null; });
   return {
     route(id) {
-      if (id !== currentId) { closeResource(); currentId = id; current = null; assistant = false; mode = applicationMode(storage, id); byId("application-material-dialog").close(); }
+      if (id !== currentId) { closeResource(); currentId = id; current = null; assistant = false; settingsOpen = false; mode = applicationMode(storage, id); byId("application-material-dialog").close(); }
       render();
     },
     update(id, application) {
@@ -115,7 +131,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
       if (mode === "application") void openResource();
     },
     async refresh() { const id = currentId; if (id) { const result = await api.application(id); if (id === currentId) this.update(id, result); } },
-    remove(id) { if (id === currentId) { closeResource(); current = null; render(); } },
+    remove(id) { if (id === currentId) { closeResource(); current = null; settingsOpen = false; render(); } },
     close: closeResource,
   };
 }

@@ -5,7 +5,10 @@ import { createSelectMenu } from "./select-menu.js";
 export function createGroupMaterials({ api, current, refresh, changed }) {
   const byId = (id) => document.getElementById(id), pending = new Map();
   let returnFocus = null, version = 0, objectUrl = null, busy = false;
+  let route = { page: "chat", groupId: null };
   let shareAgents = [];
+  const menuToggle = byId("group-attachment-menu-toggle"), menu = byId("group-attachment-menu");
+  const uploadButton = byId("group-upload"), shareButton = byId("group-share-open");
   const shareMenu = createSelectMenu({ select: byId("group-share-agent"), trigger: byId("group-share-agent-trigger"),
     menu: byId("group-share-agent-menu"), value: byId("group-share-agent-value"), icon: byId("group-share-agent-icon"),
     renderIcon: (target, option) => renderAgentAvatar(target, shareAgents.find((agent) => agent.id === option.value)
@@ -13,21 +16,54 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
   const id = () => current()?.group?.id;
   const key = () => id() || "";
   const selected = () => { if (!pending.has(key())) pending.set(key(), new Set()); return pending.get(key()); };
+  const visible = (groupId = id()) => Boolean(groupId && route.page === "group" && route.groupId === groupId && id() === groupId);
+  const unavailable = () => !visible() || busy || Boolean(current()?.group?.archived || byId("group-message").disabled);
+  const menuItems = () => [uploadButton, shareButton].filter((item) => !item.disabled && !item.hidden);
+  function closeMenu({ restoreFocus = false } = {}) {
+    menu.hidden = true; menuToggle.setAttribute("aria-expanded", "false");
+    if (restoreFocus && visible() && !menuToggle.disabled) menuToggle.focus({ preventScroll: true });
+  }
+  function openMenu(last = false) {
+    if (unavailable()) return;
+    menu.hidden = false; menuToggle.setAttribute("aria-expanded", "true");
+    const items = menuItems(); (last ? items.at(-1) : items[0])?.focus({ preventScroll: true });
+  }
+  function syncControls() {
+    const disabled = unavailable();
+    menuToggle.disabled = uploadButton.disabled = shareButton.disabled = disabled;
+    byId("group-file-input").disabled = disabled;
+    if (disabled) closeMenu();
+  }
+  closeMenu(); uploadButton.tabIndex = shareButton.tabIndex = -1;
   function render() {
     const refs = selected(), materials = current()?.materials || [], target = byId("group-pending-materials");
     target.replaceChildren(); target.hidden = !refs.size;
     for (const materialId of refs) target.append(button(`${materials.find((item) => item.id === materialId)?.name || "已选材料"} ×`, () => { refs.delete(materialId); render(); }, "group-material-chip"));
     byId("group-files-count").textContent = String(materials.length + (current()?.artifacts || []).length);
-    byId("group-upload").disabled = busy || !id() || current()?.group?.archived;
-    byId("group-share-open").disabled = !id() || current()?.group?.archived;
+    syncControls();
     changed?.();
   }
   function attach(materialId) {
     if (selected().size >= 10 && !selected().has(materialId)) throw new Error("每轮最多使用 10 份群材料。");
     selected().add(materialId); render();
   }
-  function open(dialog, trigger) { returnFocus = trigger; byId(dialog).showModal(); byId(dialog).querySelector("button")?.focus(); }
-  function close(dialog) { version++; shareMenu.close(); byId(dialog).close(); if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; } returnFocus?.focus(); }
+  function open(dialog, trigger) {
+    returnFocus = { dialog, trigger, groupId: id(), restoreFocus: true };
+    byId(dialog).showModal(); byId(dialog).querySelector("button")?.focus();
+  }
+  function finishDialog(dialog) {
+    if (!returnFocus || returnFocus.dialog !== dialog) return;
+    const previous = returnFocus; returnFocus = null;
+    version++; shareMenu.close();
+    if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+    if (previous.restoreFocus && visible(previous.groupId) && !previous.trigger.disabled && !previous.trigger.closest("[hidden]"))
+      previous.trigger.focus({ preventScroll: true });
+  }
+  function close(dialog, { restoreFocus = true } = {}) {
+    if (returnFocus?.dialog === dialog) returnFocus.restoreFocus = restoreFocus;
+    if (byId(dialog).open) byId(dialog).close();
+    finishDialog(dialog);
+  }
   async function preview(item, artifact = false) {
     const groupId = id(), request = ++version;
     byId("group-file-title").textContent = item.name || item.path || "文件";
@@ -59,6 +95,7 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
     }
   }
   function files() {
+    if (!visible()) return;
     const data = current(), target = byId("group-file-list"); target.replaceChildren();
     for (const [items, heading, artifact] of [[data?.materials || [], "共享材料", false], [data?.artifacts || [], "工作成果", true]]) {
       target.append(node("h3", "collaboration-file-section", heading));
@@ -71,7 +108,7 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
     open("group-files-dialog", byId("group-files-open"));
   }
   async function upload(fileList) {
-    const groupId = id(); if (!groupId || busy) return;
+    const groupId = id(); if (unavailable()) return;
     busy = true; render();
     try {
       for (const file of [...fileList]) {
@@ -142,13 +179,15 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
     byId("group-share-list").replaceChildren(state);
   }
   async function sharing() {
+    if (unavailable()) return;
+    closeMenu();
     const groupId = id(), request = ++version;
     shareMenu.close(); shareAgents = [];
     const select = byId("group-share-agent"); select.replaceChildren(); select.disabled = true; shareMenu.refresh();
     byId("group-share-agent-value").textContent = "正在读取智能体…";
     byId("group-share-destination").textContent = current()?.group?.name || "当前群组";
     byId("group-share-count").textContent = "0"; notice(byId("group-share-status"), ""); shareEmpty("正在读取文件…");
-    open("group-share-dialog", byId("group-share-open"));
+    open("group-share-dialog", menuToggle);
     try {
       const result = await api.agents(); if (id() !== groupId || request !== version) return;
       shareAgents = result.agents || [];
@@ -166,12 +205,45 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
   byId("group-files-open").addEventListener("click", files);
   byId("group-share-open").addEventListener("click", () => void sharing());
   byId("group-share-agent").addEventListener("change", () => void shareList());
-  byId("group-upload").addEventListener("click", () => byId("group-file-input").click());
+  byId("group-upload").addEventListener("click", () => {
+    if (unavailable()) return;
+    closeMenu({ restoreFocus: true }); byId("group-file-input").click();
+  });
+  menuToggle.addEventListener("click", () => menu.hidden ? openMenu() : closeMenu({ restoreFocus: true }));
+  menuToggle.addEventListener("keydown", (event) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || unavailable()) return;
+    event.preventDefault(); openMenu(event.key === "ArrowUp" || event.key === "End");
+  });
+  document.addEventListener("click", (event) => {
+    if (!menu.hidden && !menuToggle.contains(event.target) && !menu.contains(event.target)) closeMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (menu.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); closeMenu({ restoreFocus: true }); return;
+    }
+    if (event.key === "Tab") { closeMenu(); return; }
+    if (!menu.contains(event.target) || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = menuItems(); if (!items.length) return;
+    const index = items.indexOf(document.activeElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    event.preventDefault(); items[next].focus({ preventScroll: true });
+  });
   byId("group-file-input").addEventListener("change", (event) => void upload(event.target.files));
   for (const [dialog, closeId] of [["group-files-dialog", "group-files-close"], ["group-share-dialog", "group-share-close"]]) {
     byId(closeId).addEventListener("click", () => close(dialog));
     byId(dialog).addEventListener("cancel", (event) => { event.preventDefault(); close(dialog); });
+    byId(dialog).addEventListener("close", () => { if (!byId(dialog).open) finishDialog(dialog); });
   }
-  return { render, refs: () => [...selected()], busy: () => busy, consume() { selected().clear(); render(); },
-    reset() { version++; for (const dialog of ["group-files-dialog", "group-share-dialog"]) if (byId(dialog).open) close(dialog); render(); } };
+  const closeDialogs = () => {
+    closeMenu(); version++;
+    for (const dialog of ["group-files-dialog", "group-share-dialog"]) if (byId(dialog).open) close(dialog, { restoreFocus: false });
+    returnFocus = null;
+  };
+  document.addEventListener("neuma:route", (event) => {
+    route = event.detail; closeDialogs(); syncControls();
+  });
+  return { render, syncControls, refs: () => [...selected()], busy: () => busy, consume() { selected().clear(); render(); },
+    reset() { closeDialogs(); render(); } };
 }
