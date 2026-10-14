@@ -197,9 +197,26 @@
 .group-member-avatar.has-star-avatar { border-radius: 0; background: transparent; }
 .group-member-card summary strong { flex: 1; overflow-wrap: anywhere; }
 .group-member-card > p, .group-member-card > a { margin-top: 12px; }
+.group-member-profile { display: grid; gap: 12px; margin: 12px 0; }
+.group-member-profile p { margin: 0; }
+.group-member-card summary { list-style: none; }
+.group-member-card summary::-webkit-details-marker { display: none; }
+.group-member-card > summary::after, .group-member-abilities > summary::after { content: ""; flex-shrink: 0; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); margin: 0 2px 0 4px; }
+.group-member-card[open] > summary::after, .group-member-abilities[open] > summary::after { transform: rotate(45deg); }
+.group-member-abilities > summary { min-height: 32px; padding: 4px 10px; border-radius: 16px; background: var(--surface-2); color: var(--text-2); }
+.group-member-abilities > summary > span:first-child { flex: 1; }
+.group-member-ability-list { display: grid; gap: 12px; padding-top: 12px; }
+.group-capability-item { display: grid; gap: 6px; padding: 12px 0; border-top: 1px solid var(--border); }
+.group-capability-heading { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.6; }
+.group-capability-heading > strong { flex: 1; min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+.group-capability-status { flex-shrink: 0; padding: 1px 8px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 10px; }
+.group-capability-status[data-availability="callable"] { color: var(--accent-hover); background: var(--accent-soft); }
+.group-capability-status:is([data-availability="conditional"], [data-availability="forbidden"], [data-availability="unavailable"]) { color: var(--warn); }
+.group-capability-description { font-size: 11px; line-height: 1.8; color: var(--text-2); overflow-wrap: anywhere; white-space: pre-line; }
 .member-ready { font-size: 10px; color: var(--accent-hover); white-space: nowrap; }
 .member-ready.unavailable { color: var(--warn); }
 .group-capability { font-size: 11px; line-height: 1.8; color: var(--text-2); overflow-wrap: anywhere; }
+.group-capability > span { white-space: pre-line; }
 .group-capability strong { font-weight: 500; }
 .group-task-card { display: grid; gap: 8px; padding: 16px 0; border-bottom: 1px solid var(--border); }
 .group-task-title { border: 0; background: transparent; text-align: left; padding: 0; font-size: 12px; font-weight: 600; line-height: 1.7; overflow-wrap: anywhere; }

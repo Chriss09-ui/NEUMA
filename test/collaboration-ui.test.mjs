@@ -11,7 +11,7 @@ import { createSidebarHistory } from "../public/sidebar-history.js";
 
 const read = async (file) => (await readFile(new URL(`../public/${file}`, import.meta.url), "utf8"))
   .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "");
-const groupsSource = (await Promise.all(["collaboration-api.js", "group-view.js", "group-materials.js", "groups.js"].map(read))).join("\n");
+const groupsSource = (await Promise.all(["collaboration-api.js", "group-view.js", "group-materials.js", "group-capabilities.js", "groups.js"].map(read))).join("\n");
 const mainSource = (await Promise.all(["chat-ui.js", "agent-runtime.js", "collaboration-api.js", "group-view.js", "main-materials.js", "main-context.js", "main-agent.js"].map(read))).join("\n");
 const settle = async () => { for (let index = 0; index < 4; index++) await new Promise(setImmediate); };
 const copy = structuredClone;
@@ -1067,7 +1067,7 @@ test("成员能力使用各自星核，缺省或已移除成员按稳定身份�
     assert.equal(avatar.dataset.avatarIcon, resolveAgentAvatar(candidate).icon);
     assert.equal(avatar.dataset.avatarKind, "star"); assert.equal(avatar.textContent, "");
     assert.equal(avatar.getAttribute("aria-hidden"), "true");
-    assert.equal(name.textContent, candidate.name); assert.equal(status.textContent, candidate.ready ? "可工作" : "未就绪");
+    assert.equal(name.textContent, candidate.name); assert.equal(status.textContent, candidate.ready ? "已交付" : "未就绪");
     assert.equal(cards[index].children.at(-1).href, `#agent/${candidate.id}`);
   }
   const defaultIcon = cards[1].children[0].children[0].dataset.avatarIcon;
@@ -1088,6 +1088,84 @@ test("成员能力展开状态在群进度更新时保留，归档群阻止继�
   state.group.archived = true; await ui.get("group-refresh").click(); await settle();
   assert.equal(ui.get("group-send").disabled, true); assert.match(ui.text("group-compose-status"), /取消归档/);
   assert.equal(ui.get("group-compose-status").hidden, false);
+});
+
+test("群成员公开卡区分可调用、执行条件、禁止范围和检查记录，完整资料只作为文本展示", async () => {
+  const state = detail();
+  Object.assign(state.members[0], { capabilitySchemaVersion: 1, capabilityVersion: "internal-card-hash", revision: 23,
+    task: "依据共享论文写作", input: ["共享论文", "报告目标"], output: "报告与引用", boundaries: "不能编造来源",
+    hardBoundaries: [{ id: "private-data", label: "私人材料", reason: "只能读取明确分享到群里的材料" }],
+    capabilities: [
+      { id: "read_material", label: "读取群材料", description: "读取已经共享的文档", availability: "callable", scope: "group_task", reason: "材料必须已分享", requirements: ["群材料"], verification: { status: "unverified", checkedAt: null, description: "每次读取后核对实际范围" } },
+      { id: "search", label: "专属搜索", description: "按配置查询", availability: "conditional", scope: "group_task", reason: "缺少连接配置", requirements: ["配置搜索连接"], verification: { status: "connection_checked", checkedAt: "2026-10-14T06:00:00Z", description: "仅检查连接，具体业务调用仍需确认" } },
+      { id: "write_private", label: "修改其他成员文件", description: "<img src=x onerror=alert(1)>", availability: "forbidden", scope: "group_task", reason: "不能修改他人的私人工作目录", requirements: [], verification: { status: "delivery_checked", checkedAt: null, description: "仅检查已交付程序" } },
+    ] });
+  const ui = await readyGroup(state), card = ui.get("group-members").children[0], body = card.querySelector(".group-member-profile");
+  const abilities = card.querySelector(".group-member-abilities");
+  assert.equal(card.open, false); assert.equal(abilities.open, false);
+  assert.equal(card.children[0].getAttribute("aria-controls"), body.id);
+  assert.equal(card.children[0].getAttribute("aria-expanded"), "false");
+  card.open = true; await card.dispatchEvent({ type: "toggle" });
+  abilities.open = true; await abilities.dispatchEvent({ type: "toggle" });
+  assert.equal(card.children[0].getAttribute("aria-expanded"), "true");
+  assert.equal(abilities.children[0].getAttribute("aria-expanded"), "true");
+  const rows = card.querySelectorAll(".group-capability-item");
+  assert.equal(rows.length, 3);
+  assert.equal(textOf(rows[0]).includes("可调用"), true); assert.equal(textOf(rows[0]).includes("尚未验证"), true);
+  assert.equal(textOf(rows[1]).includes("需要条件"), true); assert.equal(textOf(rows[1]).includes("缺少连接配置"), true);
+  assert.equal(textOf(rows[1]).includes("连接检查通过"), true); assert.equal(textOf(rows[1]).includes("具体业务调用仍需确认"), true);
+  assert.equal(textOf(rows[2]).includes("禁止执行"), true); assert.equal(textOf(rows[2]).includes("<img src=x onerror=alert(1)>"), true);
+  assert.equal(rows[2].querySelectorAll("img").length, 0);
+  const text = ui.text("group-members");
+  for (const expected of ["依据共享论文写作", "共享论文；报告目标", "报告与引用", "不能编造来源", "只能读取明确分享到群里的材料"]) assert.ok(text.includes(expected), expected);
+  for (const hidden of ["internal-card-hash", "private-data", "read_material", "write_private"]) assert.equal(text.includes(hidden), false, hidden);
+});
+
+test("旧群成员卡保留原职责资料并明确具体能力尚未提供，未知状态不会误标可调用", async () => {
+  const state = detail(); Object.assign(state.members[0], { input: "说明问题", output: "文字报告", boundaries: ["使用群材料", "不编造结果"] });
+  state.members[1].capabilities = [{ id: "future-tool", label: "待确认工具", availability: "a-new-status", verification: { status: "new-check" } }];
+  const ui = await readyGroup(state), [legacy, newer] = ui.get("group-members").children;
+  assert.match(textOf(legacy), /说明问题/); assert.match(textOf(legacy), /文字报告/); assert.match(textOf(legacy), /使用群材料；不编造结果/);
+  assert.match(textOf(legacy), /尚未提供具体能力与检查记录/);
+  const unknown = newer.querySelector(".group-capability-item");
+  assert.match(textOf(unknown), /尚不明确/); assert.match(textOf(unknown), /尚未验证/);
+  assert.equal(unknown.querySelector(".group-capability-status").dataset.availability, "unknown");
+});
+
+test("群轮询更新公开能力保留成员和具体能力节点、开合及焦点，能力失效如实更新", async () => {
+  const state = detail(); state.members[0].capabilities = [{ id: "search", label: "检索资料", availability: "callable", requirements: [],
+    verification: { status: "unverified" } }];
+  const ui = await readyGroup(state, { request: (path) => path.includes("/events?")
+    ? Response.json({ events: [{ type: "member_updated" }], lastSequence: state.lastSequence }) : null });
+  await ui.get("group-panel-toggle").click(); await ui.get("group-details-members-tab").click();
+  const card = ui.get("group-members").children[0], abilities = card.querySelector(".group-member-abilities");
+  const summary = abilities.children[0], capability = card.querySelector(".group-capability-item"), privateLink = card.children.at(-1);
+  card.open = true; abilities.open = true; summary.focus();
+  Object.assign(state.members[0].capabilities[0], { availability: "conditional", reason: "连接已撤销", verification: { status: "last_call_failed", description: "上次请求失败" } });
+  state.members.reverse(); state.lastSequence++;
+  await [...ui.timers.values()][0](); await settle();
+  const refreshed = ui.get("group-members").children.find((item) => item.dataset.memberId === "writer");
+  assert.equal(refreshed, card); assert.equal(refreshed.querySelector(".group-member-abilities"), abilities);
+  assert.equal(refreshed.querySelector(".group-capability-item"), capability);
+  assert.equal(card.open, true); assert.equal(abilities.open, true); assert.equal(ui.document.activeElement, summary);
+  assert.match(textOf(capability), /需要条件/); assert.match(textOf(capability), /连接已撤销/); assert.match(textOf(capability), /最近调用失败/);
+  privateLink.focus(); await ui.get("group-refresh").click(); await settle(); assert.equal(ui.document.activeElement, privateLink);
+  state.members = state.members.filter((item) => item.id !== "writer");
+  await ui.get("group-refresh").click(); await settle();
+  assert.equal(ui.document.activeElement.id, "group-details-members-tab");
+});
+
+test("切群或离页重置成员能力展开状态，成员身份相同也不串群资料", async () => {
+  const state = detail(); state.members[0].capabilities = [{ id: "search", label: "第一群专属资料", availability: "callable" }];
+  const ui = await readyGroup(state), card = ui.get("group-members").children[0];
+  card.open = true; card.querySelector(".group-member-abilities").open = true;
+  await ui.route({ page: "group", groupId: "two" }); await settle();
+  const second = ui.get("group-members").children[0];
+  assert.notEqual(second, card); assert.equal(second.open, false); assert.equal(second.querySelector(".group-member-abilities").open, false);
+  assert.equal(ui.text("group-members").includes("第一群专属资料"), false);
+  await ui.route({ page: "chat" }); assert.equal(ui.get("group-members").children.length, 0);
+  await ui.route({ page: "group", groupId: "one" }); await settle();
+  assert.equal(ui.get("group-members").children[0].open, false); assert.match(ui.text("group-members"), /第一群专属资料/);
 });
 
 test("已完成任务的后续材料请求自动开启新任务，真实执行阶段显示中文", async () => {
