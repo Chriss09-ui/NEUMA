@@ -39,11 +39,14 @@ let sidebarCollapsed = false;
 try { sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "true"; } catch { /* Use the expanded layout when storage is unavailable. */ }
 
 function setSidebarCollapsed(collapsed, remember = true) {
-  const details = byId("sidebar-details"), shortcut = byId("sidebar-agents-shortcut"), toggle = byId("sidebar-toggle");
-  if ((collapsed && details.contains(document.activeElement)) || (!collapsed && document.activeElement === shortcut)) toggle.focus({ preventScroll: true });
+  const details = byId("sidebar-details"), rails = [byId("sidebar-agent-rail"), byId("sidebar-group-rail")], toggle = byId("sidebar-toggle");
+  const mainHistory = byId("main-history");
+  if ((collapsed && (details.contains(document.activeElement) || (mainHistory?.contains(document.activeElement)
+    && document.activeElement !== byId("sidebar-main-link")))) || (!collapsed && rails.some((rail) => rail.contains(document.activeElement)))) toggle.focus({ preventScroll: true });
   sidebarCollapsed = collapsed;
   byId("app-shell").classList.toggle("sidebar-collapsed", collapsed);
-  details.inert = collapsed; shortcut.inert = !collapsed;
+  details.inert = collapsed;
+  for (const rail of rails) rail.inert = !collapsed;
   toggle.setAttribute("aria-expanded", String(!collapsed));
   const label = collapsed ? "展开主导航" : "收起主导航";
   toggle.setAttribute("aria-label", label); toggle.title = label;

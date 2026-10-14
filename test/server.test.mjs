@@ -76,6 +76,9 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   assert.match(agentUi.headers["content-type"], /javascript/);
   assert.equal((await invoke(handler, "GET", "/chat-ui.js")).status, 200);
   assert.equal((await invoke(handler, "GET", "/panel-resize.js")).status, 200);
+  const sidebar = await invoke(handler, "GET", "/sidebar-history.js");
+  assert.equal(sidebar.status, 200);
+  assert.match(sidebar.text, /export function createSidebarHistory/);
   assert.match(page.text, /id="reset"[^>]*>＋ 新对话/);
   assert.match(page.text, /id="diagnostics"[^>]*>导出诊断记录/);
 

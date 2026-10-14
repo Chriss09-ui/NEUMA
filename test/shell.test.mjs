@@ -37,7 +37,10 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     closest() { return this.hidden ? this : null; }
     contains(element) {
       return (this.id === "project-library-body" && element === get("project-search"))
-        || (this.id === "sidebar-details" && element === get("sidebar-create-agent"));
+        || (this.id === "sidebar-details" && element === get("sidebar-create-agent"))
+        || (this.id === "sidebar-agent-rail" && element === get("collapsed-agent-one"))
+        || (this.id === "sidebar-group-rail" && element === get("collapsed-group-one"))
+        || (this.id === "main-history" && ["sidebar-main-link", "main-history-more-toggle", "main-history-toggle"].some((id) => element === get(id)));
     }
     focus() { document.activeElement = this; }
     click() { this.dispatchEvent({ type: "click" }); }
@@ -149,14 +152,17 @@ test("群组管理从我的群组标题进入，群详情与管理页都选中�
   assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), null);
 });
 
-test("主导航折叠保留页面与草稿，隐藏控件归还焦点，露出智能体图标入口", () => {
+test("主导航折叠保留页面与草稿，头像列只在收起时允许聚焦，展开归还焦点", () => {
   const { get, document, location, stored, navigate } = setup({ hash: "#projects/assistant" });
+  assert.equal(get("sidebar-agent-rail").inert, true);
+  assert.equal(get("sidebar-group-rail").inert, true);
   get("project-message").value = "保留这条草稿";
   get("sidebar-create-agent").focus();
   get("sidebar-toggle").click();
   assert.equal(document.activeElement.id, "sidebar-toggle");
   assert.equal(get("sidebar-details").inert, true);
-  assert.equal(get("sidebar-agents-shortcut").inert, false);
+  assert.equal(get("sidebar-agent-rail").inert, false);
+  assert.equal(get("sidebar-group-rail").inert, false);
   assert.equal(get("sidebar-toggle").getAttribute("aria-label"), "展开主导航");
   assert.equal(stored.get("neuma-sidebar-collapsed"), "true");
   assert.equal(location.hash, "#projects/assistant");
@@ -164,10 +170,29 @@ test("主导航折叠保留页面与草稿，隐藏控件归还焦点，露出�
   assert.equal(get("app-shell").classes.has("sidebar-collapsed"), true);
   assert.equal(get("page-settings").hidden, false);
   assert.equal(get("project-message").value, "保留这条草稿");
-  get("sidebar-agents-shortcut").focus(); get("sidebar-toggle").click();
+  get("collapsed-agent-one").focus(); get("sidebar-toggle").click();
   assert.equal(document.activeElement.id, "sidebar-toggle");
   assert.equal(get("sidebar-details").inert, false);
-  assert.equal(get("sidebar-agents-shortcut").inert, true);
+  assert.equal(get("sidebar-agent-rail").inert, true);
+  assert.equal(get("sidebar-group-rail").inert, true);
+  get("sidebar-toggle").click(); get("collapsed-group-one").focus(); get("sidebar-toggle").click();
+  assert.equal(document.activeElement.id, "sidebar-toggle");
+  assert.equal(get("sidebar-group-rail").inert, true);
+});
+
+test("收起栏使用独立 Agent 头像容器，移除机器人聚合入口", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const rail = html.match(/<div\b[^>]*id="sidebar-agent-rail"[^>]*>/)?.[0];
+  assert.ok(rail);
+  assert.match(rail, /role="navigation"/);
+  assert.match(rail, /aria-label="我的智能体"/);
+  assert.match(rail, /\binert\b/);
+  const groupRail = html.match(/<div\b[^>]*id="sidebar-group-rail"[^>]*>/)?.[0];
+  assert.ok(groupRail);
+  assert.match(groupRail, /role="navigation"/);
+  assert.match(groupRail, /aria-label="我的群组"/);
+  assert.match(groupRail, /\binert\b/);
+  assert.doesNotMatch(html, /sidebar-agents-shortcut/);
 });
 
 test("主导航和项目栏独立恢复、独立折叠，快速切换取最后状态", () => {
@@ -182,6 +207,14 @@ test("主导航和项目栏独立恢复、独立折叠，快速切换取最后�
   get("sidebar-toggle").click(); get("project-library-toggle").click();
   assert.equal(get("app-shell").classes.has("sidebar-collapsed"), true);
   assert.equal(get("project-workspace").classes.has("library-collapsed"), false);
+});
+
+test("主导航折叠会将主历史按钮焦点移回开关，保留可见NEUMA入口的焦点", () => {
+  const { get, document } = setup();
+  get("main-history-more-toggle").focus(); get("sidebar-toggle").click();
+  assert.equal(document.activeElement, get("sidebar-toggle"));
+  get("sidebar-toggle").click(); get("sidebar-main-link").focus(); get("sidebar-toggle").click();
+  assert.equal(document.activeElement, get("sidebar-main-link"));
 });
 
 test("主导航在存储受限和减少动态效果下仍可正常展开收起", () => {

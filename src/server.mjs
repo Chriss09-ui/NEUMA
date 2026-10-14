@@ -58,6 +58,7 @@ const PUBLIC = new Map([
   ["/state.js", ["state.js", "text/javascript; charset=utf-8"]],
   ["/shell.js", ["shell.js", "text/javascript; charset=utf-8"]],
   ["/panel-resize.js", ["panel-resize.js", "text/javascript; charset=utf-8"]],
+  ["/sidebar-history.js", ["sidebar-history.js", "text/javascript; charset=utf-8"]],
   ["/settings.js", ["settings.js", "text/javascript; charset=utf-8"]],
   ["/skills.js", ["skills.js", "text/javascript; charset=utf-8"]],
   ["/skills-view.js", ["skills-view.js", "text/javascript; charset=utf-8"]],

@@ -7,6 +7,7 @@ import { createDevelopmentView } from "./agent-details-view.js";
 import { createAgentMakingView } from "./agent-build-view.js";
 import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "./agent-avatar.js";
 import { conversationDate } from "./group-view.js";
+import { createSidebarHistory } from "./sidebar-history.js";
 
 installAvatarMotion(document, window);
 
@@ -16,7 +17,8 @@ let agents = [];
 let mainBusy = false;
 let route = { page: "chat", agentId: null };
 const runtimes = new Map(), inputs = new Map();
-const sidebarAvatars = new Map();
+const sidebarAvatars = new Map(), sidebarHistories = new Map(), collapsedAvatars = new Map();
+const COLLAPSED_AGENT_LIMIT = 5;
 const avatarActivityLabels = { thinking: "正在思考…", working: "正在工作…", queued: "等待开始…" };
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
@@ -33,8 +35,9 @@ const attachments = new AgentAttachments({ api, onChange(id, cid) {
 } });
 const history = new AgentConversationHistory({ api, storage, exists: (id) => agents.some((agent) => agent.id === id),
   onChange(id, messagesChanged = false) {
+    const agent = agents.find((entry) => entry.id === id);
+    if (agent) renderHistory(agent);
     if (!visible(id) || !current()) return;
-    renderHistory(current());
     if (messagesChanged) renderMessages(current());
     renderControls(current());
     const item = conversation(id);
@@ -69,11 +72,15 @@ function conversation(id) {
 }
 
 async function loadConversation(agent) {
-  return history.load(agent);
+  const state = history.state(agent.id), previous = conversation(agent.id), selection = state.selection;
+  await history.load(agent);
+  const selected = conversation(agent.id);
+  if (history.states.get(agent.id) !== state || state.selection !== selection || selected === previous
+    || previous.messages.length || previous.saveVersion) return;
+  const draft = visible(agent.id) ? input.value : inputs.get(previous.id);
+  if (draft && !inputs.has(selected.id)) inputs.set(selected.id, draft);
 }
 
-let historyCollapsed = false;
-try { historyCollapsed = storage?.getItem("neuma.agent.history-collapsed.v1") === "true"; } catch {}
 let historyMenu = null;
 const historyActionErrors = new Map();
 
@@ -98,10 +105,10 @@ function openHistoryMenu(agentId, item, trigger, row, focusItem = false) {
   remove.setAttribute("aria-label", `删除对话：${item.title}`);
   menu.setAttribute("aria-label", `对话操作：${item.title}`);
   menu.hidden = false;
-  const bounds = byId("agent-history-sidebar").getBoundingClientRect(), anchor = trigger.getBoundingClientRect();
-  const height = menu.getBoundingClientRect().height;
-  const below = anchor.bottom - bounds.top + 4;
-  menu.style.top = `${Math.max(8, below + height <= bounds.height - 8 ? below : anchor.top - bounds.top - height - 4)}px`;
+  const anchor = trigger.getBoundingClientRect(), height = menu.getBoundingClientRect().height;
+  const below = anchor.bottom + 4;
+  menu.style.left = `${Math.max(8, anchor.right - 152)}px`;
+  menu.style.top = `${Math.max(8, below + height <= window.innerHeight - 8 ? below : anchor.top - height - 4)}px`;
   if (focusItem) remove.focus({ preventScroll: true });
 }
 
@@ -118,60 +125,42 @@ function historyDate(date, today) {
 }
 
 function renderHistory(agent) {
-  const list = byId("agent-history-list"), state = history.state(agent.id), selected = conversation(agent.id);
-  const focusedId = document.activeElement?.dataset?.conversationId;
-  const focusedAction = document.activeElement?.className === "agent-history-more" ||
-    (!byId("agent-history-menu").hidden && byId("agent-history-menu").contains(document.activeElement));
-  const menuId = historyMenu?.conversationId;
-  closeHistoryMenu();
-  list.replaceChildren();
-  const records = history.records(agent.id);
-  byId("agent-history-count").textContent = String(records.length);
-  byId("agent-history-feedback").textContent = state.loading ? "正在读取历史对话…" : state.error
-    || historyActionErrors.get(agent.id)
-    || (!records.length ? "还没有对话\n发送第一条消息后，会保存在这里。" : "");
-  byId("agent-workspace").classList.toggle("history-collapsed", historyCollapsed);
-  const body = byId("agent-history-body");
-  body.hidden = false; body.inert = historyCollapsed; body.setAttribute("aria-hidden", String(historyCollapsed));
-  const toggle = byId("agent-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
-  toggle.setAttribute("aria-expanded", String(!historyCollapsed));
-  toggle.setAttribute("aria-label", label); toggle.title = label;
+  const view = sidebarHistories.get(agent.id);
+  if (!view) return;
+  const state = history.state(agent.id), selected = conversation(agent.id), records = history.records(agent.id);
+  if (historyMenu?.agentId === agent.id) closeHistoryMenu(true);
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  let previousGroup = null;
-  for (const item of records) {
-    const date = new Date(item.updatedAt), stamp = historyDate(date, today);
-    if (stamp.group !== previousGroup) {
-      list.append(element("h3", "agent-history-group-title", stamp.group));
-      previousGroup = stamp.group;
-    }
-    const row = element("div", "agent-history-row", "");
-    row.classList.toggle("is-current", item === selected);
-    const select = element("button", "agent-history-select", "");
-    select.type = "button"; select.dataset.conversationId = item.id;
-    select.setAttribute("aria-label", `打开对话：${item.title}`);
-    if (item === selected) select.setAttribute("aria-current", "true");
-    select.title = item.title;
-    select.append(element("span", "agent-history-title", item.title), element("span", "agent-history-time",
-      `${stamp.label}${item.pendingSync ? " · 待同步" : ""}`));
-    select.disabled = item.deleting;
-    select.addEventListener("click", () => selectConversation(agent.id, item.id));
-    const more = element("button", "agent-history-more", "");
-    more.type = "button"; more.dataset.conversationId = item.id; more.disabled = item.deleting;
-    more.setAttribute("aria-label", `对话操作：${item.title}`); more.title = "更多操作";
-    more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
-    more.setAttribute("aria-controls", "agent-history-menu");
-    const dots = element("span", "agent-history-more-icon", ""); dots.setAttribute("aria-hidden", "true");
-    more.append(dots);
-    more.addEventListener("click", () => openHistoryMenu(agent.id, item, more, row));
-    more.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-      event.preventDefault();
-      if (historyMenu?.trigger === more) byId("agent-history-delete").focus({ preventScroll: true });
-      else openHistoryMenu(agent.id, item, more, row, true);
-    });
-    row.append(select, more); list.append(row);
-    if ((focusedId || (focusedAction && menuId)) === item.id) (item.deleting ? toggle : focusedAction ? more : select).focus({ preventScroll: true });
-  }
+  view.update({ records, active: visible(agent.id), status: state.loading ? "正在读取历史对话…" : state.error
+    || historyActionErrors.get(agent.id) || (!records.length ? "还没有对话" : ""),
+    renderRow(item) {
+      const stamp = historyDate(new Date(item.updatedAt), today);
+      const row = element("div", "agent-history-row", "");
+      row.classList.toggle("is-current", visible(agent.id) && item === selected);
+      const select = element("button", "agent-history-select", "");
+      select.type = "button"; select.dataset.conversationId = item.id;
+      select.setAttribute("aria-label", `打开对话：${item.title}${item.pendingSync ? "，待同步" : ""}`);
+      if (visible(agent.id) && item === selected) select.setAttribute("aria-current", "true");
+      select.title = `${item.title}${stamp.label ? ` · ${stamp.label}` : ""}${item.pendingSync ? " · 待同步" : ""}`;
+      select.append(element("span", "agent-history-title", item.title), element("span", "agent-history-time",
+        `${stamp.label}${item.pendingSync ? " · 待同步" : ""}`));
+      select.disabled = item.deleting;
+      select.addEventListener("click", () => selectConversation(agent.id, item.id));
+      const more = element("button", "agent-history-more", "");
+      more.type = "button"; more.dataset.conversationId = item.id; more.disabled = item.deleting;
+      more.setAttribute("aria-label", `对话操作：${item.title}`); more.title = "更多操作";
+      more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
+      more.setAttribute("aria-controls", "agent-history-menu");
+      const dots = element("span", "agent-history-more-icon", ""); dots.setAttribute("aria-hidden", "true"); more.append(dots);
+      more.addEventListener("click", () => openHistoryMenu(agent.id, item, more, row));
+      more.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault();
+        if (historyMenu?.trigger === more) byId("agent-history-delete").focus({ preventScroll: true });
+        else openHistoryMenu(agent.id, item, more, row, true);
+      });
+      row.append(select, more); return row;
+    },
+  });
 }
 
 async function stopConversation(id, item = conversation(id)) {
@@ -191,7 +180,10 @@ async function stopConversation(id, item = conversation(id)) {
 }
 
 async function selectConversation(id, cid) {
-  if (!visible(id) || conversation(id).id === cid) return;
+  if (!agents.some((agent) => agent.id === id)) return;
+  if (!visible(id)) document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "agent", agentId: id } }));
+  if (!visible(id)) return;
+  if (conversation(id).id === cid) { input.focus({ preventScroll: true }); return; }
   const sequence = (switchRequests.get(id) || 0) + 1;
   switchRequests.set(id, sequence);
   const previous = conversation(id);
@@ -214,7 +206,7 @@ async function deleteConversation(id, cid) {
   if (!await history.remove(id, cid)) {
     if (history.state(id).items.get(cid) === item) {
       historyActionErrors.set(id, `未能删除“${item.title}”：${item.storageError || "删除失败，请重试。"}`);
-      if (visible(id) && current()) renderHistory(current());
+      const agent = agents.find((entry) => entry.id === id); if (agent) renderHistory(agent);
     }
     return;
   }
@@ -252,39 +244,80 @@ function syncAvatarActivity(agent) {
   if (sidebar) {
     setAgentAvatarActivity(sidebar.mark, activity);
     sidebar.status.textContent = avatarActivityLabels[activity] || sidebar.restingLabel;
+    sidebar.status.hidden = runtime(agent).status === "ready" && activity === "idle";
   }
+  setAgentAvatarActivity(collapsedAvatars.get(agent.id)?.mark, activity);
   if (visible(agent.id)) setAgentAvatarActivity(byId("agent-icon"), activity);
+}
+
+function renderCollapsedAgents() {
+  const rail = byId("sidebar-agent-rail"), shown = [...sidebarHistories.keys()].slice(0, COLLAPSED_AGENT_LIMIT)
+    .map((id) => agents.find((agent) => agent.id === id));
+  for (const [id, view] of collapsedAvatars) if (!shown.some((agent) => agent.id === id)) {
+    if (view.link.contains(document.activeElement)) byId("sidebar-toggle").focus({ preventScroll: true });
+    view.link.remove(); collapsedAvatars.delete(id);
+  }
+  rail.hidden = !shown.length;
+  for (const [index, agent] of shown.entries()) {
+    let view = collapsedAvatars.get(agent.id);
+    if (!view) {
+      const link = element("a", "collapsed-agent-link", ""), mark = element("span", "collapsed-agent-avatar agent-avatar", "");
+      link.href = `#agent/${encodeURIComponent(agent.id)}`; link.dataset.agentId = agent.id;
+      mark.setAttribute("aria-hidden", "true"); link.append(mark);
+      link.addEventListener("click", (event) => {
+        if (event.defaultPrevented || (event.button ?? 0) !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "agent", agentId: agent.id } }));
+      });
+      view = { link, mark }; collapsedAvatars.set(agent.id, view);
+    }
+    const name = agentDisplayName(agent);
+    view.link.title = name; view.link.setAttribute("aria-label", `打开${name}的对话`);
+    if (visible(agent.id)) view.link.setAttribute("aria-current", "page"); else view.link.removeAttribute("aria-current");
+    renderAgentAvatar(view.mark, agent, { activity: avatarActivity(agent) });
+    if (rail.children[index] !== view.link) {
+      const focused = view.link === document.activeElement;
+      rail.insertBefore(view.link, rail.children[index] ?? null);
+      if (focused) view.link.focus({ preventScroll: true });
+    }
+  }
 }
 
 function renderSidebar() {
   const list = byId("sidebar-agent-list");
-  list.replaceChildren();
-  sidebarAvatars.clear();
+  for (const [id, view] of sidebarHistories) if (!agents.some((agent) => agent.id === id)) {
+    if (historyMenu?.agentId === id) closeHistoryMenu();
+    view.root.remove(); sidebarHistories.delete(id); sidebarAvatars.delete(id);
+  }
   byId("sidebar-agents-empty").hidden = agents.length > 0;
   byId("sidebar-create-agent").disabled = mainBusy;
   for (const agent of agents) {
-    const link = element("a", "sidebar-agent", "");
-    link.href = `#agent/${encodeURIComponent(agent.id)}`;
+    let view = sidebarHistories.get(agent.id);
     const name = agentDisplayName(agent);
-    link.setAttribute("aria-label", `进入 ${name} 的对话`);
-    if (visible(agent.id)) link.setAttribute("aria-current", "page");
-    const mark = element("span", "agent-avatar", "");
-    renderAgentAvatar(mark, agent, { activity: avatarActivity(agent) });
-    mark.setAttribute("aria-hidden", "true");
-    const state = runtime(agent);
-    const label = element("span", "sidebar-agent-label", "");
+    if (!view) {
+      const mark = element("span", "agent-avatar", ""); mark.setAttribute("aria-hidden", "true");
+      view = createSidebarHistory({ document, storage, id: `sidebar-agent-history-${agent.id}`, title: name,
+        href: `#agent/${encodeURIComponent(agent.id)}`, icon: mark, className: "sidebar-agent",
+        onExpand(open) { if (!open && historyMenu?.agentId === agent.id) closeHistoryMenu(); if (open) return loadConversation(agent); },
+      });
+      sidebarHistories.set(agent.id, view); list.append(view.root);
+      const status = element("small", "sidebar-agent-status", "");
+      view.link.append(status); sidebarAvatars.set(agent.id, { mark, status, restingLabel: "" });
+      if (view.expanded) void loadConversation(agent);
+    }
+    const avatar = sidebarAvatars.get(agent.id), state = runtime(agent);
+    renderAgentAvatar(avatar.mark, agent, { activity: avatarActivity(agent) });
     const statusLabel = { building: "正在设计与检查", designing: "正在设计", evaluating: "正在评估", developing: "研发进行中",
       needs_changes: "方案待调整", needs_evidence: "待补充依据", needs_connection: "待连接能力",
       needs_development: "需要研发", infeasible: "方案不可行", failed: "处理失败", cancelled: "已停止",
       blocked: "尚未就绪", stale: "需求已更新 · 待生成", unchecked: "正在读取状态", checking: "正在读取状态",
       error: state.inspectionError ? "状态读取失败" : "处理失败" };
-    const restingLabel = state.status === "ready" ? "可以运行" : statusLabel[state.status] || "待生成";
-    const status = element("small", "", avatarActivityLabels[avatarActivity(agent)] || restingLabel);
-    sidebarAvatars.set(agent.id, { mark, status, restingLabel });
-    label.append(element("strong", "", name), status);
-    link.append(mark, label);
-    list.append(link);
+    avatar.restingLabel = state.status === "ready" ? "可以运行" : statusLabel[state.status] || "待生成";
+    avatar.status.textContent = avatarActivityLabels[avatarActivity(agent)] || avatar.restingLabel;
+    avatar.status.hidden = state.status === "ready" && avatarActivity(agent) === "idle";
+    view.update({ title: name }); view.link.title = `${name} · ${avatar.status.textContent}`; renderHistory(agent);
   }
+  renderCollapsedAgents();
 }
 
 function renderConversationDate(item) {
@@ -384,7 +417,6 @@ function renderControls(agent) {
 function renderMaking(agent) {
   const state = runtime(agent), making = state.status !== "ready" && !state.application?.pageReady && !conversation(agent.id).turn;
   byId("agent-making-panel").hidden = !making;
-  byId("agent-history-sidebar").hidden = making;
   byId("agent-conversation").hidden = making;
   byId("agent-conversation-actions").hidden = making;
   byId("agent-workspace").classList.toggle("is-making", making);
@@ -951,6 +983,8 @@ document.addEventListener("neuma:route", (event) => {
     input.dispatchEvent(new Event("input"));
   }
   renderSidebar();
+  if (route.page === "agent" && current() && (previousPage !== "agent" || previousId !== route.agentId))
+    sidebarHistories.get(route.agentId)?.openInitially();
   renderWorkspace();
   if (route.page === "agent" && current()) {
     if ((previousPage !== "agent" || previousId !== route.agentId) && runtime(current()).status === "ready") input.focus();
@@ -1018,20 +1052,12 @@ byId("agent-chat-fork").addEventListener("click", async () => {
   await history.fork(agent.id);
   if (visible(agent.id)) renderWorkspace();
 });
-byId("agent-history-toggle").addEventListener("click", () => {
-  const agent = current();
-  if (!agent) return;
-  historyCollapsed = !historyCollapsed;
-  try { storage?.setItem("neuma.agent.history-collapsed.v1", String(historyCollapsed)); } catch {}
-  if (historyCollapsed) byId("agent-history-toggle").focus({ preventScroll: true });
-  renderHistory(agent);
-});
 byId("agent-history-delete").addEventListener("click", () => {
   const target = historyMenu;
   closeHistoryMenu(true);
-  if (target && visible(target.agentId)) return deleteConversation(target.agentId, target.conversationId);
+  if (target && agents.some((agent) => agent.id === target.agentId)) return deleteConversation(target.agentId, target.conversationId);
 });
-byId("agent-history-list").addEventListener("scroll", () => closeHistoryMenu(true));
+byId("sidebar-scroll").addEventListener("scroll", () => closeHistoryMenu(true));
 window.addEventListener?.("resize", () => closeHistoryMenu(true));
 document.addEventListener("click", (event) => {
   if (historyMenu && !historyMenu.trigger.contains(event.target) && !byId("agent-history-menu").contains(event.target)) closeHistoryMenu();
@@ -1044,9 +1070,10 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault(); byId("agent-history-delete").focus({ preventScroll: true });
   }
 });
-byId("agent-new-chat").addEventListener("click", async () => {
+async function newConversation(id = route.agentId) {
+  if (!visible(id)) document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "agent", agentId: id } }));
   const agent = current();
-  if (!agent) return;
+  if (!agent || !visible(id)) return;
   const sequence = (switchRequests.get(agent.id) || 0) + 1;
   switchRequests.set(agent.id, sequence);
   const previous = conversation(agent.id);
@@ -1056,9 +1083,9 @@ byId("agent-new-chat").addEventListener("click", async () => {
   history.blank(agent.id);
   input.value = "";
   renderWorkspace();
-  input.dispatchEvent(new Event("input"));
-  input.focus();
-});
+  input.dispatchEvent(new Event("input")); input.focus();
+}
+byId("agent-new-chat").addEventListener("click", () => newConversation());
 byId("agent-chat-form").addEventListener("submit", (event) => { event.preventDefault(); return sendMessage(); });
 window.addEventListener?.("pagehide", () => history.checkpoint());
 

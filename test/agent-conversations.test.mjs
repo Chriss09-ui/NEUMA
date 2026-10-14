@@ -274,6 +274,43 @@ test("历史列表和正文迟到返回不覆盖用户刚选择的新对话", as
   assert.deepEqual(next.messages, []);
 });
 
+test("初次列表迟到返回不移除读取期间已经完成保存的新对话", async (t) => {
+  const remote = server(); remote.seed("one", "old-chat");
+  const stale = await remote.api.listConversations("one"), list = deferred(), storage = memoryStorage();
+  const history = historyFor(t, { ...remote.api, listConversations: () => list.promise }, storage);
+  const loading = history.load({ id: "one", persisted: true }), fresh = history.blank("one");
+  fresh.messages = messages("新对话已完成"); await history.changed("one", fresh, { immediate: true });
+  assert.equal(fresh.saved, true); assert.equal(fresh.pendingSync, false);
+  list.resolve(stale); await loading;
+  assert.equal(history.current("one"), fresh); assert.equal(history.state("one").items.has(fresh.id), true);
+  assert.equal(history.records("one").length, 2); assert.equal(fresh.messages[1].content, "新对话已完成");
+  assert.ok(loadAgentConversationBackups(storage, "one").some((record) => record.id === fresh.id));
+});
+
+test("迟到列表的旧摘要不能回退读取期间刚更新的对话版本", async (t) => {
+  const remote = server(), record = remote.seed("one", "saved-chat"), storage = memoryStorage(); cache(storage, record);
+  const stale = await remote.api.listConversations("one"), list = deferred();
+  const history = historyFor(t, { ...remote.api, listConversations: () => list.promise }, storage);
+  const loading = history.load({ id: "one", persisted: true }), item = history.current("one");
+  item.messages = messages("本机刚保存的更新"); await history.changed("one", item, { immediate: true });
+  assert.equal(item.saveVersion, 2);
+  list.resolve(stale); await loading;
+  assert.equal(history.current("one"), item); assert.equal(item.saveVersion, 2); assert.equal(item.loaded, true);
+  assert.equal(item.messages[1].content, "本机刚保存的更新"); assert.equal(item.saved, true);
+});
+
+test("读取中的旧列表不能重新加入已经确认删除的对话", async (t) => {
+  const remote = server(), record = remote.seed("one", "removed-chat"), storage = memoryStorage(); cache(storage, record);
+  const stale = await remote.api.listConversations("one"), list = deferred();
+  const history = historyFor(t, { ...remote.api, listConversations: () => list.promise }, storage);
+  const loading = history.load({ id: "one", persisted: true });
+  assert.equal(await history.remove("one", record.id), true);
+  list.resolve(stale); await loading;
+  assert.notEqual(history.current("one").id, record.id); assert.deepEqual(history.records("one"), []);
+  assert.equal(history.state("one").items.has(record.id), false);
+  assert.equal(loadAgentConversationBackups(storage, "one").some((entry) => entry.id === record.id), false);
+});
+
 test("同一对话在读取期间已保存新内容时，晚到旧正文不回退消息或版本", async (t) => {
   const remote = server(), record = remote.seed("one", "updated-during-read");
   const body = deferred(), api = { ...remote.api, getHistoryConversation: () => body.promise };

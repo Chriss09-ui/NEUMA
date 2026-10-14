@@ -153,7 +153,12 @@ export class AgentConversationHistory {
   async load(agent) {
     const id = agent.id, state = this.state(id);
     if (!agent.persisted || state.loaded || state.loading) return state.loading?.promise;
-    const loading = { controller: new AbortController(), selection: state.selection, active: this.current(id) };
+    const loading = { controller: new AbortController(), selection: state.selection, active: this.current(id),
+      items: new Map([...state.items].map(([cid, item]) => [cid, { item, sequence: item.sequence, saveVersion: item.saveVersion }])) };
+    const unchanged = (cid, item) => {
+      const previous = loading.items.get(cid);
+      return previous?.item === item && previous.sequence === item.sequence && previous.saveVersion === item.saveVersion;
+    };
     state.loading = loading;
     loading.promise = (async () => {
       try {
@@ -162,15 +167,16 @@ export class AgentConversationHistory {
         if (!Array.isArray(result.conversations)) throw new Error("历史对话列表尚未确认");
         const serverIds = new Set(result.conversations.map((record) => record.id));
         for (const [cid, item] of state.items) {
-          if (!serverIds.has(cid) && item.saveVersion && !item.pendingSync && !item.turn) {
+          if (!serverIds.has(cid) && unchanged(cid, item) && item.saveVersion && !item.pendingSync && !item.turn) {
             state.items.delete(cid); deleteAgentConversationBackup(this.storage, id, cid);
           }
         }
         for (const record of result.conversations) {
           if (!record || typeof record.id !== "string") throw new Error("历史对话记录格式无效");
+          if (loading.items.get(record.id)?.item.deleted) continue;
           const previous = state.items.get(record.id);
           if (!previous) state.items.set(record.id, this.item(id, record));
-          else if (!previous.pendingSync && !previous.turn) {
+          else if (unchanged(record.id, previous) && !previous.pendingSync && !previous.turn) {
             if (previous.saveVersion !== record.saveVersion) previous.loaded = false;
             Object.assign(previous, record);
           }

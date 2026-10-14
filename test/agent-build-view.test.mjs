@@ -63,15 +63,15 @@ test("读取、取消、失败和轻量交付不冒充已生成，研发整理�
   assert.equal(currentStage(packaging), "delivery");
 });
 
-const [stylesheet, html, runtimeSource, makingSource, agentsSource] = await Promise.all([
-  "style.css", "index.html", "agent-runtime.js", "agent-build-view.js", "agents.js",
+const [stylesheet, html, runtimeSource, makingSource, agentsSource, historySource] = await Promise.all([
+  "style.css", "index.html", "agent-runtime.js", "agent-build-view.js", "agents.js", "sidebar-history.js",
 ].map((file) => readFile(new URL(`../public/${file}`, import.meta.url), "utf8")));
 const stripModule = (source) => source.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "");
 const literal = (value) => JSON.stringify(value).replaceAll("<", "\\u003c");
 const pageStart = html.indexOf('<section id="page-agent"');
 const pageEnd = html.indexOf('<section id="page-projects"', pageStart);
 assert.ok(pageStart >= 0 && pageEnd > pageStart);
-const pageMarkup = html.slice(pageStart, pageEnd);
+const pageMarkup = html.match(/<body>([\s\S]*)<\/body>/)[1].replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
 const renderStart = agentsSource.indexOf("function renderMaking(");
 const renderEnd = agentsSource.indexOf("\nfunction clearInspectionTimer", renderStart);
 assert.ok(renderStart >= 0 && renderEnd > renderStart);
@@ -81,10 +81,16 @@ const browserPrelude = `
   ${agentDisplayName.toString()}
   function renderAgentAvatar(target) { target.textContent = "✦"; target.style.cssText = "display:grid;place-items:center;height:100%;font-size:64px;color:#409af0"; }
   ${stripModule(makingSource)}
+  ${stripModule(historySource)}
   const style = document.createElement("style"); style.textContent = ${literal(stylesheet)}; document.head.append(style);
   document.body.insertAdjacentHTML("beforeend", ${literal(pageMarkup)});
   const byId = (id) => document.getElementById(id);
-  byId("page-agent").hidden = false;
+  for (const page of document.querySelectorAll(".page")) page.hidden = page.id !== "page-agent";
+  const historyView = createSidebarHistory({ document, id: "making-history", title: ${literal(agent.name)}, href: "#agent/making-one" });
+  byId("sidebar-agent-list").append(historyView.root); historyView.setExpanded(true);
+  historyView.update({ records: [{ id: "first", title: "现有对话" }], renderRow(record) {
+    const row = document.createElement("button"); row.className = "sidebar-history-item"; row.textContent = record.title; return row;
+  } });
   byId("agent-title").textContent = ${literal(agent.name)};
   byId("agent-subtitle").textContent = ${literal(agent.draft.goal.value)};
   let currentState, makingView = null, stopped = 0, started = 0, details = 0;
@@ -122,7 +128,8 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
     currentState = { status: "building", label: "正在核实技术资料…", operation: { phase: "researching" } };
     renderMaking(agent);
     const active = {
-      width: innerWidth, panel: visible("agent-making-panel"), history: visible("agent-history-sidebar"),
+      width: innerWidth, panel: visible("agent-making-panel"), historyVisible: visible("making-history"),
+      historyInNavigation: byId("sidebar-agent-list").contains(historyView.root),
       conversation: visible("agent-conversation"), composer: visible("agent-chat-form"), artifacts: visible("agent-artifacts-open"),
       title: visible("agent-title"), settings: visible("agent-panel-toggle"), workspace: getComputedStyle(byId("agent-workspace")).display,
       stages: stageFacts(), animation: getComputedStyle(document.querySelector(".agent-making-satellite")).animationName,
@@ -138,11 +145,13 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
     makingView.stop.click();
     currentState = { status: "ready" }; renderMaking(agent);
     return { active, stopped, details, focusPreserved, stopping,
-      ready: { panel: visible("agent-making-panel"), history: visible("agent-history-sidebar"), conversation: visible("agent-conversation") } };
+      ready: { panel: visible("agent-making-panel"), historyVisible: visible("making-history"),
+      historyInNavigation: byId("sidebar-agent-list").contains(historyView.root), conversation: visible("agent-conversation") } };
   `);
   assert.ok(facts.active.width >= 1200);
   assert.equal(facts.active.panel, true);
-  for (const key of ["history", "conversation", "composer", "artifacts"]) assert.equal(facts.active[key], false);
+  assert.equal(facts.active.historyInNavigation, true); assert.equal(facts.active.historyVisible, true);
+  for (const key of ["conversation", "composer", "artifacts"]) assert.equal(facts.active[key], false);
   assert.equal(facts.active.title, true);
   assert.equal(facts.active.settings, true);
   assert.equal(facts.active.workspace, "block");
@@ -157,7 +166,7 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
   assert.equal(facts.details, 1);
   assert.equal(facts.focusPreserved, true);
   assert.deepEqual(facts.stopping, { disabled: true, label: "正在终止…", state: "stopping" });
-  assert.deepEqual(facts.ready, { panel: false, history: true, conversation: true });
+  assert.deepEqual(facts.ready, { panel: false, historyVisible: true, conversation: true });
 });
 
 test("真实浏览器减少动态效果时停止动画，失败文字安全展示并可重新生成", { timeout: 20_000 }, async (t) => {

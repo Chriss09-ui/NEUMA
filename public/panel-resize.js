@@ -155,8 +155,8 @@ export function initWorkspaceResize({ documentRef = document, windowRef = window
   const byId = (id) => documentRef.getElementById(id);
   const shell = byId("app-shell"), workspace = byId("main-workspace"), page = byId("page-chat");
   if (!shell || !workspace || !page) return;
-  const history = byId("main-history"), watch = [shell, workspace, page, history];
-  const agentWorkspace = byId("agent-workspace"), agentPage = byId("page-agent"), agentSidebar = byId("agent-history-sidebar");
+  const watch = [shell, workspace, page];
+  const agentWorkspace = byId("agent-workspace"), agentPage = byId("page-agent");
   const agentShell = byId("agent-page-shell"), agentPrimary = byId("agent-primary"), agentPanel = byId("agent-panel");
   const agentApplication = byId("agent-application");
   const groupPage = byId("page-group"), groupShell = byId("group-page-shell");
@@ -167,14 +167,10 @@ export function initWorkspaceResize({ documentRef = document, windowRef = window
     const css = windowRef.getComputedStyle(root);
     return (Number.parseFloat(css.paddingLeft) || 0) + (Number.parseFloat(css.paddingRight) || 0);
   };
-  const agentGap = () => {
-    const gap = Number.parseFloat(windowRef.getComputedStyle(agentWorkspace).columnGap);
-    return Number.isFinite(gap) ? gap : 28;
-  };
   const fold = (id) => { const toggle = byId(id); toggle.click(); toggle.focus({ preventScroll: true }); };
   const sidebar = initPanelResize({ layout: shell, handle: byId("sidebar-resize"), variable: "--sidebar",
     storageKey: "neuma.sidebar.width.v1", label: "主导航", defaultWidth: 232, minWidth: 175, maxWidth: 320,
-    windowRef, watch: [...watch, agentPage, agentShell, agentPrimary, agentPanel, agentApplication,
+    windowRef, watch: [...watch, agentPage, agentWorkspace, agentShell, agentPrimary, agentPanel, agentApplication,
       groupPage, groupShell, groupPrimary, groupPanel],
     isCollapsed: () => collapsed(shell, "sidebar-collapsed"), collapsedWidth: 72,
     getMax: () => {
@@ -182,10 +178,10 @@ export function initWorkspaceResize({ documentRef = document, windowRef = window
       if (agentPage && agentWorkspace && !agentPage.hidden) {
         const settingsWidth = agentShell && agentPrimary ? Math.max(0,
           agentShell.getBoundingClientRect().width - agentPrimary.getBoundingClientRect().width) : 0;
-        const application = collapsed(agentWorkspace, "is-application"), making = collapsed(agentWorkspace, "is-making");
+        const application = collapsed(agentWorkspace, "is-application");
         const extra = application ? agentApplication ? Math.max(0,
           agentWorkspace.getBoundingClientRect().width - agentApplication.getBoundingClientRect().width) : 0
-          : making ? 0 : 160 + agentGap();
+          : 0;
         return Math.max(175, width - paddingWidth(agentPage) - (agentPrimary ? paddingWidth(agentPrimary) : 0)
           - settingsWidth - extra - 364);
       }
@@ -194,26 +190,9 @@ export function initWorkspaceResize({ documentRef = document, windowRef = window
         return Math.max(175, width - paddingWidth(groupPage) - paddingWidth(groupPrimary) - settingsWidth - 364);
       }
       if (page.hidden) return Math.max(175, width - 640);
-      // Reserve the open history minimum so pulling it out never shifts its origin.
-      return Math.max(175, width - paddingWidth(page) - 160 - contextWidth() - 388);
+      return Math.max(175, width - paddingWidth(page) - contextWidth() - 364);
     }, collapse: () => fold("sidebar-toggle"), expand: () => byId("sidebar-toggle").click() });
-  const historyPanel = initPanelResize({ layout: workspace, handle: byId("main-history-resize"), variable: "--main-history-width",
-    storageKey: "neuma.main.history-width.v1", label: "历史对话", defaultWidth: 208, minWidth: 160, maxWidth: 360,
-    windowRef, watch, isEnabled: () => !page.hidden,
-    isCollapsed: () => collapsed(workspace, "history-collapsed"), collapsedWidth: 40,
-    getMax: () => Math.max(160, workspace.getBoundingClientRect().width - contextWidth() - 388),
-    collapse: () => fold("main-history-toggle"), expand: () => byId("main-history-toggle").click() });
-  const agentHistory = agentWorkspace && agentPage && agentSidebar ? initPanelResize({
-    layout: agentWorkspace, handle: byId("agent-history-resize"), variable: "--agent-history-width",
-    storageKey: "neuma.agent.history-width.v1", label: "智能体历史对话", defaultWidth: 212, minWidth: 160, maxWidth: 360,
-    windowRef, watch: [shell, agentPage, agentShell, agentPrimary, agentPanel, agentSidebar],
-    onRender: (width) => agentPrimary?.style.setProperty("--agent-history-width", `${width}px`),
-    isEnabled: () => !agentPage.hidden && !agentWorkspace.hidden && !agentSidebar.hidden
-      && !collapsed(agentWorkspace, "is-making") && !collapsed(agentWorkspace, "is-application"),
-    isCollapsed: () => collapsed(agentWorkspace, "history-collapsed"), collapsedWidth: 44,
-    getMax: () => Math.max(160, agentWorkspace.getBoundingClientRect().width - agentGap() - 364),
-    collapse: () => fold("agent-history-toggle"), expand: () => byId("agent-history-toggle").click() }) : null;
-  return { sidebar, history: historyPanel, agentHistory };
+  return { sidebar };
 }
 
 if (typeof document !== "undefined" && typeof window !== "undefined") initWorkspaceResize();
