@@ -72,14 +72,27 @@ function conversation(id) {
   return history.current(id);
 }
 
+function savedInput(id, cid = conversation(id).id) {
+  return inputs.get(cid) ?? history.state(id).items.get(cid)?.inputDraft ?? "";
+}
+
+function rememberInput(id, item, value) {
+  inputs.set(item.id, value);
+  history.saveInput(id, item, value);
+}
+
 async function loadConversation(agent) {
   const state = history.state(agent.id), previous = conversation(agent.id), selection = state.selection;
   await history.load(agent);
   const selected = conversation(agent.id);
   if (history.states.get(agent.id) !== state || state.selection !== selection || selected === previous
     || previous.messages.length || previous.saveVersion) return;
-  const draft = visible(agent.id) ? input.value : inputs.get(previous.id);
-  if (draft && !inputs.has(selected.id)) inputs.set(selected.id, draft);
+  const draft = visible(agent.id) ? input.value : savedInput(agent.id, previous.id);
+  if (draft && !savedInput(agent.id, selected.id)) {
+    rememberInput(agent.id, selected, draft);
+    inputs.delete(previous.id); history.saveInput(agent.id, previous, "");
+  }
+  if (visible(agent.id)) { input.value = savedInput(agent.id, selected.id); input.dispatchEvent(new Event("input")); }
 }
 
 let historyMenu = null;
@@ -188,12 +201,12 @@ async function selectConversation(id, cid) {
   const sequence = (switchRequests.get(id) || 0) + 1;
   switchRequests.set(id, sequence);
   const previous = conversation(id);
-  inputs.set(previous.id, input.value);
+  rememberInput(id, previous, input.value);
   await stopConversation(id, previous);
   if (!visible(id) || switchRequests.get(id) !== sequence) return;
   await history.select(id, cid);
   if (!visible(id) || switchRequests.get(id) !== sequence || conversation(id).id !== cid) return;
-  input.value = inputs.get(cid) || "";
+  input.value = savedInput(id, cid);
   input.dispatchEvent(new Event("input"));
   renderWorkspace(); input.focus();
 }
@@ -213,7 +226,7 @@ async function deleteConversation(id, cid) {
   }
   inputs.delete(cid);
   attachments.clear(id, cid);
-  if (selected && visible(id)) { input.value = inputs.get(conversation(id).id) || ""; input.dispatchEvent(new Event("input")); input.focus(); }
+  if (selected && visible(id)) { input.value = savedInput(id); input.dispatchEvent(new Event("input")); input.focus(); }
 }
 
 function runtime(agent) {
@@ -935,7 +948,7 @@ async function sendMessage() {
       attachments.restore(agent.id, item.id, attachmentRefs);
     if (!stopped && conversations.get(agent.id) === item) {
       if (visible(agent.id, item) && !input.value.trim()) { input.value = message; input.dispatchEvent(new Event("input")); }
-      else if (!visible(agent.id, item) && !inputs.get(item.id)?.trim()) inputs.set(item.id, message);
+      else if (!visible(agent.id, item) && !savedInput(agent.id, item.id).trim()) rememberInput(agent.id, item, message);
     }
   } finally {
     if (visible(agent.id, item)) {
@@ -979,12 +992,12 @@ document.addEventListener("neuma:route", (event) => {
   clearInspectionTimer();
   attachmentView.close();
   closeHistoryMenu();
-  if (route.page === "agent" && current()) inputs.set(conversation(route.agentId).id, input.value);
+  if (route.page === "agent" && current()) rememberInput(route.agentId, conversation(route.agentId), input.value);
   const previousPage = route.page, previousId = route.agentId;
   route = event.detail;
   if (route.page !== "agent") attachmentView.setContext(null);
   if (route.page === "agent" && previousId !== route.agentId) {
-    input.value = inputs.get(conversation(route.agentId).id) ?? "";
+    input.value = savedInput(route.agentId);
     input.dispatchEvent(new Event("input"));
   }
   renderSidebar();
@@ -1082,7 +1095,7 @@ async function newConversation(id = route.agentId) {
   const sequence = (switchRequests.get(agent.id) || 0) + 1;
   switchRequests.set(agent.id, sequence);
   const previous = conversation(agent.id);
-  inputs.set(previous.id, input.value);
+  rememberInput(agent.id, previous, input.value);
   await stopConversation(agent.id, previous);
   if (!visible(agent.id) || switchRequests.get(agent.id) !== sequence) return;
   history.blank(agent.id);
@@ -1091,8 +1104,12 @@ async function newConversation(id = route.agentId) {
   input.dispatchEvent(new Event("input")); input.focus();
 }
 byId("agent-new-chat").addEventListener("click", () => newConversation());
+input.addEventListener("input", () => { if (route.page === "agent" && current()) rememberInput(route.agentId, conversation(route.agentId), input.value); });
 byId("agent-chat-form").addEventListener("submit", (event) => { event.preventDefault(); return sendMessage(); });
-window.addEventListener?.("pagehide", () => history.checkpoint());
+window.addEventListener?.("pagehide", () => {
+  if (route.page === "agent" && current()) rememberInput(route.agentId, conversation(route.agentId), input.value);
+  history.checkpoint();
+});
 
 document.dispatchEvent(new CustomEvent("neuma:agents-request"));
 void loadProfiles();

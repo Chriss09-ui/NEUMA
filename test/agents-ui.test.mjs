@@ -31,6 +31,52 @@ test("发送时冻结当前页面参考，新一轮读取新参数，其他Agent
   } finally { releaseApplicationContext("one", instance.instanceId); }
 });
 
+test("未发送的新会话草稿同步备份，重建整个控制器后恢复，成功发送不再恢复已发文字", async () => {
+  const stored = new Map(), records = new Map(), ui = await setup({ stored, records });
+  const cid = ui.item().id;
+  ui.get("agent-message").value = "保留的输入草稿";
+  await ui.get("agent-message").dispatchEvent({ type: "input" });
+  const refreshed = await setup({ stored, records });
+  assert.equal(refreshed.item().id, cid);
+  assert.equal(refreshed.get("agent-message").value, "保留的输入草稿");
+  assert.equal(refreshed.history().length, 0, "仅有草稿不能生成已发送历史");
+  await refreshed.submit("保留的输入草稿");
+  const sent = await setup({ stored, records });
+  assert.equal(sent.item().id, cid);
+  assert.equal(sent.get("agent-message").value, "");
+  assert.equal(sent.item().messages[0].content, "保留的输入草稿");
+  assert.equal(refreshed.requests.filter(entry => entry.path.includes("/conversations/")).some(entry => entry.body?.inputDraft !== undefined), false);
+});
+
+test("已有历史与未发送新会话各自恢复草稿，Agent快速切换隔离，空白覆盖旧值", async () => {
+  const stored = new Map(), records = new Map(), ui = await setup({ stored, records });
+  await ui.submit("已有历史"); const previous = ui.item().id;
+  ui.get("agent-message").value = "历史里的下一条"; await ui.get("agent-message").dispatchEvent({ type: "input" });
+  await ui.get("agent-new-chat").click(); const blank = ui.item().id;
+  ui.get("agent-message").value = "新会话还没发送"; await ui.get("agent-message").dispatchEvent({ type: "input" });
+  await ui.route("two"); ui.get("agent-message").value = "另一个Agent的草稿"; await ui.get("agent-message").dispatchEvent({ type: "input" });
+  await Promise.all([ui.route("one"), ui.route("two")]);
+  const refreshed = await setup({ stored, records });
+  assert.equal(refreshed.item().id, blank); assert.equal(refreshed.get("agent-message").value, "新会话还没发送");
+  await refreshed.select(previous); assert.equal(refreshed.get("agent-message").value, "历史里的下一条");
+  refreshed.get("agent-message").value = ""; await refreshed.get("agent-message").dispatchEvent({ type: "input" });
+  const cleared = await setup({ stored, records }); assert.equal(cleared.get("agent-message").value, "");
+  await cleared.route("two"); assert.equal(cleared.get("agent-message").value, "另一个Agent的草稿");
+});
+
+test("发送期间输入下一条文字，回复完成与刷新不会清掉新草稿，删除会话同步清除", async () => {
+  const stored = new Map(), records = new Map(); let finish;
+  const ui = await setup({ stored, records, turn: body => new Promise(resolve => { finish = () => resolve(Response.json(completed(body))); }) });
+  const pending = ui.submit("第一条已提交"); await settle();
+  ui.get("agent-message").value = "等待回复时写的下一条"; await ui.get("agent-message").dispatchEvent({ type: "input" });
+  finish(); await pending;
+  const refreshed = await setup({ stored, records });
+  assert.equal(refreshed.get("agent-message").value, "等待回复时写的下一条");
+  await refreshed.remove(refreshed.item().id);
+  const removed = await setup({ stored, records }); assert.equal(removed.get("agent-message").value, "");
+  assert.equal([...stored.values()].some(value => value.includes("等待回复时写的下一条")), false);
+});
+
 test("上传材料后可仅发送附件，消息和后续成功历史保存同一ID引用", async () => {
   const ui = await setup();
   ui.get("agent-attachment-input").files = [new File(["fixture"], "论文.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })];

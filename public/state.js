@@ -256,6 +256,10 @@ function agentConversationBackup(agentId, record, options = {}) {
     title: record.title, createdAt: record.createdAt, updatedAt: record.updatedAt,
     saveVersion: record.saveVersion, expectedVersion, mutationId,
     ...(options.pendingSync === true ? { pendingSync: true } : {}) };
+  if (record.inputDraft !== undefined) {
+    if (typeof record.inputDraft !== "string" || record.inputDraft.length > 4000 || record.inputDraft.includes("\0")) throw new Error("输入草稿格式无效。");
+    if (record.inputDraft) value.inputDraft = record.inputDraft;
+  }
   if (new TextEncoder().encode(JSON.stringify(value)).length > AGENT_HISTORY_MAX_BYTES) {
     throw new Error("单条对话超过 8 MiB，完整内容未保存。");
   }
