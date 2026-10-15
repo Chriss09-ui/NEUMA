@@ -386,6 +386,45 @@ test("角色轮次耗尽显示本阶段预算失败并保留正确原因", async
   assert.equal((await designer.get("weekly")).diagnostic.reason, "turn_limit");
 });
 
+test("提交校验失败在轮次耗尽诊断中保留字段原因，不保存候选秘密值", async (t) => {
+  const progress = [], secret = "PRIVATE_PAYLOAD_SENTINEL";
+  const { designer } = await fixture(t, { onPrompt: async ({ record, submit, emit }) => {
+    const candidate = validDesign(record.payload.requirements);
+    candidate.instructions = secret; delete candidate.components[0].inputs;
+    await assert.rejects(submit(candidate), InputError);
+    for (let turn = 0; turn < 13; turn++) emit({ type: "turn_end" });
+  } });
+  await assert.rejects(designer.design(definition(), { onProgress: (event) => progress.push(event) }), (error) => {
+    assert.equal(error.diagnostic.reason, "turn_limit");
+    assert.equal(error.diagnostic.submissionAttempts, 1);
+    assert.equal(error.diagnostic.lastSubmissionError, "design.components.[0].inputs: required_field");
+    return true;
+  });
+  assert.deepEqual(progress.find((event) => event.validationIssue)?.validationIssue,
+    { path: "design.components.[0].inputs", reason: "required_field" });
+  const saved = await designer.get("weekly");
+  assert.equal(saved.diagnostic.submissionAttempts, 1);
+  assert.doesNotMatch(JSON.stringify({ progress, saved }), new RegExp(secret));
+});
+
+test("SDK预执行schema拒绝只保留白名单路径原因，忽略参数与其他工具错误", async (t) => {
+  const progress = [], secret = "PRIVATE_PAYLOAD_SENTINEL";
+  const { designer } = await fixture(t, { onPrompt: async ({ emit }) => {
+    emit({ type: "tool_execution_end", toolName: secret, toolCallId: "other", isError: true,
+      result: { content: [{ type: "text", text: `Validation failed for tool "${secret}":\n - instructions: Expected string\nArguments: ${secret}` }] } });
+    emit({ type: "tool_execution_start", toolName: "submit_architecture", toolCallId: "submission-one", args: { secret } });
+    emit({ type: "tool_execution_end", toolName: "submit_architecture", toolCallId: "submission-one", isError: true,
+      result: { content: [{ type: "text", text: `Validation failed for tool "submit_architecture":\n  - components.0.${secret}: Unexpected property ${secret}\n\nReceived arguments:\n{"instructions":"${secret}"}` }] } });
+    for (let turn = 0; turn < 13; turn++) emit({ type: "turn_end" });
+  } });
+  await assert.rejects(designer.design(definition(), { onProgress: (event) => progress.push(event) }), (error) => {
+    assert.equal(error.diagnostic.reason, "turn_limit"); assert.equal(error.diagnostic.submissionAttempts, 1);
+    assert.equal(error.diagnostic.lastSubmissionError, "components.[0].<field>: unknown_field"); return true;
+  });
+  assert.equal(progress.filter((event) => event.validationIssue).length, 1);
+  assert.doesNotMatch(JSON.stringify({ progress, saved: await designer.get("weekly") }), /PRIVATE_PAYLOAD_SENTINEL|Received arguments|Arguments:/);
+});
+
 test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完整流", async (t) => {
   for (const outcome of ["complete", "truncated", "protocol"]) await t.test(outcome, { timeout: 10_000 }, async (child) => {
     const root = await mkdtemp(join(tmpdir(), "neuma-architecture-sdk-"));
