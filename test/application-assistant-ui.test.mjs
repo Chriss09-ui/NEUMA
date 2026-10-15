@@ -85,6 +85,27 @@ test("拖动、拉伸、隐藏和切 Agent 立即结束动画，减少动态效�
   view.close();
 });
 
+test("展开中途拖动接住当前画面的位置与尺寸，释放后才恢复最小高度", async () => {
+  const ui = setup(), view = createApplicationAssistant(ui);
+  ui.root.getBoundingClientRect = () => ({ x: 200, y: 40, width: 1000, height: 700 });
+  view.select("one"); view.show(true); view.expand();
+  ui.get("agent-conversation").getBoundingClientRect = () => ({ x: 800, y: 600, width: 380, height: 120 });
+  await ui.get("agent-assistant-header").dispatchEvent({ type: "pointerdown", pointerId: 10, button: 0, clientX: 820, clientY: 620 });
+  assert.deepEqual(view.layout(), { expanded: true, x: 600, y: 560, width: 380, height: 120 });
+  assert.equal(ui.timers.size, 0);
+  await ui.window.dispatchEvent({ type: "pointermove", pointerId: 10, clientX: 780, clientY: 580 });
+  assert.deepEqual(view.layout(), { expanded: true, x: 560, y: 520, width: 380, height: 120 });
+  await ui.window.dispatchEvent({ type: "pointerup", pointerId: 10 });
+  assert.equal(view.layout().height, 240);
+  assert.equal(ui.timers.size, 1);
+  view.toggle(); view.expand();
+  const destination = view.layout();
+  await ui.get("agent-assistant-header").dispatchEvent({ type: "pointerdown", pointerId: 11, button: 0, clientX: 820, clientY: 620 });
+  await ui.window.dispatchEvent({ type: "pointerup", pointerId: 11 });
+  assert.deepEqual(view.layout(), destination);
+  view.close();
+});
+
 test("初始玻璃输入条在首次真实消息后展开，设置暂藏与刷新不重建会话和页面", async () => {
   const ui = setup(), calls = [], view = createApplicationWorkspace({ ...ui, api: {
     open: async () => instance, close: async (...args) => calls.push(args), tasks: async () => ({ tasks: [] }),

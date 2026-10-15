@@ -2,10 +2,10 @@ const STORAGE_KEY = "neuma.agent.assistant-layout.v1.";
 const MARGIN = 16, COMPACT = { width: 360, height: 64 }, EXPANDED = { width: 400, height: 440 };
 const finite = (value, fallback) => Number.isFinite(value) ? value : fallback;
 
-export function boundAssistantLayout(layout, bounds) {
+export function boundAssistantLayout(layout, bounds, minimumHeight = 240) {
   const maximumWidth = Math.max(1, bounds.width - MARGIN * 2), maximumHeight = Math.max(1, bounds.height - MARGIN * 2);
   const width = Math.min(maximumWidth, Math.max(320, finite(layout.width, COMPACT.width)));
-  const height = Math.min(maximumHeight, layout.expanded ? Math.max(240, finite(layout.height, EXPANDED.height)) : COMPACT.height);
+  const height = Math.min(maximumHeight, layout.expanded ? Math.max(minimumHeight, finite(layout.height, EXPANDED.height)) : COMPACT.height);
   return { ...layout, width, height,
     x: Math.min(Math.max(MARGIN, finite(layout.x, bounds.width - width - MARGIN)), Math.max(MARGIN, bounds.width - width - MARGIN)),
     y: Math.min(Math.max(MARGIN, finite(layout.y, bounds.height - height - MARGIN)), Math.max(MARGIN, bounds.height - height - MARGIN)) };
@@ -18,12 +18,15 @@ export function createApplicationAssistant({ document, window, root, storage }) 
   let agentId = null, visible = false, layout = { ...COMPACT, expanded: false }, expandedSize = { ...EXPANDED };
   let gesture = null, suppressClick = false, motionTimer = null;
   const bounds = () => { const box = root.getBoundingClientRect?.(); return { width: box?.width || 1000, height: box?.height || 700 }; };
+  const bounded = (value = layout) => gesture?.interrupted
+    ? { ...boundAssistantLayout({ ...value, expanded: true }, bounds(), COMPACT.height), expanded: value.expanded }
+    : boundAssistantLayout(value, bounds());
   function save() {
     if (!agentId) return;
     try { storage?.setItem(`${STORAGE_KEY}${agentId}`, JSON.stringify({ ...layout, expandedSize })); } catch {}
   }
   function render() {
-    const displayed = boundAssistantLayout(layout, bounds());
+    const displayed = bounded();
     root.classList.toggle("application-assistant-compact", visible && !layout.expanded);
     header.hidden = !visible;
     for (const direction of ["n", "e", "s", "w", "nw", "ne", "sw", "se"]) byId(`agent-assistant-resize-${direction}`).hidden = !visible;
@@ -82,19 +85,31 @@ export function createApplicationAssistant({ document, window, root, storage }) 
     if (!gesture || (event?.pointerId !== undefined && event.pointerId !== gesture.pointerId)) return;
     suppressClick = gesture.moved;
     try { gesture.target.releasePointerCapture?.(gesture.pointerId); } catch {}
-    gesture = null; shield.hidden = true; root.classList.toggle("application-assistant-dragging", false); save();
+    const { interrupted, moved, destination } = gesture;
+    gesture = null; shield.hidden = true; root.classList.toggle("application-assistant-dragging", false);
+    if (interrupted) {
+      startMotion(layout.expanded);
+      if (!moved) layout = destination;
+      if (!layout.expanded) layout = { ...layout, ...COMPACT, x: layout.x + layout.width - COMPACT.width, y: layout.y + layout.height - COMPACT.height };
+      layout = bounded(); render();
+    }
+    save();
   }
   function startGesture(event, direction = null) {
     if (!visible || gesture || (event.button !== undefined && event.button !== 0)) return;
     if (!direction && event.target?.closest?.("button,input,textarea,a") && !event.target.closest("#agent-assistant-move")) return;
     event.preventDefault();
+    const box = motionTimer !== null && !direction ? conversation.getBoundingClientRect() : null;
+    const workspace = box ? root.getBoundingClientRect() : null;
+    const interrupted = box && [box.x, box.y, workspace.x, workspace.y].every(Number.isFinite);
+    const destination = { ...layout };
     stopMotion();
     if (direction) setExpanded(true, false, false);
-    layout = boundAssistantLayout(layout, bounds());
+    layout = interrupted ? { ...layout, x: box.x - workspace.x, y: box.y - workspace.y, width: box.width, height: box.height } : bounded();
     const target = !direction && event.target?.closest?.("#agent-assistant-move") ? move : event.currentTarget || move;
-    gesture = { pointerId: event.pointerId, target, direction, startX: event.clientX, startY: event.clientY, layout: { ...layout }, moved: false };
+    gesture = { pointerId: event.pointerId, target, direction, startX: event.clientX, startY: event.clientY, layout: { ...layout }, moved: false, interrupted, destination };
     try { target.setPointerCapture?.(event.pointerId); } catch {}
-    shield.hidden = false; root.classList.toggle("application-assistant-dragging", true);
+    shield.hidden = false; root.classList.toggle("application-assistant-dragging", true); render();
   }
   function moveGesture(event) {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
@@ -110,7 +125,7 @@ export function createApplicationAssistant({ document, window, root, storage }) 
       if (direction.includes("w")) layout.x = original.x + original.width - layout.width;
       if (direction.includes("n")) layout.y = original.y + original.height - layout.height;
     }
-    layout = boundAssistantLayout(layout, bounds()); render();
+    layout = bounded(); render();
   }
   function keyboard(event, resizing) {
     const delta = { ArrowLeft: [-8, 0], ArrowRight: [8, 0], ArrowUp: [0, -8], ArrowDown: [0, 8] }[event.key];
@@ -164,7 +179,7 @@ export function createApplicationAssistant({ document, window, root, storage }) 
     expand() { setExpanded(true); },
     toggle() { setExpanded(!layout.expanded); },
     isExpanded: () => layout.expanded,
-    layout: () => boundAssistantLayout(layout, bounds()),
+    layout: () => bounded(),
     close() { finishGesture(); stopMotion(); resizeObserver?.disconnect(); avatarObserver?.disconnect(); },
   };
 }
