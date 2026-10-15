@@ -21,6 +21,7 @@ export class AgentConversationHistory {
       mutationId: record.mutationId || crypto.randomUUID(),
       saved: Boolean(record.saveVersion && !record.pendingSync), pendingSync: Boolean(record.pendingSync),
       localBackup: Boolean(record.messages), loaded: Array.isArray(record.messages), loading: null, saving: null,
+      inputDraft: typeof record.inputDraft === "string" ? record.inputDraft : "", restoredInputDraft: Boolean(record.inputDraft),
       sessionId: crypto.randomUUID(), turn: null, error: "", storageError: "", sequence: 0,
       saveTimer: null, retryRequest: record.retryRequest || null, conflict: false, deleting: false };
   }
@@ -50,15 +51,29 @@ export class AgentConversationHistory {
 
   backup(id, item) {
     try {
+      const now = new Date().toISOString();
       const record = { schemaVersion: 4, id: item.id, agentId: id, title: item.title,
-        createdAt: item.createdAt, updatedAt: item.updatedAt, saveVersion: item.saveVersion,
+        createdAt: item.createdAt || now, updatedAt: item.updatedAt || now, saveVersion: item.saveVersion,
         messages: agentHistorySnapshot(item.messages).messages,
+        ...(item.inputDraft ? { inputDraft: item.inputDraft } : {}),
         ...(item.retryRequest ? { retryRequest: item.retryRequest } : {}) };
       item.localBackup = saveAgentConversationBackup(this.storage, id, record, {
         pendingSync: item.pendingSync, expectedVersion: item.retryRequest?.expectedVersion ?? item.saveVersion,
         mutationId: item.retryRequest?.mutationId || item.mutationId,
       });
     } catch { item.localBackup = false; }
+  }
+
+  saveInput(id, item, value) {
+    if (!item || item.deleted || item.deleting || this.states.get(id)?.items.get(item.id) !== item || !this.exists(id)) return false;
+    if (typeof value !== "string" || value.length > 4000 || value.includes("\0")) return false;
+    item.inputDraft = value;
+    const state = this.state(id);
+    if (value || item.messages.length || item.saveVersion) this.backup(id, item);
+    else item.localBackup = deleteAgentConversationBackup(this.storage, id, item.id);
+    if (value && this.current(id) === item && (state.loaded || state.selection > 0 || item.restoredInputDraft))
+      saveActiveAgentConversation(this.storage, id, item.id);
+    return item.localBackup;
   }
 
   changed(id, item, { immediate = false } = {}) {
@@ -188,7 +203,7 @@ export class AgentConversationHistory {
             this.active.set(id, latest);
             saveActiveAgentConversation(this.storage, id, latest.id);
           } else this.blank(id);
-        } else if (state.selection === loading.selection && !this.current(id).messages.length) {
+        } else if (state.selection === loading.selection && !this.current(id).messages.length && !this.current(id).restoredInputDraft) {
           const selected = state.items.get(loadActiveAgentConversation(this.storage, id)) || this.records(id)[0];
           if (selected) this.active.set(id, selected);
         }
@@ -309,6 +324,6 @@ export class AgentConversationHistory {
 
   checkpoint() {
     for (const [id, state] of this.states) for (const item of state.items.values())
-      if (item.pendingSync && !item.deleted && !item.deleting) this.backup(id, item);
+      if ((item.pendingSync || item.inputDraft) && !item.deleted && !item.deleting) this.backup(id, item);
   }
 }
