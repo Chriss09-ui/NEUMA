@@ -96,6 +96,72 @@ test("全员初始认领，成员一致选临时整合者，互补分工后提�
   assert.equal(events.latestSequence, view.lastSequence);
 });
 
+test("工作预留或结果持久化持续失败时释放群 worker，恢复后不重放旧业务", { timeout: 5000 }, async (t) => {
+  for (const failureAt of ["reservation", "result"]) {
+    const { service, calls, create, post } = await fixture(t), start = service.start.bind(service);
+    service.start = () => {};
+    const { group } = await create(`persistence-${failureAt}`, ["a"]), first = await post(group.id);
+    const queued = await post(group.id, "另一段排队工作", "queued-work");
+    await service.store.change(group.id, (record) => {
+      const task = record.tasks[0]; task.ownerId = "a"; task.phase = "execution";
+      const child = service.makeChild(task, { title: "已授权工作", assigneeId: "a" });
+      service.queue(task, "a", { childId: child.id });
+    });
+    const storage = service.store.storage, write = storage.writeJson.bind(storage), failure = new Error("disk full");
+    let armed = false, failedWrites = 0, safetyStopped = false;
+    storage.writeJson = async (...args) => {
+      const task = args[2].tasks.find((value) => value.id === first.task.id);
+      armed ||= failureAt === "reservation" ? task.jobs[0]?.status === "running" : task.children[0]?.status === "completed";
+      if (!armed) return write(...args);
+      if (++failedWrites > 12) {
+        safetyStopped = true; service.closed = true;
+        service.workers.get(group.id)?.controller.abort();
+      }
+      throw failure;
+    };
+    service.start = start;
+    try {
+      service.start(group.id);
+      await assert.rejects(service.idle(group.id), (error) => error === failure);
+      assert.equal(safetyStopped, false, "持续写入故障必须自行退出，不能依赖测试的循环保护");
+      assert.ok(failedWrites <= 5, `应有界处理持久化故障，实际写入 ${failedWrites} 次`);
+      assert.equal(service.workers.has(group.id), false);
+      assert.equal((await service.getGroup(group.id)).tasks.find((value) => value.id === queued.task.id).status, "queued");
+    } finally { storage.writeJson = write; service.closed = false; }
+    await service.cancelTask(group.id, first.task.id);
+    const recovered = await post(group.id, "恢复后继续", "recovered-work", { taskId: first.task.id });
+    await service.idle(group.id);
+    const view = await service.getGroup(group.id);
+    assert.equal(view.tasks.find((value) => value.id === queued.task.id).status, "completed");
+    assert.equal(view.tasks.find((value) => value.id === recovered.task.id).status, "completed");
+    assert.equal(calls.filter((value) => value.options.scope.taskId === first.task.id && value.payload.kind === "work").length,
+      failureAt === "reservation" ? 0 : 1, "保存失败后不能重放结果未知的旧业务");
+  }
+});
+
+test("成员工作失败或显式取消不阻断同群后续排队任务", { timeout: 5000 }, async (t) => {
+  for (const outcome of ["failed", "cancelled"]) {
+    const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+    const { service, create, post } = await fixture(t, { run: async ({ payload, call, signal }) => {
+      if (payload.goal === "第一段工作" && payload.kind === "work") {
+        entered.resolve(); await release.promise;
+        if (outcome === "failed") throw new Error("成员调用失败");
+        signal.throwIfAborted();
+      }
+      await call("submit_group_turn", { status: "complete", result: "实际结果" });
+    } });
+    const { group } = await create(`queue-${outcome}`, ["a"]), first = await post(group.id, "第一段工作");
+    await entered.promise;
+    const next = await post(group.id, "后续排队工作", "next-work");
+    if (outcome === "cancelled") await service.cancelTask(group.id, first.task.id);
+    release.resolve(); await service.idle(group.id);
+    const view = await service.getGroup(group.id);
+    assert.equal(view.tasks.find((value) => value.id === first.task.id).status, outcome === "cancelled" ? "cancelled" : "needs_input");
+    assert.equal(view.tasks.find((value) => value.id === next.task.id).status, "completed");
+    assert.equal(service.workers.has(group.id), false);
+  }
+});
+
 test("普通群对话只由一位成员直接回复，不创建工作或第二轮协商", async (t) => {
   const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => ({
     ...conversationIntent(options.agentId === "a" ? "你好，我在。你想聊些什么？" : "你好，我也在。"), replyAudience: { mode: "members", memberIds: ["a", "b"] } }) });

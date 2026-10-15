@@ -15,13 +15,17 @@ const publicGroup = ({ creationId, creationHash, ...group }) => group;
 const publicArtifact = ({ content, ...artifact }) => artifact;
 const system = { type: "system", id: "platform", name: "NEUMA" };
 const unfinished = (task) => !TERMINAL_TASKS.has(task.status);
+const deletedConversation = () => Object.assign(conflict("这段群对话已删除，请新建对话"), { reason: "conversation_deleted" });
 const matchesParticipant = (member, card) => card?.ready && card.revision === member.revision
   && (!member.capabilityVersion || card.capabilityVersion === member.capabilityVersion);
 const memberCards = (record, cards) => record.group.memberIds.map((memberId) => cards.find((card) => card.id === memberId)
   ?? { id: memberId, name: "已移除的 Agent", ready: false, description: "成员已不可用" });
 export const isLive = (task) => ["queued", "running", "negotiating", "waiting"].includes(task.status);
 const rootTask = (record, taskId) => {
-  const task = record.tasks.find((value) => value.id === id(taskId, "任务"));
+  id(taskId, "任务");
+  if (record.deletedConversations?.some((value) => value.id === taskId || value.taskIds.includes(taskId)))
+    throw deletedConversation();
+  const task = record.tasks.find((value) => value.id === taskId);
   if (!task) throw new InputError("没有找到这个群的任务");
   return task;
 };
@@ -74,6 +78,30 @@ export class CollaborationService {
       memberIds: await this.members(input.memberIds), mutationId: id(input.mutationId, "操作") });
     return this.getGroup(group.id);
   }
+  async removeConversation(groupId, conversationId, input = {}) {
+    id(conversationId, "群对话");
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new InputError("群对话删除请求无效");
+    const mutationId = id(input.mutationId, "删除请求"), hash = fingerprint({ action: "removeConversation", conversationId });
+    return this.store.change(groupId, (record) => {
+      const prior = this.replay(record, mutationId, hash); if (prior) return prior;
+      if (this.closed) throw new InputError("协作服务正在关闭");
+      const tasks = record.tasks.filter((task) => groupConversationId(task) === conversationId);
+      if (tasks.some(unfinished)) throw conflict("这段群对话仍在进行或等待补充，请停止后再删除");
+      const result = { removed: true, conversationId };
+      if (tasks.length) {
+        const taskIds = new Set(tasks.map((task) => task.id));
+        record.tasks = record.tasks.filter((task) => !taskIds.has(task.id));
+        record.messages = record.messages.filter((value) => !taskIds.has(value.taskId));
+        record.events = record.events.filter((value) => !taskIds.has(value.taskId));
+        if (taskIds.has(record.group.activeTaskId)) record.group.activeTaskId = null;
+        record.deletedConversations ??= [];
+        record.deletedConversations.push({ id: conversationId, taskIds: [...taskIds], deletedAt: now() });
+        event(record, "conversation-removed", { conversationId });
+      }
+      record.mutations.push({ id: mutationId, hash, result });
+      return result;
+    });
+  }
   async updateGroup(groupId, input = {}) {
     const memberIds = input.memberIds === undefined ? undefined : await this.members(input.memberIds);
     const mutationId = id(input.mutationId, "操作"), hash = fingerprint(input);
@@ -124,6 +152,8 @@ export class CollaborationService {
     const attachments = await this.materials.resolve(groupId, input.attachmentIds ?? []);
     const restrictedTaskIds = [];
     const result = await this.store.change(groupId, (record) => {
+      if (input.taskId && record.deletedConversations?.some((value) => value.id === input.taskId || value.taskIds.includes(input.taskId)))
+        throw deletedConversation();
       const replay = this.replay(record, mutationId, hash);
       if (replay) return { message: record.messages.find((value) => value.id === replay.messageId), task: rootTask(record, replay.taskId) };
       if (this.closed) throw new InputError("协作服务正在关闭");
@@ -267,13 +297,14 @@ export class CollaborationService {
     this.workers.set(groupId, worker);
     worker.promise = Promise.resolve().then(() => runGroup(this, groupId, worker)).catch(async () => {
       if (worker.controller.signal.aborted) return;
+      worker.persistenceFailed = true;
       await this.store.change(groupId, (record) => {
         const task = record.tasks.find((value) => value.id === worker.taskId);
         if (task && isLive(task)) this.interrupt(record, task, "协作未能继续，已有结果已保留，请检查后重试", "failed");
       });
     }).finally(async () => {
       if (this.workers.get(groupId) === worker) this.workers.delete(groupId);
-      if (!this.closed && (await this.store.get(groupId)).tasks.some((task) => task.status === "queued")) this.start(groupId);
+      if (!this.closed && !worker.persistenceFailed && (await this.store.get(groupId)).tasks.some((task) => task.status === "queued")) this.start(groupId);
     });
     worker.promise.catch(() => {});
   }

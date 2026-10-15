@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import vm from "node:vm";
+import { CollaborationService } from "../src/collaboration/groups.mjs";
 import { createCollaborationApi } from "../public/collaboration-api.js";
 import { renderAgentAvatar as renderAvatar, resolveAgentAvatar } from "../public/agent-avatar.js";
 import { renderGroupAvatar as renderGroup } from "../public/group-avatar.js";
@@ -79,7 +82,8 @@ function setup(source, request, initialStorage = [], { confirm = () => false, pa
   const get = (id) => {
     if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(id === "group-message" ? "textarea" : id === "group-share-agent" ? "select"
       : ["group-editor", "group-files-dialog", "group-share-dialog", "main-material-dialog"].includes(id) ? "dialog" : "div"), {
-      id, ...(id === "main-history-menu" ? { hidden: true } : {}), ...(id === "main-history-delete" ? { textContent: "删除对话" } : {}),
+      id, ...(["main-history-menu", "group-history-menu"].includes(id) ? { hidden: true } : {}),
+      ...(["main-history-delete", "group-history-delete"].includes(id) ? { textContent: "删除对话" } : {}),
       ...(id === "group-panel" ? { hidden: true } : {}),
     }));
     return nodes.get(id);
@@ -115,6 +119,7 @@ function setup(source, request, initialStorage = [], { confirm = () => false, pa
   get("group-editor").append(get("group-editor-close"), get("group-editor-form"));
   get("group-editor-form").append(get("group-name"), get("group-purpose-input"), get("group-member-picker"), get("group-editor-save"));
   get("main-history-menu").append(get("main-history-delete"));
+  get("group-history-menu").append(get("group-history-delete"));
   class Event { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } }
   document.defaultView = { Event };
   let serial = 0;
@@ -157,7 +162,12 @@ const textOf = (node) => `${node.textContent || ""}${(node.children || []).map(t
 const isBubble = (node) => node.className.split(/\s+/).includes("bubble");
 const groupMessageRows = (ui) => ui.get("group-messages").children.filter((node) => node.classList.contains("message"));
 const sidebarGroup = (ui, id = "one") => ui.get("sidebar-group-list").children.find((entry) => entry.dataset.groupId === id);
-const sidebarGroupRows = (ui, id = "one") => sidebarGroup(ui, id).querySelector(".sidebar-history-list").children;
+const sidebarGroupRows = (ui, id = "one") => sidebarGroup(ui, id).querySelector(".sidebar-history-list").querySelectorAll(".sidebar-history-item");
+const sidebarGroupMore = (ui, conversationId, id = "one") => sidebarGroup(ui, id).querySelector(".sidebar-history-list")
+  .querySelectorAll(".main-history-more").find((button) => button.dataset.conversationId === conversationId);
+const removeGroupHistory = async (ui, conversationId, id = "one") => {
+  await sidebarGroupMore(ui, conversationId, id).click(); await ui.get("group-history-delete").click(); await settle();
+};
 const selectedGroupTask = (ui) => vm.runInContext("selectedTask", ui.context);
 const mainHistoryItems = (ui) => ui.get("main-history-list").querySelectorAll(".collaboration-history-item");
 const mainHistoryMore = (ui, id) => ui.get("main-history-list").children
@@ -187,6 +197,22 @@ async function readyGroup(state = detail(), { request, ...options } = {}) {
   }, [], options);
   await settle(); await ui.route({ page: "group", groupId: state.group.id }); await settle();
   return { ...ui, requests };
+}
+
+function removableGroup(id = "one", name = "研究小组") {
+  const state = detail(id, name); state.group.activeTaskId = null;
+  state.tasks = [
+    { id: "removed-round-one", conversationId: "history/to-remove", goal: "完整的待删除话题", status: "completed", updatedAt: "2026-10-15T01:00:00Z" },
+    { id: "removed-round-two", conversationId: "history/to-remove", goal: "该话题的后续消息", status: "completed", updatedAt: "2026-10-15T02:00:00Z" },
+    { id: "kept-round", conversationId: "kept-conversation", goal: "保留的话题", status: "completed", updatedAt: "2026-10-15T03:00:00Z" },
+  ];
+  state.messages = state.tasks.map((task) => ({ id: `message-${task.id}`, taskId: task.id, sender: { type: "user" }, content: task.goal }));
+  return state;
+}
+function removeGroupConversation(state, conversationId) {
+  const removed = new Set(state.tasks.filter((task) => (task.conversationId || task.id) === conversationId).map((task) => task.id));
+  state.tasks = state.tasks.filter((task) => !removed.has(task.id));
+  state.messages = state.messages.filter((message) => !removed.has(message.taskId)); state.lastSequence++;
 }
 
 test("群组胶囊打开非模态设置，身份、完整名称提示、输入提示和分类同步且开合保留草稿", async () => {
@@ -785,6 +811,251 @@ test("群页刷新同步导航任务，更多展开和已聚焦话题保持，�
   state.tasks.shift(); await ui.get("group-refresh").click(); await settle();
   assert.equal(selectedGroupTask(ui), "task-5"); assert.equal(sidebarGroupRows(ui).some((row) => row.dataset.taskId === "task-1"), false);
   assert.equal(more.hidden, true);
+});
+
+test("群历史删除菜单支持键盘和独立列表滚动关闭，取消确认不提交删除", async () => {
+  const state = removableGroup(), ui = await readyGroup(state), menu = ui.get("group-history-menu"), remove = ui.get("group-history-delete");
+  ui.get("group-message").value = "尚未发送的群草稿";
+  const more = sidebarGroupMore(ui, "history/to-remove");
+  assert.equal(more.getAttribute("aria-haspopup"), "menu"); assert.equal(more.getAttribute("aria-controls"), "group-history-menu");
+  assert.match(more.getAttribute("aria-label"), /完整的待删除话题/);
+  for (const [openKey, closeKey] of [["ArrowDown", "Escape"], ["ArrowUp", "Tab"]]) {
+    await ui.key(more, openKey); assert.equal(menu.hidden, false); assert.equal(ui.document.activeElement, remove);
+    await ui.key(remove, closeKey); assert.equal(menu.hidden, true); assert.equal(ui.document.activeElement, more);
+  }
+  for (const id of ["sidebar-group-list", "sidebar-scroll"]) {
+    await more.click(); assert.equal(menu.hidden, false);
+    await ui.get(id).dispatchEvent({ type: "scroll" }); assert.equal(menu.hidden, true);
+  }
+  await removeGroupHistory(ui, "history/to-remove");
+  assert.equal(ui.confirmations.length, 1); assert.match(ui.confirmations[0], /完整的待删除话题/);
+  assert.equal(ui.requests.some(({ settings }) => settings.method === "POST"), false);
+  assert.equal(sidebarGroupRows(ui).length, 2); assert.equal(ui.get("group-message").value, "尚未发送的群草稿");
+  assert.equal(selectedGroupTask(ui), "kept-conversation");
+});
+
+test("删除群历史按稳定会话移除全部执行轮次，只刷新本群并保留另一话题消息和草稿", async () => {
+  const state = removableGroup(), ui = await readyGroup(state, { confirm: () => true, request(path) {
+    if (!path.endsWith("/remove")) return null;
+    removeGroupConversation(state, "history/to-remove");
+    return Response.json({ removed: true, conversationId: "history/to-remove" });
+  } });
+  ui.get("group-message").value = "当前话题草稿";
+  await removeGroupHistory(ui, "history/to-remove");
+  const writes = ui.requests.filter(({ settings }) => settings.method === "POST");
+  assert.equal(writes.length, 1); assert.equal(writes[0].path, "/api/groups/one/conversations/history%2Fto-remove/remove");
+  assert.ok(JSON.parse(writes[0].settings.body).mutationId);
+  assert.ok(ui.requests.slice(ui.requests.indexOf(writes[0]) + 1).some(({ path }) => path === "/api/groups/one"), "删除成功后应重新读取本群");
+  assert.deepEqual(sidebarGroupRows(ui).map((row) => row.dataset.conversationId), ["kept-conversation"]);
+  assert.deepEqual(copy(vm.runInContext("data.tasks.map(task => task.id)", ui.context)), ["kept-round"]);
+  assert.equal(selectedGroupTask(ui), "kept-conversation"); assert.match(ui.text("group-messages"), /保留的话题/);
+  assert.doesNotMatch(ui.text("group-messages"), /待删除话题|后续消息/);
+  assert.equal(ui.get("group-message").value, "当前话题草稿"); assert.equal(ui.get("group-send").disabled, false);
+});
+
+test("删除当前群会话选择最新剩余话题，全部删空显示空白新对话且不发起执行", async () => {
+  const state = removableGroup(), writes = [], ui = await readyGroup(state, { confirm: () => true, request(path, options) {
+    if (!path.endsWith("/remove")) return null;
+    writes.push(path); const id = decodeURIComponent(path.split("/").at(-2)); removeGroupConversation(state, id);
+    return Response.json({ removed: true, conversationId: id });
+  } });
+  await sidebarGroupRows(ui).find((row) => row.dataset.conversationId === "history/to-remove").click();
+  assert.equal(groupMessageRows(ui).length, 2);
+  await removeGroupHistory(ui, "history/to-remove");
+  assert.equal(selectedGroupTask(ui), "kept-conversation"); assert.match(ui.text("group-messages"), /保留的话题/);
+  await removeGroupHistory(ui, "kept-conversation");
+  assert.equal(sidebarGroupRows(ui).length, 0); assert.equal(selectedGroupTask(ui), "");
+  assert.equal(groupMessageRows(ui).length, 0); assert.doesNotMatch(ui.text("group-tasks"), /待删除话题|后续消息|保留的话题/);
+  assert.equal(ui.stored.get("neuma.group.selected-conversation.one"), ""); assert.equal(ui.get("group-send").disabled, false);
+  assert.equal(writes.length, 2); assert.equal(ui.requests.some(({ path }) => path.endsWith("/messages")), false);
+});
+
+test("首次群消息回执丢失并删除会话后，确认删除冲突只换一次操作号，第二次断线仍能幂等重试", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "neuma-ui-deleted-message-"));
+  const cards = [{ id: "analyst", name: "分析员", ready: true, revision: 1, boundaries: [] }];
+  const service = new CollaborationService({ dataDir, agents: { ready: Promise.resolve(),
+    capabilityCards: async () => ({ agents: cards }), activitySnapshot: async () => ({ activities: [] }) } });
+  t.after(async () => { await service.close(); await rm(dataDir, { recursive: true, force: true }); });
+  await service.ready; service.start = () => {};
+  const { group } = await service.createGroup({ name: "回执测试群", memberIds: ["analyst"], mutationId: "create" });
+  const { attachment } = await service.uploadMaterial(group.id, { name: "重试资料.txt", source: Buffer.from("需要保留的材料") });
+  const writes = []; let deletedConversation;
+  const ui = setup(groupsSource, async (path, options = {}) => {
+    if (path === "/api/groups") return Response.json(await service.listGroups());
+    if (path === `/api/groups/${group.id}`) return Response.json(await service.getGroup(group.id));
+    if (path.endsWith("/preview")) return Response.json({ text: "需要保留的材料" });
+    if (path.endsWith("/remove")) return Response.json(await service.removeConversation(group.id, deletedConversation, JSON.parse(options.body)));
+    assert.ok(path.endsWith("/messages"), path);
+    const body = JSON.parse(options.body); writes.push(body);
+    let result;
+    try { result = await service.postMessage(group.id, body); }
+    catch (error) { return Response.json({ error: error.message, reason: error.reason }, { status: 409 }); }
+    if (writes.length === 1) {
+      deletedConversation = result.task.id;
+      await service.store.change(group.id, (record) => { record.tasks.find((task) => task.id === result.task.id).status = "completed"; });
+      throw new Error("首次发送回执中断");
+    }
+    if (writes.length === 3) throw new Error("重建后的发送回执中断");
+    return Response.json(result);
+  }, [], { confirm: () => true });
+  await ui.context.list(); await ui.route({ page: "group", groupId: group.id }); await ui.context.load(group.id);
+  await ui.get("group-files-open").click();
+  await ui.get("group-file-list").children.find((item) => item.tagName === "BUTTON").click(); await settle();
+  await ui.get("group-file-actions").children[1].click();
+  await pickMention(ui, "analyst"); ui.get("group-message").value += "按原材料重新开始";
+  await ui.context.send();
+  assert.match(ui.text("group-error"), /首次发送回执中断/);
+  await ui.context.load(group.id, { quiet: true });
+  await removeGroupHistory(ui, deletedConversation, group.id);
+  await ui.context.send();
+  assert.equal(writes.length, 3); assert.deepEqual(writes[1], writes[0]);
+  assert.notEqual(writes[2].mutationId, writes[0].mutationId);
+  assert.deepEqual({ ...writes[2], mutationId: writes[0].mutationId }, writes[0]);
+  assert.deepEqual(writes[2].attachmentIds, [attachment.id]); assert.equal(writes[2].mentions[0].memberId, "analyst");
+  assert.match(ui.text("group-error"), /重建后的发送回执中断/);
+  await ui.context.send();
+  assert.equal(writes.length, 4); assert.deepEqual(writes[3], writes[2]);
+  const saved = await service.getGroup(group.id);
+  assert.equal(saved.tasks.length, 1); assert.equal(saved.messages.length, 1);
+  assert.equal(ui.get("group-message").value, ""); assert.equal(ui.get("group-error").hidden, true);
+});
+
+test("删除无关群会话后，未知首次发送继续复用原操作号，不重放已创建的任务", async () => {
+  const state = removableGroup(), writes = []; let posted;
+  const ui = await readyGroup(state, { confirm: () => true, request(path, options) {
+    if (path.endsWith("/messages")) {
+      writes.push(JSON.parse(options.body));
+      if (writes.length === 1) {
+        const task = { id: "unknown-round", goal: writes[0].content, status: "completed" };
+        const message = { id: "unknown-message", taskId: task.id, sender: { type: "user" }, content: task.goal };
+        state.tasks.push(task); state.messages.push(message); posted = { message, task };
+        throw new Error("发送回执中断");
+      }
+      return Response.json(posted);
+    }
+    if (!path.endsWith("/remove")) return null;
+    removeGroupConversation(state, "history/to-remove"); return Response.json({ removed: true, conversationId: "history/to-remove" });
+  } });
+  await ui.get("group-new-task").click(); ui.get("group-message").value = "未知发送的独立工作";
+  await ui.context.send(); await ui.context.load("one", { quiet: true });
+  await removeGroupHistory(ui, "history/to-remove"); await ui.context.send();
+  assert.equal(writes.length, 2); assert.deepEqual(writes[1], writes[0]);
+  assert.equal(state.tasks.filter((task) => task.id === "unknown-round").length, 1);
+  assert.equal(ui.get("group-message").value, ""); assert.equal(selectedGroupTask(ui), "unknown-round");
+});
+
+test("普通发送冲突保留操作号，连续删除冲突每次提交至多自动重试一次", async () => {
+  const state = detail(), writes = []; let reason = "collaboration_conflict";
+  const ui = await readyGroup(state, { request(path, options) {
+    if (!path.endsWith("/messages")) return null;
+    writes.push(JSON.parse(options.body)); return Response.json({ error: "提交被拒绝", reason }, { status: 409 });
+  } });
+  await ui.get("group-new-task").click(); ui.get("group-message").value = "保留这次提交";
+  await ui.context.send(); await ui.context.send();
+  assert.equal(writes.length, 2); assert.deepEqual(writes[1], writes[0]);
+  reason = "conversation_deleted"; await ui.context.send();
+  assert.equal(writes.length, 4); assert.deepEqual(writes[2], writes[0]);
+  assert.notEqual(writes[3].mutationId, writes[2].mutationId);
+  assert.equal(ui.get("group-message").value, "保留这次提交"); assert.match(ui.text("group-error"), /提交被拒绝/);
+});
+
+test("离开群页后迟到的删除冲突不会自动重建或向旧群再发送消息", async () => {
+  const state = detail(), writes = []; let release;
+  const ui = await readyGroup(state, { request(path, options) {
+    if (!path.endsWith("/messages")) return null;
+    writes.push(JSON.parse(options.body)); return new Promise((resolve) => { release = () => resolve(
+      Response.json({ error: "原会话已删除", reason: "conversation_deleted" }, { status: 409 })); });
+  } });
+  await ui.get("group-new-task").click(); ui.get("group-message").value = "原群的新工作";
+  const pending = ui.context.send(); await settle();
+  await ui.route({ page: "group", groupId: "two" }); await settle();
+  release(); await pending;
+  assert.equal(writes.length, 1); assert.equal(ui.text("group-title"), "设计小组"); assert.equal(ui.get("group-error").hidden, true);
+});
+
+test("群历史删除未知结果保留记录、消息和草稿，重试复用操作并清除本群错误", async () => {
+  const state = removableGroup(), writes = []; let attempts = 0;
+  const ui = await readyGroup(state, { confirm: () => true, request(path, options) {
+    if (!path.endsWith("/remove")) return null;
+    writes.push(JSON.parse(options.body)); if (++attempts === 1) throw new Error("群历史删除响应中断");
+    removeGroupConversation(state, "history/to-remove"); return Response.json({ removed: true, conversationId: "history/to-remove" });
+  } });
+  await sidebarGroupRows(ui).find((row) => row.dataset.conversationId === "history/to-remove").click();
+  ui.get("group-message").value = "删除失败仍保留的草稿";
+  await removeGroupHistory(ui, "history/to-remove");
+  assert.equal(sidebarGroupRows(ui).length, 2); assert.equal(selectedGroupTask(ui), "history/to-remove");
+  assert.equal(groupMessageRows(ui).length, 2); assert.equal(ui.get("group-message").value, "删除失败仍保留的草稿");
+  assert.match(textOf(sidebarGroup(ui).querySelector(".sidebar-history-status")), /群历史删除响应中断/);
+  assert.equal(ui.get("group-send").disabled, false);
+  await removeGroupHistory(ui, "history/to-remove");
+  assert.deepEqual(writes[1], writes[0]); assert.equal(sidebarGroupRows(ui).length, 1);
+  assert.equal(sidebarGroup(ui).querySelector(".sidebar-history-status").hidden, true);
+  assert.equal(selectedGroupTask(ui), "kept-conversation");
+});
+
+test("群历史发送和删除进行中阻止重复删除，同组草稿与提交状态保持一致", async () => {
+  const state = removableGroup(), writes = []; let releaseSend, releaseRemoval;
+  const ui = await readyGroup(state, { confirm: () => true, request(path, options) {
+    if (options.method !== "POST") return null;
+    writes.push(path);
+    if (path.endsWith("/messages")) return new Promise((resolve) => { releaseSend = () => resolve(Response.json({ message: { id: "sent" }, task: state.tasks.at(-1) })); });
+    if (path.endsWith("/remove")) return new Promise((resolve) => { releaseRemoval = () => {
+      removeGroupConversation(state, "history/to-remove"); resolve(Response.json({ removed: true, conversationId: "history/to-remove" }));
+    }; });
+    throw new Error(`意外写请求：${path}`);
+  } });
+  ui.get("group-message").value = "先发送的消息"; await ui.submit("group-chat-form"); await settle();
+  assert.equal(typeof releaseSend, "function");
+  await removeGroupHistory(ui, "history/to-remove");
+  assert.equal(ui.confirmations.length, 0); releaseSend(); await settle();
+  ui.get("group-message").value = "删除期间不能重复发送的草稿";
+  await sidebarGroupMore(ui, "history/to-remove").click(); const removing = ui.get("group-history-delete").click(); await settle();
+  assert.equal(typeof releaseRemoval, "function"); assert.equal(ui.get("group-send").disabled, true);
+  await sidebarGroupMore(ui, "history/to-remove").click(); await ui.get("group-history-delete").click();
+  await ui.submit("group-chat-form"); await settle();
+  assert.equal(writes.filter((path) => path.endsWith("/remove")).length, 1); assert.equal(writes.filter((path) => path.endsWith("/messages")).length, 1);
+  assert.equal(ui.get("group-message").value, "删除期间不能重复发送的草稿");
+  releaseRemoval(); await removing; await settle(); assert.equal(ui.get("group-send").disabled, false);
+});
+
+test("删除群历史期间切到另一群，迟到确认只更新原群导航且保留当前界面与各群草稿", async () => {
+  const first = removableGroup(), second = detail("two", "设计小组"); second.tasks[0].status = "completed";
+  let release; const writes = [], ui = setup(groupsSource, async (path, options = {}) => {
+    if (path.endsWith("/remove")) { writes.push(path); return new Promise((resolve) => { release = () => {
+      removeGroupConversation(first, "history/to-remove"); resolve(Response.json({ removed: true, conversationId: "history/to-remove" }));
+    }; }); }
+    return Response.json(path === "/api/groups" ? { groups: [first.group, second.group] } : path === "/api/groups/two" ? second : first);
+  }, [], { confirm: () => true });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  ui.get("group-message").value = "原群尚未发送的草稿";
+  await sidebarGroupMore(ui, "history/to-remove").click(); const removing = ui.get("group-history-delete").click(); await settle();
+  await ui.route({ page: "group", groupId: "two" }); await settle(); ui.get("group-message").value = "另一群正在编辑的草稿";
+  assert.equal(ui.get("group-send").disabled, false); release(); await removing; await settle();
+  assert.equal(ui.text("group-title"), "设计小组"); assert.match(ui.text("group-messages"), /设计小组的初稿/);
+  assert.equal(ui.get("group-message").value, "另一群正在编辑的草稿"); assert.equal(selectedGroupTask(ui), "task-one");
+  assert.equal(ui.get("group-error").hidden, true); assert.equal(sidebarGroupRows(ui).length, 1);
+  assert.equal(sidebarGroupRows(ui, "two").length, 1); assert.equal(writes.length, 1);
+  await ui.route({ page: "group", groupId: "one" }); await settle(); assert.equal(ui.get("group-message").value, "原群尚未发送的草稿");
+  await ui.route({ page: "group", groupId: "two" }); await settle(); assert.equal(ui.get("group-message").value, "另一群正在编辑的草稿");
+});
+
+test("群历史删除后迟到的旧详情不能复活任何已删除轮次或覆盖当前会话", async () => {
+  const state = removableGroup(), original = copy(state); let holdRead = false, release;
+  const ui = await readyGroup(state, { confirm: () => true, request(path) {
+    if (path.endsWith("/remove")) {
+      removeGroupConversation(state, "history/to-remove"); return Response.json({ removed: true, conversationId: "history/to-remove" });
+    }
+    if (path === "/api/groups/one" && holdRead) { holdRead = false; return new Promise((resolve) => { release = () => resolve(Response.json(original)); }); }
+    return null;
+  } });
+  holdRead = true; const oldLoad = vm.runInContext("load('one', { quiet: true })", ui.context); await settle();
+  assert.equal(typeof release, "function"); await removeGroupHistory(ui, "history/to-remove");
+  ui.get("group-message").value = "确认删除后继续编辑";
+  release(); await oldLoad; await settle();
+  assert.deepEqual(sidebarGroupRows(ui).map((row) => row.dataset.conversationId), ["kept-conversation"]);
+  assert.deepEqual(copy(vm.runInContext("data.tasks.map(task => task.id)", ui.context)), ["kept-round"]);
+  assert.equal(selectedGroupTask(ui), "kept-conversation"); assert.match(ui.text("group-messages"), /保留的话题/);
+  assert.doesNotMatch(ui.text("group-messages"), /待删除话题|后续消息/); assert.equal(ui.get("group-message").value, "确认删除后继续编辑");
 });
 
 test("群成员自主协作、能力和任务分开显示，离开群页不会取消正在执行的任务", async () => {
@@ -1425,6 +1696,29 @@ test("创建群的未知结果可幂等重试，保留名称、用途和成员�
   await ui.submit("group-editor-form"); await settle();
   assert.deepEqual(writes[1], writes[0]); assert.deepEqual(writes[0].memberIds, ["writer"]);
   assert.equal(ui.get("group-editor").open, false);
+});
+
+test("停止旧群任务的迟到回执不能作废新群加载，随后仍可轮询和发送", async () => {
+  const first = detail(), second = detail("two", "新的小组"), requests = [];
+  let releaseCancel, releaseSecond;
+  const ui = setup(groupsSource, async (path, options = {}) => {
+    requests.push(path);
+    if (path.endsWith("/cancel")) return new Promise((resolve) => { releaseCancel = () => resolve(Response.json({ cancelled: true })); });
+    if (path === "/api/groups/two" && !releaseSecond) return new Promise((resolve) => { releaseSecond = () => resolve(Response.json(second)); });
+    if (path.includes("/events?")) return Response.json({ events: [], lastSequence: 1 });
+    return Response.json(path === "/api/groups" ? { groups: [first.group, second.group] }
+      : path.endsWith("/messages") ? { message: { id: "sent" }, task: second.tasks[0] } : path === "/api/groups/two" ? second : first);
+  });
+  await settle(); await ui.route({ page: "group", groupId: "one" }); await settle();
+  const stopping = ui.get("group-tasks").querySelectorAll("button").find((item) => item.textContent === "停止任务").click();
+  await settle(); await ui.route({ page: "group", groupId: "two" }); await settle();
+  releaseCancel(); await stopping; await settle(); releaseSecond(); await settle();
+  assert.equal(ui.text("group-title"), "新的小组"); assert.match(ui.text("group-messages"), /新的小组的初稿/);
+  assert.equal(ui.get("group-message").disabled, false); assert.equal(ui.get("group-send").disabled, false);
+  for (const callback of ui.timers.values()) callback(); await settle();
+  assert.ok(requests.some((path) => path === "/api/groups/two/events?after=1"));
+  ui.get("group-message").value = "继续新群任务"; await ui.submit("group-chat-form"); await settle();
+  assert.ok(requests.includes("/api/groups/two/messages"));
 });
 
 test("切换群组后迟到的旧群响应不能覆盖新群，新的任务可以独立发起", async () => {

@@ -25,6 +25,7 @@ export function createCollaborationApi(request = fetch) {
     updateGroup: (id, body) => json(groupPath(id), body),
     send: (id, body) => json(`${groupPath(id)}/messages`, body),
     cancelTask: (id, taskId) => json(`${groupPath(id)}/tasks/${part(taskId)}/cancel`, {}),
+    removeGroupConversation: (id, conversationId, body) => json(`${groupPath(id)}/conversations/${part(conversationId)}/remove`, body),
     events: (id, after = 0) => json(`${groupPath(id)}/events?after=${after}`),
     share: (id, body) => json(`${groupPath(id)}/share`, body),
     async upload(id, file) {

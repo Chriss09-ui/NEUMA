@@ -120,6 +120,14 @@ export class GroupStore {
       if (record.schemaVersion !== 1 || record.group?.id !== groupId || !Array.isArray(record.group.memberIds)
         || !["tasks", "messages", "events", "artifacts", "mutations"].every((key) => Array.isArray(record[key]))
         || !Number.isSafeInteger(record.group.lastSequence)) throw new InputError("群记录格式无效，请保留原文件");
+      if (record.deletedConversations !== undefined) {
+        if (!Array.isArray(record.deletedConversations)) throw new InputError("群对话删除记录格式无效，请保留原文件");
+        for (const removed of record.deletedConversations) {
+          if (!removed || !Array.isArray(removed.taskIds) || !Number.isFinite(Date.parse(removed.deletedAt)))
+            throw new InputError("群对话删除记录格式无效，请保留原文件");
+          id(removed.id, "已删除群对话"); for (const taskId of removed.taskIds) id(taskId, "已删除任务");
+        }
+      }
       record.group.materialIds ??= [];
       let changed = false;
       for (const task of record.tasks) if (["queued", "running", "negotiating", "waiting"].includes(task.status)) {

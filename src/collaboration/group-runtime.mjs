@@ -560,7 +560,12 @@ async function executeTask(service, groupId, taskId, worker) {
       if (occupied.has(job.agentId)) continue;
       selected.push(job); occupied.add(job.agentId); if (selected.length === service.limits.concurrentMembers) break;
     }
-    if (selected.length) { await Promise.allSettled(selected.map((job) => executeJob(service, groupId, taskId, task.generation, job, signal))); continue; }
+    if (selected.length) {
+      const results = await Promise.allSettled(selected.map((job) => executeJob(service, groupId, taskId, task.generation, job, signal)));
+      const failed = results.find((value) => value.status === "rejected");
+      if (failed) throw failed.reason;
+      continue;
+    }
     const signature = fingerprint(task.children.map(({ id, status, result }) => ({ id, status, result })));
     if (task.ownerId && !openIntegratorQuestions(task) && task.integrationSignature !== signature) {
       await service.store.change(groupId, (record) => {
