@@ -77,6 +77,42 @@ test("群API提供独立持久任务、能力卡、事件续读和全局活动�
   assert.deepEqual(result.at(-1).result.context, result[1].context);
 });
 
+test("群会话删除 API 持久移除全部续轮，保护同群其他会话并拒绝迟到提交和跨来源操作", async (t) => {
+  const { invoke, collaboration } = await fixture(t);
+  const group = (await invoke("POST", "/api/groups", { name: "删除测试", memberIds: ["analyst"], mutationId: "create" })).json().group;
+  const base = `/api/groups/${group.id}`;
+  const original = { content: "第一份报告", mutationId: "first" };
+  const first = (await invoke("POST", `${base}/messages`, original)).json(); await collaboration.idle(group.id);
+  const second = (await invoke("POST", `${base}/messages`, { content: "补充报告结论", taskId: first.task.id, mutationId: "second" })).json();
+  await collaboration.idle(group.id);
+  const third = (await invoke("POST", `${base}/messages`, { content: "另一段对话", newTask: true, mutationId: "third" })).json();
+  await collaboration.idle(group.id);
+  const path = `${base}/conversations/${first.task.id}/remove`, input = { mutationId: "remove" };
+  assert.equal((await invoke("POST", path, {})).status, 400);
+  assert.equal((await invoke("GET", path)).status, 404);
+  assert.equal((await invoke("POST", path, input, { host: "127.0.0.1:3000", origin: "https://outside.invalid" })).status, 403);
+  await collaboration.store.change(group.id, (record) => { record.tasks.find((task) => task.id === third.task.id).status = "needs_input"; });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const removed = await invoke("POST", path, input);
+    assert.equal(removed.status, 200); assert.deepEqual(removed.json(), { removed: true, conversationId: first.task.id });
+  }
+  const current = (await invoke("GET", base)).json();
+  assert.deepEqual(current.tasks.map((task) => task.id), [third.task.id]);
+  assert.ok(current.messages.every((message) => message.taskId === third.task.id));
+  const stored = await collaboration.store.storage.readJson(group.id, "group.json");
+  assert.ok(stored.messages.every((message) => message.taskId === third.task.id));
+  assert.deepEqual(stored.deletedConversations[0].taskIds, [first.task.id, second.task.id]);
+  for (const body of [original, { content: "迟到输入", taskId: second.task.id, mutationId: "late" }]) {
+    const rejected = await invoke("POST", `${base}/messages`, body);
+    assert.equal(rejected.status, 409); assert.match(rejected.json().error, /已删除/);
+    assert.equal(rejected.json().reason, "conversation_deleted");
+  }
+  const busy = await invoke("POST", `${base}/conversations/${third.task.id}/remove`, { mutationId: "remove-third" });
+  assert.equal(busy.status, 409); assert.match(busy.json().error, /停止后再删除/);
+  const reused = await invoke("POST", `${base}/conversations/${third.task.id}/remove`, input);
+  assert.equal(reused.status, 409);
+});
+
 test("群与主对话上传均在读取内容前拒绝超过 20 MiB 的请求", async (t) => {
   const { invoke, collaboration } = await fixture(t);
   const group = (await invoke("POST", "/api/groups", { name: "材料限制", purpose: "检查材料", memberIds: ["analyst"], mutationId: "material-limit" })).json().group;

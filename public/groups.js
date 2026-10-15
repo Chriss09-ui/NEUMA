@@ -21,6 +21,9 @@ const avatarMembers = new Map();
 const sidebarGroups = new Map(), taskHistories = new Map(), taskHistorySequences = new Map();
 const collapsedGroups = new Map();
 const COLLAPSED_GROUP_LIMIT = 2;
+const historyActionErrors = new Map(), removingHistories = new Map(), removalRetries = new Map();
+const removedConversations = new Map(), removedTasks = new Map();
+let historyMenu = null;
 let pendingSidebarTask = null;
 const materials = createGroupMaterials({ api, current: () => data, refresh: load, changed: controls });
 const memberCapabilities = createGroupCapabilities(byId("group-members"));
@@ -51,7 +54,7 @@ function syncAvatars(members) {
 }
 
 function controls() {
-  const unavailable = loading || !data?.group || data.group.archived;
+  const unavailable = loading || !data?.group || data.group.archived || removingHistories.has(route.groupId);
   byId("group-send").disabled = Boolean(unavailable || sending || materials.busy());
   byId("group-new-task").disabled = Boolean(unavailable || sending);
   byId("group-message").disabled = Boolean(unavailable || sending);
@@ -167,11 +170,89 @@ function taskHistorySequence(id) {
   const sequence = (taskHistorySequences.get(id) || 0) + 1;
   taskHistorySequences.set(id, sequence); return sequence;
 }
+function withoutRemovedHistory(result) {
+  const id = result.group?.id, conversations = removedConversations.get(id), taskIds = removedTasks.get(id);
+  if (!conversations?.size) return result;
+  for (const task of result.tasks || []) if (conversations.has(task.conversationId || task.id)) taskIds.add(task.id);
+  const tasks = (result.tasks || []).filter((task) => !conversations.has(task.conversationId || task.id));
+  return { ...result, tasks, messages: (result.messages || []).filter((message) => !taskIds?.has(message.taskId)) };
+}
 function rememberTaskHistory(result) {
+  result = withoutRemovedHistory(result);
   const id = result.group.id;
   taskHistorySequence(id);
   taskHistories.set(id, { tasks: Array.isArray(result.tasks) ? result.tasks : [],
     stamp: result.group.updatedAt || result.group.lastSequence || "", loading: false, error: "" });
+}
+function closeHistoryMenu(restoreFocus = false) {
+  if (!historyMenu) return;
+  const { trigger, row } = historyMenu; historyMenu = null;
+  byId("group-history-menu").hidden = true;
+  trigger.setAttribute("aria-expanded", "false"); row.classList.remove("has-open-menu");
+  if (restoreFocus) trigger.focus({ preventScroll: true });
+}
+function openHistoryMenu(groupId, conversation, trigger, row, focusItem = false) {
+  const wasOpen = historyMenu?.trigger === trigger;
+  closeHistoryMenu();
+  if (wasOpen || removingHistories.has(groupId)) return;
+  const menu = byId("group-history-menu"), remove = byId("group-history-delete");
+  historyMenu = { groupId, conversationId: conversation.id, trigger, row };
+  trigger.setAttribute("aria-expanded", "true"); row.classList.add("has-open-menu");
+  remove.setAttribute("aria-label", `删除对话：${conversation.goal || "协作任务"}`);
+  menu.setAttribute("aria-label", `对话操作：${conversation.goal || "协作任务"}`); menu.hidden = false;
+  const anchor = trigger.getBoundingClientRect(), height = menu.getBoundingClientRect().height, below = anchor.bottom + 4;
+  menu.style.left = `${Math.max(8, anchor.right - 152)}px`;
+  menu.style.top = `${Math.max(8, below + height <= window.innerHeight - 8 ? below : anchor.top - height - 4)}px`;
+  if (focusItem) remove.focus({ preventScroll: true });
+}
+async function removeConversation(groupId, conversationId) {
+  if (removingHistories.has(groupId) || (sending && retry?.id === groupId)) return;
+  const conversation = groupConversations(taskHistories.get(groupId)?.tasks || []).find((item) => item.id === conversationId);
+  if (!conversation || !window.confirm(`删除“${conversation.goal || "协作任务"}”？此对话的全部消息和执行记录将被删除，群组、共享资料与成果文件保留。`)) return;
+  const originalFocus = document.activeElement, key = `${groupId}/${conversationId}`;
+  const body = removalRetries.get(key) || { mutationId: crypto.randomUUID() };
+  removalRetries.set(key, body); removingHistories.set(groupId, conversationId); historyActionErrors.delete(groupId);
+  taskHistorySequence(groupId); renderSidebarGroups(); controls();
+  let removed = false;
+  try {
+    const result = await api.removeGroupConversation(groupId, conversationId, body);
+    if (result.removed !== true || result.conversationId !== conversationId) throw new Error("删除结果尚未确认，请重试。");
+    removed = true; removalRetries.delete(key);
+    if (!removedConversations.has(groupId)) removedConversations.set(groupId, new Set());
+    if (!removedTasks.has(groupId)) removedTasks.set(groupId, new Set());
+    removedConversations.get(groupId).add(conversationId);
+    for (const task of conversation.tasks) removedTasks.get(groupId).add(task.id);
+    const history = taskHistories.get(groupId);
+    if (history?.tasks) rememberTaskHistory({ group: { id: groupId, updatedAt: history.stamp }, tasks: history.tasks });
+    if (savedConversation(groupId) === conversationId) {
+      const remaining = groupConversations(taskHistories.get(groupId)?.tasks || []);
+      rememberConversation(groupId, remaining.at(-1)?.id || "");
+    }
+    if (pendingSidebarTask?.groupId === groupId && (pendingSidebarTask.taskId === conversationId
+      || removedTasks.get(groupId).has(pendingSidebarTask.taskId))) pendingSidebarTask = null;
+    if (retry?.id === groupId && removedTasks.get(groupId).has(retry.body.taskId)) retry = null;
+    if (route.page === "group" && route.groupId === groupId && data?.group?.id === groupId) {
+      data = withoutRemovedHistory(data);
+      if (selectedTask === conversationId) {
+        selectedTask = resolveConversation(); newTask = !selectedTask; newTaskDrafts.set(groupId, newTask);
+      }
+      render();
+    }
+  } catch (error) {
+    if ([400, 409].includes(error.status)) removalRetries.delete(key);
+    historyActionErrors.set(groupId, `删除未完成：${error.message} 可重试。`);
+  } finally {
+    removingHistories.delete(groupId); renderSidebarGroups(); controls();
+  }
+  const restoreFocus = document.activeElement === originalFocus || document.activeElement === document.body;
+  if (removed) {
+    if (route.page === "group" && route.groupId === groupId) await load(groupId, { quiet: true });
+    if (restoreFocus && route.page === "group" && route.groupId === groupId) byId("group-message").focus({ preventScroll: true });
+    else if (restoreFocus) sidebarGroups.get(groupId)?.link.focus({ preventScroll: true });
+  } else if (restoreFocus) {
+    const entry = sidebarGroups.get(groupId), row = [...(entry?.list.children || [])].find((item) => item.dataset.conversationId === conversationId);
+    (entry?.expanded ? row?.querySelector(".main-history-more") : entry?.toggle)?.focus({ preventScroll: true });
+  }
 }
 async function loadTaskHistory(id) {
   const cached = taskHistories.get(id);
@@ -180,7 +261,7 @@ async function loadTaskHistory(id) {
   const sequence = taskHistorySequence(id);
   taskHistories.set(id, { loading: true, error: "" }); renderSidebarGroups();
   try {
-    const result = await api.group(id);
+    const result = withoutRemovedHistory(await api.group(id));
     if (taskHistorySequences.get(id) !== sequence || !groups.some((group) => group.id === id && !group.archived)) return;
     if (result.group?.id !== id || !Array.isArray(result.tasks)) throw new Error("群历史尚未确认，请重试。");
     rememberTaskHistory(result); rememberAvatars(result.members); renderLibrary();
@@ -230,6 +311,7 @@ function renderSidebarGroups() {
   const ids = new Set(visible.map((group) => group.id));
   for (const [id, entry] of sidebarGroups) {
     if (ids.has(id)) continue;
+    if (historyMenu?.groupId === id) closeHistoryMenu();
     entry.root.remove(); sidebarGroups.delete(id); taskHistories.delete(id); taskHistorySequence(id);
   }
   for (const group of visible) {
@@ -237,19 +319,38 @@ function renderSidebarGroups() {
     if (!entry) {
       entry = createSidebarHistory({ document, id: `group-${group.id}`, title: group.name,
         href: `#group/${encodeURIComponent(group.id)}`, icon: groupAvatar(group, "sidebar-group-avatar"),
-        className: "sidebar-group-link", onExpand: (expanded) => { if (expanded) void loadTaskHistory(group.id); },
+        className: "sidebar-group-link", onExpand: (expanded) => {
+          if (!expanded && historyMenu?.groupId === group.id) closeHistoryMenu();
+          if (expanded) void loadTaskHistory(group.id);
+        },
         onOpen: () => openSidebarGroup(group.id), storage: localStorage });
       entry.root.dataset.groupId = group.id; sidebarGroups.set(group.id, entry);
     }
     renderGroupAvatar(entry.icon, group, [...avatarMembers.values()]);
     const current = route.page === "group" && route.groupId === group.id, history = taskHistories.get(group.id);
+    if (historyMenu?.groupId === group.id) closeHistoryMenu(true);
     entry.update({ title: group.name, active: current,
       records: groupConversations(history?.tasks || []).reverse(),
-      status: history?.loading ? "正在读取历史…" : history?.error || (history?.tasks?.length === 0 ? "还没有任务对话" : ""),
+      status: removingHistories.has(group.id) ? "正在删除对话…" : historyActionErrors.get(group.id)
+        || (history?.loading ? "正在读取历史…" : history?.error || (history?.tasks?.length === 0 ? "还没有任务对话" : "")),
       renderRow: (task) => {
-        const row = button(task.goal || "协作任务", () => openSidebarGroup(group.id, task.id), "sidebar-history-item");
-        row.dataset.taskId = task.id; row.dataset.conversationId = task.id; row.title = task.goal || "协作任务";
-        row.setAttribute("aria-current", current && selectedTask === task.id ? "page" : "false"); return row;
+        const row = node("div", "main-history-row"); row.dataset.conversationId = task.id;
+        const select = button(task.goal || "协作任务", () => openSidebarGroup(group.id, task.id), "sidebar-history-item");
+        select.dataset.taskId = task.id; select.dataset.conversationId = task.id; select.title = task.goal || "协作任务";
+        select.setAttribute("aria-current", current && selectedTask === task.id ? "page" : "false");
+        const more = button("", () => openHistoryMenu(group.id, task, more, row), "main-history-more");
+        more.dataset.conversationId = task.id; more.setAttribute("aria-label", `对话操作：${task.goal || "协作任务"}`);
+        more.title = "更多操作"; more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
+        more.setAttribute("aria-controls", "group-history-menu");
+        const dots = node("span", "agent-history-more-icon"); dots.setAttribute("aria-hidden", "true"); more.append(dots);
+        more.disabled = select.disabled = removingHistories.has(group.id);
+        more.addEventListener("keydown", (event) => {
+          if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+          event.preventDefault();
+          if (historyMenu?.trigger === more) byId("group-history-delete").focus({ preventScroll: true });
+          else openHistoryMenu(group.id, task, more, row, true);
+        });
+        row.append(select, more); return row;
       } });
     if (entry.root.parentNode !== rail) rail.append(entry.root);
   }
@@ -328,7 +429,7 @@ async function load(id = route.groupId, { quiet = false } = {}) {
   if (!quiet) { taskHistories.set(id, { ...history, loading: true, error: "" }); renderSidebarGroups(); }
   if (!quiet) { loading = true; controls(); }
   try {
-    const result = await api.group(id);
+    const result = withoutRemovedHistory(await api.group(id));
     if (result.group?.id !== id) throw new Error("群组身份尚未确认，请重试。");
     if (taskHistorySequences.get(id) === historySequence
       && groups.some((group) => group.id === id && !group.archived)) {
@@ -360,14 +461,17 @@ function chooseTask(id, { focus = true } = {}) {
 }
 async function stop(taskId) {
   const id = data?.group?.id; if (!id) return;
-  try { await api.cancelTask(id, taskId); await load(id); }
+  try {
+    await api.cancelTask(id, taskId);
+    if (route.page === "group" && route.groupId === id) await load(id);
+  }
   catch (error) { if (route.groupId === id) notice(byId("group-error"), `停止尚未确认：${error.message}`, true); }
 }
 async function send() {
   const id = data?.group?.id;
   const refs = materials.refs();
   const content = byId("group-message").value.trim() || (refs.length ? "请处理这些共享材料，任务目标不明确时先向我提问。" : "");
-  if (!id || (!content && !refs.length) || loading || sending || data.group.archived || materials.busy()) return;
+  if (!id || (!content && !refs.length) || loading || sending || removingHistories.has(id) || data.group.archived || materials.busy()) return;
   let mentions;
   try { mentions = mentionComposer.requestMentions(); }
   catch (error) { notice(byId("group-error"), error.message, true); return; }
@@ -377,13 +481,21 @@ async function send() {
   const body = { content, ...(taskId && !startNew ? { taskId } : {}), ...(mentions.length ? { mentions } : {}),
     newTask: startNew, ...(refs.length ? { attachmentIds: refs } : {}) };
   const fingerprint = JSON.stringify({ ...body, taskId: undefined, conversationId: startNew ? "" : selectedTask });
-  const request = retry?.id === id && retry.fingerprint === fingerprint
+  let request = retry?.id === id && retry.fingerprint === fingerprint
     ? retry.body : { ...body, mutationId: crypto.randomUUID() };
   retry = { id, fingerprint, body: request }; sending = true;
   if (startNew) newTask = true;
   controls(); notice(byId("group-error"), "");
   try {
-    const result = await api.send(id, request);
+    let result;
+    try { result = await api.send(id, request); }
+    catch (error) {
+      if (error.reason !== "conversation_deleted" || request.newTask !== true || request.taskId
+        || route.page !== "group" || route.groupId !== id || retry?.id !== id || retry.body !== request) throw error;
+      request = { ...request, mutationId: crypto.randomUUID() };
+      retry = { id, fingerprint, body: request };
+      result = await api.send(id, request);
+    }
     if (!result.message?.id) throw new Error("消息发送尚未确认，请重试。");
     retry = null; drafts.delete(id); newTaskDrafts.delete(id); materials.consume(id);
     const conversationId = result.task?.conversationId || result.task?.id || selectedConversations.get(id) || "";
@@ -454,6 +566,25 @@ async function poll() {
   catch (error) { if (route.groupId === id) notice(byId("group-error"), `进度同步暂时中断：${error.message} 将自动重试。`, true); }
   finally { polling = false; }
 }
+byId("group-history-delete").addEventListener("click", () => {
+  const target = historyMenu; closeHistoryMenu(true);
+  if (target) return removeConversation(target.groupId, target.conversationId);
+});
+for (const id of ["sidebar-scroll", "sidebar-agent-list", "sidebar-group-list"]) {
+  byId(id).addEventListener("scroll", () => closeHistoryMenu(true));
+}
+window.addEventListener?.("resize", () => closeHistoryMenu(true));
+document.addEventListener("click", (event) => {
+  if (historyMenu && !historyMenu.trigger.contains(event.target) && !byId("group-history-menu").contains(event.target)) closeHistoryMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (!historyMenu) return;
+  if (event.key === "Escape") { event.preventDefault(); closeHistoryMenu(true); }
+  else if (event.key === "Tab") closeHistoryMenu(true);
+  else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && byId("group-history-menu").contains(event.target)) {
+    event.preventDefault(); byId("group-history-delete").focus({ preventScroll: true });
+  }
+});
 byId("group-chat-form").addEventListener("submit", (event) => { event.preventDefault(); void send(); });
 byId("group-new-task").addEventListener("click", () => {
   mentionComposer.close();
@@ -485,6 +616,7 @@ byId("group-editor-form").addEventListener("submit", (event) => { event.preventD
 byId("group-editor-close").addEventListener("click", closeEditor);
 byId("group-editor").addEventListener("cancel", (event) => { event.preventDefault(); closeEditor(); });
 document.addEventListener("neuma:route", (event) => {
+  closeHistoryMenu();
   closeSettings({ restoreFocus: false, animate: false });
   mentionComposer.close();
   if (route.page === "group" && route.groupId) {

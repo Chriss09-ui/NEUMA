@@ -12,6 +12,9 @@ export async function routeCollaboration({ request, response, address, getCollab
     if (method === "GET") return send(await groups.listGroups());
     if (method === "POST") return send(await groups.createGroup(await readBody()));
   }
+  const groupConversation = path.match(/^\/api\/groups\/([\w-]+)\/conversations\/([\w-]+)\/remove$/);
+  if (method === "POST" && groupConversation)
+    return send(await groups.removeConversation(groupConversation[1], groupConversation[2], await readBody()));
   const group = path.match(/^\/api\/groups\/([\w-]+)(?:\/(messages|events|share|materials))?$/);
   if (group) {
     const [, groupId, action] = group;
