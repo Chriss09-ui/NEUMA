@@ -12,17 +12,19 @@ export class ApplicationService {
   constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources() }) {
     this.agents = agents; this.store = store; this.resources = resources;
     this.running = new Map(); this.ready = store.ready;
-    this.unsubscribe = agents.onLifecycle(({ agentId }) => this.interruptAgent(agentId));
+    this.unsubscribe = agents.onLifecycle(async ({ agentId, type }) => this.interruptAgent(agentId, {
+      preserveResources: type === "build" && Boolean(await agents.getActiveRuntime?.(agentId)),
+    }));
   }
-  async descriptor(id, { optional = false } = {}) {
+  async descriptor(id, { optional = false, allowBuilding = false } = {}) {
     await this.agents.ready;
     const agent = this.agents.agents.get(id);
     if (agent?.execution?.kind !== "node-action") {
       if (optional) return null;
       throw new InputError("这个 Agent 尚未交付应用操作");
     }
-    const architecture = await this.agents.getArchitecture(id);
-    if (this.agents.removing.has(id) || this.agents.builds.has(id)
+    const architecture = await (this.agents.getActiveArchitecture?.(id) ?? this.agents.getArchitecture(id));
+    if (this.agents.removing.has(id) || !allowBuilding && this.agents.builds.has(id)
       || !this.agents.approvedDefinition(agent, architecture)) throw new InputError("应用定义已更新或正在制作，请等待当前版本交付");
     const record = await this.agents.development.store.getRun(agent.developmentRef.id);
     if (!record || record.agentId !== id || record.status !== "completed"
@@ -36,7 +38,7 @@ export class ApplicationService {
     return { agent, architecture, record, manifest, snapshot, deliveryVersion: `${record.id}:${snapshot.hash}` };
   }
   async summary(id) {
-    const descriptor = await this.descriptor(id, { optional: true });
+    const descriptor = await this.descriptor(id, { optional: true, allowBuilding: true });
     if (!descriptor) return { manifest: null, pageReady: false, actions: [], deliveryVersion: null, ...applicationInteraction(null) };
     const connectionSnapshot = await this.agents.connections.snapshot(id);
     const ids = new Set(connectionSnapshot.connections.map((connection) => connection.id));
@@ -61,11 +63,11 @@ export class ApplicationService {
     return { context, prompt: applicationConversationContext(descriptor, context) };
   }
   async open(id, parentOrigin, signal) {
-    const descriptor = await this.descriptor(id);
+    const descriptor = await this.descriptor(id, { allowBuilding: true });
     return this.resources.open({ agentId: id, ...descriptor, codeDir: descriptor.snapshot.path, parentOrigin, signal });
   }
   async state(id, version) {
-    const { manifest, deliveryVersion } = await this.descriptor(id);
+    const { manifest, deliveryVersion } = await this.descriptor(id, { allowBuilding: true });
     if (version !== undefined && version !== deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
     return this.store.getState(id, { stateVersion: manifest.stateVersion });
   }
@@ -162,7 +164,7 @@ export class ApplicationService {
     }
     return { task: await this.store.get(id, taskId) };
   }
-  async interruptAgent(id) {
+  async interruptAgent(id, { preserveResources = false } = {}) {
     await this.ready;
     const running = [...this.running.values()].filter((item) => item.task.agentId === id);
     for (const item of running) { item.terminalStatus = "interrupted"; item.controller.abort(); }
@@ -173,7 +175,7 @@ export class ApplicationService {
       failure = results.find((result) => result.status === "rejected")?.reason;
     } catch (error) { failure = error; }
     finally {
-      await this.resources.closeAgent(id);
+      if (!preserveResources) await this.resources.closeAgent(id);
       await Promise.allSettled(running.map((item) => item.done));
     }
     if (failure) throw failure;

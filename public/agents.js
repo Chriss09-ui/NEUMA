@@ -429,15 +429,25 @@ function renderControls(agent) {
 }
 
 function renderMaking(agent) {
-  const state = runtime(agent), making = state.status !== "ready" && !state.application?.pageReady && !conversation(agent.id).turn;
+  const state = runtime(agent), active = Boolean(state.activeRuntime), updateAvailable = active && Boolean(state.updateStatus || state.operation);
+  const toggle = byId("agent-upgrade-toggle");
+  toggle.hidden = !updateAvailable;
+  if (!updateAvailable) state.showUpgrade = false;
+  toggle.textContent = state.showUpgrade ? "返回当前版本" : "查看更新进度";
+  toggle.setAttribute("aria-expanded", String(Boolean(state.showUpgrade)));
+  toggle.title = state.operation ? "当前版本保留；更新期间暂时停止提交新任务。" : "查看最近一次更新的进度和结果。";
+  const showingUpdate = updateAvailable && Boolean(state.showUpgrade);
+  const making = showingUpdate || !active && state.status !== "ready" && !state.application?.pageReady && !conversation(agent.id).turn;
   byId("agent-making-panel").hidden = !making;
   byId("agent-conversation").hidden = making;
   byId("agent-conversation-actions").hidden = making;
-  byId("agent-workspace").classList.toggle("is-making", making);
+  byId("agent-workspace").classList.toggle("is-making", making && !showingUpdate);
+  byId("agent-workspace").classList.toggle("showing-update", showingUpdate);
   if (!making) { byId("agent-making-content").replaceChildren(); makingView = null; return; }
   const focused = makingView?.agentId === agent.id
     ? ["stop", "start", "details"].find((key) => makingView[key] === document.activeElement) : null;
-  makingView = { ...createAgentMakingView(agent, state, {
+  const progressState = showingUpdate ? { ...state, ...agentBuildState(agent, { agent: state.definition, architecture: state.architecture, development: state.development }) } : state;
+  makingView = { ...createAgentMakingView(agent, progressState, {
     onStop: () => stopMaking(agent.id),
     onStart: () => {
       const development = agentDevelopmentState(agent, state);
@@ -648,7 +658,7 @@ function inspectAgent(agent, refresh = false) {
       state.definition = result.agent ?? null;
       state.architecture = result.architecture ?? null;
       state.development = result.development ?? null;
-      state.application = result.application ?? null;
+      state.application = result.application ?? result.activeRuntime?.application ?? null;
       state.error = "";
       Object.assign(state, agentBuildState(agent, result));
       syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
@@ -685,7 +695,7 @@ async function buildAgent(id, queueIfBusy = false) {
   state.status = "building";
   state.architecture = null;
   state.development = null;
-  state.application = null;
+  if (!state.activeRuntime) state.application = null;
   state.error = item.error = "";
   state.inspectionError = false;
   state.label = "正在设计与检查…";
@@ -711,7 +721,7 @@ async function buildAgent(id, queueIfBusy = false) {
     state.definition = result.agent ?? null;
     state.architecture = result.architecture ?? null;
     state.development = result.development ?? null;
-    state.application = result.application ?? null;
+    state.application = result.application ?? result.activeRuntime?.application ?? null;
     Object.assign(state, agentBuildState(agent, result));
     if (state.status === "ready") item.sessionId = crypto.randomUUID();
     syncProfile(id, result.profile || result.agent?.profile, profileVersion);
@@ -749,7 +759,7 @@ function applyDevelopmentResult(agent, state, result) {
   state.definition = result.agent ?? null;
   state.architecture = result.architecture ?? null;
   state.development = result.development ?? null;
-  state.application = result.application ?? null;
+  state.application = result.application ?? result.activeRuntime?.application ?? null;
   Object.assign(state, agentBuildState(agent, result));
 }
 
@@ -978,7 +988,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
     state.sequence++;
     state.operation?.controller.abort();
     state.status = "stale";
-    state.application = null;
+    if (!state.activeRuntime) state.application = null;
     state.label = "";
     state.error = "";
     state.inspectionError = false;
@@ -1054,6 +1064,10 @@ byId("sidebar-create-agent").addEventListener("click", () => action("create"));
 byId("agent-iterate").addEventListener("click", () => action("edit"));
 byId("agent-save-entry").addEventListener("click", () => action("save"));
 byId("agent-build").addEventListener("click", () => buildAgent(route.agentId));
+byId("agent-upgrade-toggle").addEventListener("click", () => {
+  const agent = current(); if (!agent) return;
+  const state = runtime(agent); state.showUpgrade = !state.showUpgrade; renderControls(agent);
+});
 byId("agent-cancel-reply").addEventListener("click", () => stopAgent(route.agentId));
 byId("agent-chat-retry").addEventListener("click", async () => {
   const agent = current();

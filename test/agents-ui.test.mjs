@@ -1755,6 +1755,35 @@ test("制作失败展示保存的实际原因与阶段，继续停留在制作�
   assert.equal(ui.get("agent-send").disabled, true);
 });
 
+test("升级失败保留已激活对话入口，可查看最新失败进度再返回，草稿不丢失", async () => {
+  const old = readyResult(), latest = architecture({ version: 2, status: "failed", delivery: "blocked", summary: "新版验收未通过。" });
+  const ui = await setup({ inspect: () => Response.json({ agent: old.agent, architecture: latest,
+    activeRuntime: { architecture: old.architecture, development: null, application: null } }) });
+  assert.equal(ui.runtime().status, "ready");
+  assert.equal(ui.get("agent-conversation").hidden, false);
+  assert.equal(ui.get("agent-upgrade-toggle").hidden, false);
+  ui.get("agent-message").value = "旧版下一条任务";
+  await ui.get("agent-upgrade-toggle").click();
+  assert.equal(ui.get("agent-making-panel").hidden, false);
+  assert.match(treeText(ui.get("agent-making-content")), /新版验收未通过/);
+  await ui.get("agent-upgrade-toggle").click();
+  assert.equal(ui.get("agent-making-panel").hidden, true);
+  assert.equal(ui.get("agent-conversation").hidden, false);
+  assert.equal(ui.get("agent-message").value, "旧版下一条任务");
+  assert.equal(ui.get("agent-send").disabled, false);
+});
+
+test("已有版本的后台升级保留入口，但在构建锁期间暂停新提交", async () => {
+  const old = readyResult(), ui = await setup({ inspect: () => Response.json({ agent: old.agent,
+    architecture: architecture({ status: "evaluating", delivery: "blocked" }),
+    activeRuntime: { architecture: old.architecture, development: null } }) });
+  assert.equal(ui.get("agent-conversation").hidden, false);
+  assert.equal(ui.get("agent-send").disabled, true);
+  await ui.get("agent-upgrade-toggle").click();
+  assert.match(treeText(ui.get("agent-making-content")), /正在制作/);
+  assert.equal(developmentButton(ui).textContent, "终止生成");
+});
+
 test("任务期间确认更新先排队，旧任务完成后仅生成一次最新需求", async () => {
   const partial = stream(), ui = await setup({ turn: () => partial.response });
   const pending = ui.submit("旧需求任务"); await settle();

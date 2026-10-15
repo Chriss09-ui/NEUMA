@@ -265,5 +265,10 @@ test("最终完成记录写入期间取消：新版不成功，旧定义、用�
   assert.deepEqual((await agents.development.store.getRun(previous.developmentRef.id)).package, previousRecord.package);
   assert.equal((await agents.development.store.getRun(result.development.id)).status, "cancelled");
   assert.equal((await agents.getArchitecture("normalizer")).delivery, "blocked");
-  await assert.rejects(agents.prompt({ agentId: "normalizer", sessionId: "cancelled-new-version-session", message: "hello" }), /尚未生成可运行定义/);
+  const active = await agents.getActiveRuntime("normalizer");
+  assert.equal(active.architecture.version, previous.architectureRef.version);
+  assert.equal(active.development.id, previous.developmentRef.id);
+  const continued = await agents.prompt({ agentId: "normalizer", sessionId: "cancelled-new-version-session", message: "hello" });
+  assert.equal(continued.status, "complete");
+  assert.match(continued.reply, /HELLO/);
 });

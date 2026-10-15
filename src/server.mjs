@@ -440,6 +440,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
       if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]),
         architecture: await prototypeAgents.getArchitecture?.(agentQuery[1]) ?? null,
+        ...(prototypeAgents.getActiveRuntime ? { activeRuntime: await prototypeAgents.getActiveRuntime(agentQuery[1]) } : {}),
         ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment(agentQuery[1]) } : {}),
         ...(prototypeAgents.applications ? { application: await prototypeAgents.applications.summary(agentQuery[1]).catch(() => ({ manifest: null, pageReady: false, actions: [], deliveryVersion: null })),
           connectionRequirements: await prototypeAgents.connectionRequirements(agentQuery[1]),

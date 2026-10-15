@@ -117,7 +117,7 @@ test("独立评估未通过或存在关键未知时，不保存新的 Agent 执�
   }
 });
 
-test("新架构失败保留旧定义、记忆、资料和文件，但 API 与后端不能借旧版本运行", async (t) => {
+test("新架构失败保留旧定义、记忆、资料和文件，API与后端继续运行精确批准的旧版本", async (t) => {
   const script = { design: (payload) => validDesign(payload.requirements, { capabilities: FILE_CAPABILITIES }) };
   const { agents, records, options } = await fixture(t, script);
   const first = await agents.build(input());
@@ -139,15 +139,18 @@ test("新架构失败保留旧定义、记忆、资料和文件，但 API 与后
   assert.equal(inspected.architecture.status, "failed");
   assert.equal(inspected.architecture.draft.goal.value, "新的工作目标");
   assert.equal((await agents.file("weekly", "weekly.md")).content, "已保存的产物");
-  await assert.rejects(agents.prompt(turn()), /尚未生成可运行定义/);
+  assert.equal(inspected.activeRuntime.architecture.version, first.architecture.version);
+  assert.equal(inspected.activeRuntime.architecture.candidateHash, first.agent.architectureRef.candidateHash);
+  assert.equal((await agents.prompt(turn())).status, "complete");
   const response = await invoke(handler, "POST", "/api/agents/turn", turn());
-  assert.equal(response.status, 400);
-  assert.match(JSON.parse(response.text).error, /尚未生成可运行定义/);
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse(response.text).status, "complete");
   const restored = new PrototypeAgents(options);
   t.after(() => restored.close());
   assert.equal((await restored.getArchitecture("weekly")).status, "failed");
   assert.equal((await restored.getMemory("weekly")).memory, "偏好简短中文");
-  await assert.rejects(restored.prompt(turn()), /尚未生成可运行定义/);
+  assert.equal((await restored.getActiveRuntime("weekly")).architecture.version, first.architecture.version);
+  assert.equal((await restored.prompt(turn())).status, "complete");
 });
 
 test("相同需求的旧 prototype 必须经过新设计和评估，不能复用未评估指令", async (t) => {
@@ -438,10 +441,11 @@ test("定义先保存但激活失败或取消时恢复旧定义，保留期间�
       const architecture = await agents.getArchitecture("weekly");
       assert.equal(architecture.status, stop === "cancel" ? "cancelled" : "failed");
       assert.equal(architecture.delivery, "blocked");
-      await assert.rejects(agents.prompt(turn()), /尚未生成可运行定义/);
+      assert.equal((await agents.getActiveRuntime("weekly")).architecture.version, initial.architecture.version);
+      assert.equal((await agents.prompt(turn())).status, "complete");
       const restarted = new PrototypeAgents(options); subtest.after(() => restarted.close());
       assert.deepEqual(await restarted.get("weekly"), retained);
-      await assert.rejects(restarted.prompt(turn()), /尚未生成可运行定义/);
+      assert.equal((await restarted.prompt(turn())).status, "complete");
     });
   }
 });
@@ -494,9 +498,9 @@ test("正在等待审核快照的任务不能在 Agent 删除完成后用旧定�
   const { agents, records } = await fixture(t);
   await agents.build(input());
   const reading = deferred(), release = deferred();
-  const getArchitecture = agents.getArchitecture.bind(agents);
-  agents.getArchitecture = async (id) => {
-    const snapshot = await getArchitecture(id);
+  const getVersion = agents.architecture.getVersion.bind(agents.architecture);
+  agents.architecture.getVersion = async (id, version) => {
+    const snapshot = await getVersion(id, version);
     reading.resolve(); await release.promise;
     return snapshot;
   };
