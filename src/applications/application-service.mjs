@@ -11,7 +11,7 @@ const cleanError = (error) => error instanceof InputError ? error.message : "应
 export class ApplicationService {
   constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources() }) {
     this.agents = agents; this.store = store; this.resources = resources;
-    this.running = new Map(); this.ready = store.ready;
+    this.running = new Map(); this.submitting = new Set(); this.epoch = 0; this.closing = null; this.ready = store.ready;
     this.unsubscribe = agents.onLifecycle(async ({ agentId, type }) => this.interruptAgent(agentId, {
       preserveResources: type === "build" && Boolean(await agents.getActiveRuntime?.(agentId)),
     }));
@@ -76,14 +76,28 @@ export class ApplicationService {
     if (body.deliveryVersion !== undefined && body.deliveryVersion !== deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
     return this.store.setState(id, body, { stateVersion: manifest.stateVersion });
   }
-  async submit(id, body, { source = { kind: "application", scope: "private" }, signal, heldLease = false, workspaceRoot, materialTools, allowNetwork = true,
-    validatedApplicationContext } = {}) {
+  assertOpen(epoch) {
+    if (this.closing || this.agents.closing || epoch !== this.epoch) throw new InputError("应用服务正在关闭或已重置，请重新提交任务");
+  }
+  submit(id, body, options = {}) {
+    if (this.closing || this.agents.closing) return Promise.reject(new InputError("应用服务正在关闭或已重置，请重新提交任务"));
+    const submission = { epoch: this.epoch, task: null, done: null };
+    this.submitting.add(submission);
+    submission.done = this.submitTask(id, body, options, submission);
+    const settled = () => this.submitting.delete(submission);
+    submission.done.then(settled, settled);
+    return submission.done;
+  }
+  async submitTask(id, body, { source = { kind: "application", scope: "private" }, signal, heldLease = false, workspaceRoot, materialTools, allowNetwork = true,
+    validatedApplicationContext } = {}, submission) {
     const descriptor = await this.descriptor(id);
+    this.assertOpen(submission.epoch);
     if (body.deliveryVersion !== undefined && body.deliveryVersion !== descriptor.deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
     // A conversation owns its already-validated snapshot even after its viewing
     // instance closes. Public submissions always take the live validation path.
     const applicationContext = validatedApplicationContext === undefined
       ? await this.validateContext(id, body.applicationContext, descriptor) : normalizeApplicationContext(validatedApplicationContext);
+    this.assertOpen(submission.epoch);
     if (applicationContext && applicationContext.deliveryVersion !== descriptor.deliveryVersion)
       throw new InputError("页面上下文的应用交付版本已变化，请重新打开页面");
     const taskSource = { ...source, ...(applicationContext ? { applicationContext: applicationContextBinding(applicationContext) } : {}) };
@@ -91,10 +105,16 @@ export class ApplicationService {
     if (!action) throw new InputError("应用没有这个已验收动作");
     validateActionInput(action, body.input);
     const connectionSnapshot = await this.agents.connections.snapshot(id);
-    for (const connectionId of action.connectionIds) await this.agents.connections.assertActive(connectionSnapshot, connectionId);
+    this.assertOpen(submission.epoch);
+    for (const connectionId of action.connectionIds) {
+      await this.agents.connections.assertActive(connectionSnapshot, connectionId);
+      this.assertOpen(submission.epoch);
+    }
     const { task, created } = await this.store.create(id, { actionId: action.id, input: body.input, mutationId: body.mutationId,
       source: taskSource, deliveryVersion: descriptor.deliveryVersion, revision: descriptor.agent.revision,
       configVersion: connectionSnapshot.version, connectionVersions: connectionSnapshot.connections, allowNetwork });
+    submission.task = task;
+    this.assertOpen(submission.epoch);
     if (created) {
       const controller = new AbortController();
       const item = { controller, task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease };
@@ -180,14 +200,25 @@ export class ApplicationService {
     }
     if (failure) throw failure;
   }
-  async close() {
-    const running = [...this.running.values()];
+  close() {
+    if (this.closing) return this.closing;
+    this.epoch++;
+    const running = [...this.running.values()], submissions = [...this.submitting];
     for (const item of running) { item.terminalStatus = "interrupted"; item.controller.abort(); }
-    const outcomes = await Promise.allSettled(running.map((item) => this.cancel(item.task.agentId, item.task.id, "interrupted")));
-    await Promise.allSettled(running.map((item) => item.done));
-    await this.resources.closeAll(); await this.store.settle();
-    const failure = outcomes.find((outcome) => outcome.status === "rejected");
-    if (failure) throw failure.reason;
+    this.closing = (async () => {
+      const [outcomes] = await Promise.all([
+        Promise.allSettled(running.map((item) => this.cancel(item.task.agentId, item.task.id, "interrupted"))),
+        Promise.allSettled(submissions.map((submission) => submission.done)),
+      ]);
+      // A task may finish its initial write after the running snapshot was taken.
+      const late = submissions.map((submission) => submission.task).filter((task) => task && !running.some((item) => item.task.id === task.id));
+      outcomes.push(...await Promise.allSettled(late.map((task) => this.cancel(task.agentId, task.id, "interrupted"))));
+      await Promise.allSettled(running.map((item) => item.done));
+      await this.resources.closeAll(); await this.store.settle();
+      const failure = outcomes.find((outcome) => outcome.status === "rejected");
+      if (failure) throw failure.reason;
+    })().finally(() => { this.closing = null; });
+    return this.closing;
   }
   async tools(agent, { scope = "private", workspaceRoot, materialTools, allowNetwork = () => true, getApplicationContext = () => null } = {}) {
     const { manifest, deliveryVersion } = await this.descriptor(agent.id);

@@ -674,8 +674,7 @@ export class PrototypeAgents {
       if (!tool) throw new InputError("应用不具备这个能力");
       const result = await tool.execute(randomUUID(), args, activeSignal);
       if (capability === "files.write") {
-        const current = await this.applications.store.get(task.agentId, task.id);
-        await this.applications.store.update(task.agentId, task.id, { artifacts: [...current.artifacts.filter((file) => file.path !== args.file), { path: args.file }] }, "artifact");
+        await this.applications.store.appendArtifact(task.agentId, task.id, { path: args.file });
       }
       const text = result.content?.find((content) => content.type === "text")?.text;
       const images = result.content?.filter((content) => content.type === "image");
