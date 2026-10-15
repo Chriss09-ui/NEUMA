@@ -1173,7 +1173,7 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
   .agent-chat-layout.is-application.application-assistant-animating > .conversation #agent-chat-form {
     position: absolute; bottom: 0; flex-shrink: 0;
   }
-  .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation #agent-chat-form { right: 0; width: calc(var(--assistant-width) - 16px); }
+  .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation #agent-chat-form { right: 0; width: calc(var(--assistant-width) - 18px); }
   .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation #agent-messages { width: calc(var(--assistant-width) - 2px); }
   .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation::after { content: ""; flex: 0 0 var(--assistant-composer-space, 60px); }
   .application-assistant-expanding #agent-messages { animation: assistant-content-in .22s .06s both; }
