@@ -244,6 +244,6 @@ export function createGroupMaterials({ api, current, refresh, changed }) {
   document.addEventListener("neuma:route", (event) => {
     route = event.detail; closeDialogs(); syncControls();
   });
-  return { render, syncControls, refs: () => [...selected()], busy: () => busy, consume() { selected().clear(); render(); },
+  return { render, syncControls, refs: () => [...selected()], busy: () => busy, consume(groupId = id()) { pending.delete(groupId); if (visible(groupId)) render(); },
     reset() { closeDialogs(); render(); } };
 }

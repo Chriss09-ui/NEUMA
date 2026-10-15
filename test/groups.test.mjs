@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CollaborationService } from "../src/collaboration/groups.mjs";
 import { GroupStore } from "../src/collaboration/group-store.mjs";
-import { groupTools } from "../src/collaboration/group-tools.mjs";
+import { groupTools, intentTool, groupTaskAllowsNetwork } from "../src/collaboration/group-tools.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 async function until(check) {
@@ -21,11 +21,13 @@ const card = (id) => ({ id, name: `成员 ${id}`, description: `${id} 的公开�
 const capabilityCard = (id, version = `${id}-capabilities-v1`) => ({ ...card(id), capabilitySchemaVersion: 1, capabilityVersion: version,
   capabilities: [{ id: "action:verify", label: "核对", description: "核对共享资料", scope: "group_task", availability: "callable", requirements: [], reason: "可调用",
     verification: { status: "unverified", checkedAt: null, description: "结果需逐次核验" } }], hardBoundaries: [{ id: "group-only", label: "群共享资料", reason: "不能访问私聊材料" }] });
+const conversationIntent = (reply, replyStatus = "complete") => ({ interaction: "conversation", reply, replyStatus,
+  participate: false, contribution: "", willingToIntegrate: false, integratorId: "" });
 const toolsFor = (service, groupId, taskId, agentId, job = { kind: "work", childId: null, id: "manual" }) => Object.fromEntries(groupTools(service,
   { groupId, taskId, agentId, generation: 1, job, signal: new AbortController().signal, capture: () => {} }).map((tool) => [tool.name, tool]));
 
-async function fixture(t, { run, intent, limits } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "neuma-groups-")), calls = [], capabilityCalls = [], holds = [], listeners = new Set();
+async function fixture(t, { run, intent, route, limits } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "neuma-groups-")), calls = [], routeCalls = [], capabilityCalls = [], holds = [], listeners = new Set();
   const cards = [card("a"), card("b"), card("outside")];
   let service, toolCalls = 0;
   const materials = { list: async () => ({ attachments: [] }), resolve: async (_groupId, refs) => refs,
@@ -42,8 +44,14 @@ async function fixture(t, { run, intent, limits } = {}) {
         assert.ok(tools[name], `必须提供 ${name}`);
         return tools[name].execute(`fixture-${++toolCalls}`, input, signal);
       };
-      const entry = { options, payload, tools, call }; calls.push(entry);
+      const entry = { options, payload, tools, call };
       const context = { ...entry, service, signal, cards, hold: () => { const held = deferred(); holds.push(held); return held; } };
+      if (options.role === "routing") {
+        routeCalls.push(entry);
+        await call("submit_group_route", route ? await route(context) : { mode: "default" });
+        return { reply: "", turns: 1 };
+      }
+      calls.push(entry);
       if (tools.submit_group_intent) {
         const owner = payload.members[0].id;
         await call("submit_group_intent", intent ? await intent(context) : { participate: true, contribution: `${options.agentId} 的互补贡献`,
@@ -59,7 +67,7 @@ async function fixture(t, { run, intent, limits } = {}) {
   const create = (mutationId = "create-one", memberIds = ["a", "b"]) => service.createGroup({ name: "长期团队", purpose: "共同处理材料", memberIds, mutationId });
   const post = (groupId, content = "完成一份共同成果", mutationId = "post-one", extra = {}) => service.postMessage(groupId, { content, mutationId, ...extra });
   const lifecycle = async (value) => { await Promise.all([...listeners].map((listener) => listener(value))); };
-  return { root, service, agents, cards, calls, capabilityCalls, create, post, lifecycle };
+  return { root, service, agents, cards, calls, routeCalls, capabilityCalls, create, post, lifecycle };
 }
 
 test("全员初始认领，成员一致选临时整合者，互补分工后提交最终成果", { timeout: 5000 }, async (t) => {
@@ -78,9 +86,766 @@ test("全员初始认领，成员一致选临时整合者，互补分工后提�
   assert.equal(intentions.every((entry) => entry.options.allowBusinessTools === false), true);
   assert.equal(calls.filter((entry) => entry.payload.kind === "integration").length, 1);
   assert.equal(calls.every((entry) => entry.options.agentId !== "main"), true);
+  const internal = (await service.store.get(group.id)).messages.filter((value) => value.visibility === "internal"), visible = view.messages.filter((value) => value.visibility !== "internal");
+  assert.ok(internal.some((value) => value.kind === "negotiation"));
+  assert.equal(internal.filter((value) => value.kind === "member_result").length, 2);
+  assert.equal(visible.filter((value) => value.sender.type === "agent").length, 1);
+  assert.equal(visible.at(-1).kind, "delivery"); assert.equal(visible.at(-1).content, task.result);
   const events = await service.events(group.id);
   assert.equal(new Set(events.events.map((value) => value.seq)).size, events.events.length);
   assert.equal(events.latestSequence, view.lastSequence);
+});
+
+test("普通群对话只由一位成员直接回复，不创建工作或第二轮协商", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => ({
+    ...conversationIntent(options.agentId === "a" ? "你好，我在。你想聊些什么？" : "你好，我也在。"), replyAudience: { mode: "members", memberIds: ["a", "b"] } }) });
+  const { group } = await create(); await post(group.id, "你好"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.phase, "conversation"); assert.equal(task.ownerId, "a");
+  assert.equal(task.result, "你好，我在。你想聊些什么？"); assert.equal(task.negotiationRound, 1);
+  assert.deepEqual(task.children, []); assert.deepEqual(task.jobs, []); assert.equal(task.turnsUsed, 0);
+  assert.equal(calls.length, 2); assert.equal(calls.every((entry) => entry.options.allowBusinessTools === false), true);
+  const visible = view.messages.filter((value) => value.visibility !== "internal");
+  assert.deepEqual(visible.map((value) => value.sender.type), ["user", "agent"]);
+  assert.equal(visible[1].sender.id, "a"); assert.equal(visible[1].kind, "reply"); assert.equal(visible[1].content, task.result);
+});
+
+test("直接问题无需执行任务，点名时由被点名成员以自身身份回答", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => conversationIntent(`我是成员 ${options.agentId}，我可以帮你整理已分享的资料。`) });
+  const { group } = await create(); await post(group.id, "你可以帮我做什么？", "direct-question", { recipientId: "b" }); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0], reply = view.messages.find((value) => value.visibility === "public" && value.sender.type === "agent");
+  assert.equal(task.status, "completed"); assert.equal(task.ownerId, "b"); assert.equal(reply.sender.id, "b"); assert.match(reply.content, /我是成员 b/);
+  assert.equal(calls.length, 1); assert.deepEqual(task.children, []); assert.deepEqual(task.jobs, []);
+});
+
+test("业务进行中或待补充时自然点名与准确艾特均由本人公开回应，不重跑业务", { timeout: 10000 }, async (t) => {
+  for (const phase of ["running", "needs_input"]) for (const content of ["成员 b，你先打个招呼", "@成员 b 你先打个招呼"]) {
+    const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+    const { service, calls, routeCalls, create, post } = await fixture(t, {
+      route: async ({ payload }) => {
+        assert.equal(payload.triggeringMessage.content, content);
+        return { mode: "named", memberIds: ["b"] };
+      },
+      intent: async ({ options, payload }) => payload.kind === "update"
+        ? (assert.equal(options.agentId, "b"), conversationIntent("我在，我是成员 b。"))
+        : { participate: true, contribution: "整理共享资料", willingToIntegrate: true, integratorId: "a" },
+      run: async ({ payload, call }) => {
+        if (payload.kind === "work" && phase === "running") { entered.resolve(); await release.promise; }
+        await call("submit_group_turn", payload.kind === "integration" && phase === "needs_input"
+          ? { status: "needs_input", result: "已整理收到的资料。", reason: "请补充原始评分标准。" }
+          : { status: "complete", result: payload.kind === "integration" ? "整理结果" : "已完成实际整理" });
+      }
+    });
+    const { group } = await create(), initial = await post(group.id, "整理已共享资料", "initial", { recipientId: "a" });
+    if (phase === "running") await entered.promise;
+    else await service.idle(group.id);
+    const before = (await service.getGroup(group.id)).tasks[0];
+    const followup = await post(group.id, content, "followup", { taskId: initial.task.id });
+    assert.equal(followup.task.id, initial.task.id);
+    release.resolve(); await service.idle(group.id);
+    const view = await service.getGroup(group.id), task = view.tasks[0];
+    const reply = view.messages.find((value) => value.replyTo === followup.message.id && value.sender.type === "agent");
+    assert.equal(reply.sender.id, "b"); assert.equal(reply.content, "我在，我是成员 b。"); assert.equal(reply.visibility, "public");
+    assert.equal(calls.filter((value) => value.payload.kind === "update").length, 1);
+    assert.equal(calls.find((value) => value.payload.kind === "update").options.allowBusinessTools, false);
+    assert.equal(routeCalls.length, content.startsWith("@") ? 0 : 1);
+    assert.equal(task.ownerId, "a"); assert.equal(task.status, phase === "needs_input" ? "needs_input" : "completed");
+    assert.equal(calls.filter((value) => value.payload.kind === "integration").length, 1);
+    if (phase === "needs_input") { assert.equal(task.reason, before.reason); assert.equal(task.result, before.result); }
+  }
+});
+
+test("同一业务的快速连续点名逐条寻址，不用后发消息覆盖前一句", { timeout: 5000 }, async (t) => {
+  const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+  const firstText = "成员 b，介绍一下自己", nextText = "成员 a，你也打个招呼";
+  const { service, calls, create, post } = await fixture(t, {
+    route: async ({ payload }) => {
+      const first = payload.triggeringMessage.content === firstText;
+      if (first) { entered.resolve(); await release.promise; assert.equal(payload.recentMessages.some((value) => value.content === nextText), false); }
+      return { mode: "named", memberIds: [first ? "b" : "a"] };
+    },
+    intent: async ({ options, payload }) => payload.kind === "update" ? conversationIntent(`我在，我是成员 ${options.agentId}。`)
+      : { participate: true, contribution: "整理资料", willingToIntegrate: true, integratorId: "a" },
+    run: async ({ payload, call }) => call("submit_group_turn", payload.kind === "integration"
+      ? { status: "needs_input", result: "保留的资料结果", reason: "还缺评分标准" } : { status: "complete", result: "已处理现有资料" })
+  });
+  const { group } = await create(), initial = await post(group.id, "整理资料", "start", { recipientId: "a" }); await service.idle(group.id);
+  const first = await post(group.id, firstText, "followup-1", { taskId: initial.task.id }); await entered.promise;
+  const next = await post(group.id, nextText, "followup-2", { taskId: initial.task.id }); release.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id);
+  assert.equal(view.messages.find((value) => value.replyTo === first.message.id && value.sender.type === "agent").sender.id, "b");
+  assert.equal(view.messages.find((value) => value.replyTo === next.message.id && value.sender.type === "agent").sender.id, "a");
+  const firstCall = calls.find((value) => value.payload.kind === "update" && value.payload.triggeringMessage.id === first.message.id);
+  assert.equal(firstCall.payload.recentMessages.some((value) => value.content === nextText), false);
+  assert.equal(view.tasks[0].status, "needs_input"); assert.equal(view.tasks[0].result, "保留的资料结果");
+});
+
+test("真实业务补充在只读判断后继续原任务，失败寻址不会中断已有结果", { timeout: 5000 }, async (t) => {
+  for (const routingFails of [false, true]) {
+    const { service, calls, create, post } = await fixture(t, {
+      route: async () => { if (routingFails) throw new Error("模拟寻址失败"); return { mode: "default" }; },
+      intent: async () => ({ participate: true, contribution: "按新增标准继续整理", willingToIntegrate: true, integratorId: "a" }),
+      run: async ({ payload, call }) => call("submit_group_turn", payload.kind === "integration"
+        ? { status: "needs_input", result: "保留的资料结果", reason: "需要评分标准" } : { status: "complete", result: "已接收新业务要求" })
+    });
+    const { group } = await create(), initial = await post(group.id, "整理资料", "original", { recipientId: "a" }); await service.idle(group.id);
+    await post(group.id, "用补充的评分标准继续整理", "update", { taskId: initial.task.id }); await service.idle(group.id);
+    const view = await service.getGroup(group.id), updates = calls.filter((value) => value.payload.kind === "update");
+    assert.equal(view.tasks.length, 1); assert.equal(view.tasks[0].ownerId, "a"); assert.equal(view.tasks[0].status, "needs_input");
+    assert.equal(view.tasks[0].result, "保留的资料结果");
+    if (routingFails) { assert.equal(updates.length, 0); assert.match(view.messages.at(-1).content, /未能确定回复成员/); }
+    else { assert.equal(updates.length, 2); assert.equal(updates[0].options.allowBusinessTools, false); assert.equal(updates[1].options.allowBusinessTools, true); }
+  }
+});
+
+test("业务中的点名答复仍复核取消与成员版本，迟到回复不能重新发布", { timeout: 5000 }, async (t) => {
+  for (const action of ["cancel", "version"]) {
+    const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+    const { service, cards, create, post } = await fixture(t, {
+      intent: async ({ payload }) => {
+        if (payload.kind === "update") { entered.resolve(); await release.promise; return conversationIntent("不应出现的迟到答复"); }
+        return { participate: true, contribution: "整理资料", willingToIntegrate: true, integratorId: "a" };
+      }, run: async ({ payload, call }) => call("submit_group_turn", payload.kind === "integration"
+        ? { status: "needs_input", result: "保留成果", reason: "需要评分标准" } : { status: "complete", result: "实际结果" })
+    });
+    cards[0] = capabilityCard("a"); cards[1] = capabilityCard("b");
+    const { group } = await create(), initial = await post(group.id, "整理资料", "start", { recipientId: "a" }); await service.idle(group.id);
+    await post(group.id, "@成员 b 介绍一下自己", "followup", { taskId: initial.task.id }); await entered.promise;
+    if (action === "cancel") await service.cancelTask(group.id, initial.task.id); else cards[1].capabilityVersion = "b-new-version";
+    release.resolve(); await service.idle(group.id); const view = await service.getGroup(group.id);
+    assert.equal(view.messages.some((value) => value.content === "不应出现的迟到答复"), false);
+    assert.equal(view.tasks[0].status, action === "cancel" ? "cancelled" : "interrupted"); assert.equal(view.tasks[0].result, "保留成果");
+  }
+});
+
+test("明确邀请全员固定回复名单，完成的本人答复及时公开而不等待慢成员", async (t) => {
+  let held;
+  const { service, calls, routeCalls, create, post } = await fixture(t, { route: async () => ({ mode: "all" }), intent: async ({ options, hold }) => {
+    if (options.agentId === "a") { held = hold(); await held.promise; }
+    return { ...conversationIntent(`你好，我是成员 ${options.agentId}。`), replyAudience: options.agentId === "a"
+      ? { mode: "members", memberIds: ["a", "b"] } : { mode: "single", memberIds: ["b"] } };
+  } });
+  const { group } = await create(); const submitted = await post(group.id, "请各位都和我打个招呼");
+  await until(async () => held && (await service.store.get(group.id)).tasks[0].intents.some((intent) => intent.agentId === "b"));
+  assert.deepEqual((await service.getGroup(group.id)).messages.filter((value) => value.sender.type === "agent").map((value) => value.sender.id), ["b"]);
+  held.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.phase, "conversation");
+  assert.deepEqual(task.replyAudience, { mode: "members", memberIds: ["a", "b"] });
+  assert.equal(task.replyRouting.mode, "all"); assert.equal(task.replyRouting.sourceMessageId, submitted.message.id); assert.equal(task.replyRouting.generation, task.generation);
+  assert.deepEqual(view.messages[0].replyAudience, task.replyAudience);
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => [message.sender.id, message.content]), [["b", "你好，我是成员 b。"], ["a", "你好，我是成员 a。"]]);
+  assert.equal(calls.length, 2); assert.equal(calls.every((entry) => entry.options.allowBusinessTools === false), true);
+  assert.equal(routeCalls.length, 1); assert.equal(routeCalls[0].options.role, "routing"); assert.equal(routeCalls[0].options.allowBusinessTools, false);
+  assert.equal(routeCalls[0].tools.submit_group_intent, undefined); assert.equal(routeCalls[0].tools.send_group_message, undefined);
+  assert.deepEqual(task.jobs, []); assert.deepEqual(task.children, []);
+  const replay = await post(group.id, "请各位都和我打个招呼"); await service.idle(group.id);
+  assert.equal(replay.message.id, submitted.message.id); assert.equal(calls.length, 2); assert.equal(routeCalls.length, 1);
+  assert.equal((await service.getGroup(group.id)).messages.filter((message) => message.sender.type === "agent").length, 2);
+});
+
+test("全员回复连续填满并发空位，混合业务意向不会吞掉已完成的本人答复", { timeout: 5000 }, async (t) => {
+  const entered = deferred(), release = deferred(); t.after(() => release.resolve());
+  const { service, cards, calls, create, post } = await fixture(t, { route: async () => ({ mode: "all" }), intent: async ({ options }) => {
+    if (options.agentId === "a") { entered.resolve(); await release.promise; return { participate: true, contribution: "处理真实资料", willingToIntegrate: true, integratorId: "a" }; }
+    return conversationIntent(`我在，我是成员 ${options.agentId}。`);
+  } });
+  cards.push(card("c")); const { group } = await create("mixed-explicit", ["a", "b", "c"]);
+  await post(group.id, "各位打招呼，成员 a 继续处理资料"); await entered.promise;
+  await until(async () => (await service.getGroup(group.id)).messages.some((value) => value.sender.id === "c"));
+  const pending = await service.getGroup(group.id);
+  assert.deepEqual(pending.messages.filter((value) => value.sender.type === "agent").map((value) => value.sender.id), ["b", "c"]);
+  release.resolve(); await service.idle(group.id); const view = await service.getGroup(group.id);
+  assert.deepEqual(view.tasks[0].children.map((value) => value.assigneeId), ["a"]);
+  assert.deepEqual(view.messages.filter((value) => value.sender.type === "agent").map((value) => value.sender.id), ["b", "c", "a"]);
+  assert.equal(calls.filter((value) => value.options.allowBusinessTools).every((value) => value.options.agentId === "a"), true);
+});
+
+test("其他成员的语义判断使用公开历史，目标本人发言且不会继续触发全员循环", async (t) => {
+  const { service, calls, routeCalls, cards, create, post } = await fixture(t, { route: async ({ payload }) => {
+    if (payload.triggeringMessage.content === "你好") return { mode: "default" };
+    assert.equal(payload.recentMessages.filter((message) => message.sender.type === "agent").at(-1).sender.id, "a");
+    return { mode: "others" };
+  }, intent: async ({ payload, options }) => {
+    if (payload.triggeringMessage.content === "你好") return conversationIntent(`你好，我是成员 ${options.agentId}。`);
+    const previous = payload.recentMessages.filter((message) => message.sender.type === "agent").at(-1);
+    assert.equal(previous.sender.id, "a"); assert.equal(previous.content, "你好，我是成员 a。");
+    assert.equal(payload.triggeringMessage.content, "其他两位也各自介绍一下吧");
+    return { ...conversationIntent(`我叫成员 ${options.agentId}，我在这里。`), replyAudience: { mode: "members", memberIds: ["b", "c"] } };
+  } });
+  cards.push(card("c"));
+  const { group } = await create("other-members-group", ["a", "b", "c"]), initial = await post(group.id, "你好", "other-first"); await service.idle(group.id);
+  const next = await post(group.id, "其他两位也各自介绍一下吧", "other-second", { taskId: initial.task.id }); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks.find((value) => value.id === next.task.id);
+  assert.deepEqual(task.replyAudience, { mode: "members", memberIds: ["b", "c"] });
+  assert.equal(task.replyRouting.mode, "others"); assert.equal(task.replyRouting.sourceMessageId, next.message.id); assert.equal(routeCalls.length, 2);
+  assert.deepEqual(view.messages.filter((message) => message.taskId === next.task.id && message.sender.type === "agent").map((message) => message.sender.id), ["b", "c"]);
+  assert.equal(calls.length, 5); assert.deepEqual(task.jobs, []); assert.equal(task.turnsUsed, 0);
+});
+
+test("明确指定多位成员优先于模型扩张的回复对象", async (t) => {
+  const { service, calls, routeCalls, cards, create, post } = await fixture(t, { route: async () => { assert.fail("明确@无需再询问模型路由"); }, intent: async ({ options, payload }) => {
+    assert.deepEqual(payload.requestedRecipientIds, ["a", "b"]);
+    return { ...conversationIntent(`我是成员 ${options.agentId}，我来回答。`), replyAudience: { mode: "members", memberIds: ["a", "b", "c"] } };
+  } });
+  cards.push(card("c"));
+  const { group } = await create("selected-members-group", ["a", "b", "c"]);
+  await post(group.id, "@成员 a @成员 b 你们分别说说能做什么", "selected-members"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.deepEqual(task.replyAudience, { mode: "members", memberIds: ["a", "b"] });
+  assert.deepEqual(calls.map((entry) => entry.options.agentId), ["a", "b"]);
+  assert.equal(routeCalls.length, 0);
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.sender.id), ["a", "b"]);
+});
+
+test("明确多位回复的部分目标失败仍展示成功答复，但不能伪装全员完成", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { route: async () => ({ mode: "all" }), intent: async ({ options }) => {
+    if (options.agentId === "b") throw new Error("模型连接暂时失败");
+    return { ...conversationIntent("你好，我是成员 a。"), replyAudience: { mode: "members", memberIds: ["a", "b"] } };
+  } });
+  const { group } = await create(); await post(group.id, "你们都各自打个招呼"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "partial"); assert.equal(task.phase, "conversation"); assert.equal(task.result, "你好，我是成员 a。");
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.sender.id), ["a"]);
+  assert.match(view.messages.at(-1).content, /成员 b 暂时未能回复/); assert.equal(calls.length, 2);
+});
+
+test("独立全员路由包括每位成员自身，成员旧audience漏掉自己也不会少回复", async (t) => {
+  const { service, cards, calls, create, post } = await fixture(t, { route: async () => ({ mode: "all" }), intent: async ({ options }) => ({
+    ...conversationIntent(`我在，我是 ${options.agentId}。`), replyAudience: { mode: "members", memberIds: ["a", "b", "c"].filter((id) => id !== options.agentId) } }) });
+  cards.push(card("c")); const { group } = await create("all-self-group", ["a", "b", "c"]);
+  await post(group.id, "所有成员都分别和我打招呼"); await service.idle(group.id);
+  const view = await service.getGroup(group.id);
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.sender.id), ["a", "b", "c"]);
+  assert.deepEqual(view.tasks[0].replyAudience.memberIds, ["a", "b", "c"]); assert.equal(view.tasks[0].status, "completed");
+  assert.equal(calls.length, 3); assert.equal(calls.every((entry) => entry.options.allowBusinessTools === false), true);
+});
+
+test("其他人路由排除紧邻上一用户轮的全部公开回复成员，不只排除最后一条", async (t) => {
+  const { service, cards, create, post } = await fixture(t, { route: async ({ payload }) => payload.triggeringMessage.content === "先听两位介绍"
+    ? { mode: "named", memberIds: ["a", "b"] } : { mode: "others" }, intent: async ({ options }) => conversationIntent(`我叫 ${options.agentId}。`) });
+  cards.push(card("c")); const { group } = await create("other-batch-group", ["a", "b", "c"]);
+  const first = await post(group.id, "先听两位介绍", "other-batch-first"); await service.idle(group.id);
+  const second = await post(group.id, "剩下那位也说说吧", "other-batch-second", { taskId: first.task.id }); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks.find((value) => value.id === second.task.id);
+  assert.deepEqual(task.replyAudience.memberIds, ["c"]);
+  assert.deepEqual(view.messages.filter((message) => message.taskId === second.task.id && message.sender.type === "agent").map((message) => message.sender.id), ["c"]);
+});
+
+test("上一轮回复尚未发布就连续问其他人，待前轮完成后仍只路由给剩余成员", async (t) => {
+  let held;
+  const { service, cards, calls, routeCalls, create, post } = await fixture(t, { route: async ({ payload }) => {
+    if (payload.triggeringMessage.content === "先打个招呼") return { mode: "default" };
+    assert.equal(payload.triggeringMessage.content, "其他人也各自打个招呼吧");
+    assert.ok(payload.recentMessages.some((message) => message.sender.id === "a" && message.content === "我是 a，我在。"));
+    return { mode: "others" };
+  }, intent: async ({ payload, options, hold }) => {
+    if (payload.triggeringMessage.content === "先打个招呼" && options.agentId === "a") { held = hold(); await held.promise; }
+    return conversationIntent(`我是 ${options.agentId}，我在。`);
+  } });
+  cards.push(card("c")); const { group } = await create("fast-other-group", ["a", "b", "c"]);
+  const first = await post(group.id, "先打个招呼", "fast-other-first"); await until(() => Boolean(held));
+  const next = await post(group.id, "其他人也各自打个招呼吧", "fast-other-second", { taskId: first.task.id });
+  assert.notEqual(next.task.id, first.task.id); assert.equal(next.task.conversationId, first.task.conversationId);
+  held.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id), firstReply = view.messages.find((message) => message.taskId === first.task.id && message.sender.type === "agent");
+  const task = view.tasks.find((value) => value.id === next.task.id);
+  assert.ok(next.message.seq < firstReply.seq, "补充在前轮公开答复之前真实入列");
+  assert.equal(task.replyRouting.sourceMessageId, next.message.id); assert.deepEqual(task.replyAudience.memberIds, ["b", "c"]);
+  assert.deepEqual(view.messages.filter((message) => message.taskId === next.task.id && message.sender.type === "agent").map((message) => message.sender.id), ["b", "c"]);
+  assert.equal(routeCalls.length, 2); assert.equal(calls.length, 5);
+});
+
+test("自然点名的明显错字由独立语义路由绑定真实成员，其他成员不能代答", async (t) => {
+  const { service, cards, routeCalls, create, post } = await fixture(t, { route: async ({ payload, options }) => {
+    assert.equal(payload.triggeringMessage.content, "验收检察员，你还在吗？");
+    assert.ok(payload.members.some((member) => member.id === "c" && member.name === "验收检查员"));
+    assert.equal(options.role, "routing"); assert.equal(options.allowBusinessTools, false);
+    return { mode: "named", memberIds: ["c"] };
+  }, intent: async ({ options }) => ({ ...conversationIntent(options.agentId === "c" ? "我在，我是验收检查员。" : "我替他回答。"), replyAudience: { mode: "single", memberIds: ["a"] } }) });
+  cards.push({ ...card("c"), name: "验收检查员" }); const { group } = await create("natural-name-group", ["a", "b", "c"]);
+  const submitted = await post(group.id, "验收检察员，你还在吗？"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.deepEqual(task.replyRouting, { mode: "named", memberIds: ["c"], sourceMessageId: submitted.message.id, generation: task.generation });
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => [message.sender.id, message.content]), [["c", "我在，我是验收检查员。"]]);
+  assert.equal(routeCalls.length, 1);
+});
+
+test("语义点名只调用目标，非目标的拒领或业务认领不能否决普通答复", async (t) => {
+  for (const participate of [false, true]) {
+    const { service, calls, create, post } = await fixture(t, { route: async () => ({ mode: "named", memberIds: ["b"] }), intent: async ({ options }) => options.agentId === "a"
+      ? { interaction: "task", participate, contribution: participate ? "我准备执行业务任务。" : "我没有这项能力。", willingToIntegrate: participate, integratorId: participate ? "a" : "" }
+      : conversationIntent("我在，我是你点名的成员 b。") });
+    const { group } = await create(); await post(group.id, "我想听第二位说话"); await service.idle(group.id);
+    const view = await service.getGroup(group.id), task = view.tasks[0];
+    assert.equal(task.status, "completed"); assert.equal(task.phase, "conversation");
+    assert.deepEqual(calls.map((entry) => entry.options.agentId), ["b"]); assert.deepEqual(task.jobs, []); assert.deepEqual(task.children, []);
+    assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.sender.id), ["b"]);
+  }
+});
+
+test("被自然点名成员调用失败时显示真实失败提示，不由别人代答或编造成离线", async (t) => {
+  const { service, cards, create, post } = await fixture(t, { route: async () => ({ mode: "named", memberIds: ["c"] }), intent: async ({ options }) => {
+    if (options.agentId === "c") throw new Error("模拟模型调用失败");
+    return conversationIntent("我可以替他说一声你好。");
+  } });
+  cards.push({ ...card("c"), name: "验收检查员" }); const { group } = await create("named-failure-group", ["a", "b", "c"]);
+  await post(group.id, "验收检察员，回个话吧"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.ok(["needs_input", "failed"].includes(task.status)); assert.equal(task.result, "");
+  assert.equal(view.messages.some((message) => message.sender.type === "agent"), false);
+  const status = view.messages.filter((message) => message.sender.type === "system").at(-1);
+  assert.match(status.content, /验收检查员/); assert.match(status.content, /失败|未能|暂时/); assert.doesNotMatch(status.content, /离线|未上线|不在群里|未就绪/);
+});
+
+test("独立路由不确定时只追问，补充后重新绑定最新原话再定向本人回复", async (t) => {
+  const { service, calls, routeCalls, create, post } = await fixture(t, { route: async ({ payload }) => payload.triggeringMessage.content === "那位帮我介绍一下"
+    ? { mode: "clarify", question: "你想听哪一位成员介绍？" } : { mode: "named", memberIds: ["b"] }, intent: async ({ options }) => conversationIntent(`我是成员 ${options.agentId}。`) });
+  const { group } = await create(), initial = await post(group.id, "那位帮我介绍一下"); await service.idle(group.id);
+  let view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "needs_input"); assert.equal(calls.length, 0); assert.equal(view.messages.at(-1).content, "你想听哪一位成员介绍？");
+  assert.equal(task.replyRouting.mode, "clarify"); assert.equal(task.replyRouting.sourceMessageId, initial.message.id);
+  const next = await post(group.id, "我是说第二位", "route-clarify-answer", { taskId: initial.task.id }); await service.idle(group.id);
+  view = await service.getGroup(group.id); task = view.tasks.find((value) => value.id === next.task.id);
+  assert.equal(task.status, "completed"); assert.equal(task.replyRouting.sourceMessageId, next.message.id); assert.equal(routeCalls.length, 2);
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.sender.id), ["b"]);
+});
+
+test("独立路由等待期间取消或能力变化阻止迟到路由和所有成员调用", async (t) => {
+  for (const action of ["cancel", "revision"]) {
+    let held;
+    const { service, calls, cards, create, post } = await fixture(t, { route: async ({ hold }) => { held = hold(); await held.promise; return { mode: "all" }; },
+      intent: async () => conversationIntent("迟到的问候") });
+    cards[0] = capabilityCard("a"); cards[1] = capabilityCard("b");
+    const { group } = await create(), submitted = await post(group.id, "各位和我打个招呼"); await until(() => Boolean(held));
+    if (action === "cancel") await service.cancelTask(group.id, submitted.task.id);
+    else cards[0].capabilityVersion = "a-route-new-version";
+    held.resolve(); await service.idle(group.id);
+    const view = await service.getGroup(group.id), task = view.tasks[0];
+    assert.equal(task.status, action === "cancel" ? "cancelled" : "interrupted"); assert.equal(calls.length, 0);
+    assert.equal(view.messages.some((message) => message.sender.type === "agent"), false);
+  }
+});
+
+test("独立路由调用失败不能静默改成默认成员代答", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { route: async () => { throw new Error("模拟路由连接失败"); },
+    intent: async () => conversationIntent("不应发布的代答") });
+  const { group } = await create(); await post(group.id, "那位能回应一下吗"); await service.idle(group.id);
+  const view = await service.getGroup(group.id);
+  assert.ok(["needs_input", "failed", "interrupted"].includes(view.tasks[0].status)); assert.equal(calls.length, 0);
+  assert.equal(view.messages.some((message) => message.sender.type === "agent"), false);
+  assert.equal(view.messages.some((message) => message.sender.type === "system"), true);
+});
+
+test("明确点名的全部目标调用失败不能以其他成员回复完成", async (t) => {
+  const { service, routeCalls, create, post } = await fixture(t, { intent: async () => { throw new Error("本次调用失败"); } });
+  const { group } = await create(); await post(group.id, "@成员 a @成员 b 请你们各自回答"); await service.idle(group.id);
+  const view = await service.getGroup(group.id);
+  assert.ok(["needs_input", "failed"].includes(view.tasks[0].status)); assert.equal(view.tasks[0].result, "");
+  assert.equal(view.messages.some((message) => message.sender.type === "agent"), false); assert.equal(routeCalls.length, 0);
+});
+
+test("多人直接答复保留各自追问状态，补充时读取最新触发原话", async (t) => {
+  const { service, create, post } = await fixture(t, { route: async () => ({ mode: "all" }), intent: async ({ options, payload }) => ({
+    ...conversationIntent(payload.triggeringMessage.content === "按100字即可" ? `我会按100字来回答，成员 ${options.agentId}。`
+      : options.agentId === "a" ? "我可以整理资料。" : "你希望摘要多长？", payload.triggeringMessage.content !== "按100字即可" && options.agentId === "b" ? "needs_input" : "complete"),
+    replyAudience: { mode: "members", memberIds: ["a", "b"] } }) });
+  const { group } = await create(), initial = await post(group.id, "各位介绍一下需要哪些输入"); await service.idle(group.id);
+  let view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "needs_input"); assert.equal(task.reason, "你希望摘要多长？");
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.kind), ["reply", "clarification"]);
+  await post(group.id, "按100字即可", "multi-input-followup", { taskId: initial.task.id }); await service.idle(group.id);
+  view = await service.getGroup(group.id); task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.reason, "");
+  assert.deepEqual(view.messages.filter((message) => message.content.startsWith("我会按100字")).map((message) => message.sender.id), ["a", "b"]);
+});
+
+test("意向中的群外回复对象和引用自身被拒绝，不会伪造收件人或唤醒成员", async (t) => {
+  for (const fields of [{ replyAudience: { mode: "members", memberIds: ["outside"] } }, { replyRecipientId: "a" }]) {
+    const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => ({ ...conversationIntent(`我是成员 ${options.agentId}。`),
+      ...(options.agentId === "a" ? fields : {}) }) });
+    const { group } = await create(); await post(group.id, "你好"); await service.idle(group.id);
+    const view = await service.getGroup(group.id), reply = view.messages.find((message) => message.sender.type === "agent");
+    assert.equal(reply.sender.id, "b"); assert.equal(reply.recipientId, null); assert.deepEqual(view.tasks[0].jobs, []);
+    assert.equal(calls.length, 2);
+  }
+});
+
+test("直接回复引用成员产生结构化展示对象，正文的艾特不会排队或代叫其他成员", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => ({ ...conversationIntent(options.agentId === "a" ? "@成员 b 我同意刚才的判断。" : "我也同意。"),
+    ...(options.agentId === "a" ? { replyRecipientId: "b" } : {}) }) });
+  const { group } = await create(); await post(group.id, "回应一下刚才的判断"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0], reply = view.messages.find((message) => message.sender.type === "agent");
+  assert.equal(reply.recipientId, "b"); assert.equal(reply.content, "@成员 b 我同意刚才的判断。");
+  assert.deepEqual(task.jobs, []); assert.equal(calls.length, 2);
+});
+
+test("连续三轮公开问答共用会话，旧执行终态不重开且旧窗口选择与重试幂等", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ payload }) => {
+    if (payload.goal === "我叫小林") return conversationIntent("你好小林，我记住你在这段对话中的称呼了。");
+    if (payload.goal === "我刚才说叫什么？") {
+      assert.ok(payload.recentMessages.some((message) => message.sender.type === "agent" && message.content === "你好小林，我记住你在这段对话中的称呼了。"));
+      return conversationIntent("你刚才说你叫小林。");
+    }
+    if (payload.goal === "接着上一句再说一遍") {
+      assert.ok(payload.recentMessages.some((message) => message.sender.type === "agent" && message.content === "你刚才说你叫小林。"));
+      return conversationIntent("我再说一遍：你叫小林。");
+    }
+    assert.equal(payload.recentMessages.length, 1, "加号开启的另一段会话只含本轮消息");
+    return conversationIntent("我在这段新对话里还不知道你的称呼。");
+  } });
+  const { group } = await create("continuous-group", ["a"]), first = await post(group.id, "我叫小林", "continuous-first"); await service.idle(group.id);
+  const firstSnapshot = structuredClone((await service.getGroup(group.id)).tasks[0]);
+  await service.store.change(group.id, (record) => { delete record.tasks[0].conversationId; });
+  const secondInput = { content: "我刚才说叫什么？", taskId: first.task.id, mutationId: "continuous-second" };
+  const second = await service.postMessage(group.id, secondInput); await service.idle(group.id);
+  const replay = await service.postMessage(group.id, secondInput);
+  assert.equal(replay.message.id, second.message.id); assert.equal(replay.task.id, second.task.id);
+  const third = await service.postMessage(group.id, { content: "接着上一句再说一遍", taskId: first.task.id, mutationId: "continuous-third" }); await service.idle(group.id);
+  const view = await service.getGroup(group.id), [oldTask, secondTask, thirdTask] = view.tasks;
+  assert.equal(view.tasks.length, 3); assert.notEqual(first.task.id, second.task.id); assert.notEqual(second.task.id, third.task.id);
+  assert.equal(secondTask.conversationId, first.task.id); assert.equal(thirdTask.conversationId, first.task.id);
+  const { conversationId, ...expectedOld } = firstSnapshot;
+  assert.deepEqual(oldTask, expectedOld, "旧数据缺省会话 ID 继续可读且原终态记录不改写");
+  assert.equal(thirdTask.result, "我再说一遍：你叫小林。"); assert.equal(calls.length, 3);
+  const fresh = await service.postMessage(group.id, { content: "这段知道我是谁吗？", taskId: first.task.id, newTask: true, mutationId: "continuous-plus" }); await service.idle(group.id);
+  assert.equal(fresh.task.conversationId, fresh.task.id); assert.notEqual(fresh.task.conversationId, secondTask.conversationId);
+  const next = (await service.getGroup(group.id)).tasks.at(-1);
+  assert.equal(next.result, "我在这段新对话里还不知道你的称呼。");
+});
+
+test("认领判断期间连续快速发送每句都成为同会话后续轮，上下文不混入排队后的消息", async (t) => {
+  let held;
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ payload, hold }) => {
+    if (payload.goal === "第一句") { held = hold(); await held.promise; }
+    const contents = payload.recentMessages.map((message) => message.content);
+    if (payload.goal === "第一句") assert.deepEqual(contents, ["第一句"]);
+    if (payload.goal === "第二句") { assert.ok(contents.includes("第一句的答复")); assert.equal(contents.includes("第三句"), false); }
+    if (payload.goal === "第三句") assert.ok(contents.includes("第二句的答复"));
+    return conversationIntent(`${payload.goal}的答复`);
+  } });
+  const { group } = await create("fast-turns-group", ["a"]), first = await post(group.id, "第一句", "fast-first"); await until(() => Boolean(held));
+  const second = await service.postMessage(group.id, { content: "第二句", taskId: first.task.id, mutationId: "fast-second" });
+  const third = await service.postMessage(group.id, { content: "第三句", taskId: first.task.id, mutationId: "fast-third" });
+  assert.equal(second.task.conversationId, first.task.id); assert.equal(third.task.conversationId, first.task.id);
+  held.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id);
+  assert.deepEqual(view.tasks.map((task) => task.status), ["completed", "completed", "completed"]);
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.content), ["第一句的答复", "第二句的答复", "第三句的答复"]);
+  assert.equal(calls.length, 3); assert.equal(view.tasks.every((task) => task.generation === 1), true);
+});
+
+test("整合正在执行时的新消息保留为同会话下一轮，旧最终提交不能取消用户后续问题", async (t) => {
+  let held;
+  const { service, calls, create, post } = await fixture(t, {
+    intent: async ({ payload, options }) => {
+      if (payload.goal === "再把刚才的结果解释一下") {
+        assert.ok(payload.recentMessages.some((message) => message.sender.type === "agent" && message.content === "我已为你核对第一份材料。"));
+        return conversationIntent("我接着解释：第一份材料已经核对，结论沿用刚才交付的内容。");
+      }
+      return { participate: true, contribution: "核对第一份材料", willingToIntegrate: options.agentId === "a", integratorId: "a" };
+    },
+    run: async ({ payload, call, hold }) => {
+      if (payload.kind === "integration") { held = hold(); await held.promise; }
+      await call("submit_group_turn", { status: "complete", result: payload.kind === "integration" ? "我已为你核对第一份材料。" : "第一份材料的实际核对结果" });
+    },
+  });
+  const { group } = await create("during-delivery-group", ["a"]), first = await post(group.id, "核对第一份材料", "during-delivery-first");
+  await until(() => Boolean(held));
+  const next = await service.postMessage(group.id, { content: "再把刚才的结果解释一下", taskId: first.task.id, mutationId: "during-delivery-followup" });
+  assert.notEqual(next.task.id, first.task.id); assert.equal(next.task.conversationId, first.task.id); assert.equal(next.task.status, "queued");
+  const executing = (await service.getGroup(group.id)).tasks[0]; assert.equal(executing.generation, 1); assert.equal(executing.status, "running");
+  assert.equal(executing.jobs.some((job) => job.kind === "update"), false);
+  held.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id), [previous, continued] = view.tasks;
+  assert.equal(previous.status, "completed"); assert.equal(previous.result, "我已为你核对第一份材料。"); assert.equal(previous.generation, 1);
+  assert.equal(continued.status, "completed"); assert.equal(continued.phase, "conversation");
+  assert.equal(continued.result, "我接着解释：第一份材料已经核对，结论沿用刚才交付的内容。");
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.content), [previous.result, continued.result]);
+  assert.equal(view.messages.filter((message) => message.content === "再把刚才的结果解释一下").length, 1);
+  assert.equal(calls.filter((call) => call.payload.goal === "再把刚才的结果解释一下").length, 1);
+});
+
+test("整合已被调度但尚未原子启动时，新补充优先处理，旧调度不能越过更新队列", async (t) => {
+  const selected = deferred(), release = deferred(); t.after(() => release.resolve());
+  const { service, calls, create, post } = await fixture(t, { run: async ({ payload, call }) => {
+    if (payload.kind === "integration") {
+      assert.ok(payload.recentMessages.some((message) => message.content === "补充：结果需要再解释一句"));
+      assert.ok(payload.recentMessages.some((message) => message.content === "我已读取你的新补充。"));
+    }
+    await call("submit_group_turn", { status: "complete", result: payload.kind === "integration" ? "我把核对结果和你的补充一并解释了。"
+      : payload.kind === "update" ? "我已读取你的新补充。" : "原材料已经核对。" });
+  } });
+  const { group } = await create("integration-start-race", ["a"]), validate = service.validateTaskCapabilities.bind(service); let paused = false;
+  service.validateTaskCapabilities = async (...args) => {
+    const task = (await service.store.get(group.id)).tasks.find((task) => task.id === args[1]);
+    if (!paused && task?.phase === "integration" && task.jobs.some((job) => job.kind === "integration" && job.status === "queued")) {
+      paused = true; selected.resolve(); await release.promise;
+    }
+    return validate(...args);
+  };
+  const first = await post(group.id, "核对材料", "integration-race-first"); await selected.promise;
+  const update = await service.postMessage(group.id, { content: "补充：结果需要再解释一句", taskId: first.task.id, mutationId: "integration-race-update" });
+  assert.equal(update.task.id, first.task.id); assert.ok(update.task.jobs.some((job) => job.kind === "update" && job.status === "queued"));
+  release.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(view.tasks.length, 1); assert.equal(task.status, "completed"); assert.equal(task.generation, 1);
+  assert.equal(task.result, "我把核对结果和你的补充一并解释了。");
+  assert.deepEqual(calls.filter((call) => !call.tools.submit_group_intent).map((call) => call.payload.kind), ["work", "update", "integration"]);
+  assert.equal(task.jobs.find((job) => job.kind === "update").status, "completed");
+});
+
+test("没有整合者的待补充任务可直接承接下一句重新判断，不强制点名", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ payload }) => payload.recentMessages.some((message) => message.content === "不要联网，先不用做文件，我只想问你能做什么")
+    ? conversationIntent("我可以帮你整理明确分享的资料。") : { participate: false, contribution: "", willingToIntegrate: false, integratorId: "" } });
+  const { group } = await create("no-owner-continue", ["a"]), first = await post(group.id); await service.idle(group.id);
+  assert.equal((await service.getGroup(group.id)).tasks[0].status, "needs_input");
+  const next = await service.postMessage(group.id, { content: "不要联网，先不用做文件，我只想问你能做什么", taskId: first.task.id, mutationId: "no-owner-followup" }); await service.idle(group.id);
+  assert.equal(next.task.id, first.task.id); const task = (await service.getGroup(group.id)).tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.phase, "conversation"); assert.equal(task.result, "我可以帮你整理明确分享的资料。");
+  assert.equal(calls.at(-1).options.taskAllowNetwork, false);
+});
+
+test("完成后的续聊承接共享选材及可信禁网，另一段会话保持独立", async (t) => {
+  const { service, calls, create } = await fixture(t, { intent: async () => conversationIntent("我会遵守本次对话的材料与联网范围。") });
+  const { group } = await create("continuity-policy", ["a"]);
+  await service.store.change(group.id, (record) => { record.group.materialIds.push("shared-one", "shared-two"); });
+  const first = await service.postMessage(group.id, { content: "请在已分享材料中回答", attachmentIds: [{ id: "shared-one" }, { id: "shared-two" }], mutationId: "policy-first" }, { source: "main", taskAllowNetwork: false }); await service.idle(group.id);
+  await service.store.change(group.id, (record) => { record.group.materialIds = ["shared-two"]; });
+  const second = await service.postMessage(group.id, { content: "继续回答，允许联网", taskId: first.task.id, mutationId: "policy-second" }, { source: "main", taskAllowNetwork: true }); await service.idle(group.id);
+  assert.deepEqual(second.task.attachmentIds, ["shared-two"]); assert.equal(second.task.taskAllowNetwork, false);
+  assert.equal(calls.filter((call) => call.payload.conversationId === first.task.id).every((call) => call.options.taskAllowNetwork === false), true);
+  const fresh = await service.postMessage(group.id, { content: "另一个话题", taskId: second.task.id, newTask: true, mutationId: "policy-fresh" }); await service.idle(group.id);
+  assert.deepEqual(fresh.task.attachmentIds, []); assert.equal(calls.at(-1).options.taskAllowNetwork, true);
+  const forbidden = await service.postMessage(group.id, { content: "不要联网，只讨论我发的内容", taskId: fresh.task.id, mutationId: "policy-user-forbids" }); await service.idle(group.id);
+  const after = await service.postMessage(group.id, { content: "那接着说", taskId: forbidden.task.id, mutationId: "policy-after-forbid" }); await service.idle(group.id);
+  assert.equal(after.task.taskAllowNetwork, false); assert.equal(calls.at(-1).options.taskAllowNetwork, false);
+});
+
+test("前轮分类期间收紧联网权限中断旧轮，后续队列按新约束继续且不丢新话", async (t) => {
+  let held, initialSignal;
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ payload, hold, signal }) => {
+    if (payload.goal === "先看看公开信息") { held = hold(); initialSignal = signal; await held.promise; }
+    return conversationIntent("我会只依据你已分享的信息来回答。");
+  } });
+  const { group } = await create("restrict-queued-next", ["a"]), first = await post(group.id, "先看看公开信息", "restrict-queued-first"); await until(() => Boolean(held));
+  const next = await service.postMessage(group.id, { content: "不要联网，先聊聊", taskId: first.task.id, mutationId: "restrict-queued-next" });
+  assert.notEqual(next.task.id, first.task.id); assert.equal(next.task.conversationId, first.task.id); assert.equal(initialSignal.aborted, true);
+  held.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id); assert.equal(view.tasks[0].status, "interrupted"); assert.equal(view.tasks[1].status, "completed");
+  assert.equal(view.messages.some((message) => message.taskId === first.task.id && message.kind === "reply"), false);
+  assert.equal(view.messages.filter((message) => message.content === "不要联网，先聊聊").length, 1);
+  assert.equal(calls.at(-1).options.taskAllowNetwork, false);
+});
+
+test("续聊工具只读取本会话既往公开问答和本轮协作，旧终态工具仍拒绝写入", async (t) => {
+  const { service, create, post } = await fixture(t); service.start = () => {};
+  const { group } = await create("scoped-read", ["a"]), first = await post(group.id, "第一段原话", "scoped-first");
+  await service.store.change(group.id, (record) => {
+    record.tasks[0].status = "completed"; record.tasks[0].result = "第一段答复";
+    record.messages.push({ id: "first-reply", taskId: first.task.id, sender: { type: "agent", id: "a", name: "a" }, content: "第一段答复", visibility: "public", seq: ++record.group.lastSequence });
+    record.messages.push({ id: "first-private", taskId: first.task.id, sender: { type: "agent", id: "a", name: "a" }, content: "上一轮后台讨论", visibility: "internal", seq: ++record.group.lastSequence });
+  });
+  await post(group.id, "无关另一个会话", "scoped-other");
+  const second = await service.postMessage(group.id, { content: "第二段原话", taskId: first.task.id, mutationId: "scoped-second" });
+  const third = await service.postMessage(group.id, { content: "排队后第三段", taskId: second.task.id, mutationId: "scoped-third" });
+  const tools = toolsFor(service, group.id, second.task.id, "a"), history = parsed(await tools.read_group_messages.execute("read-scoped", {}));
+  assert.deepEqual(history.messages.map((message) => message.content), ["第一段原话", "第一段答复", "第二段原话"]);
+  assert.equal(history.more, false); assert.notEqual(third.task.id, second.task.id);
+  await assert.rejects(toolsFor(service, group.id, first.task.id, "a").send_group_message.execute("late-terminal-write", { content: "旧终态迟到内容" }), /本轮协作已停止/);
+});
+
+test("旧窗口的任务 ID 在同一会话最新执行等待输入时仍向真实执行补充，不重新派工作", async (t) => {
+  const { service, create, post } = await fixture(t); service.start = () => {};
+  const { group } = await create("stale-execution-window", ["a"]), first = await post(group.id, "第一轮", "stale-first");
+  await service.store.change(group.id, (record) => { record.tasks[0].status = "completed"; record.tasks[0].result = "第一轮已完成"; });
+  const second = await service.postMessage(group.id, { content: "第二轮工作", taskId: first.task.id, mutationId: "stale-second" });
+  await service.store.change(group.id, (record) => { const task = record.tasks[1]; task.status = "needs_input"; task.phase = "execution"; task.ownerId = "a"; });
+  const update = await service.postMessage(group.id, { content: "补充第二轮资料", taskId: first.task.id, mutationId: "stale-update" });
+  assert.equal(update.task.id, second.task.id); assert.equal(update.task.status, "queued"); assert.equal(update.task.jobs.length, 1);
+  assert.equal(update.task.jobs[0].kind, "update"); assert.equal(update.task.jobs[0].messageId, update.message.id);
+  const view = await service.getGroup(group.id); assert.equal(view.tasks.length, 2); assert.equal(view.tasks[0].status, "completed"); assert.equal(view.tasks[0].result, "第一轮已完成");
+});
+
+test("独立当前任务尚未加入记录时仍保留其可信策略、原话及发送者权限边界", () => {
+  const record = { tasks: [], messages: [] };
+  assert.equal(groupTaskAllowsNetwork(record, { id: "new", goal: "查询公开资料", taskAllowNetwork: false }), false);
+  assert.equal(groupTaskAllowsNetwork(record, { id: "new", goal: "不要联网，读我提供的内容" }), false);
+  assert.equal(groupTaskAllowsNetwork(record, { id: "new", goal: "查询公开资料" }), true);
+});
+
+test("完成、部分交付、失败、停止和中断后可以续聊，旧终态与迟到工具写入门槛不变", async (t) => {
+  const { service, create, post } = await fixture(t); service.start = () => {};
+  const { group } = await create("all-terminal-continuity", ["a"]);
+  for (const status of ["completed", "partial", "failed", "cancelled", "interrupted"]) {
+    const first = await post(group.id, `${status} 前一轮`, `terminal-${status}`);
+    await service.store.change(group.id, (record) => {
+      const task = record.tasks.find((task) => task.id === first.task.id);
+      task.status = status; task.reason = `${status} 原因`; task.result = `${status} 已有结果`; task.generation = 3;
+    });
+    const snapshot = structuredClone((await service.getGroup(group.id)).tasks.find((task) => task.id === first.task.id));
+    const next = await service.postMessage(group.id, { content: `${status} 后继续聊`, taskId: first.task.id, mutationId: `terminal-follow-${status}` });
+    assert.notEqual(next.task.id, first.task.id); assert.equal(next.task.conversationId, first.task.id); assert.equal(next.task.generation, 1);
+    assert.deepEqual((await service.getGroup(group.id)).tasks.find((task) => task.id === first.task.id), snapshot);
+    await assert.rejects(toolsFor(service, group.id, first.task.id, "a").send_group_message.execute(`late-${status}`, { content: "迟到的原任务写入" }), /本轮协作已停止/);
+  }
+});
+
+test("直接对话缺信息时公开追问，补充原话后仍直接回答且不执行空任务", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ payload }) => {
+    const answer = payload.recentMessages.some((value) => value.content === "按不超过 150 字即可");
+    return conversationIntent(answer ? "好，我会按不超过 150 字的要求处理你接下来分享的材料。" : "你希望摘要多长？", answer ? "complete" : "needs_input");
+  } });
+  const { group } = await create(), posted = await post(group.id, "我准备让你帮我摘要材料，需要说清哪些要求？"); await service.idle(group.id);
+  let view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "needs_input"); assert.equal(task.ownerId, "a"); assert.equal(task.result, "你希望摘要多长？");
+  assert.equal(view.messages.filter((value) => value.visibility === "public").at(-1).kind, "clarification");
+  await service.postMessage(group.id, { content: "按不超过 150 字即可", taskId: posted.task.id, mutationId: "answer-length" }); await service.idle(group.id);
+  view = await service.getGroup(group.id); task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.phase, "conversation"); assert.match(task.result, /^好，我会/);
+  assert.deepEqual(task.children, []); assert.deepEqual(task.jobs, []); assert.equal(calls.length, 4);
+});
+
+test("对话追问刚发布时立即补充不会被旧执行轮吞掉，仍重入只读判断", { timeout: 5000 }, async (t) => {
+  const published = deferred(), release = deferred(); t.after(() => release.resolve());
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ payload }) => {
+    const answered = payload.recentMessages.some((message) => message.content === "100字");
+    return conversationIntent(answered ? "好，我会按100字的要求处理你接下来分享的材料。" : "你希望摘要多长？", answered ? "complete" : "needs_input");
+  } });
+  const { group } = await create("quick-answer-group", ["a"]);
+  const originalChange = service.store.change.bind(service.store); let paused = false;
+  service.store.change = async (...args) => {
+    const result = await originalChange(...args), current = (await service.store.get(group.id)).tasks[0];
+    if (!paused && current?.phase === "conversation" && current.status === "needs_input") {
+      paused = true; published.resolve(); await release.promise;
+    }
+    return result;
+  };
+  const posted = await post(group.id, "做摘要前需要说清哪些要求？"); await published.promise;
+  await service.postMessage(group.id, { content: "100字", taskId: posted.task.id, mutationId: "immediate-answer" });
+  const queued = (await service.store.get(group.id)).tasks[0];
+  assert.equal(queued.status, "queued"); assert.equal(queued.ownerId, null);
+  release.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.result, "好，我会按100字的要求处理你接下来分享的材料。");
+  assert.equal(task.negotiationRound, 1); assert.equal(calls.length, 2); assert.equal(calls.every((call) => call.tools.submit_group_intent && call.options.allowBusinessTools === false), true);
+  assert.deepEqual(task.children, []); assert.deepEqual(task.jobs, []);
+  assert.deepEqual(view.messages.filter((message) => message.sender.type === "agent").map((message) => message.kind), ["clarification", "reply"]);
+  assert.equal(view.messages.some((message) => message.sender.type === "system"), false);
+});
+
+test("混合对话与真实任务保留任务流程，对话成员不会被排入业务工作", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => options.agentId === "b" ? { ...conversationIntent("你好，我在。"), replyAudience: { mode: "members", memberIds: ["a", "b"] } }
+    : { participate: true, contribution: "整理共享报告", willingToIntegrate: true, integratorId: "a", interaction: "task" } });
+  const { group } = await create(); await post(group.id); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.phase, "delivery"); assert.deepEqual(task.children.map((value) => value.assigneeId), ["a"]);
+  assert.equal(calls.filter((entry) => !entry.tools.submit_group_intent).every((entry) => entry.options.agentId === "a"), true);
+  const visible = view.messages.filter((value) => value.visibility !== "internal" && value.sender.type === "agent");
+  assert.equal(visible.length, 1); assert.equal(visible[0].kind, "delivery"); assert.notEqual(visible[0].content, "你好，我在。");
+});
+
+test("真实任务因能力不足拒领时不能用另一位的普通回复伪装已经完成", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => options.agentId === "a"
+    ? { interaction: "task", participate: false, contribution: "我没有执行这项操作的能力。", willingToIntegrate: false, integratorId: "" }
+    : conversationIntent("我在，可以继续聊。") });
+  const { group } = await create(); await post(group.id, "执行需要当前成员尚未具备能力的任务"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "needs_input"); assert.equal(task.result, ""); assert.equal(task.negotiationRound, 2);
+  assert.deepEqual(task.jobs, []); assert.deepEqual(task.children, []); assert.equal(calls.length, 4);
+  assert.equal(view.messages.some((message) => message.kind === "reply" || message.sender.type === "agent"), false);
+  assert.equal(view.messages.at(-1).kind, "clarification");
+});
+
+test("普通单人回复不被无关成员意向失败阻挡，保留成功成员本人答复", async (t) => {
+  const { service, calls, create, post } = await fixture(t, { intent: async ({ options }) => {
+    if (options.agentId === "b") throw new Error("模型连接暂时失败");
+    return conversationIntent("你好，我在。");
+  } });
+  const { group } = await create(); await post(group.id, "你好"); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.result, "你好，我在。"); assert.equal(calls.length, 2); assert.deepEqual(task.children, []);
+  assert.deepEqual(view.messages.filter((value) => value.sender.type === "agent").map((value) => value.sender.id), ["a"]);
+  assert.equal(view.messages.some((value) => value.visibility === "public" && value.sender.type === "system"), false);
+});
+
+test("对话回复发布前重验能力版本，迟到的普通回复不能越过停工边界", async (t) => {
+  let held;
+  const { service, cards, create, post } = await fixture(t, { intent: async ({ options, hold }) => {
+    if (options.agentId === "a") { held = hold(); await held.promise; }
+    return conversationIntent("你好，我在。");
+  } });
+  cards[0] = capabilityCard("a"); cards[1] = capabilityCard("b");
+  const { group } = await create(); await post(group.id, "你好"); await until(() => Boolean(held));
+  cards[0].capabilityVersion = "a-new-execution-conditions"; held.resolve(); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "interrupted"); assert.equal(task.result, "");
+  assert.equal(view.messages.some((value) => value.visibility === "public" && value.kind === "reply"), false);
+  assert.equal(view.messages.some((value) => value.visibility === "public" && value.kind === "status"), true);
+});
+
+test("对话意向等待期间权限收紧或显式取消均阻止迟到公开回复", async (t) => {
+  for (const action of ["restrict", "cancel"]) {
+    let held;
+    const { service, create, post } = await fixture(t, { intent: async ({ options, hold }) => {
+      if (options.agentId === "a" && !held) { held = hold(); await held.promise; }
+      return { ...conversationIntent("我可以直接回答你的问题。"), replyAudience: { mode: "members", memberIds: ["a", "b"] } };
+    } });
+    const { group } = await create(), posted = await post(group.id, "你能介绍一下自己吗？"); await until(() => Boolean(held));
+    if (action === "restrict") await service.postMessage(group.id, { content: "接下来不要联网", taskId: posted.task.id, mutationId: "restrict-late-reply" });
+    else await service.cancelTask(group.id, posted.task.id);
+    held.resolve(); await service.idle(group.id);
+    const view = await service.getGroup(group.id), task = view.tasks[0];
+    assert.equal(task.status, action === "restrict" ? "interrupted" : "cancelled"); assert.equal(task.result, "");
+    assert.equal(view.messages.some((value) => value.taskId === posted.task.id && value.visibility === "public" && value.kind === "reply"), false);
+    assert.equal(view.messages.some((value) => value.visibility === "public" && value.kind === "status"), true);
+  }
+});
+
+test("对话意向严格拒绝业务认领、空回复和无效状态，旧意向仍按实际任务处理", async () => {
+  const tool = intentTool(() => {}), signal = new AbortController().signal;
+  for (const input of [{ participate: true, contribution: "假执行" }, { willingToIntegrate: true }, { integratorId: "a" }, { reply: "" }, { replyStatus: "partial" }, { interaction: "invented" },
+    { replyAudience: { mode: "all", memberIds: ["a"] } }, { replyAudience: { mode: "members", memberIds: [] } }, { replyAudience: { mode: "single", memberIds: ["a", "b"] } },
+    { replyAudience: { mode: "members", memberIds: ["a"], extra: "untrusted" } }]) {
+    await assert.rejects(tool.execute("invalid", { ...conversationIntent("你好，我在。"), ...input }, signal));
+  }
+  let captured;
+  await intentTool((value) => { captured = value; }).execute("legacy", { participate: true, contribution: "真实工作", willingToIntegrate: true, integratorId: "a" }, signal);
+  assert.equal(captured.interaction, "task"); assert.equal(captured.participate, true); assert.equal("reply" in captured, false);
+});
+
+test("真实最终回复失败仍公开简短提示，保留成员成果且不冒充完成", async (t) => {
+  const { service, create, post } = await fixture(t, { run: async ({ payload, call }) => {
+    if (payload.kind === "integration") throw new Error("模型暂时无法完成最终回复");
+    await call("submit_group_turn", { status: "complete", result: "已经保存的真实核对结果" });
+  } });
+  const { group } = await create(); await post(group.id); await service.idle(group.id);
+  const view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "needs_input"); assert.equal(task.result, ""); assert.equal(task.children.every((child) => child.result === "已经保存的真实核对结果"), true);
+  assert.equal(view.messages.some((message) => message.sender.type === "agent"), false);
+  const hint = view.messages.find((message) => message.visibility === "public" && message.kind === "status");
+  assert.match(hint.content, /暂时没能完成最终回复.*已有成果都保留/);
+});
+
+test("真实任务追问补充经 update 恢复业务工作，公开的仍是具体问题与最后结果", async (t) => {
+  let supplied = false;
+  const { service, calls, create, post } = await fixture(t, { run: async ({ payload, call }) => {
+    if (payload.kind === "update") { supplied = true; await call("submit_group_turn", { status: "complete", result: "补充已经收到，继续内部核对" }); }
+    else if (!supplied) await call("submit_group_turn", { status: "needs_input", result: payload.kind === "integration" ? "你能分享原始预算表吗？" : "", reason: "缺少预算表" });
+    else await call("submit_group_turn", { status: "complete", result: payload.kind === "integration" ? "我核对过你分享的预算表，总额是 100。" : "预算表已核对" });
+  } });
+  const { group } = await create(), posted = await post(group.id, "核对预算表", "initial-budget-task", { recipientId: "a" }); await service.idle(group.id);
+  let view = await service.getGroup(group.id), task = view.tasks[0];
+  assert.equal(task.status, "needs_input"); assert.equal(task.phase, "integration");
+  await service.postMessage(group.id, { content: "原始表里的预算总额是 100", taskId: posted.task.id, mutationId: "supply-budget" }); await service.idle(group.id);
+  view = await service.getGroup(group.id); task = view.tasks[0];
+  assert.equal(task.status, "completed"); assert.equal(task.result, "我核对过你分享的预算表，总额是 100。");
+  assert.ok(calls.some((call) => call.payload.kind === "update"));
+  const replies = view.messages.filter((message) => message.sender.type === "agent");
+  assert.deepEqual(replies.map((message) => message.kind), ["clarification", "delivery"]);
+  assert.equal(replies[0].content, "你能分享原始预算表吗？"); assert.equal(replies[1].content, task.result);
+  const internal = (await service.store.get(group.id)).messages.find((message) => message.content === "补充已经收到，继续内部核对");
+  assert.equal(internal.visibility, "internal"); assert.equal(internal.kind, "coordination");
 });
 
 test("两轮仍无一致整合者时等待用户，不强派或继续实际工作", { timeout: 5000 }, async (t) => {
@@ -118,6 +883,10 @@ test("A 请求 B 协助，B 问 A 资料问题，回答后自动恢复双方工�
   assert.equal(task.children.every((value) => value.status === "completed" && value.pendingQuestions.length === 0), true);
   assert.equal(calls.filter((entry) => entry.payload.kind === "question").length, 1);
   assert.ok(calls.length < 12, "请求与恢复是有限短轮次");
+  const messages = (await service.store.get(group.id)).messages;
+  for (const value of messages.filter((value) => value.recipientId || value.kind === "member_result")) assert.equal(value.visibility, "internal");
+  assert.equal(messages.find((value) => value.content === "预算为100，请继续分析").kind, "coordination");
+  assert.equal((await service.getGroup(group.id)).messages.some((value) => value.content === "预算为100，请继续分析"), false);
 });
 
 test("发送/创建幂等，重用操作ID而内容不同报告冲突", { timeout: 5000 }, async (t) => {
@@ -516,7 +1285,7 @@ test("运行期间收紧用户联网限制立即中断信号，保存新原话�
   assert.equal(view.messages.filter((value) => value.content === input.content).length, 1);
   assert.equal(task.children[0].status, "completed"); assert.equal(task.children[0].result, "已经保存的材料核对结果");
   assert.equal(task.jobs.some((value) => value.status === "queued"), false);
-  held.resolve(); await service.idle(group.id); assert.equal(lateRejected, 1); assert.equal(calls.length, 2);
+  held.resolve(); await service.idle(group.id); assert.equal(lateRejected, 1); assert.equal(calls.length, 3);
 
   held = null; runningSignal = null;
   const next = await post(group.id, "整理第二份公开资料", "online-main-policy-change", { recipientId: "a" });

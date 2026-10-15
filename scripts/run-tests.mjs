@@ -15,7 +15,7 @@ export const TEST_LAYERS = Object.freeze({
     "chat-ui.test.mjs", "rich-text.test.mjs", "collaboration-api.test.mjs", "collaboration-ui.test.mjs", "core.test.mjs",
     "development-api.test.mjs", "development-context.test.mjs", "development-contract.test.mjs", "development-store.test.mjs",
     "development-ui.test.mjs", "development-workspace.test.mjs", "development.test.mjs", "group-question.test.mjs",
-    "groups.test.mjs", "group-avatar.test.mjs", "installation-migration.test.mjs", "isolation-native.test.mjs", "jev-connection.test.mjs",
+    "groups.test.mjs", "group-avatar.test.mjs", "group-messages.test.mjs", "group-conversations.test.mjs", "group-mentions.test.mjs", "group-mention-composer.test.mjs", "group-routing.test.mjs", "group-reply-protocol.test.mjs", "group-replies.test.mjs", "installation-migration.test.mjs", "isolation-native.test.mjs", "jev-connection.test.mjs",
     "main-agent.test.mjs", "main-context-focus.test.mjs", "main-materials.test.mjs", "main-requirements.test.mjs",
     "model-connection-api.test.mjs", "panel-resize.test.mjs", "preview-release.test.mjs", "project-diagnostics.test.mjs",
     "project-folder-picker.test.mjs", "project-inspection.test.mjs", "project-removal.test.mjs", "project-runtime.test.mjs",

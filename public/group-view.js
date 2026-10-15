@@ -1,11 +1,28 @@
 import { renderRichText } from "./rich-text.js";
 import { renderAgentAvatar, resolveAgentAvatar } from "./agent-avatar.js";
 
-export const taskLabels = { queued: "等待认领", pending: "等待认领", running: "协作中", discussing: "正在讨论", planning: "正在分工",
+export const taskLabels = { queued: "等待认领", pending: "等待认领", running: "协作中", responding: "成员回应中", discussing: "正在讨论", planning: "正在分工",
   working: "正在处理", completed: "已完成", complete: "已完成", partial: "部分交付", failed: "失败", blocked: "等待处理", cancelled: "已停止", interrupted: "已中断",
-  negotiating: "正在协商", negotiation: "成员协商", execution: "执行任务", integration: "整合成果", delivery: "交付成果",
+  negotiating: "正在协商", negotiation: "成员协商", conversation: "对话", execution: "执行任务", integration: "整合成果", delivery: "交付成果",
   waiting: "等待成员回应", needs_input: "待你补充", declined: "未认领" };
 export const terminalTask = (task) => ["completed", "complete", "partial", "failed", "cancelled", "interrupted"].includes(task?.status);
+
+export function groupConversations(tasks = []) {
+  const conversations = new Map();
+  for (const [index, task] of tasks.entries()) {
+    const id = task.conversationId || task.id;
+    const previous = conversations.get(id);
+    conversations.set(id, { ...task, id, taskId: task.id,
+      goal: previous?.goal || task.goal, createdAt: previous?.createdAt || task.createdAt,
+      tasks: [...(previous?.tasks || []), task], order: index });
+  }
+  return [...conversations.values()].sort((left, right) => {
+    const leftTime = Date.parse(left.updatedAt || left.tasks.at(-1)?.createdAt || "");
+    const rightTime = Date.parse(right.updatedAt || right.tasks.at(-1)?.createdAt || "");
+    return Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime
+      ? leftTime - rightTime : left.order - right.order;
+  });
+}
 
 export function conversationDate(value) {
   if (typeof value !== "string" || !value.trim()) return null;
@@ -57,7 +74,41 @@ function prependRecipient(body, agent) {
     const opening = node("p"); opening.append(mention); body.prepend(opening);
   }
 }
-export function messageRow(message, { attachmentUrl, bubble = false, senderAgent, recipientAgent } = {}) {
+function recipientPrefix(content, name) {
+  const prefix = `@${name}`;
+  if (!content.startsWith(prefix) || !/^(?:[\s，,：:、]|$)/u.test(content.slice(prefix.length))) return null;
+  let remainder = content.slice(prefix.length).replace(/^[\s，,：:、]+/u, "");
+  if (remainder.startsWith(name) && /^(?:[\s，,：:、]|$)/u.test(remainder.slice(name.length))) {
+    remainder = remainder.slice(name.length).replace(/^[\s，,：:、]+/u, "");
+  }
+  return remainder;
+}
+function leadingRecipient(content, members) {
+  const matches = members.filter((member) => member.id && member.id !== "main" && typeof member.name === "string"
+    && member.name && recipientPrefix(content, member.name) !== null);
+  const longest = Math.max(0, ...matches.map((member) => member.name.length));
+  const exact = matches.filter((member) => member.name.length === longest);
+  return new Set(exact.map((member) => member.id)).size === 1 ? exact[0] : null;
+}
+function renderUserMentions(body, content, mentions, members) {
+  const ranges = Array.isArray(mentions) ? [...mentions].sort((a, b) => a.start - b.start) : [];
+  let cursor = 0;
+  for (const mention of ranges) {
+    if (!Number.isInteger(mention.start) || !Number.isInteger(mention.end) || mention.start < cursor || mention.end <= mention.start
+      || mention.end > content.length || typeof mention.text !== "string" || !mention.text.startsWith("@")
+      || content.slice(mention.start, mention.end) !== mention.text) continue;
+    const member = members.find((member) => member.id === mention.memberId);
+    if (!member) continue;
+    body.append(document.createTextNode(content.slice(cursor, mention.start)));
+    const identity = node("span", "group-message-mention group-user-mention group-agent-identity");
+    agentIdentity(identity, member); identity.title = mention.text; identity.setAttribute("aria-label", mention.text);
+    identity.append(messageAvatar(member, "group-mention-avatar"), node("span", "group-mention-name", mention.text));
+    body.append(identity); cursor = mention.end;
+  }
+  if (cursor) body.append(document.createTextNode(content.slice(cursor)));
+  else body.textContent = content;
+}
+export function messageRow(message, { attachmentUrl, bubble = false, senderAgent, recipientAgent, recipientNames = [], members = [] } = {}) {
   const isUser = message.sender?.type === "user" || message.role === "user";
   const showAgent = bubble && !isUser && senderAgent && message.sender?.type === "agent";
   const row = node("article", bubble ? `message ${isUser ? "user" : "assistant"}` : `collaboration-message ${isUser ? "is-user" : ""}`);
@@ -78,7 +129,14 @@ export function messageRow(message, { attachmentUrl, bubble = false, senderAgent
     if (message.createdAt) { const time = node("time", "muted-note small", new Date(message.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })); time.dateTime = message.createdAt; identity.append(time); }
     row.append(identity);
   }
-  const content = (isUser ? String(message.content || "") : String(message.content || "").replace(/#(?:group|agent)\/[\w-]+/g, "")).trim();
+  let content = (isUser ? String(message.content || "") : String(message.content || "").replace(/#(?:group|agent)\/[\w-]+/g, "")).trim();
+  if (showAgent && recipientAgent) {
+    const names = [...new Set([recipientAgent.name, ...recipientNames])].filter(Boolean).sort((left, right) => right.length - left.length);
+    for (const name of names) {
+      const remainder = recipientPrefix(content, name);
+      if (remainder !== null) { content = remainder; break; }
+    }
+  }
   if (message.attachments?.length) {
     const attachments = node("div", "collaboration-links");
     for (const attachment of message.attachments) {
@@ -90,11 +148,12 @@ export function messageRow(message, { attachmentUrl, bubble = false, senderAgent
   }
   const body = node("div", bubble ? "bubble" : "collaboration-message-body");
   const displayedContent = content || (message.status === "running" ? "正在处理…" : "");
-  if (isUser) body.textContent = displayedContent;
+  const showRecipient = showAgent && recipientAgent && Boolean(String(message.content || "").trim());
+  if (isUser) renderUserMentions(body, displayedContent, message.mentions, members);
   else renderRichText(body, displayedContent);
-  if (showAgent && recipientAgent && displayedContent) prependRecipient(body, recipientAgent);
+  if (showRecipient) prependRecipient(body, recipientAgent);
   if (bubble) {
-    body.hidden = !content && message.status !== "running";
+    body.hidden = !content && !showRecipient && message.status !== "running";
     body.classList.toggle("streaming", message.status === "running" && Boolean(content));
   }
   row.append(body);
@@ -105,11 +164,14 @@ export function messageRow(message, { attachmentUrl, bubble = false, senderAgent
 export function renderMessages(target, messages, selectedTask = "", members = [], tasks = []) {
   const atBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
   target.replaceChildren();
-  const visible = selectedTask ? messages.filter((message) => message.taskId === selectedTask) : messages;
+  const conversation = groupConversations(tasks).find((item) => item.id === selectedTask
+    || item.tasks.some((task) => task.id === selectedTask));
+  const taskIds = new Set(conversation?.tasks.map((task) => task.id) || [selectedTask]);
+  const visible = messages.filter((message) => message.visibility !== "internal" && (!selectedTask || taskIds.has(message.taskId)));
   if (!visible.length) {
     const welcome = node("div", "collaboration-empty");
     welcome.append(node("span", "collaboration-empty-mark", "◎"), node("h2", "", "让不同能力在这里相遇"),
-      node("p", "muted-note", "给出目标，成员会根据自己的能力讨论、认领并推进任务。你可以随时补充信息。"));
+      node("p", "muted-note", "说说你想完成什么，成员会为你处理并在这里回复结果。需要补充信息时也会直接问你。"));
     target.append(welcome);
   }
   const date = conversationDate(visible[0]?.createdAt);
@@ -122,13 +184,20 @@ export function renderMessages(target, messages, selectedTask = "", members = []
     const sender = isUser ? "你" : message.sender?.name || members.find((member) => member.id === message.sender?.id)?.name || "NEUMA";
     const senderAgent = message.sender?.type === "agent"
       ? { ...members.find((member) => member.id === message.sender.id), id: message.sender.id, name: sender } : null;
-    const recipientAgent = message.recipientId === "main" ? null : members.find((member) => member.id === message.recipientId)
-      || tasks.find((task) => task.id === message.taskId)?.participants?.find((member) => member.id === message.recipientId)
-      || messages.find((item) => item.sender?.type === "agent" && item.sender.id === message.recipientId)?.sender;
+    const participants = tasks.find((task) => task.id === message.taskId)?.participants || [];
+    const knownMembers = [...members, ...participants];
+    const legacyRecipient = !message.recipientId && message.sender?.type === "agent"
+      ? leadingRecipient(String(message.content || "").trim(), knownMembers) : null;
+    const recipientAgent = !message.recipientId ? legacyRecipient : message.recipientId === "main" ? null
+      : members.find((member) => member.id === message.recipientId)
+        || participants.find((member) => member.id === message.recipientId)
+        || messages.find((item) => item.sender?.type === "agent" && item.sender.id === message.recipientId)?.sender;
     const recipient = recipientAgent?.name || message.recipientId;
-    const row = messageRow(message, { bubble: true, senderAgent, recipientAgent });
-    row.setAttribute("aria-label", `${sender}发送的消息${recipient ? `，定向发送给${recipient}` : ""}`);
-    row.setAttribute("title", `${sender}${recipient ? ` → ${recipient}` : ""}`);
+    const isMention = !isUser && Boolean(senderAgent);
+    const recipientNames = knownMembers.filter((member) => member.id === recipientAgent?.id).map((member) => member.name);
+    const row = messageRow(message, { bubble: true, senderAgent, recipientAgent, recipientNames, members: knownMembers });
+    row.setAttribute("aria-label", `${sender}发送的消息${recipient ? isMention ? `，提及${recipient}` : `，定向发送给${recipient}` : ""}`);
+    row.setAttribute("title", `${sender}${recipient ? isMention ? ` · @${recipient}` : ` → ${recipient}` : ""}`);
     target.append(row);
   }
   if (atBottom) target.scrollTop = target.scrollHeight;
@@ -157,9 +226,10 @@ export function renderTasks(target, tasks, selected, { onSelect, onStop, members
   target.replaceChildren();
   if (!tasks.length) target.append(node("p", "muted-note", "从一项明确的任务开始。"));
   for (const task of [...tasks].reverse()) {
-    const card = node("article", `group-task-card ${selected === task.id ? "selected" : ""}`);
+    const isSelected = selected === (task.conversationId || task.id);
+    const card = node("article", `group-task-card ${isSelected ? "selected" : ""}`);
     const select = button(task.goal || "协作任务", () => onSelect(task.id), "group-task-title");
-    select.setAttribute("aria-pressed", String(selected === task.id));
+    select.setAttribute("aria-pressed", String(isSelected));
     card.append(select, node("p", "group-task-status", [taskLabels[task.status] || task.status, taskLabels[task.phase] || task.phase].filter(Boolean).join(" · ")));
     for (const child of task.children || []) {
       const assignee = members.find((member) => member.id === child.assigneeId)?.name || child.assigneeId;

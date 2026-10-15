@@ -4,7 +4,8 @@ import { mkdir, lstat, realpath, open, readdir, rename, rm } from "node:fs/promi
 import { join, resolve, dirname } from "node:path";
 import { InputError } from "../requirements/core.mjs";
 
-export const GROUP_LIMITS = Object.freeze({ concurrentMembers: 2, negotiationRounds: 2, executionTurns: 48, turnLimit: 12, recordBytes: 32 * 1024 * 1024 });
+export const GROUP_LIMITS = Object.freeze({ concurrentMembers: 2, negotiationRounds: 2, executionTurns: 48, turnLimit: 12,
+  publicReplyDepth: 2, publicReplyCount: 4, publicReplyTurns: 3, recordBytes: 32 * 1024 * 1024 });
 export const TERMINAL_TASKS = new Set(["completed", "partial", "failed", "cancelled", "interrupted"]);
 export const now = () => new Date().toISOString();
 export function id(value, label = "标识") {
@@ -97,8 +98,12 @@ export function event(record, type, details = {}) {
   const value = { ...details, type, groupId: record.group.id, seq: ++record.group.lastSequence, createdAt: now() };
   record.events.push(value); record.group.updatedAt = value.createdAt; return value;
 }
-export function message(record, sender, content, { taskId = null, recipientId = null, replyTo = null, status = "complete" } = {}) {
+export function message(record, sender, content, { taskId = null, recipientId = null, replyTo = null, status = "complete", visibility, kind } = {}) {
+  if (visibility !== undefined && !["public", "internal"].includes(visibility)) throw new InputError("群消息展示范围无效");
+  if (kind !== undefined && !["negotiation", "coordination", "member_result", "delivery", "reply", "clarification", "status"].includes(kind)) throw new InputError("群消息类型无效");
   const value = { id: randomUUID(), sender, content, taskId, recipientId, replyTo, status, createdAt: now() };
+  if (visibility !== undefined) value.visibility = visibility;
+  if (kind !== undefined) value.kind = kind;
   value.seq = event(record, "message", { messageId: value.id, taskId, agentId: sender.type === "agent" ? sender.id : null }).seq;
   record.messages.push(value); return value;
 }
@@ -120,6 +125,14 @@ export class GroupStore {
       for (const task of record.tasks) if (["queued", "running", "negotiating", "waiting"].includes(task.status)) {
         task.status = "interrupted"; task.reason = "服务已重启，请检查已有成果后创建新任务继续"; task.updatedAt = now(); task.generation++;
         for (const job of task.jobs) if (["queued", "running"].includes(job.status)) job.status = "interrupted";
+        if (task.replyRelay?.status === "running") {
+          task.replyRelay.status = "interrupted";
+          for (const request of task.replyRelay.requests) if (["queued", "running"].includes(request.status)) {
+            request.status = "interrupted";
+            const source = record.messages.find((value) => value.id === request.sourceMessageId);
+            if (source) source.replyRequestStatus = "interrupted";
+          }
+        }
         for (const child of task.children) if (["queued", "running", "waiting"].includes(child.status)) child.status = "interrupted";
         event(record, "task", { taskId: task.id, status: task.status }); changed = true;
       }

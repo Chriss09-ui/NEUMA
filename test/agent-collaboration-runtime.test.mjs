@@ -14,6 +14,13 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 const input = (id, goal) => ({ id, name: `成员 ${id}`, draft: validDraft(goal) });
 const round = (agentId = "a", sessionId = "collaboration-session-12345", overrides = {}) => ({ agentId, revision: 1, sessionId,
   scope: { groupId: "group-one", taskId: "task-one" }, message: "处理当前共享任务", systemContext: "只处理本群本任务", ...overrides });
+const routingTools = (submit = async () => ({ content: [{ type: "text", text: "accepted" }], details: {}, terminate: true })) => [
+  { name: "read_group_turn_context", parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: async () => ({ content: [{ type: "text", text: "本轮公开上下文" }], details: {} }) },
+  { name: "submit_group_route", parameters: { type: "object", properties: {}, additionalProperties: false }, execute: submit },
+];
+const routingRound = (sessionId = "routing-session-12345", overrides = {}) => round("a", sessionId, {
+  role: "routing", allowBusinessTools: false, customTools: routingTools(), ...overrides });
 
 async function fixture(t, run = async () => {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-collaboration-runtime-")), records = [];
@@ -54,6 +61,8 @@ test("群短会话不含私人记忆/材料工具，协商只装群工具，工�
   assert.deepEqual(await agents.executeCollaboration(round("a", undefined, { allowBusinessTools: false, customTools: [claim] })), { reply: "", turns: 1 });
   const first = executions()[0];
   assert.deepEqual(Object.keys(first.tools), ["claim_work"]);
+  assert.match(first.options.systemPrompt, /对话回复或协商/);
+  assert.doesNotMatch(first.options.systemPrompt, /仅用于协商认领/);
   assert.doesNotMatch(JSON.stringify(first.options.systemPrompt) + first.prompts.join(""), /PRIVATE_MEMORY_FIXTURE|list_materials|read_material/);
   assert.equal(first.disposed, true); assert.equal(first.autoCompaction, false);
   await agents.executeCollaboration(round("a", "second-group-session-12345"));
@@ -62,6 +71,68 @@ test("群短会话不含私人记忆/材料工具，协商只装群工具，工�
   const activity = (await agents.activitySnapshot()).activities;
   assert.equal(activity.length, 2); assert.equal(activity.every((item) => item.status === "complete"), true);
   assert.deepEqual(activity[0].scope, { groupId: "group-one", taskId: "task-one" });
+});
+
+test("平台寻址借用配置但不继承成员身份、工作指令、私人记忆或业务工具", async (t) => {
+  const { agents, executions } = await fixture(t, async (record) => {
+    record.reply = "";
+    await record.tools.read_group_turn_context.execute("context", {});
+    await record.tools.submit_group_route.execute("route", {});
+  });
+  await agents.setMemory("a", "PRIVATE_MEMORY_FIXTURE");
+  await agents.setProfile("a", { name: "PRIVATE_AGENT_NAME_FIXTURE", description: "公开简介", icon: "star:0:0" });
+  agents.agents.set("a", { ...agents.agents.get("a"), instructions: "PRIVATE_AGENT_INSTRUCTIONS_FIXTURE" });
+  agents.approvedDefinition = () => true;
+  agents.businessTools = async () => { throw new Error("寻址不得装配业务工具"); };
+  const capabilityVersion = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0].capabilityVersion;
+  assert.deepEqual(await agents.executeCollaboration(routingRound(undefined, { capabilityVersion,
+    systemContext: "只提交接收者，不生成群回复", message: "验收检查员打个招呼啊" })), { reply: "", turns: 1 });
+  const record = executions()[0], prompt = record.options.systemPrompt + record.prompts.join("");
+  assert.deepEqual(Object.keys(record.tools), ["read_group_turn_context", "submit_group_route"]);
+  assert.match(record.options.systemPrompt, /中立群消息寻址器/);
+  assert.doesNotMatch(prompt, /PRIVATE_AGENT_NAME_FIXTURE|PRIVATE_AGENT_INSTRUCTIONS_FIXTURE|PRIVATE_MEMORY_FIXTURE|Agent 工作指令|你是 NEUMA 的群成员|web_search|list_materials/);
+  assert.deepEqual(JSON.parse(record.prompts[0].split("\n")[0].replace("平台核实的群范围：", "")), {
+    groupId: "group-one", taskId: "task-one", identity: "group-routing" });
+  assert.equal(record.options.config.llmConfigured, true);
+  assert.equal(typeof record.options.beforeModelRequest, "function");
+  assert.equal(record.autoCompaction, false); assert.equal(record.disposed, true);
+  assert.equal(agents.scheduler.snapshot().running, 0);
+});
+
+test("平台寻址严格拒绝角色、业务权限提升和额外工具，不创建模型会话", async (t) => {
+  const { agents, executions } = await fixture(t);
+  for (const role of ["router", "", null, true, {}]) await assert.rejects(
+    agents.executeCollaboration(routingRound(undefined, { role })), /参数无效/);
+  await assert.rejects(agents.executeCollaboration(routingRound(undefined, { allowBusinessTools: true })), /参数无效/);
+  const arbitrary = { name: "arbitrary_tool", execute: async () => ({}) };
+  for (const customTools of [[], routingTools().slice(0, 1), [...routingTools(), arbitrary], [routingTools()[0], arbitrary]])
+    await assert.rejects(agents.executeCollaboration(routingRound(undefined, { customTools })), /群寻址仅允许/);
+  await assert.rejects(agents.executeCollaboration(routingRound(undefined, {
+    customTools: [...routingTools(), { name: "write_workspace_file", execute: async () => ({}) }] })), /权限冲突/);
+  assert.equal(executions().length, 0); assert.equal(agents.scheduler.snapshot().running, 0);
+});
+
+test("平台寻址提交继续核实能力版本，取消后不调用提交工具", async (t) => {
+  let submitCalls = 0, invalidate = true, started, release;
+  const waiting = new Promise((resolve) => { started = resolve; });
+  const { agents, executions } = await fixture(t, async (record) => {
+    if (invalidate) agents.config.llmConfigured = false;
+    else { started(); await new Promise((resolve) => { release = resolve; }); }
+    await record.tools.submit_group_route.execute("route", {});
+  });
+  const capabilityVersion = (await agents.capabilityCards({ agentIds: ["a"] })).agents[0].capabilityVersion;
+  const customTools = routingTools(async () => { submitCalls++; return { content: [], details: {}, terminate: true }; });
+  await assert.rejects(agents.executeCollaboration(routingRound(undefined, { capabilityVersion, customTools })), /能力或连接配置已改变/);
+  assert.equal(submitCalls, 0);
+  agents.config.llmConfigured = true; invalidate = false;
+  const controller = new AbortController();
+  const running = agents.executeCollaboration(routingRound("cancel-routing-session-12345", { customTools }), undefined, { signal: controller.signal });
+  const rejected = assert.rejects(running, (error) => error.diagnostic?.reason === "cancelled");
+  await waiting; controller.abort(); release(); await rejected;
+  assert.equal(submitCalls, 0);
+  assert.equal(executions().every((record) => record.disposed), true);
+  assert.equal(agents.scheduler.snapshot().running, 0);
+  assert.equal((await agents.activitySnapshot()).activities.find((item) => item.sessionId === "cancel-routing-session-12345").status, "cancelled");
 });
 
 test("群业务文件工具与专用程序仅使用当前群/任务子目录，无法读取私人和其他群文件", async (t) => {
@@ -336,5 +407,32 @@ test("真实 Pi 群工具终止无额外回执，上限阻止第二个模型请�
   await assert.rejects(agents.executeCollaboration(round("a", "real-limit-session-12345", {
     allowBusinessTools: false, maxTurns: 1, customTools: [tool(false)] })), (error) => error.diagnostic?.reason === "turn_limit");
   assert.equal(requests, 2, "两个群轮次各发一个请求，上限不允许自动发第二次请求");
+  assert.equal(agents.scheduler.snapshot().running, 0);
+});
+
+test("真实 Pi 平台寻址请求仅包含中立系统身份与两个只读决策工具", async (t) => {
+  const { agents } = await fixture(t), requests = [];
+  await agents.setMemory("a", "PRIVATE_MEMORY_FIXTURE");
+  await agents.setProfile("a", { name: "PRIVATE_AGENT_NAME_FIXTURE", description: "公开简介", icon: "star:0:0" });
+  agents.agents.set("a", { ...agents.agents.get("a"), instructions: "PRIVATE_AGENT_INSTRUCTIONS_FIXTURE" });
+  agents.approvedDefinition = () => true;
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks)));
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "routing-fixture", object: "chat.completion.chunk", created: 1,
+      model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "route", type: "function", function: { name: "submit_group_route", arguments: "{}" } }] });
+    chunk({}, "tool_calls"); response.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve, reject) => { model.once("error", reject); model.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => model.close(resolve)));
+  Object.assign(agents.config, { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" });
+  agents.sessionFactory = createPiSession;
+  assert.deepEqual(await agents.executeCollaboration(routingRound("real-routing-session-12345", { maxTurns: 1 })), { reply: "", turns: 1 });
+  assert.equal(requests.length, 1, "寻址提交后不再请求模型生成成员回执");
+  assert.deepEqual(requests[0].tools.map((tool) => tool.function.name), ["read_group_turn_context", "submit_group_route"]);
+  assert.match(JSON.stringify(requests[0].messages), /中立群消息寻址器|group-routing/);
+  assert.doesNotMatch(JSON.stringify(requests[0].messages), /PRIVATE_AGENT_NAME_FIXTURE|PRIVATE_AGENT_INSTRUCTIONS_FIXTURE|PRIVATE_MEMORY_FIXTURE|Agent 工作指令|你是 NEUMA 的群成员|web_search|list_materials/);
   assert.equal(agents.scheduler.snapshot().running, 0);
 });

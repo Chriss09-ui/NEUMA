@@ -26,6 +26,10 @@ async function fixture(t, { durableMain = false } = {}) {
   const agents = { ready: Promise.resolve(), close: async () => {}, capabilityCards: async () => ({ agents: cards }), activitySnapshot: async () => ({ activities: [] }),
     file: async (_id, path) => ({ path, content: "真实文件内容", truncated: false }),
     executeCollaboration: async (input, _progress, { signal }) => {
+      if (input.role === "routing") {
+        await input.customTools.find((tool) => tool.name === "submit_group_route").execute("route", { mode: "default" }, signal);
+        return { reply: "", turns: 1 };
+      }
       const payload = JSON.parse(input.message), tool = input.customTools.find((value) => value.name === "submit_group_intent" || value.name === "submit_group_turn");
       await tool.execute("call-1", tool.name === "submit_group_intent" ? { participate: true, contribution: "读取资料形成报告", willingToIntegrate: true, integratorId: "analyst" }
         : { status: "complete", result: payload.kind === "integration" ? "完成最终报告" : "实际分析结果" }, signal);

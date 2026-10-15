@@ -477,6 +477,22 @@ test("输入法确认和 Shift+Enter 不提交，普通 Enter 提交一次", () 
   assert.equal(input.submissions, 1);
 });
 
+test("提及候选打开时全局回车让给选择器，选择完成后的下一次回车才发送", () => {
+  const { get } = setup(), input = get("group-message");
+  input.setAttribute("aria-autocomplete", "list"); input.setAttribute("aria-expanded", "true");
+  input.value = "@";
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && input.getAttribute("aria-expanded") === "true") {
+      event.preventDefault(); input.value = "@资料研究员 "; input.setAttribute("aria-expanded", "false");
+    }
+  });
+  const key = () => ({ type: "keydown", key: "Enter", preventDefault() { this.defaultPrevented = true; } });
+  input.dispatchEvent(key());
+  assert.equal(input.value, "@资料研究员 "); assert.equal(input.submissions, undefined);
+  input.dispatchEvent(key()); assert.equal(input.submissions, 1);
+  input.dispatchEvent({ ...key(), defaultPrevented: true }); assert.equal(input.submissions, 1);
+});
+
 test("Agent 与群输入框随宽度重新增高，同宽高度通知不递归，隐藏后恢复仍重新计算", () => {
   const { get, resizeObservers } = setup({ resizeObserver: true });
   assert.equal(resizeObservers.length, 2);

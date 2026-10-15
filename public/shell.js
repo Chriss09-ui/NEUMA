@@ -208,7 +208,8 @@ for (const textarea of document.querySelectorAll(".composer textarea")) {
   };
   textarea.addEventListener("input", resize);
   textarea.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    const choosingMention = textarea.getAttribute("aria-autocomplete") === "list" && textarea.getAttribute("aria-expanded") === "true";
+    if (event.defaultPrevented || choosingMention || event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
     textarea.form.requestSubmit();
   });
