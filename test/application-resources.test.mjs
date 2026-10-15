@@ -20,6 +20,10 @@ test("resources use distinct origins, only serve manifest and inject bound bridg
   const { service, config } = await fixture(t);
   const first = await service.open(config), second = await service.open({ ...config, agentId: "agent-b" });
   assert.notEqual(first.origin, second.origin);
+  assert.deepEqual(service.assertInstance("agent-a", first.instanceId, config.deliveryVersion),
+    { instanceId: first.instanceId, agentId: "agent-a", deliveryVersion: config.deliveryVersion });
+  assert.throws(() => service.assertInstance("agent-b", first.instanceId, config.deliveryVersion), /其他 Agent/);
+  assert.throws(() => service.assertInstance("agent-a", first.instanceId, "old-version"), /版本/);
   const response = await fetch(first.url), html = await response.text();
   assert.equal(response.status, 200); assert.ok(html.indexOf("__NEUMA_APPLICATION__") < html.indexOf("window.started"));
   assert.match(response.headers.get("content-security-policy"), /connect-src 'none'/);
@@ -29,6 +33,7 @@ test("resources use distinct origins, only serve manifest and inject bound bridg
   }
   await assert.rejects(service.close("agent-b", first.instanceId), /其他 Agent/);
   await service.close("agent-a", first.instanceId);
+  assert.throws(() => service.assertInstance("agent-a", first.instanceId, config.deliveryVersion), /已关闭/);
   await assert.rejects(fetch(first.url));
   assert.equal((await fetch(second.url)).status, 200);
 });

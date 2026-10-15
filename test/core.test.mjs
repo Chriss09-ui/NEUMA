@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CONFIRMATION_QUESTION, decideNext, emptyDraft, processTurn, ProviderError } from "../src/requirements/core.mjs";
+import { CONFIRMATION_QUESTION, decideNext, emptyDraft, normalizeDraft, processTurn, ProviderError } from "../src/requirements/core.mjs";
 
 function completeDraft() {
   const draft = emptyDraft();
@@ -33,6 +33,39 @@ function jevAnswers(overrides = {}) {
     },
   };
 }
+
+test("页面入口与助手选择进入确认摘要，旧草稿不回填助手", async () => {
+  const legacy = completeDraft();
+  assert.deepEqual(normalizeDraft(legacy), legacy);
+  legacy.interaction = { defaultEntry: "conversation", page: false, operations: [], inputs: "", results: "", persistentData: "" };
+  assert.equal(Object.hasOwn(normalizeDraft(legacy).interaction, "assistant"), false);
+  for (const assistant of [{ enabled: false, purpose: "" }, { enabled: true, purpose: "解释当前图形并调整已有参数" }]) {
+    const draft = { ...completeDraft(), interaction: { ...legacy.interaction, defaultEntry: "application", page: true, assistant } };
+    const result = await processTurn({ message: "以后打开这个页面使用", draft: null }, {
+      generateDraft: async () => ({ draft, proposedGap: "none", question: "" }),
+    });
+    assert.equal(result.status, "ready"); assert.equal(result.confirmed, false);
+    assert.deepEqual(result.draft.interaction.assistant, assistant);
+    assert.match(result.summary, /打开方式：以交互页面为主/);
+    assert.ok(result.summary.includes(assistant.enabled ? assistant.purpose : "无需浮窗助手"));
+    const confirmed = await processTurn({ message: "确认", draft: result.draft, lastQuestion: result.confirmationQuestion }, {
+      generateDraft: async () => assert.fail("明确确认无需再次生成"),
+    });
+    assert.equal(confirmed.confirmed, true); assert.deepEqual(confirmed.draft, result.draft);
+  }
+});
+
+test("缺少页面或用途的助手选择不能交接，模型不能用字符串伪造开关", async () => {
+  const draft = completeDraft();
+  for (const interaction of [{ defaultEntry: "application", page: false },
+    { page: true, assistant: { enabled: true, purpose: "" } },
+    { page: false, assistant: { enabled: true, purpose: "解释图形" } }]) {
+    assert.equal(decideNext(normalizeDraft({ ...draft, interaction })).status, "needs_input");
+  }
+  await assert.rejects(processTurn({ message: "需要页面", draft: null }, {
+    generateDraft: async () => ({ draft: { ...draft, interaction: { page: true, assistant: { enabled: "false", purpose: "" } } } }),
+  }), ProviderError);
+});
 
 test("完整会议需求直接可交接，不安排例行追问", async () => {
   const result = await processTurn({ message: "我提供会议转写，请提取结论和待办，输出结论和待办列表，方便会后追踪责任人", draft: null }, {

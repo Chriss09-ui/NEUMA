@@ -1,24 +1,34 @@
 import { createApplicationApi } from "./application-api.js";
 import { installApplicationHostBridge } from "./application-bridge.js";
 import { createApplicationTasks } from "./application-tasks.js";
+import { createApplicationAssistant } from "./application-assistant.js";
+import { activateApplicationContext, setApplicationContext, clearApplicationContext, getApplicationActionContext,
+  releaseApplicationContext, applicationTaskEvent } from "./application-context.js";
 
-export function applicationMode(storage, id) {
-  try { return storage?.getItem(`neuma.agent.application-mode.v1.${id}`) === "chat" ? "chat" : "application"; }
-  catch { return "application"; }
+export function applicationMode(storage, id, defaultEntry = "application") {
+  try {
+    const selected = storage?.getItem(`neuma.agent.application-mode.v1.${id}`);
+    if (["chat", "application"].includes(selected)) return selected;
+  } catch {}
+  return ["conversation", "chat"].includes(defaultEntry) ? "chat" : "application";
 }
 
 export function createApplicationWorkspace({ document, window, api, storage }) {
   const byId = (id) => document.getElementById(id), root = byId("agent-workspace"), panel = byId("agent-application");
   let currentId = null, current = null, mode = "application", assistant = false, settingsOpen = false, instance = null, frame = null;
   let detachBridge = null, generation = 0, opening = false, materialResolve = null;
+  const floatingAssistant = createApplicationAssistant({ document, window, root, storage });
   const settings = () => document.dispatchEvent(new CustomEvent("neuma:agent-connections-open"));
   const artifacts = () => byId("agent-artifacts-open").click();
   const tasks = createApplicationTasks({ document, api, list: byId("agent-application-task-list"), status: byId("agent-application-task-status"), onArtifacts: artifacts,
+    onChanged: (task) => detachBridge?.notifyTask?.(applicationTaskEvent(currentId, task)),
     onCompleted: (agentId) => document.dispatchEvent(new CustomEvent("neuma:agent-artifacts-changed", { detail: { agentId } })) });
   function render() {
     const available = Boolean(current?.pageReady && current.manifest?.page);
     const appMode = available && mode === "application";
-    const assistantVisible = appMode && assistant && !settingsOpen;
+    const assistantAllowed = current?.assistant?.enabled !== false;
+    const assistantVisible = appMode && assistantAllowed && assistant && !settingsOpen;
+    floatingAssistant.show(assistantVisible);
     const conversation = byId("agent-conversation");
     conversation.inert = appMode && !assistantVisible;
     conversation.setAttribute("aria-hidden", String(conversation.inert));
@@ -26,10 +36,10 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
     const actionsHost = byId(assistantVisible ? "agent-assistant-actions" : "agent-chat-actions");
     if (actions.parentElement !== actionsHost) actionsHost.append(actions);
     byId("agent-view-switch").hidden = !available;
-    byId("agent-assistant-toggle").hidden = !appMode || settingsOpen;
-    byId("agent-assistant-toggle").disabled = settingsOpen;
+    byId("agent-assistant-toggle").hidden = !appMode || settingsOpen || !assistantAllowed;
+    byId("agent-assistant-toggle").disabled = settingsOpen || !assistantAllowed;
     byId("agent-new-chat").hidden = appMode && !assistantVisible;
-    byId("agent-assistant-toggle").setAttribute("aria-expanded", String(assistantVisible));
+    byId("agent-assistant-toggle").setAttribute("aria-expanded", String(assistantVisible && floatingAssistant.isExpanded()));
     byId("agent-view-application").setAttribute("aria-pressed", String(mode === "application"));
     byId("agent-view-chat").setAttribute("aria-pressed", String(mode === "chat"));
     root.classList.toggle("has-application", available);
@@ -47,6 +57,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
     generation++; opening = false;
     detachBridge?.(); detachBridge = null;
     const previous = instance; instance = null;
+    if (previous) releaseApplicationContext(previous.agentId, previous.instanceId);
     frame?.remove(); frame = null;
     if (previous) void api.close(previous.agentId, previous.instanceId, { keepalive }).catch(() => {});
     tasks.stop();
@@ -67,12 +78,22 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
       if (address.origin !== result.origin || !["http:", "https:"].includes(address.protocol)
         || result.origin === window.location.origin || result.deliveryVersion !== current.deliveryVersion) throw new Error("页面来源或交付版本不一致，请重新打开应用。");
       instance = { ...result, agentId: id };
+      activateApplicationContext(id, instance);
       frame = document.createElement("iframe"); frame.title = `${byId("agent-title").textContent}应用`;
       frame.className = "application-frame"; frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
       frame.setAttribute("referrerpolicy", "no-referrer");
       detachBridge = installApplicationHostBridge({ window, frame, instance, agentId: id, api, onTasks: tasks.refresh,
-        onSettings: settings, onArtifacts: artifacts, selectMaterials });
-      frame.addEventListener("load", () => { if (currentId === id && version === generation) byId("agent-application-loading").hidden = true; });
+        onSettings: settings, onArtifacts: artifacts, selectMaterials,
+        getContext: () => getApplicationActionContext(id),
+        onAssistantContext: (snapshot) => snapshot === null ? clearApplicationContext(id, result.instanceId) : setApplicationContext(id, result.instanceId, snapshot),
+        onAssistantOpen: () => {
+          if (currentId !== id || version !== generation || settingsOpen || current?.assistant?.enabled === false) return { opened: false };
+          assistant = true; floatingAssistant.expand(); render(); byId("agent-message").focus(); return { opened: true };
+        } });
+      frame.addEventListener("load", () => {
+        if (currentId !== id || version !== generation) return;
+        byId("agent-application-loading").hidden = true;
+      });
       frame.src = result.url; byId("agent-application-frame-host").append(frame);
       tasks.start(id);
     } catch (error) {
@@ -104,8 +125,17 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
     render(); if (mode === "application") void openResource(); else byId("agent-message").focus();
   });
   byId("agent-assistant-toggle").addEventListener("click", () => {
-    if (settingsOpen) return;
-    assistant = !assistant; render(); if (assistant) byId("agent-message").focus();
+    if (settingsOpen || current?.assistant?.enabled === false) return;
+    if (current?.assistant?.enabled === true) { assistant = true; floatingAssistant.toggle(); }
+    else { assistant = !assistant; if (assistant) floatingAssistant.expand(); }
+    render(); if (assistant) byId("agent-message").focus();
+  });
+  document.addEventListener("neuma:agent-message-started", (event) => {
+    if (event.detail?.agentId !== currentId || !assistant) return;
+    floatingAssistant.expand(); render();
+  });
+  document.addEventListener("neuma:agent-turn-finished", (event) => {
+    if (event.detail?.agentId === currentId && instance) void tasks.refresh();
   });
   document.addEventListener("neuma:agent-settings-view", (event) => {
     if (!currentId || event.detail?.agentId !== currentId) return;
@@ -121,11 +151,13 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
   byId("application-material-dialog").addEventListener("close", () => { materialResolve?.resolve({ materials: [] }); materialResolve = null; });
   return {
     route(id) {
-      if (id !== currentId) { closeResource(); currentId = id; current = null; assistant = false; settingsOpen = false; mode = applicationMode(storage, id); byId("application-material-dialog").close(); }
+      if (id !== currentId) { closeResource(); currentId = id; current = null; assistant = false; settingsOpen = false; mode = applicationMode(storage, id); floatingAssistant.select(id); byId("application-material-dialog").close(); }
       render();
     },
     update(id, application) {
       if (id !== currentId) return;
+      if (!current && application) { mode = applicationMode(storage, id, application.defaultEntry); assistant = application.assistant?.enabled === true; }
+      else if (current?.assistant?.enabled !== application?.assistant?.enabled) assistant = application?.assistant?.enabled === true;
       if (current?.deliveryVersion !== application?.deliveryVersion || !application?.pageReady) closeResource();
       current = application; render();
       if (mode === "application") void openResource();

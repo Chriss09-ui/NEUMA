@@ -71,7 +71,7 @@ export function groupCapabilityFacts({ agent, agentId = agent?.id, architecture,
   });
   if (agent?.execution?.kind === "node-action") {
     const manifest = application?.manifest;
-    add("run_application_action", "应用动作入口；必须选择下列具体 action 能力，入口存在不代表所有动作都具备执行条件", {
+    if (!manifest || manifest.actions.length > 0) add("run_application_action", "应用动作入口；必须选择下列具体 action 能力，入口存在不代表所有动作都具备执行条件", {
       label: "执行应用动作", availability: manifest ? "conditional" : deliveryFailed ? "unavailable" : "unknown",
       reason: manifest ? "需要先选择已验收的具体动作并满足该动作全部连接条件" : "应用交付未能核对，不能推定具体动作可用",
       requirements: ["必须使用具体 action 能力及其输入契约，不能绕过动作连接要求"],

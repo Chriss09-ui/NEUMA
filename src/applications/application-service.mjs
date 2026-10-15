@@ -3,6 +3,8 @@ import { InputError } from "../requirements/core.mjs";
 import { ApplicationTaskStore, taskFinished } from "./task-store.mjs";
 import { ApplicationResources } from "./application-resources.mjs";
 import { validateApplicationManifest, validateActionInput, validateActionOutput } from "./application-contract.mjs";
+import { normalizeApplicationContext, applicationContextBinding, applicationInteraction, applicationActionCatalog,
+  applicationConversationContext } from "./application-context.mjs";
 
 const cleanError = (error) => error instanceof InputError ? error.message : "应用操作未完成，请检查输入、连接和运行环境后重试";
 
@@ -35,14 +37,28 @@ export class ApplicationService {
   }
   async summary(id) {
     const descriptor = await this.descriptor(id, { optional: true });
-    if (!descriptor) return { manifest: null, pageReady: false, actions: [], deliveryVersion: null };
+    if (!descriptor) return { manifest: null, pageReady: false, actions: [], deliveryVersion: null, ...applicationInteraction(null) };
     const connectionSnapshot = await this.agents.connections.snapshot(id);
     const ids = new Set(connectionSnapshot.connections.map((connection) => connection.id));
     const actions = descriptor.manifest.actions.map((action) => {
       const missingConnections = action.connectionIds.filter((id) => !ids.has(id));
       return { id: action.id, title: action.title, label: action.title, ready: !missingConnections.length, missingConnections };
     });
-    return { manifest: descriptor.manifest, deliveryVersion: descriptor.deliveryVersion, pageReady: Boolean(descriptor.manifest.page), actions };
+    return { manifest: descriptor.manifest, deliveryVersion: descriptor.deliveryVersion, pageReady: Boolean(descriptor.manifest.page), actions,
+      ...applicationInteraction(descriptor) };
+  }
+  async validateContext(id, value, descriptor) {
+    const context = normalizeApplicationContext(value);
+    if (!context) return null;
+    const current = descriptor ?? await this.descriptor(id);
+    if (context.deliveryVersion !== current.deliveryVersion) throw new InputError("页面上下文的应用交付版本已变化，请重新打开页面");
+    this.resources.assertInstance(id, context.instanceId, context.deliveryVersion);
+    return context;
+  }
+  async conversationContext(id, value) {
+    const descriptor = await this.descriptor(id, { optional: true });
+    const context = await this.validateContext(id, value, descriptor);
+    return { context, prompt: applicationConversationContext(descriptor, context) };
   }
   async open(id, parentOrigin, signal) {
     const descriptor = await this.descriptor(id);
@@ -58,16 +74,24 @@ export class ApplicationService {
     if (body.deliveryVersion !== undefined && body.deliveryVersion !== deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
     return this.store.setState(id, body, { stateVersion: manifest.stateVersion });
   }
-  async submit(id, body, { source = { kind: "application", scope: "private" }, signal, heldLease = false, workspaceRoot, materialTools, allowNetwork = true } = {}) {
+  async submit(id, body, { source = { kind: "application", scope: "private" }, signal, heldLease = false, workspaceRoot, materialTools, allowNetwork = true,
+    validatedApplicationContext } = {}) {
     const descriptor = await this.descriptor(id);
     if (body.deliveryVersion !== undefined && body.deliveryVersion !== descriptor.deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
+    // A conversation owns its already-validated snapshot even after its viewing
+    // instance closes. Public submissions always take the live validation path.
+    const applicationContext = validatedApplicationContext === undefined
+      ? await this.validateContext(id, body.applicationContext, descriptor) : normalizeApplicationContext(validatedApplicationContext);
+    if (applicationContext && applicationContext.deliveryVersion !== descriptor.deliveryVersion)
+      throw new InputError("页面上下文的应用交付版本已变化，请重新打开页面");
+    const taskSource = { ...source, ...(applicationContext ? { applicationContext: applicationContextBinding(applicationContext) } : {}) };
     const action = descriptor.manifest.actions.find((action) => action.id === body.actionId);
     if (!action) throw new InputError("应用没有这个已验收动作");
     validateActionInput(action, body.input);
     const connectionSnapshot = await this.agents.connections.snapshot(id);
     for (const connectionId of action.connectionIds) await this.agents.connections.assertActive(connectionSnapshot, connectionId);
     const { task, created } = await this.store.create(id, { actionId: action.id, input: body.input, mutationId: body.mutationId,
-      source, deliveryVersion: descriptor.deliveryVersion, revision: descriptor.agent.revision,
+      source: taskSource, deliveryVersion: descriptor.deliveryVersion, revision: descriptor.agent.revision,
       configVersion: connectionSnapshot.version, connectionVersions: connectionSnapshot.connections, allowNetwork });
     if (created) {
       const controller = new AbortController();
@@ -163,13 +187,16 @@ export class ApplicationService {
     const failure = outcomes.find((outcome) => outcome.status === "rejected");
     if (failure) throw failure.reason;
   }
-  async tools(agent, { scope = "private", workspaceRoot, materialTools, allowNetwork = () => true } = {}) {
+  async tools(agent, { scope = "private", workspaceRoot, materialTools, allowNetwork = () => true, getApplicationContext = () => null } = {}) {
     const { manifest, deliveryVersion } = await this.descriptor(agent.id);
-    return [{ name: "run_application_action", label: "执行应用操作", description: "执行已交付应用动作，与页面共用持久任务及状态。以真实任务结果回答。",
+    if (!manifest.actions.length) return [];
+    return [{ name: "run_application_action", label: "执行应用操作", description: `执行已交付应用动作，与页面共用持久任务及状态。以真实任务结果回答。仅按以下动作输入契约传参：${JSON.stringify(applicationActionCatalog(manifest))}`,
       parameters: { type: "object", properties: { actionId: { type: "string", enum: manifest.actions.map((action) => action.id) }, input: { type: "object" } }, required: ["actionId", "input"], additionalProperties: false },
       executionMode: "sequential", execute: async (callId, params, signal) => {
-        const submitted = await this.submit(agent.id, { ...params, deliveryVersion, mutationId: /^[\w-]{8,100}$/.test(callId) ? callId : randomUUID() },
-          { source: { kind: scope === "private" ? "conversation" : "group", scope }, heldLease: true, workspaceRoot, materialTools, signal, allowNetwork: allowNetwork() });
+        const submitted = await this.submit(agent.id, { ...params, deliveryVersion,
+          mutationId: /^[\w-]{8,100}$/.test(callId) ? callId : randomUUID() },
+          { source: { kind: scope === "private" ? "conversation" : "group", scope }, heldLease: true, workspaceRoot, materialTools, signal,
+            allowNetwork: allowNetwork(), validatedApplicationContext: getApplicationContext() });
         const task = await this.wait(agent.id, submitted.taskId);
         return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id, status: task.status, result: task.result, error: task.error }) }], details: {} };
       } }];

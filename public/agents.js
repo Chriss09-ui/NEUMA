@@ -8,6 +8,7 @@ import { createAgentMakingView } from "./agent-build-view.js";
 import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "./agent-avatar.js";
 import { conversationDate } from "./group-view.js";
 import { createSidebarHistory } from "./sidebar-history.js";
+import { getApplicationContext } from "./application-context.js";
 
 installAvatarMotion(document, window);
 
@@ -885,12 +886,14 @@ async function sendMessage() {
     || (library.loading && library.selection === library.loading.selection)
     || item.deleting || (!item.loaded && item.saveVersion)) return;
   if (message.length > 4000) return showError("任务输入需为 1～4000 字。");
+  const applicationContext = getApplicationContext(agent.id);
   const turnHistory = agentHistory(item.messages, state.definition.revision);
   const user = addUserMessage(item.messages, message, attachmentRefs);
   user.revision = String(state.definition.revision);
   const reply = { role: "assistant", content: "", status: "thinking", label: "正在处理任务…", revision: user.revision };
   const operation = { controller: new AbortController(), reply, avatarActivity: "thinking" };
   item.turn = operation;
+  document.dispatchEvent(new CustomEvent("neuma:agent-message-started", { detail: { agentId: agent.id, sessionId: item.sessionId } }));
   item.loaded = true;
   item.messages.push(reply);
   item.saved = false;
@@ -903,6 +906,7 @@ async function sendMessage() {
   void history.changed(agent.id, item, { immediate: true });
   try {
     const result = await api.turn({ agentId: agent.id, sessionId: item.sessionId, message, history: turnHistory,
+      ...(applicationContext ? { applicationContext } : {}),
       ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}) }, {
       signal: operation.controller.signal, onProgress(progress) {
         if (operation.controller.signal.aborted) return;
@@ -939,6 +943,7 @@ async function sendMessage() {
       if (user.delivery !== "sent") item.userRows.get(user)?.replaceWith(userRow(agent.id, item, user));
     }
     if (item.turn === operation) item.turn = item.replyView = null;
+    document.dispatchEvent(new CustomEvent("neuma:agent-turn-finished", { detail: { agentId: agent.id } }));
     syncAvatarActivity(agent);
     await history.changed(agent.id, item, { immediate: true });
     if (visible(agent.id, item)) {

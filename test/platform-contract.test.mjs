@@ -49,7 +49,7 @@ test("平台事实保留业务快照并单独声明公共工具与可交付路�
 
 test("公共能力的实现许可与每次调用结果分别声明，有效候选目录包含联网但不改旧业务目录", () => {
   const snapshot = createPlatformSnapshot();
-  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.version, 3);
   assert.deepEqual(snapshot.availabilitySemantics, { available: "implemented_and_permitted", verification: "result_specific" });
   assert.deepEqual(snapshot.publicCapabilities.map((item) => item.id), snapshot.publicTools);
   for (const item of snapshot.publicCapabilities) {
@@ -153,6 +153,24 @@ test("固定保存的 v1 平台快照仍按原版本验证，不追加联网能�
   const forged = structuredClone(snapshot);
   forged.publicCapabilities = createPlatformSnapshot().publicCapabilities;
   assert.throws(() => renderPlatformRules(forged), InputError);
+});
+
+test("v3 页面助手和检查能力不回填或改写旧 v2 平台快照", () => {
+  const current = createPlatformSnapshot();
+  assert.equal(current.applicationExperience.context.maxBytes, 16 * 1024);
+  assert.equal(current.applicationExperience.codeModification, false);
+  assert.equal(current.applicationExperience.verification.browser, "unverified");
+  const legacy = structuredClone(current); legacy.version = 2; delete legacy.applicationExperience;
+  const before = structuredClone(legacy);
+  assert.equal(validatePlatformMetadata(record({ platformSnapshot: legacy })), true);
+  assert.equal(platformEvidence(legacy).id, "neuma-runtime-v2");
+  assert.deepEqual(platformCapabilityCatalog(legacy), platformCapabilityCatalog(current));
+  assert.deepEqual(legacy, before);
+  assert.doesNotMatch(renderPlatformRules(legacy), /assistant\.setContext|node-check/);
+  assert.match(renderPlatformRules(current), /assistant\.setContext/);
+  assert.match(renderPlatformRules(current), /node-check 不是浏览器执行/);
+  legacy.applicationExperience = structuredClone(current.applicationExperience);
+  assert.throws(() => validatePlatformMetadata(record({ platformSnapshot: legacy })), /事实范围/);
 });
 
 test("v2 能力兼容核对冻结公共目录，v1 和无平台记录仍使用旧业务规则", async () => {

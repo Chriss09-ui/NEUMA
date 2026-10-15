@@ -70,7 +70,7 @@ const PUBLIC = new Map([
   ["/chat-ui.js", ["chat-ui.js", "text/javascript; charset=utf-8"]],
   ["/rich-text.js", ["rich-text.js", "text/javascript; charset=utf-8"]],
   ...["collaboration-api", "group-view", "group-materials", "group-capabilities", "groups", "main-agent", "main-context", "main-materials"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
-  ...["application-api", "application-bridge", "application-tasks", "application-workspace", "agent-connections"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
+  ...["application-api", "application-bridge", "application-context", "application-assistant", "application-tasks", "application-workspace", "agent-connections"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
 

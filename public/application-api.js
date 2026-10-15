@@ -18,7 +18,9 @@ export function createApplicationApi(request = fetch) {
     close: (id, instanceId, options) => json(id, "/application/close", { instanceId }, "POST", options),
     getState: (id, deliveryVersion) => json(id, `/application/state${deliveryVersion === undefined ? "" : `?deliveryVersion=${part(deliveryVersion)}`}`),
     saveState: (id, state, expectedVersion, deliveryVersion) => json(id, "/application/state", { state, expectedVersion, deliveryVersion }, "PUT"),
-    run: (id, actionId, input, mutationId, deliveryVersion) => json(id, "/tasks", { actionId, input, mutationId, deliveryVersion }),
+    run: (id, actionId, input, mutationId, deliveryVersion, applicationContext) => json(id, "/tasks", {
+      actionId, input, mutationId, deliveryVersion, ...(applicationContext ? { applicationContext } : {}),
+    }),
     tasks: (id) => json(id, "/tasks"),
     task: (id, taskId) => json(id, `/tasks/${part(taskId)}`),
     events: (id, taskId, after = 0) => json(id, `/tasks/${part(taskId)}/events?after=${encodeURIComponent(after)}`),

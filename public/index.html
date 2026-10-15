@@ -308,7 +308,12 @@
               <div id="agent-development" class="agent-development" hidden></div>
             </div>
             <section id="agent-conversation" class="conversation" aria-label="用户智能体的独立对话">
-              <div id="agent-assistant-actions" class="agent-assistant-actions"></div>
+              <header id="agent-assistant-header" class="application-assistant-header" hidden>
+                <button id="agent-assistant-move" class="application-assistant-move" type="button" aria-label="展开助手；可拖动，方向键移动"><span id="agent-assistant-avatar" aria-hidden="true"></span><span id="agent-assistant-title">智能体助手</span></button>
+                <div id="agent-assistant-actions" class="agent-assistant-actions"></div>
+                <button id="agent-assistant-reset" class="application-assistant-control" type="button" aria-label="重置助手位置和尺寸" title="重置位置和尺寸">↺</button>
+                <button id="agent-assistant-collapse" class="application-assistant-control" type="button" aria-label="收起为输入条" title="收起为输入条" aria-expanded="false">−</button>
+              </header>
               <span id="agent-conversation-title" class="conversation-title" hidden></span>
               <div class="agent-status-line" hidden><p id="agent-runtime-status" role="status" aria-live="polite">智能体界面尚未加载。若此提示持续显示，请刷新页面；更新代码后需重启本机服务。</p><button id="agent-build-shortcut" class="text-link link-button" type="button" hidden>生成智能体</button></div>
               <div id="agent-messages" class="messages" aria-live="polite"></div>
@@ -329,7 +334,9 @@
                   <button id="agent-cancel-reply" class="cancel-reply" type="button" aria-label="停止当前操作" title="停止当前操作" hidden>■</button>
                 </div>
               </form>
+              <span id="agent-assistant-resize-n" class="application-assistant-resize" data-edge="n" aria-hidden="true" hidden></span><span id="agent-assistant-resize-e" class="application-assistant-resize" data-edge="e" aria-hidden="true" hidden></span><span id="agent-assistant-resize-s" class="application-assistant-resize" data-edge="s" aria-hidden="true" hidden></span><span id="agent-assistant-resize-w" class="application-assistant-resize" data-edge="w" aria-hidden="true" hidden></span><span id="agent-assistant-resize-nw" class="application-assistant-resize" data-edge="nw" aria-hidden="true" hidden></span><span id="agent-assistant-resize-ne" class="application-assistant-resize" data-edge="ne" aria-hidden="true" hidden></span><span id="agent-assistant-resize-sw" class="application-assistant-resize" data-edge="sw" aria-hidden="true" hidden></span><button id="agent-assistant-resize-se" class="application-assistant-resize" data-edge="se" type="button" aria-label="调整助手大小；使用方向键" hidden></button>
             </section>
+            <div id="agent-assistant-pointer-shield" class="application-assistant-pointer-shield" aria-hidden="true" hidden></div>
           </div>
           </div>
           <aside id="agent-panel" class="agent-settings-panel" aria-labelledby="agent-details-title" hidden>

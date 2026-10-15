@@ -71,6 +71,17 @@ test("应用入口不能绕过具体动作缺连接，交付验收与连接测�
   assert.notEqual(revoked.capabilityVersion, verified.capabilityVersion);
 });
 
+test("已验收纯页面不公开不存在的应用动作入口，内部定义绑定保持兼容", () => {
+  const options = fixture({ agent: { id: "page", revision: 1, execution: { kind: "node-action" }, toolIds: ["run_application_action"] },
+    application: { ...application, manifest: { page: { entrypoint: "ui/index.html" }, actions: [] } } });
+  const facts = groupCapabilityFacts(options);
+  assert.equal(item(facts, "run_application_action"), undefined);
+  assert.equal(facts.capabilities.some((entry) => entry.id.startsWith("action:")), false);
+  assert.equal(item(facts, "conversation").availability, "callable");
+  assert.deepEqual(options.agent.toolIds, ["run_application_action"]);
+  assert.equal(item(groupCapabilityFacts({ ...options, application: null }), "run_application_action").availability, "unknown");
+});
+
 test("禁止联网覆盖公共工具和业务动作，尚未配置的业务动作也不能绕过政策", () => {
   const options = fixture({ agent: { id: "app", revision: 1, execution: { kind: "node-action" } }, application,
     draft: { goal: { value: "仅使用离线材料" }, constraints: [] },

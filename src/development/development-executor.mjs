@@ -324,8 +324,9 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
     if (runtime === "node-action") {
       try { validateApplicationManifest(application, { ...(validateResources ? { snapshot } : {}), allowUnverified: true }); }
       catch { return { ...report, status: "failed", summary: "应用清单未匹配验收快照，页面或后端文件仍需修复" }; }
-      report.evidenceMode = "mock_capabilities";
+      report.evidenceMode = Array.isArray(cases) && cases.length && cases.every((item) => item.kind === "node-check") ? "node_checks" : "mock_capabilities";
       report.pageResourcesChecked = validateResources;
+      report.browserVerified = false;
       report.connectionVerified = false;
     }
     if (typeof stateful !== "boolean") return { ...report, stateful: false, status: "error", summary: "验收状态模式无效" };
@@ -342,6 +343,17 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
         || item.assertions.some((assertion) => !assertion || typeof assertion.path !== "string" || typeof assertion.expectedJson !== "string"))
         return { ...report, status: "error", summary: "验收用例必须有唯一标识和具体值断言" };
       ids.add(item.id);
+      if (runtime === "node-action") {
+        if (item.kind !== undefined && !["action", "node-check"].includes(item.kind)) return { ...report, status: "error", summary: "验收用例类型无效" };
+        if (item.kind === "node-check") {
+          try { validateCodePath(item.entrypoint); }
+          catch { return { ...report, status: "error", summary: "Node 检查入口无效" }; }
+          if (!application.page || !/\.(?:mjs|js)$/.test(item.entrypoint) || item.entrypoint === entrypoint
+            || Object.hasOwn(item, "actionId") || Object.hasOwn(item, "mocks")
+            || application.page.resources.some((resource) => resource.path === item.entrypoint)
+            || !snapshot.files.some((file) => file.path === item.entrypoint)) return { ...report, status: "error", summary: "Node 检查必须使用独立且未公开的快照入口" };
+        } else if (Object.hasOwn(item, "entrypoint")) return { ...report, status: "error", summary: "动作验收不能指定其他入口" };
+      }
       try { for (const assertion of item.assertions) JSON.parse(assertion.expectedJson); }
       catch { return { ...report, status: "error", summary: "验收断言包含无效 JSON" }; }
     }
@@ -355,7 +367,9 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
       if (stateful) verificationWorkspace = await realpath(await mkdtemp(join(this.temporaryDir, "neuma-verification-state-")));
       for (const item of cases) {
         let run, mockCalls;
-        if (runtime === "node-action") {
+        if (runtime === "node-action" && item.kind === "node-check") {
+          run = await this.run({ codeDir: snapshot.path, entrypoint: item.entrypoint, input: item.input, signal });
+        } else if (runtime === "node-action") {
           const action = application.actions.find((entry) => entry.id === item.actionId);
           let input;
           try { input = validateActionInput(action, JSON.parse(item.input)); }
@@ -378,6 +392,7 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
         } else run = await this.run({ codeDir: snapshot.path, entrypoint, input: item.input, signal,
           ...(verificationWorkspace ? { workspaceDir: verificationWorkspace } : {}) });
         const result = { caseId: item.id, ...(mockCalls ? { evidenceMode: "mock_capabilities", mockCalls, actionId: item.actionId } : {}), ...(item.taskId === undefined ? {} : { taskId: item.taskId }),
+          ...(item.kind === "node-check" ? { kind: "node-check", entrypoint: item.entrypoint, evidenceMode: "node_check", browserVerified: false } : {}),
           ...(item.acceptanceId === undefined ? {} : { acceptanceId: item.acceptanceId }), status: run.status,
           input: item.input, exitCode: run.exitCode, stdout: run.stdout, stderr: run.stderr, reason: run.reason ?? "",
           expected: item.assertions.map(({ path, expectedJson }) => ({ path, value: JSON.parse(expectedJson) })) };

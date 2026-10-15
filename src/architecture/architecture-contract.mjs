@@ -55,7 +55,7 @@ export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES
     const snapshot = new Map(record.capabilitySnapshot.map((item) => [item.id, item]));
     const current = new Map(capabilities.map((item) => [item.id, item]));
     const publicCurrent = new Map(publicCapabilities.map((item) => [item.id, item]));
-    const publicSnapshot = new Map(record.platformSnapshot?.version === 2 ? (record.platformSnapshot.publicCapabilities ?? [])
+  const publicSnapshot = new Map([2, 3].includes(record.platformSnapshot?.version) ? (record.platformSnapshot.publicCapabilities ?? [])
       .map(({ id, version, status, scope }) => [id, { id, version, status, scope }]) : []);
     return used.every(({ id }) => {
       const saved = snapshot.has(id) ? snapshot.get(id) : publicSnapshot.get(id);
@@ -100,6 +100,7 @@ export const INTERACTION_SCHEMA = object({
   defaultEntry: choice("conversation", "application"), page: { type: "boolean" }, operations: { type: "boolean" },
   inputs: text(), results: text(), persistentData: text(),
 });
+INTERACTION_SCHEMA.properties.assistant = object({ enabled: { type: "boolean" }, purpose: { type: "string", minLength: 0, maxLength: 500 } });
 export const CONNECTION_SCHEMA = object({ id: identifier, purpose: choice("search", "model", "business"),
   required: { type: "boolean" }, description: text(), operations: list(object({
     id: identifier, method: choice("GET", "POST", "PUT", "PATCH", "DELETE"), path: text(500), input: text(), output: text(), safeTest: { type: "boolean" },
@@ -134,7 +135,7 @@ function validateSchema(value, schema, path = "design") {
     value.forEach((item, index) => validateSchema(item, schema.items, `${path}[${index}]`));
     if (schema.uniqueItems && new Set(value).size !== value.length) fail(`${path} 包含重复引用`);
   } else if (schema.type === "string") {
-    if (typeof value !== "string" || !value.trim() || value.includes("\0")
+    if (typeof value !== "string" || (schema.minLength !== 0 && !value.trim()) || value.includes("\0")
         || (schema.maxLength && value.length > schema.maxLength)
         || (schema.pattern && !new RegExp(schema.pattern).test(value))
         || (schema.enum && !schema.enum.includes(value))) fail(`${path} 文本或取值无效`);
@@ -182,6 +183,7 @@ export function validateDesign(value, { requirements, capabilities = CAPABILITIE
   validateSchema(value, value?.schemaVersion === 2 ? DESIGN_V2_SCHEMA : LEGACY_DESIGN_SCHEMA);
   if (value.schemaVersion === 2) {
     if (value.interaction.defaultEntry === "application" && !value.interaction.page) fail("应用入口必须交付页面");
+    if (value.interaction.assistant?.enabled && (!value.interaction.page || !value.interaction.assistant.purpose.trim())) fail("页面助手必须有托管页面及具体用途");
     uniqueIds(value.connections, "connections");
     for (const connection of value.connections) {
       uniqueIds(connection.operations, "connection.operations");
@@ -266,6 +268,14 @@ export function checkDesign(value, context) {
     candidateFields: ["schemaVersion", "interaction", "profile", "steps", "coverage", "acceptance"],
     description: "候选没有保留已确认的托管页面或应用操作需求，不能以旧版结构或关闭交付字段缩减需求。",
     remedy: "提交 schemaVersion:2，按已确认需求设置 interaction.page/operations，并通过现有研发通道交付；同步核对步骤、需求覆盖和验收，不能降为普通对话或下载文件。",
+  });
+  if (design.schemaVersion === 2 && (confirmed?.defaultEntry && confirmed.defaultEntry !== design.interaction.defaultEntry
+    || confirmed?.assistant && (confirmed.assistant.enabled !== design.interaction.assistant?.enabled
+      || confirmed.assistant.purpose !== design.interaction.assistant?.purpose)
+    || design.interaction.assistant?.enabled && !confirmed?.assistant?.enabled)) issues.push({
+    id: "confirmed_presentation", blocking: true, source: "program", candidateFields: ["interaction", "coverage", "acceptance"],
+    description: "候选没有保留已确认的默认入口或页面助手用途，不能擅自添加助手或改写交互选择。",
+    remedy: "按已确认需求原样保留 interaction.defaultEntry 和 assistant；未要求 AI 对话的页面不启用助手。",
   });
   design.unknowns.forEach((item, index) => issues.push({
     id: `unknown_${index + 1}`, blocking: item.blocking,
