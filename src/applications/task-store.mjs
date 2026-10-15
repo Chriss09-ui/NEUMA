@@ -4,12 +4,13 @@ import { agentId } from "../agents/agent-storage.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const MAX_BYTES = 16 * 1024 * 1024;
+const MAX_STATE_BYTES = 1024 * 1024;
 const now = () => new Date().toISOString();
 export const taskFinished = (task) => TERMINAL.has(task.status);
 export const applicationConflict = (message) => Object.assign(new InputError(message), { reason: "application_conflict" });
-function json(value, limit = 128 * 1024) {
+function json(value, limit = 128 * 1024, space) {
   let source;
-  try { source = JSON.stringify(value); } catch { throw new InputError("应用数据必须是 JSON"); }
+  try { source = JSON.stringify(value, null, space); } catch { throw new InputError("应用数据必须是 JSON"); }
   if (!source || Buffer.byteLength(source) > limit) throw new InputError("应用数据超过大小限制");
   return JSON.parse(source);
 }
@@ -39,21 +40,31 @@ export class ApplicationTaskStore {
     return record;
   }
   async save(id, record) {
-    json(record, MAX_BYTES);
+    // Match AgentStorage's persisted encoding, including indentation.
+    json(record, MAX_BYTES, 2);
+    const interrupted = this.interruptedRecord(record);
+    if (interrupted) json(interrupted, MAX_BYTES, 2);
     await this.storage.writeJson(id, "application/tasks.json", record);
   }
   event(task, type, value = {}) {
     const event = { ...json(value), type, seq: ++task.sequence, at: now(), taskId: task.id };
     task.events.push(event); task.updatedAt = event.at;
   }
+  interruptedRecord(record) {
+    let changed = false;
+    const tasks = record.tasks.map((task) => {
+      if (taskFinished(task)) return task;
+      const interrupted = { ...task, events: [...task.events], status: "interrupted",
+        error: "NEUMA 已重启，任务已中断；请核实外部操作后重新提交。", finishedAt: now() };
+      this.event(interrupted, "interrupted", { error: interrupted.error }); changed = true;
+      return interrupted;
+    });
+    return changed ? { ...record, tasks } : null;
+  }
   async recover() {
     for (const id of await this.storage.agentIds()) await this.serial(id, async () => {
-      const record = await this.record(id); let changed = false;
-      for (const task of record.tasks) if (!taskFinished(task)) {
-        task.status = "interrupted"; task.error = "NEUMA 已重启，任务已中断；请核实外部操作后重新提交。";
-        task.finishedAt = now(); this.event(task, "interrupted", { error: task.error }); changed = true;
-      }
-      if (changed) await this.save(id, record);
+      const interrupted = this.interruptedRecord(await this.record(id));
+      if (interrupted) await this.save(id, interrupted);
     });
   }
   view(task) { const { events, mutationId, requestHash, ...value } = task; return structuredClone({ ...value, taskId: task.id }); }
@@ -97,6 +108,19 @@ export class ApplicationTaskStore {
       this.event(task, type, patch); await this.save(id, record); return this.view(task);
     });
   }
+  async appendArtifact(id, taskId, artifact) {
+    await this.ready;
+    const clean = json(artifact);
+    if (typeof clean.path !== "string" || !clean.path) throw new InputError("应用产物路径无效");
+    return this.serial(id, async () => {
+      const record = await this.record(id), task = record.tasks.find((task) => task.id === taskId);
+      if (!task) throw new InputError("应用任务不存在");
+      if (taskFinished(task)) return this.view(task);
+      task.artifacts = [...task.artifacts.filter((file) => file.path !== clean.path), clean];
+      this.event(task, "artifact", { artifacts: task.artifacts });
+      await this.save(id, record); return this.view(task);
+    });
+  }
   async events(id, taskId, after = 0) {
     if (!Number.isSafeInteger(after) || after < 0) throw new InputError("任务事件续读位置无效");
     await this.ready;
@@ -111,7 +135,7 @@ export class ApplicationTaskStore {
   }
   async getState(id, { scope = "private", kind = "draft", stateVersion = 1 } = {}) {
     agentId(id); await this.ready;
-    const value = await this.storage.readJson(id, this.statePath(scope, kind), { maxBytes: 1024 * 1024 });
+    const value = await this.storage.readJson(id, this.statePath(scope, kind), { maxBytes: MAX_STATE_BYTES });
     if (!value) return { state: {}, version: 0, stateVersion };
     if (value.stateVersion !== stateVersion) throw applicationConflict("应用状态版本已变化，请先完成状态迁移");
     return value;
@@ -122,6 +146,7 @@ export class ApplicationTaskStore {
       const previous = await this.getState(id, options);
       if (!Number.isSafeInteger(expectedVersion) || expectedVersion !== previous.version) throw applicationConflict("应用状态已被其他窗口更新，请重新读取后保存");
       const next = { state: clean, version: previous.version + 1, stateVersion: previous.stateVersion };
+      json(next, MAX_STATE_BYTES, 2);
       await this.storage.writeJson(id, this.statePath(options.scope ?? "private", options.kind ?? "draft"), next); return next;
     });
   }

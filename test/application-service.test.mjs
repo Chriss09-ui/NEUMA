@@ -72,6 +72,80 @@ test("显式取消传播到运行程序且拒绝迟到成功，Agent生命周期
   assert.deepEqual(resources.closed, ["one"]);
 });
 
+test("关闭等待初次写盘中的提交并中断记录，关闭期间拒绝新任务且完成后可重用", async (t) => {
+  const writing = deferred(), gate = deferred(); let executions = 0, closed = false;
+  const { service, agents, store, scheduler } = await fixture(t, async ({ input }) => { executions++; return { status: "passed", output: input }; });
+  const write = agents.storage.writeJson.bind(agents.storage); let block = true;
+  agents.storage.writeJson = async (...args) => {
+    if (block && args[1] === "application/tasks.json") { block = false; writing.resolve(); await gate.promise; }
+    return write(...args);
+  };
+  const pending = service.submit("one", submit());
+  const rejected = assert.rejects(pending, /关闭或已重置/);
+  await writing.promise;
+  scheduler.cancelAll();
+  const closing = service.close(); closing.then(() => { closed = true; }, () => {});
+  try {
+    assert.equal(service.close(), closing);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false);
+    await assert.rejects(service.submit("two", submit("two", "during-close")), /关闭或已重置/);
+  } finally { gate.resolve(); }
+  await Promise.all([closing, rejected]);
+  assert.equal(executions, 0);
+  assert.equal((await store.list("one"))[0].status, "interrupted");
+  assert.deepEqual(scheduler.snapshot(), { running: 0, queued: 0, agentIds: [] });
+  agents.closing = Promise.resolve();
+  await assert.rejects(service.submit("two", submit("two", "parent-closing")), /关闭或已重置/);
+  agents.closing = null;
+  const next = await service.submit("one", submit("after", "after-close"));
+  assert.equal((await service.wait("one", next.taskId)).status, "completed");
+  assert.equal(executions, 1);
+});
+
+test("关闭等待交付或连接读取中的提交，迟到校验不能创建或调度任务", async (t) => {
+  for (const boundary of ["descriptor", "connections"]) await t.test(boundary, async (t) => {
+    const entered = deferred(), gate = deferred(); let executions = 0, closed = false;
+    const { service, agents, store, scheduler } = await fixture(t, async ({ input }) => { executions++; return { status: "passed", output: input }; });
+    if (boundary === "descriptor") {
+      const descriptor = service.descriptor.bind(service);
+      service.descriptor = async (...args) => { entered.resolve(); await gate.promise; return descriptor(...args); };
+    } else {
+      const snapshot = agents.connections.snapshot.bind(agents.connections);
+      agents.connections.snapshot = async (...args) => { entered.resolve(); await gate.promise; return snapshot(...args); };
+    }
+    const rejected = assert.rejects(service.submit("one", submit()), /关闭或已重置/);
+    await entered.promise;
+    const closing = service.close(); closing.then(() => { closed = true; }, () => {});
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(closed, false);
+    } finally { gate.resolve(); }
+    await Promise.all([closing, rejected]);
+    assert.deepEqual(await store.list("one"), []);
+    assert.equal(executions, 0);
+    assert.deepEqual(scheduler.snapshot(), { running: 0, queued: 0, agentIds: [] });
+  });
+});
+
+test("关闭等待实际程序退出和槽位释放，不能把迟到完成写成成功", async (t) => {
+  const started = deferred(), gate = deferred(); let signal, closed = false;
+  const { service, scheduler } = await fixture(t, async ({ signal: current, input }) => {
+    signal = current; started.resolve(); await gate.promise; return { status: "passed", output: input };
+  });
+  const submitted = await service.submit("one", submit()); await started.promise;
+  const closing = service.close(); closing.then(() => { closed = true; }, () => {});
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(signal.aborted, true);
+    assert.equal(closed, false);
+    assert.equal(scheduler.snapshot().running, 1);
+  } finally { gate.resolve(); }
+  await closing;
+  assert.equal((await service.wait("one", submitted.taskId)).status, "interrupted");
+  assert.deepEqual(scheduler.snapshot(), { running: 0, queued: 0, agentIds: [] });
+});
+
 test("未成功写入任务记录时不得开始程序，运行状态保存失败也阻止副作用", async (t) => {
   let calls = 0;
   const { service, store } = await fixture(t, async ({ input }) => { calls++; return { status: "passed", output: input }; });
