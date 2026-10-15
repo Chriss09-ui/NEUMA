@@ -130,6 +130,46 @@ async function contextField(record, payload, section) {
   return JSON.parse(text);
 }
 
+test("纯页面研发保留私有 Node 检查与空动作清单，按现有评审和快照打包", async (t) => {
+  const architecture = developmentArchitecture();
+  Object.assign(architecture.design, { schemaVersion: 2, profile: "light", connections: [],
+    interaction: { defaultEntry: "application", page: true, operations: false, inputs: "本地参数", results: "页面图形",
+      persistentData: "无", assistant: { enabled: false, purpose: "" } } });
+  architecture.contractVersion = 2; architecture.candidateHash = hashValue(architecture.design);
+  architecture.review.candidateHash = architecture.candidateHash;
+  bindPlatform(architecture, createPlatformSnapshot());
+  const files = { "actions.mjs": "export const actions={};", "ui/index.html": "<!doctype html><title>Tool</title>",
+    "checks/page.mjs": "import {readFile} from 'node:fs/promises';console.log(JSON.stringify({ok:(await readFile(new URL('../ui/index.html',import.meta.url),'utf8')).includes('<title>Tool</title>')}));" };
+  const { controller, executor } = await fixture(t, { architecture,
+    onVerify: async (options, report) => ({ ...report, browserVerified: false, evidenceMode: "node_checks" }),
+    onPrompt: async ({ record, payload, submit, respond }) => {
+      if (record.role === "planner") {
+        const base = developmentPlan(architecture);
+        return submit({ ...base, schemaVersion: 2, runtime: "node-action", entrypoint: "actions.mjs",
+          tasks: base.tasks.map((task) => ({ ...task, files: Object.keys(files) })),
+          cases: base.cases.map((item) => ({ ...item, kind: "node-check", entrypoint: "checks/page.mjs",
+            assertions: [{ path: "ok", expectedJson: "true" }] })),
+          application: { protocolVersion: 2, runtime: "node-action", entrypoint: "actions.mjs",
+            page: { entrypoint: "ui/index.html", resources: [{ path: "ui/index.html", sha256: "" }] },
+            actions: [], stateVersion: 1, evidenceIds: [] } });
+      }
+      if (record.role === "developer") {
+        for (const [path, content] of Object.entries(files)) await record.tools.write_code_file.execute("page-write", { path, content });
+        return submit(developmentWork(payload.task));
+      }
+      await respond();
+    } });
+  const result = await controller.run(architecture);
+  assert.equal(result.status, "completed", result.summary);
+  assert.deepEqual(result.package.application.actions, []);
+  assert.deepEqual(result.package.application.page.resources.map((item) => item.path), ["ui/index.html"]);
+  assert.ok(result.package.snapshot.files.some((item) => item.path === "checks/page.mjs"));
+  assert.ok(result.package.application.page.resources.every((item) => /^[a-f0-9]{64}$/.test(item.sha256)));
+  assert.ok(executor.calls.verify.every((call) => call.cases.every((item) => item.kind === "node-check" && !item.actionId)));
+  assert.equal(result.reports.at(-1).browserVerified, false);
+  assert.ok(result.package.application.evidenceIds.includes(result.reports.at(-1).id));
+});
+
 test("研发规划、开发与独立评审接收同一冻结平台事实，评审仍不能联网", async (t) => {
   const snapshot = createPlatformSnapshot(), architecture = bindPlatform(developmentArchitecture(), snapshot), calls = [];
   const { controller, sessions } = await fixture(t, { architecture,

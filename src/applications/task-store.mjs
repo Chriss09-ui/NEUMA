@@ -13,6 +13,12 @@ function json(value, limit = 128 * 1024) {
   if (!source || Buffer.byteLength(source) > limit) throw new InputError("应用数据超过大小限制");
   return JSON.parse(source);
 }
+function taskRequestHash(task) {
+  const source = { ...task.source };
+  // Page bindings decide where results may appear, not whether an operation is a retry.
+  delete source.applicationContext;
+  return createHash("sha256").update(JSON.stringify([task.actionId, task.input, task.deliveryVersion, source])).digest("hex");
+}
 
 export class ApplicationTaskStore {
   constructor({ storage }) {
@@ -56,10 +62,11 @@ export class ApplicationTaskStore {
     return this.serial(id, async () => {
       const record = await this.record(id);
       if (typeof input.mutationId !== "string" || !/^[\w-]{8,100}$/.test(input.mutationId)) throw new InputError("请提供稳定的任务幂等标识");
-      const requestHash = createHash("sha256").update(JSON.stringify([input.actionId, input.input, input.deliveryVersion, input.source])).digest("hex");
+      const requestHash = taskRequestHash(input);
       const existing = record.tasks.find((task) => task.mutationId === input.mutationId);
       if (existing) {
-        if (existing.requestHash !== requestHash) throw applicationConflict("这个幂等标识已用于其他任务，请使用新的标识");
+        // Recompute legacy records whose stored hash included the page binding.
+        if (taskRequestHash(existing) !== requestHash) throw applicationConflict("这个幂等标识已用于其他任务，请使用新的标识");
         return { task: this.view(existing), created: false };
       }
       const task = { ...json(input), id: randomUUID(), agentId: id, status: "queued", sequence: 0,

@@ -6,11 +6,30 @@ import * as state from "../public/state.js";
 import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "../public/agent-avatar.js";
 import { conversationDate } from "../public/group-view.js";
 import { createSidebarHistory } from "../public/sidebar-history.js";
+import { activateApplicationContext, setApplicationContext, releaseApplicationContext, getApplicationContext } from "../public/application-context.js";
 
 const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-build-view.js", "agent-conversations.js", "agent-attachments.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
   text.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "")).join("\n");
 const settle = () => new Promise(setImmediate);
+
+test("发送时冻结当前页面参考，新一轮读取新参数，其他Agent不携带该页面", async () => {
+  const ui = await setup();
+  const instance = { instanceId: "dashboard-page", deliveryVersion: "dashboard-v1" };
+  activateApplicationContext("one", instance);
+  try {
+    setApplicationContext("one", instance.instanceId, { viewId: "overview", title: "经营看板", summary: "当前收入", selection: null, values: { period: "month" } });
+    await ui.submit("解释当前指标");
+    const first = ui.requests.find((entry) => entry.path === "/api/agents/turn").body;
+    assert.equal(first.applicationContext.snapshot.values.period, "month");
+    setApplicationContext("one", instance.instanceId, { viewId: "overview", title: "经营看板", summary: "当前收入", selection: null, values: { period: "year" } });
+    await ui.submit("现在呢");
+    assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/turn").at(-1).body.applicationContext.revision, 2);
+    assert.equal(first.applicationContext.snapshot.values.period, "month");
+    await ui.route("two"); await ui.submit("你好");
+    assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/turn").at(-1).body.applicationContext, undefined);
+  } finally { releaseApplicationContext("one", instance.instanceId); }
+});
 
 test("上传材料后可仅发送附件，消息和后续成功历史保存同一ID引用", async () => {
   const ui = await setup();
@@ -214,7 +233,7 @@ async function setup({ turn, build, develop, cancelDevelopment, cancelBuild, ins
     static now() { return new Date(clock).getTime(); }
   };
   const context = vm.createContext({ ...state, document, Date: Clock, AbortController, TextDecoder, TextEncoder, structuredClone, Event, CustomEvent: Event,
-    conversationDate, createSidebarHistory,
+    conversationDate, createSidebarHistory, getApplicationContext,
     renderRichText: (container, content) => { container.textContent = String(content || ""); },
     renderAgentAvatar: (target, agent, options) => renderAgentAvatar(target, agent, { ...options, document }), avatarColors, resolveAgentAvatar, installAvatarMotion, setAgentAvatarActivity,
     setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },

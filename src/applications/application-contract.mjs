@@ -87,7 +87,7 @@ export function validateApplicationManifest(value, { snapshot, allowUnverified =
     unique(value.page.resources.map((resource) => resource.path), "资源路径");
     if (!value.page.resources.some((resource) => resource.path === value.page.entrypoint)) fail("页面入口未列入资源清单");
   }
-  if (!Array.isArray(value.actions) || !value.actions.length || value.actions.length > 80) fail("动作清单无效");
+  if (!Array.isArray(value.actions) || (!value.actions.length && value.page === null) || value.actions.length > 80) fail("动作清单无效");
   for (const action of value.actions) {
     fields(action, ["id", "title", "inputSchema", "outputSchema", "connectionIds"], "action");
     if (!id.test(action.id) || ["__proto__", "constructor", "prototype"].includes(action.id) || typeof action.title !== "string" || !action.title.trim() || action.title.length > 200) fail("动作标识或名称无效");

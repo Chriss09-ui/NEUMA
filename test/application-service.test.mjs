@@ -114,6 +114,92 @@ test("嵌套应用动作复用已持有槽位，避免等待同Agent自己释放
   } finally { conversation.release(); }
 });
 
+test("页面和聊天动作保存经过验证的本轮实例绑定，旧轮快照不进入任务记录", async (t) => {
+  const { service, resources, scheduler } = await fixture(t);
+  resources.assertInstance = (id, instanceId, version) => {
+    assert.equal(id, "one");
+    if (instanceId !== "current-page" || version !== "delivery-v1") throw new Error("invalid_instance");
+  };
+  const context = { instanceId: "current-page", deliveryVersion: "delivery-v1", revision: 1,
+    snapshot: { viewId: "entry", title: "练习", summary: "当前选择", selection: ["first"], values: { note: "do-not-persist-snapshot" } } };
+  const page = await service.submit("one", { ...submit(), applicationContext: context });
+  assert.deepEqual(page.task.source.applicationContext, { instanceId: "current-page", deliveryVersion: "delivery-v1", revision: 1 });
+  assert.doesNotMatch(JSON.stringify(page.task), /do-not-persist-snapshot/);
+  await service.wait("one", page.taskId);
+  const lease = await scheduler.acquire({ agentId: "one" });
+  try {
+    let current = context;
+    const [tool] = await service.tools({ id: "one" }, { getApplicationContext: () => current });
+    assert.match(tool.description, /分析.*inputSchema.*outputSchema/s);
+    const first = JSON.parse((await tool.execute("conversation-one", { actionId: "analyze", input: { value: "first" } }, lease.signal)).content[0].text);
+    assert.equal((await service.store.get("one", first.taskId)).source.applicationContext.revision, 1);
+    current = { ...context, revision: 2 };
+    const next = JSON.parse((await tool.execute("conversation-two", { actionId: "analyze", input: { value: "next" } }, lease.signal)).content[0].text);
+    assert.equal((await service.store.get("one", next.taskId)).source.applicationContext.revision, 2);
+    current = null;
+    const cleared = JSON.parse((await tool.execute("conversation-clear", { actionId: "analyze", input: { value: "plain" } }, lease.signal)).content[0].text);
+    assert.equal((await service.store.get("one", cleared.taskId)).source.applicationContext, undefined);
+  } finally { lease.release(); }
+  await assert.rejects(service.submit("one", { ...submit("bad", "invalid-context"), applicationContext: { ...context, instanceId: "other-page" } }), /invalid_instance/);
+  await assert.rejects(service.conversationContext("one", { ...context, deliveryVersion: "old" }), /版本/);
+});
+
+test("应用摘要使用批准设计的入口与助手职责，旧缺省不变成显式禁用", async (t) => {
+  const { service } = await fixture(t), descriptor = service.descriptor;
+  assert.equal(Object.hasOwn(await service.summary("one"), "assistant"), false);
+  service.descriptor = async (id) => ({ ...await descriptor(id), architecture: { design: {
+    interaction: { defaultEntry: "conversation", assistant: { enabled: true, purpose: "解释应用及执行已交付动作" } },
+  } } });
+  const summary = await service.summary("one");
+  assert.equal(summary.defaultEntry, "conversation");
+  assert.deepEqual(summary.assistant, { enabled: true, purpose: "解释应用及执行已交付动作" });
+});
+
+test("纯页面没有动作时不注册空枚举的执行工具", async (t) => {
+  const { service } = await fixture(t), descriptor = service.descriptor;
+  service.descriptor = async (id) => { const value = await descriptor(id); return { ...value, manifest: { ...value.manifest, actions: [] } }; };
+  assert.deepEqual(await service.tools({ id: "one" }), []);
+});
+
+test("页面关闭不撤销聊天本轮已验证快照，公开提交仍要求活跃实例", async (t) => {
+  const { service, resources, scheduler } = await fixture(t);
+  let active = true;
+  resources.assertInstance = () => { if (!active) throw new Error("page_closed"); };
+  const context = await service.validateContext("one", { instanceId: "page-one", deliveryVersion: "delivery-v1", revision: 1,
+    snapshot: { viewId: "overview", title: "看板", summary: "月度", selection: null, values: {} } });
+  const lease = await scheduler.acquire({ agentId: "one" });
+  try {
+    const [tool] = await service.tools({ id: "one" }, { getApplicationContext: () => context });
+    active = false;
+    const result = JSON.parse((await tool.execute("closed-page-turn", { actionId: "analyze", input: { value: "continued" } }, lease.signal)).content[0].text);
+    assert.equal(result.status, "completed");
+    assert.equal((await service.store.get("one", result.taskId)).source.applicationContext.instanceId, "page-one");
+    await assert.rejects(service.submit("one", { ...submit("external", "closed-page-submit"), applicationContext: context }), /page_closed/);
+  } finally { lease.release(); }
+});
+
+test("新页面重试同一提交复用原任务且不重绑结果，公开重试仍验证活跃实例", async (t) => {
+  let executions = 0;
+  const { service, resources } = await fixture(t, async ({ input }) => { executions++; return { status: "passed", output: input }; });
+  const active = new Set(["page-original"]);
+  resources.assertInstance = (id, instanceId, version) => {
+    assert.equal(id, "one"); assert.equal(version, "delivery-v1");
+    if (!active.has(instanceId)) throw new Error("page_closed");
+  };
+  const context = { instanceId: "page-original", deliveryVersion: "delivery-v1", revision: 3,
+    snapshot: { viewId: "overview", title: "看板", summary: "月度", selection: null, values: {} } };
+  const body = { ...submit(), applicationContext: context };
+  const first = await service.submit("one", body); await service.wait("one", first.taskId);
+  active.delete("page-original"); active.add("page-reloaded");
+  const retry = { ...body, applicationContext: { ...context, instanceId: "page-reloaded", revision: 1 } };
+  const replay = await service.submit("one", retry);
+  assert.equal(replay.taskId, first.taskId); assert.equal(executions, 1);
+  assert.deepEqual(replay.task.source.applicationContext, { instanceId: "page-original", deliveryVersion: "delivery-v1", revision: 3 });
+  active.delete("page-reloaded");
+  await assert.rejects(service.submit("one", retry), /page_closed/);
+  assert.equal(executions, 1); assert.equal((await service.store.list("one")).length, 1);
+});
+
 test("公开应用API拒绝页面伪造任务范围，群任务详情不能从私有应用入口读取", async () => {
   let submitted = 0;
   const agents = { requireAgent: async () => {}, applications: { submit: async () => { submitted++; },

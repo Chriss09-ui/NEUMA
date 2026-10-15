@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +16,31 @@ test("task submission is atomic and idempotent, mismatched replay is rejected", 
   const submissions = await Promise.all(Array.from({ length: 5 }, () => store.create("agent-a", input())));
   assert.equal(submissions.filter((value) => value.created).length, 1);
   assert.equal(new Set(submissions.map((value) => value.task.id)).size, 1);
+  const contextualReplay = await store.create("agent-a", { ...input(), source: { ...input().source,
+    applicationContext: { instanceId: "page-new", deliveryVersion: "v1", revision: 1 } } });
+  assert.equal(contextualReplay.task.id, submissions[0].task.id); assert.equal(contextualReplay.task.source.applicationContext, undefined);
   await assert.rejects(store.create("agent-a", { ...input(), input: { different: true } }), { reason: "application_conflict" });
   assert.equal((await store.list("agent-a")).length, 1);
   assert.equal((await store.list("agent-b")).length, 0);
   await assert.rejects(store.get("agent-b", submissions[0].task.id), /没有找到/);
+});
+test("reload retries preserve the original task binding and accept legacy hashes without replaying mutations", async (t) => {
+  const { store, storage } = await fixture(t);
+  const original = { ...input(), source: { ...input().source, applicationContext: { instanceId: "page-old", deliveryVersion: "v1", revision: 4 } } };
+  const first = await store.create("agent-a", original);
+  await store.update("agent-a", first.task.id, { status: "completed", result: { saved: true } });
+  const record = await store.record("agent-a");
+  record.tasks[0].requestHash = createHash("sha256").update(JSON.stringify([original.actionId, original.input, original.deliveryVersion, original.source])).digest("hex");
+  await storage.writeJson("agent-a", "application/tasks.json", record);
+  const retry = { ...original, source: { ...original.source, applicationContext: { instanceId: "page-reloaded", deliveryVersion: "v1", revision: 1 } } };
+  const replay = await store.create("agent-a", retry);
+  assert.equal(replay.created, false); assert.equal(replay.task.id, first.task.id);
+  assert.deepEqual(replay.task.source.applicationContext, original.source.applicationContext);
+  assert.deepEqual(replay.task.result, { saved: true });
+  assert.deepEqual(await store.record("agent-a"), record);
+  for (const patch of [{ input: { url: "https://example.com/other" } }, { actionId: "different" }, { deliveryVersion: "v2" },
+    { source: { ...retry.source, scope: "group:other" } }, { source: { ...retry.source, kind: "conversation" } }])
+    await assert.rejects(store.create("agent-a", { ...retry, ...patch }), { reason: "application_conflict" });
 });
 test("cancelled terminal task refuses late successful receipts, events can be replayed", async (t) => {
   const { store } = await fixture(t), { task } = await store.create("agent-a", input());

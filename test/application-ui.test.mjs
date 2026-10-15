@@ -86,6 +86,7 @@ test("iframe桥只信任指定父窗口，未匹配响应不能伪造完成", as
   vm.runInNewContext(await readFile(new URL("../public/application-frame-bridge.js", import.meta.url), "utf8"), {
     window: ui.window, setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; }, clearTimeout: (id) => timers.delete(id),
   });
+  assert.equal(sent.shift().message.type, "document.ready");
   const pending = ui.window.neuma.actions.run("search", { link: "https://example.com" }, { mutationId: "retry-key" });
   assert.equal(ui.window.__NEUMA_APPLICATION__, undefined); assert.equal(sent[0].origin, ui.window.location.origin);
   assert.equal(sent[0].message.params.mutationId, "retry-key");

@@ -51,6 +51,32 @@ function interactionFixture(interaction, { schemaVersion, page = false, operatio
   return { value, context: { draft, requirements } };
 }
 
+test("已确认页面默认入口和助手用途不能被降级或擅自扩张", () => {
+  const assistant = { enabled: true, purpose: "解释当前图形并操作已有参数" };
+  const fixture = interactionFixture({ defaultEntry: "application", page: true, assistant }, { schemaVersion: 2, page: true });
+  fixture.value.interaction.assistant = assistant;
+  assert.equal(checkDesign(fixture.value, fixture.context).issues.some((issue) => issue.blocking), false);
+  for (const mutate of [
+    (value) => { value.interaction.defaultEntry = "conversation"; },
+    (value) => { delete value.interaction.assistant; },
+    (value) => { value.interaction.assistant = { enabled: false, purpose: "" }; },
+    (value) => { value.interaction.assistant.purpose = "自动修改页面代码"; },
+  ]) {
+    const changed = structuredClone(fixture.value); mutate(changed);
+    assert.ok(checkDesign(changed, fixture.context).issues.some((issue) => issue.id === "confirmed_presentation" && issue.blocking));
+  }
+  fixture.context.draft.interaction.assistant = { enabled: false, purpose: "" };
+  assert.ok(checkDesign(fixture.value, fixture.context).issues.some((issue) => issue.id === "confirmed_presentation"));
+  fixture.value.interaction.assistant = { enabled: false, purpose: "" };
+  assert.equal(checkDesign(fixture.value, fixture.context).issues.some((issue) => issue.blocking), false);
+  delete fixture.context.draft.interaction.assistant;
+  fixture.value.interaction.assistant = assistant;
+  assert.ok(checkDesign(fixture.value, fixture.context).issues.some((issue) => issue.id === "confirmed_presentation"));
+  assert.ok(checkDesign(fixture.value, { requirements: fixture.context.requirements }).issues.some((issue) => issue.id === "confirmed_presentation"));
+  delete fixture.value.interaction.assistant;
+  assert.equal(checkDesign(fixture.value, fixture.context).issues.some((issue) => issue.blocking), false);
+});
+
 test("需求交接使用现有 ready 门禁，保留约束、触发与外部边界", () => {
   assert.equal(ARCHITECTURE_VERSION, 1);
   assert.throws(() => requirementItems(emptyDraft()), InputError);

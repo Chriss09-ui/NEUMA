@@ -46,6 +46,15 @@ test("v2 manifest binds resource bytes and evidence; action input rejects extra 
   assert.throws(() => validateActionInput(plan.actions[0], { url: "https://example.com", agentId: "victim" }), /字段/);
 });
 
+test("page-only delivery retains an empty backend module without inventing public actions", async (t) => {
+  const input = await fixture(t, "export const actions={};", { page: true });
+  const source = { ...manifest(), actions: [], page: { entrypoint: "index.html", resources: [{ path: "index.html", sha256: "" }] } };
+  const delivered = bindApplicationManifest(source, input.snapshot, ["page_checks"]);
+  assert.deepEqual(validateApplicationManifest(delivered, { snapshot: input.snapshot }).actions, []);
+  assert.throws(() => validateApplicationManifest({ ...delivered, page: null }, { snapshot: input.snapshot }), /动作清单/);
+  assert.throws(() => bindApplicationManifest({ ...source, entrypoint: "missing.mjs" }, input.snapshot, ["page_checks"]), /入口不在/);
+});
+
 test("v2 architecture separates interaction from complexity and retains exact v1 validation", () => {
   const architecture = developmentArchitecture();
   const design = { ...architecture.design, schemaVersion: 2, profile: "light",

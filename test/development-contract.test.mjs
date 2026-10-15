@@ -22,6 +22,48 @@ function plan() {
 
 const check = (value, options = {}) => validatePlan(value, { architecture: architecture(), ...options });
 
+function pagePlan() {
+  const base = plan();
+  return { ...base, schemaVersion: 2, runtime: "node-action", entrypoint: "actions.mjs",
+    tasks: base.tasks.map((task) => ({ ...task, files: ["actions.mjs", "ui/index.html", "checks/page.mjs"] })),
+    cases: base.cases.map((item) => ({ ...item, kind: "node-check", entrypoint: "checks/page.mjs" })),
+    application: { protocolVersion: 2, runtime: "node-action", entrypoint: "actions.mjs",
+      page: { entrypoint: "ui/index.html", resources: [{ path: "ui/index.html", sha256: "" }] },
+      actions: [], stateVersion: 1, evidenceIds: [] } };
+}
+
+test("page-only plans keep empty public actions and require independent Node checks for every acceptance", () => {
+  const value = pagePlan();
+  assert.deepEqual(check(value), value);
+  for (const mutate of [
+    (next) => { next.application.page = null; },
+    (next) => { next.cases.pop(); },
+    (next) => { next.cases[0].entrypoint = next.entrypoint; },
+    (next) => { next.cases[0].entrypoint = "ui/index.html"; },
+    (next) => { next.cases[0].entrypoint = "checks/missing.mjs"; },
+    (next) => { next.cases[0].actionId = "fake"; },
+    (next) => { next.cases[0].mocks = []; },
+    (next) => { delete next.cases[0].kind; },
+    (next) => { next.application.page.resources.push({ path: "checks/page.mjs", sha256: "" }); },
+  ]) { const next = structuredClone(value); mutate(next); assert.throws(() => check(next), InputError); }
+});
+
+test("Node checks cannot replace action verification and their kind and entrypoint are frozen", () => {
+  const value = pagePlan();
+  const schema = { type: "object", properties: {}, required: [], additionalProperties: false };
+  value.application.actions.push({ id: "extract", title: "提取", inputSchema: schema, outputSchema: schema, connectionIds: [] });
+  assert.throws(() => check(value), /每个动作必须有实际验收/);
+  const previousPlan = pagePlan();
+  const changed = structuredClone(previousPlan);
+  changed.tasks[0].files.push("checks/replacement.mjs"); changed.cases[0].entrypoint = "checks/replacement.mjs";
+  assert.throws(() => check(changed, { previousPlan }), /不能删除或替换/);
+  const action = { id: "extract", title: "提取", inputSchema: schema, outputSchema: schema, connectionIds: [] };
+  const switched = structuredClone(previousPlan); switched.application.actions.push(action);
+  switched.cases[0] = { ...switched.cases[0], kind: "action", actionId: "extract", mocks: [], input: "{}" };
+  delete switched.cases[0].entrypoint;
+  assert.throws(() => check(switched, { previousPlan }), /不能删除或替换/);
+});
+
 test("structured submit schemas disallow extra properties and require all fields", () => {
   for (const schema of [PLAN_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA]) {
     assert.equal(schema.additionalProperties, false);

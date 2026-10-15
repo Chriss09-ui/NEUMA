@@ -91,6 +91,13 @@ export class ApplicationResources {
     this.instances.set(instanceId, instance);
     return { instanceId, origin: instance.origin, url: `${instance.origin}/${instanceId}/${manifest.page.entrypoint}`, deliveryVersion, manifest };
   }
+  assertInstance(agentId, instanceId, deliveryVersion) {
+    const instance = this.instances.get(instanceId);
+    if (!instance) throw new InputError("应用页面实例已关闭，请重新打开页面后重试");
+    if (instance.agentId !== agentId) throw new InputError("应用页面实例属于其他 Agent");
+    if (instance.deliveryVersion !== deliveryVersion) throw new InputError("应用页面实例的交付版本已变化，请重新打开页面");
+    return { instanceId: instance.instanceId, agentId: instance.agentId, deliveryVersion: instance.deliveryVersion };
+  }
   async close(agentId, instanceId) {
     const instance = this.instances.get(instanceId);
     if (!instance) return { closed: false };

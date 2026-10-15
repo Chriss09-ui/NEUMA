@@ -1,8 +1,9 @@
 const labels = { queued: "排队中", running: "处理中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断" };
-export function createApplicationTasks({ document, api, list, status, onArtifacts = () => {}, onCompleted = () => {} }) {
+export function createApplicationTasks({ document, api, list, status, onArtifacts = () => {}, onCompleted = () => {}, onChanged = () => {} }) {
   let agentId = null, generation = 0, timer = null, requestSequence = 0;
   let lastSnapshot = "";
   const rows = new Map(), notified = new Set();
+  const sequences = new Map();
   const node = (tag, text, className = "") => { const value = document.createElement(tag); value.textContent = text; value.className = className; return value; };
   const active = (task) => ["queued", "running"].includes(task.status);
   async function refresh() {
@@ -17,6 +18,12 @@ export function createApplicationTasks({ document, api, list, status, onArtifact
       const snapshot = JSON.stringify(tasks);
       if (snapshot === lastSnapshot) return;
       lastSnapshot = snapshot;
+      for (const task of tasks) {
+        const taskId = task.id || task.taskId, sequence = task.sequence;
+        if (Number.isSafeInteger(sequence) && sequence > (sequences.get(taskId) ?? -1)) {
+          sequences.set(taskId, sequence); onChanged(task);
+        }
+      }
       const expanded = new Set([...rows].filter(([, row]) => row.result?.open).map(([id]) => id));
       let focus;
       for (const [id, row] of rows) for (const key of ["cancel", "artifacts", "summary"]) if (row[key] === document.activeElement) focus = { id, key };
@@ -60,7 +67,7 @@ export function createApplicationTasks({ document, api, list, status, onArtifact
   }
   return { start(id) {
     if (agentId === id) return;
-    agentId = id; generation++; lastSnapshot = ""; rows.clear(); notified.clear(); list.replaceChildren();
+    agentId = id; generation++; lastSnapshot = ""; rows.clear(); notified.clear(); sequences.clear(); list.replaceChildren();
     status.textContent = "正在读取任务…"; void refresh();
   }, refresh,
     stop() { agentId = null; generation++; clearTimeout(timer); } };

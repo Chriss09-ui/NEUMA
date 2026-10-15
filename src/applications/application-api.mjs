@@ -34,7 +34,7 @@ export async function routeApplication({ request, response, address, agents, rea
   if (family === "tasks") {
     if (!suffix && method === "POST") {
       const body = await readBody();
-      if (Object.keys(body).some((key) => !["actionId", "input", "mutationId", "deliveryVersion"].includes(key))) throw new InputError("应用任务不能指定其他身份或任务范围");
+      if (Object.keys(body).some((key) => !["actionId", "input", "mutationId", "deliveryVersion", "applicationContext"].includes(key))) throw new InputError("应用任务不能指定其他身份或任务范围");
       return send(await application.submit(id, body));
     }
     if (!suffix && method === "GET") return send({ tasks: await application.store.list(id, { scope: "private" }) });

@@ -140,6 +140,10 @@ export function normalizeDraft(value) {
       operations: normalizeStrings(raw.interaction.operations),
       inputs: cleanText(raw.interaction.inputs), results: cleanText(raw.interaction.results),
       persistentData: cleanText(raw.interaction.persistentData),
+      ...(raw.interaction.assistant && typeof raw.interaction.assistant === "object" ? { assistant: {
+        enabled: raw.interaction.assistant.enabled === true,
+        purpose: cleanText(raw.interaction.assistant.purpose, 500),
+      } } : {}),
     } } : {}),
     ...(Array.isArray(raw.connections) ? { connections: raw.connections.slice(0, 40).filter((item) => item && typeof item === "object").map((item) => ({
       purpose: ["search", "model", "business"].includes(item.purpose) ? item.purpose : "business",
@@ -172,6 +176,10 @@ function requireModelDraft(value) {
       || !ACTION_MODES.has(value.externalAction?.mode)) {
     throw new ProviderError("需求模型返回的草稿格式不完整",
       { stage: "llm", reason: "invalid_draft" });
+  }
+  if (value.interaction?.assistant !== undefined && (!value.interaction.assistant
+    || typeof value.interaction.assistant.enabled !== "boolean" || typeof value.interaction.assistant.purpose !== "string")) {
+    throw new ProviderError("需求模型返回的页面助手格式无效", { stage: "llm", reason: "invalid_draft", field: "interaction.assistant" });
   }
   return normalizeDraft(value);
 }
@@ -224,6 +232,10 @@ export function decideNext(draft, modelSuggestion = {}, jevResult = null,
     addGap(gaps, proposedGap);
   }
   if (draft.conflict) addGap(gaps, "conflict");
+  if (draft.interaction?.defaultEntry === "application" && !draft.interaction.page
+    || draft.interaction?.assistant?.enabled && (!draft.interaction.page || !draft.interaction.assistant.purpose)) {
+    addGap(gaps, "boundary");
+  }
 
   const action = draft.externalAction;
   if (action.mode === "possible" || (action.mode === "requested"
@@ -314,6 +326,9 @@ function summaryFor(draft, status) {
     `输入：${draft.inputSource.value || "待明确"}`,
     `核心任务与处理方式：${draft.task.value || "待明确"}`,
     `输出：${draft.deliverable.value || "待明确"}`,
+    ...(draft.interaction ? [`打开方式：${draft.interaction.defaultEntry === "application" ? "以交互页面为主" : "以对话为主"}`,
+      ...(draft.interaction.page ? [`页面 AI 助手：${draft.interaction.assistant?.enabled
+        ? draft.interaction.assistant.purpose : "无需浮窗助手"}`] : [])] : []),
     `关键规则与边界：${boundary || "暂无额外要求"}`,
     `建议的调用场景：${draft.routingCondition.value || "待根据需求确定"}`,
   ].join("\n");

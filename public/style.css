@@ -1101,12 +1101,68 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .agent-view-switch button { min-height: 32px; padding: 6px 12px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 12px; }
 .agent-view-switch button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px #00000012; }
 .application-delivery-state { max-width: 160px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.agent-chat-layout.is-application { grid-template-columns: minmax(0, 1fr) 0px; gap: 0; overflow: hidden; }
-.agent-chat-layout.is-application.application-assistant-open { grid-template-columns: minmax(0, 1fr) 360px; gap: 20px; }
-.agent-chat-layout.is-application > .conversation { width: 360px; justify-self: end; border-left: 1px solid var(--border); padding-left: 20px; opacity: 0; visibility: hidden; transform: translateX(20px); pointer-events: none; }
-.agent-chat-layout.is-application.application-assistant-open > .conversation { opacity: 1; visibility: visible; transform: translateX(0); pointer-events: auto; }
-.agent-chat-layout.is-application > .conversation .messages { padding-left: 0; padding-right: 0; }
-.agent-chat-layout.is-application > .conversation .composer { padding: 12px; }
+.agent-chat-layout.is-application { grid-template-columns: minmax(0, 1fr); gap: 0; overflow: hidden; }
+.agent-chat-layout.is-application > .conversation {
+  position: absolute; z-index: 8; left: var(--assistant-x, 16px); top: var(--assistant-y, 16px);
+  width: var(--assistant-width, 400px); height: var(--assistant-height, 440px); padding: 0; overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--surface) 84%, var(--border-strong)); border-radius: 24px;
+  background: color-mix(in srgb, var(--surface) 42%, transparent); backdrop-filter: blur(22px) saturate(1.3); -webkit-backdrop-filter: blur(22px) saturate(1.3);
+  box-shadow: 0 8px 32px #00000016, inset 0 1px 0 #ffffffa6;
+  visibility: hidden; pointer-events: none;
+}
+.agent-chat-layout.is-application.application-assistant-open > .conversation { visibility: visible; pointer-events: auto; }
+.application-assistant-header { display: flex; align-items: center; flex: 0 0 48px; gap: 4px; padding: 8px 12px 0; cursor: grab; touch-action: none; }
+.application-assistant-move { display: flex; align-items: center; flex: 1; min-width: 0; gap: 8px; height: 32px; padding: 0; border: 0; background: transparent; text-align: left; cursor: grab; touch-action: none; }
+#agent-assistant-avatar { display: grid; place-items: center; width: 32px; height: 32px; flex-shrink: 0; }
+#agent-assistant-avatar > span { display: grid; place-items: center; width: 28px; height: 28px; font-size: 22px; }
+#agent-assistant-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.application-assistant-control { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; color: var(--text-2); background: transparent; font-size: 20px; }
+.application-assistant-control:hover { color: var(--text); background: color-mix(in srgb, var(--surface) 55%, transparent); }
+.agent-chat-layout.is-application > .conversation #agent-messages { padding: 16px; gap: 16px; border-radius: 12px; }
+.agent-chat-layout.is-application > .conversation #agent-chat-form { width: calc(100% - 16px); margin: 0 8px 8px; padding: 8px; border-color: color-mix(in srgb, var(--border-strong) 70%, transparent); background: color-mix(in srgb, var(--surface) 26%, transparent); box-shadow: none; }
+.agent-chat-layout.is-application > .conversation #agent-chat-form:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.agent-chat-layout.is-application > .conversation #agent-chat-form textarea { max-height: min(100px, calc(var(--assistant-height, 440px) - 160px)); }
+.agent-chat-layout.is-application > .conversation .agent-save-actions { margin: 0 16px 8px; font-size: 11px; }
+.agent-chat-layout.is-application.application-assistant-compact > .conversation { border-radius: 32px; }
+.application-assistant-compact .application-assistant-header { position: absolute; z-index: 1; left: 12px; top: 15px; width: 32px; height: 32px; padding: 0; }
+.application-assistant-compact :is(#agent-assistant-title, #agent-assistant-actions, .application-assistant-control),
+.application-assistant-compact #agent-messages, .application-assistant-compact .agent-save-actions { display: none; }
+.agent-chat-layout.is-application.application-assistant-compact > .conversation #agent-chat-form { display: flex; align-items: center; width: calc(100% - 56px); height: 62px; margin: 0 8px 0 48px; padding: 0 8px; border: 0; border-radius: 32px; background: transparent; }
+.application-assistant-compact .agent-compose-row { align-items: center; width: 100%; gap: 8px; }
+.application-assistant-compact #agent-chat-form .agent-composer-tools { display: none; }
+.agent-chat-layout.is-application.application-assistant-compact > .conversation #agent-chat-form textarea { height: 34px !important; max-height: 34px; overflow-y: auto; }
+.application-assistant-compact #agent-attachment-list { display: none; }
+.application-assistant-compact #agent-error, .application-assistant-compact #agent-attachment-error { position: absolute; bottom: 100%; left: 0; margin: 0 0 8px; padding: 8px 12px; border-radius: 12px; background: var(--surface); }
+@media (prefers-reduced-motion: no-preference) {
+  .agent-chat-layout.is-application.application-assistant-animating > .conversation {
+    overflow: clip;
+    transition: left .34s cubic-bezier(.22, 1, .36, 1), top .34s cubic-bezier(.22, 1, .36, 1),
+      width .34s cubic-bezier(.22, 1, .36, 1), height .34s cubic-bezier(.22, 1, .36, 1), border-radius .34s cubic-bezier(.22, 1, .36, 1);
+  }
+  .agent-chat-layout.is-application.application-assistant-animating > .conversation #agent-chat-form {
+    position: absolute; bottom: 0; flex-shrink: 0;
+  }
+  .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation #agent-chat-form { right: 0; width: calc(var(--assistant-width) - 16px); }
+  .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation #agent-messages { width: calc(var(--assistant-width) - 2px); }
+  .agent-chat-layout.is-application.application-assistant-animating:not(.application-assistant-compact) > .conversation::after { content: ""; flex: 0 0 var(--assistant-composer-space, 60px); }
+  .application-assistant-expanding #agent-messages { animation: assistant-content-in .22s .06s both; }
+  .application-assistant-expanding :is(#agent-assistant-title, #agent-assistant-actions, .application-assistant-control, .agent-save-actions, .agent-composer-tools) { animation: assistant-controls-in .2s .07s both; }
+}
+@keyframes assistant-content-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes assistant-controls-in { from { opacity: 0; } to { opacity: 1; } }
+.application-assistant-resize { position: absolute; z-index: 2; touch-action: none; }
+.application-assistant-resize[data-edge="n"], .application-assistant-resize[data-edge="s"] { left: 24px; right: 24px; height: 8px; cursor: ns-resize; }
+.application-assistant-resize[data-edge="n"] { top: -3px; } .application-assistant-resize[data-edge="s"] { bottom: -3px; }
+.application-assistant-resize[data-edge="e"], .application-assistant-resize[data-edge="w"] { top: 24px; bottom: 24px; width: 8px; cursor: ew-resize; }
+.application-assistant-resize[data-edge="e"] { right: -3px; } .application-assistant-resize[data-edge="w"] { left: -3px; }
+.application-assistant-resize:is([data-edge="nw"], [data-edge="ne"], [data-edge="sw"], [data-edge="se"]) { width: 18px; height: 18px; border: 0; padding: 0; border-radius: 4px; background: transparent; }
+.application-assistant-resize[data-edge="nw"] { left: 0; top: 0; cursor: nwse-resize; } .application-assistant-resize[data-edge="ne"] { right: 0; top: 0; cursor: nesw-resize; }
+.application-assistant-resize[data-edge="sw"] { left: 0; bottom: 0; cursor: nesw-resize; } .application-assistant-resize[data-edge="se"] { right: 4px; bottom: 4px; cursor: nwse-resize; }
+.application-assistant-resize[data-edge="se"]::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 6px; height: 6px; border-right: 1px solid var(--muted); border-bottom: 1px solid var(--muted); border-bottom-right-radius: 2px; }
+.application-assistant-compact .application-assistant-resize[data-edge="se"] { right: 10px; bottom: 1px; }
+.application-assistant-pointer-shield { position: absolute; z-index: 7; inset: 0; background: transparent; }
+.application-assistant-dragging, .application-assistant-dragging * { user-select: none !important; }
+.application-assistant-dragging .application-frame { pointer-events: none; }
 .agent-chat-layout.is-application > .conversation .composer-footer { align-items: flex-end; gap: 8px; }
 .agent-chat-layout.is-application > .conversation .agent-attachment-actions { flex-wrap: wrap; gap: 4px; }
 .agent-chat-layout.is-application > .conversation .agent-attachment-actions > span { display: none; }
@@ -1440,8 +1496,6 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
   .agent-identity-capsule > svg { transition: width 180ms cubic-bezier(.22, 1, .36, 1), margin-left 180ms cubic-bezier(.22, 1, .36, 1), opacity 180ms ease; }
   .agent-settings-panel { transition: transform 420ms cubic-bezier(.22, 1, .36, 1), opacity 200ms ease; }
   .agent-chat-layout { transition: grid-template-columns 420ms cubic-bezier(.22, 1, .36, 1), gap 420ms cubic-bezier(.22, 1, .36, 1); }
-  .agent-chat-layout.is-application > .conversation { transition: opacity 200ms ease, transform 420ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 420ms; }
-  .agent-chat-layout.is-application.application-assistant-open > .conversation { transition-delay: 0s; }
   .agent-details-dialog[open], .agent-file-dialog[open] { animation: workspace-in 220ms cubic-bezier(.22, 1, .36, 1) both; }
   .agent-details-tabs button { transition: color 160ms ease, border-color 160ms ease; }
 }

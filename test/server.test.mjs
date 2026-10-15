@@ -85,6 +85,9 @@ test("本地服务提供测试页面、配置状态和需求接口", async () =>
   const capabilities = await invoke(handler, "GET", "/group-capabilities.js");
   assert.equal(capabilities.status, 200);
   assert.match(capabilities.headers["content-type"], /javascript/);
+  const mentions = await invoke(handler, "GET", "/group-mention-composer.js");
+  assert.equal(mentions.status, 200);
+  assert.match(mentions.headers["content-type"], /javascript/);
   assert.match(page.text, /id="reset"[^>]*>＋ 新对话/);
   assert.match(page.text, /id="diagnostics"[^>]*>导出诊断记录/);
 

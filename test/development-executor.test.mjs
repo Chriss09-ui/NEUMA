@@ -51,6 +51,64 @@ function fakeSandbox(runs = []) {
     killImpl: (pid, signal) => killed.push({ pid, signal }), timeoutMs: 30 }) };
 }
 
+async function pageCheckFixture(t, source = 'console.log(JSON.stringify({ok:true}));') {
+  const input = await fixture(t, "export const actions={};");
+  await mkdir(join(input.codeDir, "checks"));
+  await writeFile(join(input.codeDir, "index.html"), '<!doctype html><title>Page</title>');
+  await writeFile(join(input.codeDir, "checks/page.mjs"), source);
+  input.snapshot = await inspectDevelopmentCode(input.codeDir);
+  const application = { protocolVersion: 2, runtime: "node-action", entrypoint: input.entrypoint,
+    page: { entrypoint: "index.html", resources: [{ path: "index.html", sha256: "" }] },
+    actions: [], stateVersion: 1, evidenceIds: [] };
+  return { ...input, runtime: "node-action", application, cases: [{ id: "page", kind: "node-check", entrypoint: "checks/page.mjs",
+    taskId: "page", acceptanceId: "resources", input: "", assertions: [{ path: "ok", expectedJson: "true" }] }] };
+}
+
+test("page Node checks use a private snapshot entrypoint with no action channel or user workspace", async (t) => {
+  const input = await pageCheckFixture(t), { executor, calls } = fakeSandbox([{ stdout: '{"ok":true}' }]);
+  executor.runAction = () => assert.fail("检查不能作为业务动作执行");
+  const report = await executor.verify(input);
+  assert.equal(report.status, "passed", JSON.stringify(report)); assert.equal(report.evidenceMode, "node_checks");
+  assert.equal(report.browserVerified, false); assert.equal(report.results[0].evidenceMode, "node_check");
+  assert.equal(Object.hasOwn(report.results[0], "actionId"), false);
+  assert.ok(calls.at(-1).args.at(-1).endsWith("checks/page.mjs"));
+  assert.notEqual(calls.at(-1).options.cwd, input.codeDir);
+  assert.match(calls.at(-1).args[1], /\(deny network\*\)/);
+});
+
+test("page Node check validation rejects public, missing and capability-bearing entries before execution", async (t) => {
+  const input = await pageCheckFixture(t);
+  for (const mutate of [
+    (next) => { next.cases[0].entrypoint = next.entrypoint; },
+    (next) => { next.cases[0].entrypoint = "checks/missing.mjs"; },
+    (next) => { next.cases[0].entrypoint = "../outside.mjs"; },
+    (next) => { next.cases[0].actionId = "fake"; },
+    (next) => { next.cases[0].mocks = []; },
+    (next) => { next.application.page.resources.push({ path: "checks/page.mjs", sha256: "" }); },
+  ]) {
+    const next = structuredClone(input); mutate(next);
+    const { executor, calls } = fakeSandbox();
+    assert.equal((await executor.verify(next)).status, "error"); assert.equal(calls.length, 0);
+  }
+});
+
+test("native page check reads real resources but cannot modify the snapshot or read private data", async (t) => {
+  const executor = new DevelopmentExecutor(); if (!(await requireIsolation(t, executor))) return;
+  const input = await pageCheckFixture(t, `import {readFile,writeFile} from 'node:fs/promises';
+const page=new URL('../index.html',import.meta.url); const html=await readFile(page,'utf8');
+let writeDenied=false,readDenied=false;
+try{await writeFile(page,'changed')}catch{writeDenied=true}
+try{await readFile(process.argv[2],'utf8')}catch{readDenied=true}
+console.log(JSON.stringify({ok:html.includes('<title>Page</title>')&&writeDenied&&readDenied}));`);
+  const privatePath = join(input.root, "private.txt"); await writeFile(privatePath, "private fixture");
+  input.cases[0].input = privatePath;
+  const report = await executor.verify(input);
+  assert.equal(report.status, "passed", JSON.stringify(report)); assert.equal(report.browserVerified, false);
+  assert.equal(await readFile(join(input.codeDir, "index.html"), "utf8"), '<!doctype html><title>Page</title>');
+  input.cases[0].assertions[0].expectedJson = "false";
+  assert.equal((await executor.verify(input)).status, "failed");
+});
+
 test("无隔离的平台明确不执行，不以 cwd 或普通进程代替沙箱", async (t) => {
   const input = await fixture(t);
   const executor = new DevelopmentExecutor({ platform: "linux", spawnImpl: () => assert.fail("不得启动非隔离进程") });

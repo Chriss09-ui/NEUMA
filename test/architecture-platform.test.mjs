@@ -490,7 +490,7 @@ test("持久化的 v1 平台记录保留原候选与历史结果，主动重设�
   assert.equal(await readFile(path, "utf8"), before);
   const next = await restarted.design(definition());
   assert.equal(next.version, legacy.version + 1);
-  assert.equal(next.platformContractVersion, 2);
+  assert.equal(next.platformContractVersion, 3);
   assert.notEqual(next.platformHash, legacy.platformHash);
   assert.equal(sessions.length, 4);
   const stored = JSON.parse(await readFile(path, "utf8"));
