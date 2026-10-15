@@ -19,6 +19,33 @@ const moduleResultSchema = object({ proposal: text(8000), interfaces: text(4000)
 const toolResult = (result) => ({ content: [{ type: "text", text: JSON.stringify(result) }], details: {} });
 const issue = (id, description, remedy) => ({ id, blocking: true, description, remedy });
 
+function submissionValidationIssue(message, schema, sdk = false) {
+  if (typeof message !== "string" || sdk && !message.startsWith("Validation failed for tool ")) return null;
+  // SDK validation errors append the complete arguments. Never retain that text or arbitrary field names/values.
+  const validation = message.slice(0, 16_000).replace(/\\n/g, "\n").split(/(?:received\s+)?arguments\s*:/i)[0];
+  const fields = new Set(["root", "design", "review"]);
+  const collect = (value) => {
+    if (!value || typeof value !== "object") return;
+    for (const [name, child] of Object.entries(value.properties ?? {})) { fields.add(name); collect(child); }
+    collect(value.items);
+  };
+  collect(schema);
+  const match = sdk ? validation.match(/^\s*-\s+([^:\n]{1,400}):\s*([^\n]*)/m)
+    : validation.match(/\b((?:design|review)(?:\.[\w-]+|\[\d+\])*)\s+([^\n]*)/);
+  const path = (match?.[1] ?? "root").replace(/\[(\d+)\]/g, ".$1").split(/[./]/).filter(Boolean).slice(0, 12)
+    .map((part) => fields.has(part) ? part : /^\d{1,4}$/.test(part) ? `[${part}]` : "<field>").join(".").slice(0, 240);
+  const text = match?.[2] ?? validation;
+  const reason = [
+    [/缺失|缺少|expected required property|missing|required/i, "required_field"],
+    [/不受支持|不支持的字段|unexpected property|additional propert/i, "unknown_field"],
+    [/必须为|expected (?:string|boolean|number|integer|object|array|null)|\btype\b/i, "invalid_type"],
+    [/条目数量|长度|length|items|characters|too (?:long|short)/i, "size_limit"],
+    [/文本或取值无效|literal|enum|union/i, "invalid_value"],
+    [/引用|覆盖|依赖存在循环|未出现在执行步骤/i, "invalid_reference"],
+  ].find(([pattern]) => pattern.test(text))?.[1] ?? "invalid_contract";
+  return { path: path || "root", reason };
+}
+
 function programIssue(entry) {
   const candidateFields = entry.candidateFields ?? (entry.id.startsWith("capability_")
     ? ["capabilities", "decisions", "steps", "coverage", "acceptance"]
@@ -126,13 +153,26 @@ export class ArchitectureDesigner {
 
   async role({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress }) {
     let result, session, unsubscribe = () => {}, failed = false, turns = 0, retries = 0, retryError = "", turnLimit = false, truncated = false;
-    const details = () => ({ role, phase: role === "reviewer" ? "evaluating" : "designing", retries });
+    let submissionAttempts = 0, lastSubmissionError;
+    const submissions = new Set(), phase = role === "reviewer" ? "evaluating" : "designing";
+    const attempted = (callId) => { if (!submissions.has(callId)) { submissions.add(callId); submissionAttempts++; } };
+    const rejected = (message, sdk = false) => {
+      const validationIssue = submissionValidationIssue(message, parameters, sdk);
+      if (!validationIssue) return;
+      const summary = `${validationIssue.path}: ${validationIssue.reason}`;
+      if (summary === lastSubmissionError) return;
+      lastSubmissionError = summary;
+      onProgress?.({ type: "status", phase, label: "方案提交未通过格式检查，正在修正…", validationIssue, submissionAttempts });
+    };
+    const details = () => ({ role, phase, retries, submissionAttempts, ...(lastSubmissionError ? { lastSubmissionError } : {}) });
     const abort = () => { void session?.abort().catch(() => {}); };
     const submit = { name: submitName, label: "提交检查结果", description: "提交本阶段的结构化结果；提交不代表整体通过。",
       parameters, executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
+        attempted(_id);
         if (result !== undefined) throw new InputError("本阶段已经提交，请结束本轮");
-        result = validate(value);
+        try { result = validate(value); }
+        catch (error) { if (error instanceof InputError) rejected(error.message); throw error; }
         session?.setAutoCompactionEnabled?.(false);
         return { ...toolResult({ submitted: true }), terminate: true };
       } };
@@ -144,6 +184,12 @@ export class ArchitectureDesigner {
         systemPrompt, customTools: [...tools, submit], maxOutputTokens: modelOutputBudget(this.config, role === "designer" ? 8192 : 4096) });
       signal?.throwIfAborted();
       unsubscribe = session.subscribe?.((event) => {
+        if (event.toolName === submitName && ["tool_execution_start", "tool_execution_end"].includes(event.type)) {
+          attempted(event.toolCallId);
+          if (event.type === "tool_execution_end" && event.isError) {
+            for (const content of event.result?.content ?? []) if (content.type === "text") rejected(content.text, true);
+          }
+        }
         if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "length") truncated = true;
         if (event.type === "auto_retry_end" && !event.success) { failed = true; retryError = event.finalError || retryError; }
         if (event.type === "auto_retry_start") {
