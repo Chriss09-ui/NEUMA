@@ -91,6 +91,13 @@ export class ArchitectureDesigner {
     return structuredClone([...this.records.values()].filter((record) => record.agentId === id).sort((a, b) => b.version - a.version)[0] ?? null);
   }
 
+  async getVersion(id, version) {
+    agentId(id);
+    if (!Number.isSafeInteger(version) || version < 1) return null;
+    await this.ready;
+    return structuredClone(this.records.get(`${id}:${version}`) ?? null);
+  }
+
   save(record) {
     agentId(record.agentId);
     validatePlatformMetadata(record);

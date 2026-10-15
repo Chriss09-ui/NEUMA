@@ -298,6 +298,34 @@ export class PrototypeAgents {
 
   async get(id) { validId(id); await this.ready; const agent = cloneAgent(this.agents.get(id)); return agent ? { ...agent, publicCapabilityVersion: PUBLIC_CAPABILITY_VERSION } : null; }
   async getArchitecture(id) { validId(id); return this.architecture.get(id); }
+  async getActiveArchitecture(id) {
+    validId(id); await this.ready;
+    const definition = this.agents.get(id), reference = definition?.architectureRef;
+    if (!reference) return null;
+    const architecture = this.architecture.getVersion ? await this.architecture.getVersion(id, reference.version) : await this.getArchitecture(id);
+    const current = this.agents.get(id);
+    if (!current || current.revision !== definition.revision || current.architectureRef?.version !== reference.version
+      || current.architectureRef?.candidateHash !== reference.candidateHash) return null;
+    return architecture?.version === reference.version && architecture.candidateHash === reference.candidateHash ? architecture : null;
+  }
+  async getActiveRuntime(id) {
+    validId(id); await this.ready;
+    const agent = this.agents.get(id), architecture = await this.getActiveArchitecture(id);
+    if (!this.approvedDefinition(agent, architecture) || architecture.delivery !== "ready") return null;
+    let development = null, application = null;
+    try {
+      if (agent.execution?.kind === "node-action") {
+        const descriptor = await this.applications.descriptor(id, { allowBuilding: true });
+        development = developmentSummary(descriptor.record);
+        application = await this.applications.summary(id);
+      } else if (agent.execution?.kind === "node-json") {
+        await this.developedTools(agent, this.cwd);
+        development = developmentSummary(await this.development.store.getRun(agent.developmentRef.id));
+      }
+    } catch { return null; }
+    if (this.agents.get(id) !== agent || this.removing.has(id)) return null;
+    return { architecture, development, application };
+  }
   async getDevelopment(id) { validId(id); return this.development.get(id); }
   async getRequirements() { await this.ready; return this.library.list(); }
   async saveRequirements(id, value) { await this.ready; return this.library.saveRequirement(id, value); }
@@ -340,7 +368,7 @@ export class PrototypeAgents {
       await this.notifyLifecycle("build", id);
       const architecture = await this.getArchitecture(id);
       const record = await this.executeDevelopment(architecture, { resume, signal: context.controller.signal, onProgress });
-      return { agent: await this.get(id), architecture: await this.getArchitecture(id), development: developmentSummary(record) };
+      return { agent: await this.get(id), architecture: await this.getArchitecture(id), development: developmentSummary(record), activeRuntime: await this.getActiveRuntime(id) };
     } finally {
       signal?.removeEventListener("abort", abort);
       if (this.builds.get(id) === context) this.builds.delete(id);
@@ -361,8 +389,9 @@ export class PrototypeAgents {
       context.controller.abort();
       await context.done;
     }
+    const activeRuntime = await this.getActiveRuntime(id);
     return { cancelled, agent: await this.get(id), architecture: await this.getArchitecture(id),
-      development: await this.getDevelopment(id) };
+      development: await this.getDevelopment(id), ...(activeRuntime ? { activeRuntime } : {}) };
   }
 
   async executeDevelopment(architecture, options) {
@@ -501,7 +530,7 @@ export class PrototypeAgents {
     const entries = new Map(requirements.map((entry) => [entry.id, entry]));
     for (const agent of this.agents.values()) entries.set(agent.id, agent);
     const agents = await Promise.all([...entries.values()].filter((entry) => !selected || selected.has(entry.id)).map(async (entry) => {
-      const agent = this.agents.get(entry.id), architecture = await this.getArchitecture(entry.id);
+      const agent = this.agents.get(entry.id), architecture = await this.getActiveArchitecture(entry.id);
       const draft = entry.draft, profile = profileOf(entry);
       const clean = (value, limit = 500) => safeDiagnosticText(typeof value === "string" ? value : "").slice(0, limit);
       const approved = this.approvedDefinition(agent, architecture);
@@ -561,7 +590,7 @@ export class PrototypeAgents {
   }
 
   async connectionRequirements(id) {
-    const architecture = await this.getArchitecture(id);
+    const architecture = await this.getActiveArchitecture(id) ?? await this.getArchitecture(id);
     const requirements = structuredClone(architecture?.design?.connections ?? []);
     const draft = architecture?.draft ?? this.agents.get(id)?.draft;
     if (!requirements.some((item) => item.purpose === "search") && networkAllowed(draft)
@@ -756,10 +785,10 @@ export class PrototypeAgents {
       if (architecture.status === "passed" && requiresDevelopment(architecture.design)) {
         onProgress({ type: "status", phase: "intake", label: "架构评估通过，正在进入研发…", architecture });
         const record = await this.executeDevelopment(architecture, { signal: controller.signal, onProgress });
-        return { agent: await this.get(definition.id), architecture: await this.getArchitecture(definition.id), development: developmentSummary(record) };
+        return { agent: await this.get(definition.id), architecture: await this.getArchitecture(definition.id), development: developmentSummary(record), activeRuntime: await this.getActiveRuntime(definition.id) };
       }
       if (architecture.status !== "passed" || architecture.buildable !== true)
-        return { agent: cloneAgent(previous), architecture };
+        return { agent: cloneAgent(previous), architecture, activeRuntime: await this.getActiveRuntime(definition.id) };
       const instructions = architecture.design.instructions;
       if (typeof instructions !== "string" || !instructions.trim() || instructions.length > 12_000)
         throw new InputError("架构方案没有有效工作指令，不能生成");
@@ -828,7 +857,7 @@ export class PrototypeAgents {
       throw new InputError("请提供任务文字或附件，文字不超过 12000 字");
     await this.ready; checkExternalCancellation();
     await this.closing; checkExternalCancellation(); this.prune();
-    const architecture = await this.getArchitecture(agentId);
+    const architecture = await this.getActiveArchitecture(agentId);
     checkExternalCancellation();
     if (runtimeEpoch !== this.runtimeEpoch) throw modelError("cancelled");
     const agent = this.agents.get(agentId);
@@ -1007,7 +1036,7 @@ export class PrototypeAgents {
     const abort = () => { item.cancelled = true; item.controller.abort(); void abortSession(); };
     const checkReady = async () => {
       if (taskSignal.aborted || item.cancelled || runtimeEpoch !== this.runtimeEpoch) throw modelError("cancelled");
-      const current = this.agents.get(agentId), architecture = await this.getArchitecture(agentId);
+      const current = this.agents.get(agentId), architecture = await this.getActiveArchitecture(agentId);
       if (taskSignal.aborted || item.cancelled || this.removing.has(agentId)) throw modelError("cancelled");
       if (!agent || current?.revision !== revision || agent.revision !== revision || this.removing.has(agentId)
         || this.builds.has(agentId) || !this.approvedDefinition(agent, architecture) || architecture?.delivery !== "ready")

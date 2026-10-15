@@ -1097,6 +1097,9 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .agent-primary:has(> .is-panel-resizing) .agent-chat-header,
 .agent-primary:has(> .is-panel-revealing) .agent-chat-header { transition: none !important; }
 .agent-chat-layout.is-making { display: block; overflow-y: auto; }
+.agent-chat-layout.showing-update > .agent-making-panel { position: absolute; inset: 48px 0 0; z-index: 10; overflow-y: auto; background: var(--surface); }
+.agent-chat-layout.showing-update > .agent-application { visibility: hidden; pointer-events: none; }
+.agent-primary:has(.showing-update) :is(#agent-assistant-toggle, #agent-view-switch) { display: none; }
 .agent-view-switch { display: inline-flex; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
 .agent-view-switch button { min-height: 32px; padding: 6px 12px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 12px; }
 .agent-view-switch button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px #00000012; }

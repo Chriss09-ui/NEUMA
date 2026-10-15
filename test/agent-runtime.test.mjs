@@ -82,6 +82,18 @@ test("没有架构记录的定义一律停用，展示信息不能绕过架构�
   assert.equal(agentBuildState({ ...agent, profile: { name: "新的展示名" } }, { agent: designed, architecture: architecture() }).status, "ready");
 });
 
+test("最新升级失败或取消时使用完整核实的已激活版本，仍单独报告升级状态", () => {
+  const nextAgent = { ...agent, draft: { goal: { value: "新版需求" } } };
+  for (const status of ["designing", "failed", "cancelled", "passed"]) {
+    const latest = architecture({ version: 3, candidateHash: "next", draft: nextAgent.draft, status, delivery: "blocked" });
+    const result = { agent: designed, architecture: latest, activeRuntime: { architecture: architecture(), development: null } };
+    assert.equal(agentBuildState(nextAgent, result).status, "ready");
+    assert.notEqual(agentBuildState(nextAgent, result).updateStatus.status, "ready");
+    assert.notEqual(agentBuildState(nextAgent, { ...result, activeRuntime: { architecture: architecture({ candidateHash: "wrong" }) } }).status, "ready");
+    assert.notEqual(agentBuildState(nextAgent, { ...result, agent: null }).status, "ready");
+  }
+});
+
 test("已取消的请求忽略迟到的完成结果，详情路径正确编码", async () => {
   const controller = new AbortController(), requests = [];
   const api = createAgentRuntime(async (path) => { requests.push(path); return Response.json(turn); });

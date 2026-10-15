@@ -44,7 +44,20 @@ export function agentDevelopmentState(agent, { architecture, development } = {})
       : record ? "研发进度已保存，下一步以实际检查结果为准。" : "方案已通过评估，开始后会按任务开发并检查验收。" };
 }
 
-export function agentBuildState(agent, { agent: definition, architecture, development } = {}) {
+export function agentBuildState(agent, result = {}) {
+  const latest = candidateBuildState(agent, result), active = result.activeRuntime;
+  if (active && result.agent?.id === agent.id) {
+    const running = candidateBuildState(result.agent, { agent: result.agent, architecture: active.architecture, development: active.development });
+    if (running.status === "ready") {
+      const updating = result.architecture?.version !== active.architecture.version || agentSourceKey(agent) !== agentSourceKey(result.agent);
+      return { ...running, activeRuntime: active, updateStatus: updating ? latest : null,
+        label: updating ? `当前继续使用已激活版本。更新状态：${latest.label}` : running.label };
+    }
+  }
+  return { ...latest, activeRuntime: null, updateStatus: null };
+}
+
+function candidateBuildState(agent, { agent: definition, architecture, development } = {}) {
   const sourceKey = agentSourceKey(agent);
   const matchingDefinition = definition?.id === agent.id && agentSourceKey(definition) === sourceKey;
   if (architecture) {

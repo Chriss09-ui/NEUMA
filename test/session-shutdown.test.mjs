@@ -36,9 +36,9 @@ async function agentFixture(t, sessionFactory) {
     sessions: new Map(), collaborationSessions: new Map(), removing: new Set(), builds: new Map(), scheduler: new AgentScheduler(),
     activities: { start: async () => ({ id: "test-activity" }), update: async () => {}, persistence: Promise.resolve() },
     configured() {}, prune() {}, approvedDefinition: () => true,
-    getArchitecture: async () => ({ delivery: "ready" }), workspace: async () => root,
+    getActiveArchitecture: async () => ({ delivery: "ready" }), workspace: async () => root,
     storage: { directory: async () => root }, development: { close: async () => {} },
-    applications: { close: async () => {} },
+    applications: { close: async () => {}, conversationContext: async () => ({ context: null, prompt: "本轮当前页面不可用。" }) },
     connections: { snapshot: async () => ({ agentId: "alpha", version: 0, connections: [] }), modelConfig: async (_snapshot, config) => config },
     materials: { resolve: async () => [], tools: () => [], close: async () => {} }, sessionFactory,
   });
@@ -54,7 +54,7 @@ for (const boundary of ["ready", "closing", "architecture", "connections", "work
     const delayed = async (value) => { entered.resolve(); await held.promise; return value; };
     if (boundary === "ready" || boundary === "closing") {
       Object.defineProperty(agents, boundary, { configurable: true, get() { entered.resolve(); return held.promise; } });
-    } else if (boundary === "architecture") agents.getArchitecture = () => delayed({ delivery: "ready" });
+    } else if (boundary === "architecture") agents.getActiveArchitecture = () => delayed({ delivery: "ready" });
     else if (boundary === "connections") agents.connections.snapshot = () => delayed({ agentId: "alpha", version: 0, connections: [] });
     else if (boundary === "workspace") agents.workspace = () => delayed(awaitedRoot);
     else if (boundary === "storage") agents.storage.directory = () => delayed(awaitedRoot);
