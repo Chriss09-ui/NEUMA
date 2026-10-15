@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { CollaborationService } from "../src/collaboration/groups.mjs";
 
 async function fixture(t, execute) {
-  const root = await mkdtemp(join(tmpdir(), "neuma-group-question-")), calls = [];
+  const root = await mkdtemp(join(tmpdir(), "neuma-group-question-")), calls = [], intentCalls = [];
   let service;
   const agents = { ready: Promise.resolve(),
     async capabilityCards() { return { agents: ["A", "B", "C"].map((id) => ({ id, name: id, ready: true, revision: 1 })) }; },
@@ -14,7 +14,21 @@ async function fixture(t, execute) {
     async executeCollaboration(input, _progress, { signal }) {
       signal.throwIfAborted();
       const payload = JSON.parse(input.message), tools = Object.fromEntries(input.customTools.map((tool) => [tool.name, tool]));
-      const call = { agentId: input.agentId, kind: payload.kind, payload, input, tools }; calls.push(call);
+      const call = { agentId: input.agentId, kind: payload.kind, payload, input, tools };
+      if (input.role === "routing") {
+        assert.equal(input.allowBusinessTools, false);
+        await tools.submit_group_route.execute("route", { mode: "default" }, signal);
+        return { turns: 1 };
+      }
+      if (tools.submit_group_intent) {
+        intentCalls.push(call);
+        assert.equal(input.allowBusinessTools, false, "点名后的交互判断也不能获得业务权限");
+        assert.equal(tools.submit_group_turn, undefined); assert.equal(tools.ask_group_member, undefined);
+        await tools.submit_group_intent.execute("intent", { interaction: "task", participate: true, contribution: payload.goal.slice(0, 500),
+          willingToIntegrate: true, integratorId: input.agentId }, signal);
+        return { turns: 1 };
+      }
+      calls.push(call);
       await execute(call, { service, signal, calls }); return { turns: 1 };
     },
   };
@@ -22,7 +36,7 @@ async function fixture(t, execute) {
   t.after(async () => { await service.close(); await rm(root, { recursive: true, force: true }); });
   const result = await service.createGroup({ name: "提问验证组", purpose: "验证真实消息与调度", memberIds: ["A", "B", "C"], mutationId: "create_once" });
   const groupId = result.group.id;
-  return { service, groupId, calls, async start(content = "整理报告") {
+  return { service, groupId, calls, intentCalls, async start(content = "整理报告") {
     const result = await service.postMessage(groupId, { content, recipientId: "A", mutationId: "first_task" });
     await service.idle(groupId); return (await service.getGroup(groupId)).tasks.find((task) => task.id === result.task.id);
   } };
@@ -62,6 +76,7 @@ test("三人提问链仅在真实答复后解锁，第三人回答重新唤起�
   });
   const task = await f.start();
   assert.equal(task.status, "completed"); assert.equal(aWork, 2); assert.equal(bQuestions, 2);
+  assert.deepEqual(f.intentCalls.map((call) => call.agentId), ["A"]);
   assert.deepEqual(f.calls.map(({ agentId, kind }) => `${agentId}:${kind}`), ["A:work", "B:question", "C:question", "B:question", "A:work", "A:integration"]);
   assert.equal(task.questions.every((question) => question.status === "answered"), true);
 });

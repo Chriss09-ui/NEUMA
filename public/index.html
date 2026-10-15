@@ -129,7 +129,7 @@
                 <div class="agent-heading">
                   <button id="group-panel-toggle" class="agent-identity-capsule" type="button" aria-label="打开群组设置" aria-controls="group-panel" aria-expanded="false" disabled><span id="group-avatar" class="group-identity-avatar" aria-hidden="true"></span><span id="group-title">群组</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
                 </div>
-                <button id="group-new-task" class="ghost-button group-new-task" type="button" aria-label="新任务" title="新任务">＋</button>
+                <button id="group-new-task" class="ghost-button group-new-task" type="button" aria-label="新对话" title="新对话">＋</button>
               </header>
               <div id="group-error" class="error" role="alert" hidden></div>
               <div id="group-workspace" class="group-workspace">
@@ -138,6 +138,8 @@
                   <form id="group-chat-form" class="composer" autocomplete="off">
                     <div id="group-pending-materials" class="group-pending-materials" aria-label="本轮材料" hidden></div>
                     <label class="sr-only" for="group-message">群组消息或任务</label>
+                    <div id="group-mention-popup" class="group-mention-popup" role="listbox" aria-label="选择要提及的群成员" aria-hidden="true" inert></div>
+                    <div id="group-selected-mentions" class="group-selected-mentions" aria-label="已提及的群成员" hidden></div>
                     <div class="agent-compose-row">
                       <div class="agent-composer-tools">
                         <button id="group-attachment-menu-toggle" class="agent-composer-add" type="button" aria-label="添加群材料" title="添加群材料" aria-haspopup="menu" aria-controls="group-attachment-menu" aria-expanded="false">＋</button>
@@ -147,10 +149,6 @@
                           <p>只有明确分享到这个群的文件，成员才能使用。</p>
                           <p class="agent-upload-limit">单份 20 MiB · 本轮最多 10 份</p>
                         </div>
-                      </div>
-                      <div class="group-recipient-field">
-                        <span id="group-recipient-label" class="sr-only">发送给</span>
-                        <div class="select-menu"><select id="group-recipient" hidden tabindex="-1" aria-hidden="true"><option value="">群内协作</option></select><button id="group-recipient-trigger" class="select-menu-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-controls="group-recipient-menu" aria-expanded="false" aria-labelledby="group-recipient-label group-recipient-value"><span id="group-recipient-icon" class="select-menu-icon" aria-hidden="true"></span><span id="group-recipient-value" class="select-menu-value">群内协作</span><span class="select-menu-chevron" aria-hidden="true"></span></button><div id="group-recipient-menu" class="select-menu-popup" role="listbox" aria-labelledby="group-recipient-label" hidden></div></div>
                       </div>
                       <textarea id="group-message" rows="1" maxlength="4000" placeholder="给当前群组发消息…"></textarea>
                       <button id="group-send" class="primary agent-composer-send" type="submit" aria-label="发送" title="发送"><span class="sr-only">发送</span></button>
