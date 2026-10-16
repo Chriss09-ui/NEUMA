@@ -459,15 +459,16 @@ test("群头像在侧栏、列表和群标题使用同一静态组合，资料�
   assert.equal(textOf(sidebarGroup(ui).querySelector(".sidebar-group-link")), "研究小组");
 });
 
-test("收起栏按群列表顺序展示前两个未归档群，稳定刷新不打断头像焦点", async () => {
-  let listed = [group("archived", "归档组"), group("one"), group("two", "设计小组"), group("three", "第三小组")];
+test("收起栏保留全部未归档群供独立滚动，刷新与滚动范围外的重排不打断焦点", async () => {
+  let listed = [group("archived", "归档组"), group("one"), group("two", "设计小组"), group("three", "第三小组"),
+    group("four", "第四小组"), group("five", "第五小组"), group("six", "第六小组")];
   listed[0].archived = true;
   const requests = [], ui = setup(groupsSource, async (path) => {
     requests.push(path); return Response.json({ groups: listed });
   });
   await settle();
   const rail = ui.get("sidebar-group-rail"), first = rail.children[0], second = rail.children[1];
-  assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["one", "two"]);
+  assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["one", "two", "three", "four", "five", "six"]);
   assert.equal(rail.hidden, false); assert.equal(first.href, "#group/one");
   assert.equal(first.title, "研究小组"); assert.equal(first.getAttribute("aria-label"), "打开研究小组的群聊");
   assert.equal(requests.length, 1);
@@ -476,20 +477,19 @@ test("收起栏按群列表顺序展示前两个未归档群，稳定刷新不�
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "writer", profile: { icon: "star:1:7" } } });
   assert.equal(rail.children[0], first); assert.equal(first.children[0].children[0].dataset.avatarIcon, "star:1:7");
   assert.equal(ui.document.activeElement, first); assert.equal(requests.length, 2);
-  listed = [listed[2], listed[1], listed[3]];
+  listed = [...listed.slice(2), listed[1]];
   await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
-  assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["two", "one"]);
-  assert.equal(rail.children[0], second); assert.equal(rail.children[1], first); assert.equal(ui.document.activeElement, first);
+  assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["two", "three", "four", "five", "six", "one"]);
+  assert.equal(rail.children[0], second); assert.equal(rail.children.at(-1), first); assert.equal(ui.document.activeElement, first);
 });
 
-test("收起栏群头像删除、归档或超出显示上限时将原头像焦点返回侧栏开关", async () => {
-  for (const change of ["delete", "archive", "limit"]) {
+test("收起栏群头像删除或归档时将原头像焦点返回侧栏开关", async () => {
+  for (const change of ["delete", "archive"]) {
     let listed = [group("one"), group("two", "设计小组"), group("three", "第三小组")];
     const ui = setup(groupsSource, async () => Response.json({ groups: listed })); await settle();
     const rail = ui.get("sidebar-group-rail"), removed = rail.children[0]; removed.focus();
     if (change === "delete") listed = listed.slice(1);
-    else if (change === "archive") listed[0].archived = true;
-    else listed = [listed[1], listed[2], listed[0]];
+    else listed[0].archived = true;
     await ui.document.dispatchEvent({ type: "neuma:groups-changed" }); await settle();
     assert.deepEqual(rail.children.map((link) => link.dataset.groupId), ["two", "three"]);
     assert.equal(ui.document.activeElement.id, "sidebar-toggle"); assert.equal(rail.contains(removed), false);

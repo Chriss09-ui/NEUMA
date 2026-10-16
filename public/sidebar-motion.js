@@ -1,10 +1,14 @@
 const expanded = "#sidebar-agent-list .sidebar-history-link, #sidebar-group-list .sidebar-history-link";
 const compact = "#sidebar-agent-rail a, #sidebar-group-rail a";
+const regions = ["sidebar-agent-list", "sidebar-group-list", "sidebar-agent-rail", "sidebar-group-rail"];
+const regionSelector = regions.map((id) => `#${id}`).join(", ");
 const easing = "cubic-bezier(.22, 1, .36, 1)";
 
 export function createSidebarAvatarMotion({ document, window, reducedMotion, duration = 320 }) {
   const shell = document.getElementById("app-shell"), sidebar = shell?.querySelector(".sidebar");
   const scroll = sidebar?.querySelector("#sidebar-scroll");
+  const scrollers = ["sidebar-scroll", ...regions].map((id) => [id, sidebar?.querySelector(`#${id}`)])
+    .filter(([, element]) => element);
   const flights = new Map();
   let generation = 0, expectedScroll = null;
   const cancel = () => {
@@ -23,9 +27,16 @@ export function createSidebarAvatarMotion({ document, window, reducedMotion, dur
     }
     return result;
   };
-  const visible = (rect, clip) => rect.width > 0 && rect.height > 0
+  const visible = (rect, clip) => rect.width > 0 && rect.height > 0 && clip.bottom > clip.top && clip.right > clip.left
     && rect.bottom > Math.max(0, clip.top) && rect.top < Math.min(window.innerHeight, clip.bottom)
     && rect.right > Math.max(0, clip.left) && rect.left < Math.min(window.innerWidth, clip.right);
+  const clipFor = (avatar, outer) => {
+    const region = avatar.closest(regionSelector);
+    if (!region) return outer;
+    const rect = region.getBoundingClientRect();
+    return { top: Math.max(outer.top, rect.top), bottom: Math.min(outer.bottom, rect.bottom),
+      left: Math.max(outer.left, rect.left), right: Math.min(outer.right, rect.right) };
+  };
   const measure = (collapsed) => {
     const copy = shell.cloneNode(false), side = sidebar.cloneNode(true);
     const bounds = shell.getBoundingClientRect();
@@ -39,13 +50,14 @@ export function createSidebarAvatarMotion({ document, window, reducedMotion, dur
     try {
       document.body.append(copy);
       const copyScroll = side.querySelector("#sidebar-scroll");
-      copyScroll.scrollTop = scroll.scrollTop;
+      const copies = scrollers.map(([id, source]) => [id, side.querySelector(`#${id}`), source]);
+      for (const [, target, source] of copies) target.scrollTop = source.scrollTop;
       const clip = copyScroll.getBoundingClientRect(), result = new Map();
       for (const [key, avatar] of links(side, collapsed)) {
         const rect = avatar.getBoundingClientRect();
-        if (visible(rect, clip)) result.set(key, rect);
+        if (visible(rect, clipFor(avatar, clip))) result.set(key, rect);
       }
-      return { positions: result, scrollTop: copyScroll.scrollTop };
+      return { positions: result, scrollTops: new Map(copies.map(([id, target]) => [id, target.scrollTop])) };
     } finally { copy.remove(); }
   };
   const prepare = (collapsed) => {
@@ -55,14 +67,14 @@ export function createSidebarAvatarMotion({ document, window, reducedMotion, dur
     const sources = links(sidebar, shell.classList.contains("sidebar-collapsed"));
     for (const [key, avatar] of sources) {
       const flight = flights.get(key), rect = (flight?.element ?? avatar).getBoundingClientRect();
-      if (flight || (visible(rect, clip) && window.getComputedStyle(avatar).visibility !== "hidden")) starts.set(key, rect);
+      if (flight || (visible(rect, clipFor(avatar, clip)) && window.getComputedStyle(avatar).visibility !== "hidden")) starts.set(key, rect);
     }
     cancel();
     if (!starts.size) return;
     const token = generation;
     try {
       const targets = links(sidebar, collapsed), measured = measure(collapsed);
-      expectedScroll = measured.scrollTop;
+      expectedScroll = measured.scrollTops;
       for (const [key, from] of starts) {
         const target = targets.get(key), to = measured.positions.get(key);
         if (!target || !to) continue;
@@ -92,8 +104,8 @@ export function createSidebarAvatarMotion({ document, window, reducedMotion, dur
   };
   window.addEventListener("resize", cancel);
   window.addEventListener("scroll", cancel);
-  scroll?.addEventListener("scroll", () => {
-    if (flights.size && scroll.scrollTop !== expectedScroll) cancel();
+  for (const [id, element] of scrollers) element.addEventListener("scroll", () => {
+    if (flights.size && element.scrollTop !== expectedScroll?.get(id)) cancel();
   });
   document.addEventListener("visibilitychange", cancel);
   document.addEventListener("neuma:route", cancel);

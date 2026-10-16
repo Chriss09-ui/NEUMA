@@ -467,13 +467,13 @@ test("默认小星核使用稳定智能体 ID，侧栏、欢迎区和标题使�
 const avatarState = (target) => target.querySelector(".star-avatar")?.dataset.activity;
 const sidebarAvatar = (ui, index = 0) => ui.sidebar(index ? "two" : "one").icon;
 
-test("收起栏显示前五个Agent自己的头像，保持列表顺序且资料更新保留节点与焦点", async () => {
+test("收起栏保留全部Agent供独立滚动，保持列表顺序且资料更新保留节点与焦点", async () => {
   const items = Array.from({ length: 8 }, (_, index) => ({ ...requirements[0], id: `agent-${index}`, name: `助手 ${index + 1}`,
     profile: { icon: `star:${index % 6}:${index % 8}` } }));
   const ui = await setup({ initialItems: items, initialAgentId: null });
   const rail = ui.get("sidebar-agent-rail");
-  assert.equal(rail.children.length, 5);
-  assert.deepEqual(rail.children.map((link) => link.dataset.agentId), items.slice(0, 5).map((agent) => agent.id));
+  assert.equal(rail.children.length, items.length);
+  assert.deepEqual(rail.children.map((link) => link.dataset.agentId), items.map((agent) => agent.id));
   for (const [index, link] of rail.children.entries()) {
     assert.equal(link.href, `#agent/${items[index].id}`);
     assert.equal(link.title, items[index].name);
@@ -489,10 +489,10 @@ test("收起栏显示前五个Agent自己的头像，保持列表顺序且资料
   assert.equal(rail.children[0], link); assert.equal(link.title, "新星河伙伴");
   assertStarAvatar(link.children[0], "star:4:6"); assert.equal(ui.document.activeElement, link);
   await ui.emit("neuma:agents-changed", { items: [...updated].reverse(), busy: false });
-  assert.deepEqual(rail.children.map((entry) => entry.dataset.agentId), items.slice(0, 5).map((agent) => agent.id));
+  assert.deepEqual(rail.children.map((entry) => entry.dataset.agentId), items.map((agent) => agent.id));
   assert.equal(ui.document.activeElement, link);
   await ui.emit("neuma:agents-changed", { items: updated.slice(1), busy: false });
-  assert.deepEqual(rail.children.map((entry) => entry.dataset.agentId), items.slice(1, 6).map((agent) => agent.id));
+  assert.deepEqual(rail.children.map((entry) => entry.dataset.agentId), items.slice(1).map((agent) => agent.id));
   assert.equal(ui.document.activeElement, ui.get("sidebar-toggle"));
   await ui.emit("neuma:agents-changed", { items: [], busy: false });
   assert.equal(rail.children.length, 0); assert.equal(rail.hidden, true);
@@ -1403,6 +1403,18 @@ test("历史操作菜单按记录切换且互斥，Esc返回触发按钮，外�
   await firstMore.click(); await ui.get("agent-message").click();
   assert.equal(ui.get("agent-history-menu").hidden, true);
   assert.equal(firstMore.attributes.get("aria-expanded"), "false");
+});
+
+test("智能体与群组独立列表滚动时关闭历史悬浮菜单，焦点返回触发按钮", async () => {
+  const ui = await setup(); await ui.submit("已有记录");
+  const more = historyMore(ui, ui.item().id);
+  for (const id of ["sidebar-agent-list", "sidebar-group-list", "sidebar-scroll"]) {
+    await more.click(); ui.get("agent-history-delete").focus();
+    assert.equal(ui.get("agent-history-menu").hidden, false);
+    await ui.get(id).dispatchEvent({ type: "scroll", bubbles: false });
+    assert.equal(ui.get("agent-history-menu").hidden, true);
+    assert.equal(ui.document.activeElement, more);
+  }
 });
 
 test("历史操作支持键盘打开与Tab关闭，菜单更新把删除焦点还给同记录按钮", async () => {

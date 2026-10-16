@@ -1,12 +1,12 @@
 {
   "name": "@chrissliu/neuma",
-  "version": "0.1.0-preview.1",
+  "version": "0.1.0-preview.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@chrissliu/neuma",
-      "version": "0.1.0-preview.1",
+      "version": "0.1.0-preview.2",
       "cpu": [
         "arm64"
       ],
@@ -24,7 +24,7 @@
         "neuma": "bin/neuma.cjs"
       },
       "engines": {
-        "node": ">=22.19"
+        "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
       }
     },
     "node_modules/@earendil-works/pi-coding-agent": {

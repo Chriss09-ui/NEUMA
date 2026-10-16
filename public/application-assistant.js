@@ -1,3 +1,5 @@
+import { renderAgentAvatar, setAgentAvatarActivity } from "./agent-avatar.js";
+
 const STORAGE_KEY = "neuma.agent.assistant-layout.v1.";
 const MARGIN = 16, COMPACT = { width: 360, height: 64 }, EXPANDED = { width: 400, height: 440 };
 const finite = (value, fallback) => Number.isFinite(value) ? value : fallback;
@@ -71,13 +73,14 @@ export function createApplicationAssistant({ document, window, root, storage }) 
     }
     if (persist) save();
   }
+  function syncAvatarActivity() {
+    setAgentAvatarActivity(byId("agent-assistant-avatar"), byId("agent-icon").dataset?.avatarActivity);
+  }
   function syncAvatar() {
     const source = byId("agent-icon"), target = byId("agent-assistant-avatar");
-    if (source.cloneNode) {
-      const copy = source.cloneNode(true); copy.removeAttribute("id"); copy.removeAttribute("title");
-      const star = copy.querySelector("[data-star-avatar]");
-      if (star) { star.dataset.avatarMotion = "false"; star.dataset.activity = "idle"; }
-      target.replaceChildren(copy);
+    if (source.dataset?.avatarKey) {
+      const agent = source.dataset.avatarKind === "empty" ? null : { id: agentId, profile: { icon: source.dataset.avatarIcon } };
+      renderAgentAvatar(target, agent, { document, activity: source.dataset.avatarActivity });
     } else target.textContent = source.textContent;
     byId("agent-assistant-title").textContent = byId("agent-title").textContent || "智能体助手";
   }
@@ -159,8 +162,11 @@ export function createApplicationAssistant({ document, window, root, storage }) 
   });
   const resizeObserver = window.ResizeObserver ? new window.ResizeObserver(() => { if (visible && !gesture) { stopMotion(); render(); } }) : null;
   resizeObserver?.observe(root);
-  const avatarObserver = window.MutationObserver ? new window.MutationObserver(syncAvatar) : null;
-  avatarObserver?.observe(byId("agent-icon"), { childList: true, attributes: true, attributeFilter: ["data-avatar-key"] });
+  const avatarObserver = window.MutationObserver ? new window.MutationObserver((records) => {
+    if (records.some((record) => record.type === "childList" || record.attributeName === "data-avatar-key")) syncAvatar();
+    else syncAvatarActivity();
+  }) : null;
+  avatarObserver?.observe(byId("agent-icon"), { childList: true, attributes: true, attributeFilter: ["data-avatar-key", "data-avatar-activity"] });
   window.addEventListener("resize", () => { if (visible && !gesture) { stopMotion(); render(); } });
   return {
     select(id) {

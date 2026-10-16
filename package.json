@@ -1,6 +1,6 @@
 {
   "name": "@chrissliu/neuma",
-  "version": "0.1.0-preview.1",
+  "version": "0.1.0-preview.2",
   "description": "NEUMA 本机智能体与项目工作台（Apple 芯片 Mac 试用版）",
   "private": false,
   "type": "module",
@@ -34,7 +34,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {
-    "node": ">=22.19"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "scripts": {
     "start": "node --env-file=.env src/server.mjs",

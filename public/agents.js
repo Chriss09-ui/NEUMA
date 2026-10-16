@@ -19,7 +19,6 @@ let mainBusy = false;
 let route = { page: "chat", agentId: null };
 const runtimes = new Map(), inputs = new Map();
 const sidebarAvatars = new Map(), sidebarHistories = new Map(), collapsedAvatars = new Map();
-const COLLAPSED_AGENT_LIMIT = 5;
 const avatarActivityLabels = { thinking: "正在思考…", working: "正在工作…", queued: "等待开始…" };
 const profileVersions = new Map(), broadcasting = new Set();
 let profilesError = "";
@@ -265,7 +264,7 @@ function syncAvatarActivity(agent) {
 }
 
 function renderCollapsedAgents() {
-  const rail = byId("sidebar-agent-rail"), shown = [...sidebarHistories.keys()].slice(0, COLLAPSED_AGENT_LIMIT)
+  const rail = byId("sidebar-agent-rail"), shown = [...sidebarHistories.keys()]
     .map((id) => agents.find((agent) => agent.id === id));
   for (const [id, view] of collapsedAvatars) if (!shown.some((agent) => agent.id === id)) {
     if (view.link.contains(document.activeElement)) byId("sidebar-toggle").focus({ preventScroll: true });
@@ -1089,7 +1088,9 @@ byId("agent-history-delete").addEventListener("click", () => {
   closeHistoryMenu(true);
   if (target && agents.some((agent) => agent.id === target.agentId)) return deleteConversation(target.agentId, target.conversationId);
 });
-byId("sidebar-scroll").addEventListener("scroll", () => closeHistoryMenu(true));
+for (const id of ["sidebar-scroll", "sidebar-agent-list", "sidebar-group-list"]) {
+  byId(id).addEventListener("scroll", () => closeHistoryMenu(true));
+}
 window.addEventListener?.("resize", () => closeHistoryMenu(true));
 document.addEventListener("click", (event) => {
   if (historyMenu && !historyMenu.trigger.contains(event.target) && !byId("agent-history-menu").contains(event.target)) closeHistoryMenu();

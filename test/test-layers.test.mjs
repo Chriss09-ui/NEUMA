@@ -12,7 +12,7 @@ test("分层清单覆盖实际测试文件，快速组不包含真实执行或�
   assert.ok(layers.unit.files.includes("core.test.mjs")); assert.ok(layers.unit.files.includes("collaboration-ui.test.mjs"));
   for (const name of ["agent-prototype.test.mjs", "pi-runtime.test.mjs", "development-executor.test.mjs", "materials-runner.test.mjs", "project-platform.test.mjs"])
     assert.ok(layers.integration.files.includes(name), `${name} 必须归入集成组`);
-  assert.deepEqual(layers.browser.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs"]);
+  assert.deepEqual(layers.browser.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "sidebar-layout.test.mjs"]);
   assert.deepEqual(layers.browser.files.filter((name) => layers.integration.files.includes(name)), ["agent-build-view.test.mjs"]);
 });
 
