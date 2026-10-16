@@ -40,6 +40,42 @@ test("明确的 Apple 芯片 Mac 试用包通过，不需要三平台验收记�
   assert.deepEqual(await checkPreviewRelease(root), { ok: true, failures: [] });
 });
 
+test("发布清单允许已批准的文档与资源路径", async (t) => {
+  const { root, manifest, save } = await fixture(t);
+  manifest.files.push("npm-shrinkwrap.json", "scripts/check-release.mjs", "scripts/check-preview-release.mjs",
+    "README.md", "docs/images/readme-workspace.jpg", "docs/images/readme-projects.jpg");
+  await save();
+  assert.deepEqual(await checkPreviewRelease(root), { ok: true, failures: [] });
+});
+
+test("发布清单拒绝扩大打包范围和加入用户数据或本机目录", async (t) => {
+  const { root, manifest, save } = await fixture(t);
+  for (const path of [".", "**", ".neuma/", ".env", "node_modules/", "test/", "src/../.neuma/"]) {
+    manifest.files = ["src/", "bin/", "public/", path];
+    await save();
+    const result = await checkPreviewRelease(root);
+    assert.equal(result.ok, false, path);
+    assert.ok(result.failures.some((value) => value.includes("禁止扩大范围")), path);
+  }
+});
+
+test("两种依赖捆绑配置均拒绝启用，允许空清单或显式禁用", async (t) => {
+  const { root, manifest, save } = await fixture(t);
+  for (const key of ["bundleDependencies", "bundledDependencies"]) {
+    for (const value of [true, ["fixture"]]) {
+      manifest[key] = value; await save();
+      const result = await checkPreviewRelease(root);
+      assert.equal(result.ok, false, key);
+      assert.ok(result.failures.some((failure) => failure.includes("禁止捆绑本机依赖")), key);
+    }
+    for (const value of [false, []]) {
+      manifest[key] = value; await save();
+      assert.deepEqual(await checkPreviewRelease(root), { ok: true, failures: [] });
+    }
+    delete manifest[key];
+  }
+});
+
 test("试用检查拒绝稳定版本号和扩大安装平台", async (t) => {
   for (const change of [{ version: "0.1.0" }, { os: ["darwin", "win32", "linux"] }, { cpu: ["x64", "arm64"] }]) {
     const { root, manifest, save } = await fixture(t);
@@ -86,8 +122,7 @@ test("错误命令入口、缺入口文件或损坏锁文件会阻止发布", as
 
 test("入口文件存在但发布清单遗漏完整源码目录时必须失败", async (t) => {
   const { root, manifest, save } = await fixture(t);
-  manifest.files = ["bin/", "public/", "src/server.mjs", "src/installation/installation-cli.mjs",
-    "src/installation/installation-runtime.mjs", "src/app-metadata.mjs"];
+  manifest.files = ["bin/", "public/"];
   await save();
   const result = await checkPreviewRelease(root);
   assert.equal(result.ok, false);

@@ -20,7 +20,6 @@ const selectedConversations = new Map();
 const avatarMembers = new Map();
 const sidebarGroups = new Map(), taskHistories = new Map(), taskHistorySequences = new Map();
 const collapsedGroups = new Map();
-const COLLAPSED_GROUP_LIMIT = 2;
 const historyActionErrors = new Map(), removingHistories = new Map(), removalRetries = new Map();
 const removedConversations = new Map(), removedTasks = new Map();
 let historyMenu = null;
@@ -278,7 +277,7 @@ function openSidebarGroup(id, taskId) {
   navigate({ page: "group", groupId: id });
 }
 function renderCollapsedGroups(visible) {
-  const rail = byId("sidebar-group-rail"), shown = visible.slice(0, COLLAPSED_GROUP_LIMIT);
+  const rail = byId("sidebar-group-rail"), shown = visible;
   for (const [id, view] of collapsedGroups) if (!shown.some((group) => group.id === id)) {
     if (view.link.contains(document.activeElement)) byId("sidebar-toggle").focus({ preventScroll: true });
     view.link.remove(); collapsedGroups.delete(id);

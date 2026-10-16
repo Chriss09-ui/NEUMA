@@ -36,7 +36,7 @@ export const TEST_LAYERS = Object.freeze({
     "project-script-runtime.test.mjs", "projects.test.mjs", "skills-boundaries.test.mjs",
   ]),
   // The build-view file also has two state checks, and is intentionally present in integration.
-  browser: Object.freeze(["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs"]),
+  browser: Object.freeze(["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "sidebar-layout.test.mjs"]),
 });
 
 export function selectTestFiles(layer, availableFiles) {

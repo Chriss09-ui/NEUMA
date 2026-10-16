@@ -18,7 +18,7 @@ const HELP = `NEUMA ${APP_VERSION}
   neuma --help                  显示帮助
   neuma --version               显示版本
 
-需要 Node.js 22.19 或更新版本。默认数据目录：用户主目录下的 .neuma。
+需要 Node.js 22.22.2+（22.x）、24.15+（24.x）或 26+。默认数据目录：用户主目录下的 .neuma。
 更新后重新启动；更新与卸载程序均不会删除用户数据。
 `;
 

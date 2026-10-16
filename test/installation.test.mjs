@@ -4,7 +4,7 @@ import { copyFile, cp, mkdtemp, readFile, rm, writeFile, readdir } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { acquireDataLock, DataDirectoryBusyError } from "../src/installation/instance-lock.mjs";
@@ -23,6 +23,22 @@ function stubHandler({ instanceId }) {
   handler.dispose = async () => {};
   return handler;
 }
+
+test("CLI 拒绝依赖不支持的 Node 版本，并接受各版本线边界", async (t) => {
+  const root = await temporary(t), preload = join(root, "node-version.cjs");
+  const cli = fileURLToPath(new URL("../bin/neuma.cjs", import.meta.url));
+  for (const [version, supported] of [["22.19.0", false], ["22.22.1", false], ["22.22.2", true],
+    ["22.23.0", true], ["23.0.0", false], ["24.14.9", false], ["24.15.0", true],
+    ["25.0.0", false], ["26.0.0", true], ["27.0.0", true]]) {
+    await writeFile(preload, `Object.defineProperty(process.versions, "node", { value: ${JSON.stringify(version)} });\n`);
+    const result = spawnSync(process.execPath, ["--require", preload, cli, "--version"], {
+      cwd: root, env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT }, encoding: "utf8", timeout: 5000,
+    });
+    assert.equal(result.status, supported ? 0 : 1, version);
+    if (supported) assert.match(result.stdout, /^\d+\.\d+\.\d+-preview\.\d+\n$/, version);
+    else { assert.match(result.stderr, /22\.22\.2.*24\.15.*26\+/, version); assert.equal(result.stdout, "", version); }
+  }
+});
 
 test("CLI 校验端口和迁移参数，独立于启动时所在目录", () => {
   const args = parseCliArgs([], { home: "/test-home" });

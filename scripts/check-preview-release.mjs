@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const ENTRY_FILES = ["bin/neuma.cjs", "src/installation/installation-cli.mjs", "src/installation/installation-runtime.mjs",
   "src/app-metadata.mjs", "src/server.mjs", "public/index.html"];
+const ALLOWED_FILES = new Set(["src/", "npm-shrinkwrap.json", "bin/", "public/", "scripts/check-release.mjs",
+  "scripts/check-preview-release.mjs", "README.md", "docs/images/readme-workspace.jpg", "docs/images/readme-projects.jpg"]);
 const PREVIEW_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-preview\.(0|[1-9]\d*)$/;
 const SCOPED_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/;
 
@@ -25,6 +27,11 @@ export async function checkPreviewRelease(root) {
   if (manifest) {
     if (!Array.isArray(manifest.files) || !manifest.files.includes("src/"))
       failures.push("发布文件清单必须包含完整源码目录 src/");
+    if (Array.isArray(manifest.files) && manifest.files.some((path) => !ALLOWED_FILES.has(path)))
+      failures.push("发布文件清单只能包含已批准的程序、文档和资源路径，禁止扩大范围或加入用户数据与依赖目录");
+    if (["bundleDependencies", "bundledDependencies"].some((key) => manifest[key] !== undefined
+      && manifest[key] !== false && !(Array.isArray(manifest[key]) && manifest[key].length === 0)))
+      failures.push("试用包禁止捆绑本机依赖，请移除 bundleDependencies 和 bundledDependencies 或保持禁用");
     if (typeof manifest.name !== "string" || manifest.name.length > 214 || !SCOPED_NAME.test(manifest.name))
       failures.push("试用包需要有效的 scoped npm 包名，例如 @账号/neuma");
     if (typeof manifest.version !== "string" || !PREVIEW_VERSION.test(manifest.version))

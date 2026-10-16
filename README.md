@@ -10,7 +10,7 @@ NEUMA 读作“纽玛”，取意早期音乐记谱中的 *neuma*：把声音组
 
 [快速开始](#快速开始) · [项目特点](#项目特点) · [源码开发](#源码开发) · [npm](https://www.npmjs.com/package/@chrissliu/neuma)
 
-> 当前公开版本 `0.1.0-preview.1` 是 **Apple 芯片 Mac（M 系列）试用版**，通过 npm 的 `preview` 标签安装。Windows、Linux 和 Intel Mac 尚不在本次公开支持范围内。
+> 当前公开版本 `0.1.0-preview.2` 是 **Apple 芯片 Mac（M 系列）试用版**，通过 npm 的 `preview` 标签安装。Windows、Linux 和 Intel Mac 尚不在本次公开支持范围内。
 
 ![NEUMA 需求工作区：对话与需求草稿并排展示](https://raw.githubusercontent.com/Chriss09-ui/NEUMA/main/docs/images/readme-workspace.jpg)
 
@@ -41,7 +41,7 @@ NEUMA 读作“纽玛”，取意早期音乐记谱中的 *neuma*：把声音组
 
 ### 1. 安装并启动
 
-需要 **Apple 芯片 Mac、macOS 13+ 和 ARM64 版 Node.js 22.19 或更新版本**。当前本机实际验证使用 Node.js 26.3.0。
+需要 **Apple 芯片 Mac、macOS 14+ 和 ARM64 版 Node.js**。推荐 Node.js 26+；其他兼容版本为 22.22.2+（22.x）和 24.15+（24.x）。材料解析原生模块要求 macOS 14 或更新版本；当前本机实际验证使用 Node.js 26.3.0。
 
 ```sh
 npm install -g @chrissliu/neuma@preview

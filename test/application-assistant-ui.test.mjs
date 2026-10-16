@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { boundAssistantLayout, createApplicationAssistant } from "../public/application-assistant.js";
 import { createApplicationWorkspace, applicationMode } from "../public/application-workspace.js";
+import { renderAgentAvatar, setAgentAvatarActivity } from "../public/agent-avatar.js";
 
 function setup() {
   class Events {
@@ -13,7 +14,7 @@ function setup() {
   const document = new Events(), nodes = new Map(), values = new Map(), timers = new Map();
   let bounds = { width: 1000, height: 700 };
   class Element extends Events {
-    children = []; classes = new Set(); attributes = new Map(); hidden = false; textContent = ""; value = "";
+    children = []; classes = new Set(); attributes = new Map(); dataset = {}; hidden = false; textContent = ""; value = "";
     style = { setProperty: (key, value) => this.attributes.set(key, value) };
     classList = { toggle: (key, on) => on ? this.classes.add(key) : this.classes.delete(key) };
     contentWindow = { postMessage() {} };
@@ -45,6 +46,46 @@ test("浮窗限制在工作区内，不接受损坏的持久尺寸", () => {
   const bounded = boundAssistantLayout({ expanded: true, x: -100, y: 9999, width: 9000, height: NaN }, { width: 800, height: 600 });
   assert.deepEqual(bounded, { expanded: true, x: 16, y: 144, width: 768, height: 440 });
   assert.equal(boundAssistantLayout({ expanded: false, height: 800 }, { width: 800, height: 600 }).height, 64);
+});
+
+test("浮窗星核同步真实活动且重复进度、收起展开和设置隐藏不重建动画节点", () => {
+  const ui = setup(), observers = [];
+  ui.window.MutationObserver = class {
+    constructor(callback) { this.callback = callback; observers.push(this); }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.disconnected = true; }
+  };
+  const source = ui.get("agent-icon"), target = ui.get("agent-assistant-avatar");
+  const one = { id: "one", profile: { icon: "star:4:1" } };
+  renderAgentAvatar(source, one, { document: ui.document });
+  const view = createApplicationAssistant(ui); view.select("one"); view.show(true);
+  const star = target.children[0], observer = observers[0];
+  assert.equal(star.dataset.avatarMotion, "true");
+  assert.equal(star.dataset.activity, "idle");
+  for (const activity of ["thinking", "thinking", "working", "working", "queued", "idle"]) {
+    setAgentAvatarActivity(source, activity);
+    observer.callback([{ type: "attributes", attributeName: "data-avatar-activity", target: source }]);
+    assert.equal(target.children[0], star);
+    assert.equal(star.dataset.activity, activity);
+  }
+  view.expand(); view.toggle(); view.show(false); view.show(true);
+  assert.equal(target.children[0], star);
+  renderAgentAvatar(source, { id: "two", profile: { icon: "star:0:0" } }, { document: ui.document, activity: "thinking" });
+  view.select("two");
+  const second = target.children[0];
+  observer.callback([{ type: "attributes", attributeName: "data-avatar-activity", target: source, oldValue: "working" }]);
+  assert.equal(target.children[0], second);
+  assert.equal(second.dataset.shape, "cut");
+  assert.equal(second.dataset.color, "mint");
+  assert.equal(second.dataset.activity, "thinking");
+  renderAgentAvatar(source, { id: "two", profile: { icon: "☀️" } }, { document: ui.document });
+  observer.callback([{ type: "childList", target: source }]);
+  assert.equal(target.textContent, "☀️");
+  assert.equal(target.children.length, 0);
+  renderAgentAvatar(source, one, { document: ui.document, activity: "working" });
+  observer.callback([{ type: "attributes", attributeName: "data-avatar-key", target: source }]);
+  assert.equal(target.children[0].dataset.activity, "working");
+  view.close(); assert.equal(observer.disconnected, true);
 });
 
 test("开合动画可连续反向，结束后清理，保留输入和焦点", () => {
