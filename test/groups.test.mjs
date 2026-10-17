@@ -1058,6 +1058,48 @@ test("同一子任务认领原子互斥，群外成员与主 Agent 不能被群�
   assert.equal(announced.queued, false);
 });
 
+test("相同协助请求规范化去重，重试不重复派发且待输入任务可以恢复", async (t) => {
+  const { service, create, post } = await fixture(t); service.start = () => {};
+  const { group } = await create(), posted = await post(group.id), tools = toolsFor(service, group.id, posted.task.id, "a");
+  const request = { agentId: "b", title: " 核对预算 ", description: " 请核对1月预算 " };
+  const first = parsed(await tools.request_group_help.execute("first-help", request));
+  assert.deepEqual(parsed(await tools.request_group_help.execute("first-help", request)), first);
+  const same = { ...request, title: request.title.trim(), description: request.description.trim(), required: true };
+  assert.equal(parsed(await tools.request_group_help.execute("same-help", same)).taskId, first.taskId);
+  assert.equal(parsed(await tools.request_group_help.execute("padded-help", { ...same, title: ` ${same.title} `, description: ` ${same.description} ` })).taskId, first.taskId);
+  let task = (await service.store.get(group.id)).tasks[0];
+  assert.equal(task.children.length, 1); assert.equal(task.jobs.length, 1);
+  assert.equal(task.children[0].title, same.title); assert.equal(task.children[0].description, same.description);
+  await service.store.change(group.id, (record) => {
+    const task = record.tasks[0]; task.children[0].status = "needs_input"; task.jobs[0].status = "completed";
+  });
+  const resumed = parsed(await tools.request_group_help.execute("resume-help", same));
+  assert.equal(resumed.taskId, first.taskId); assert.equal(resumed.status, "queued");
+  assert.deepEqual(parsed(await tools.request_group_help.execute("resume-help", same)), resumed);
+  task = (await service.store.get(group.id)).tasks[0];
+  assert.equal(task.children.length, 1); assert.equal(task.jobs.filter((job) => job.status === "queued").length, 1);
+});
+
+test("同标题协助请求的说明或必需标记变化时创建新工作，保留旧成果", async (t) => {
+  const { service, create, post } = await fixture(t); service.start = () => {};
+  const { group } = await create(), posted = await post(group.id), tools = toolsFor(service, group.id, posted.task.id, "a");
+  const request = { agentId: "b", title: "核对预算", description: "请核对1月预算", required: false };
+  const first = parsed(await tools.request_group_help.execute("january-help", request));
+  await service.store.change(group.id, (record) => {
+    const task = record.tasks[0]; task.children[0].status = "completed"; task.children[0].result = "1月核对完成";
+    task.jobs[0].status = "completed";
+  });
+  const february = parsed(await tools.request_group_help.execute("february-help", { ...request, description: "请核对2月预算" }));
+  assert.notEqual(february.taskId, first.taskId); assert.equal(february.status, "queued");
+  const required = parsed(await tools.request_group_help.execute("required-help", { ...request, required: true }));
+  assert.notEqual(required.taskId, first.taskId); assert.notEqual(required.taskId, february.taskId);
+  const task = (await service.store.get(group.id)).tasks[0];
+  assert.equal(task.children.length, 3); assert.equal(task.jobs.filter((job) => job.status === "queued").length, 2);
+  assert.equal(task.children.find((child) => child.id === first.taskId).result, "1月核对完成");
+  assert.equal(task.children.find((child) => child.id === february.taskId).description, "请核对2月预算");
+  assert.equal(task.children.find((child) => child.id === required.taskId).required, true);
+});
+
 test("补充子任务认领仍只装协作工具，实际工作由后续独立轮次执行", { timeout: 5000 }, async (t) => {
   let proposed = false;
   const { service, calls, create, post } = await fixture(t, { run: async ({ payload, options, call }) => {

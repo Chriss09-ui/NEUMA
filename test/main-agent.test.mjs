@@ -355,11 +355,25 @@ test("直接委派只接受就绪 Agent，并保存可点击结果来源", async
   assert.equal(f.calls.length, 1); assert.equal(f.calls[0].input.agentId, "worker");
   assert.match(f.calls[0].input.sessionId, /^main_delegation_/); assert.ok(f.calls[0].metadata.signal);
   assert.deepEqual(f.calls[0].metadata.activityScope, { kind: "main", conversationId: f.conversation.id });
+  assert.equal(f.calls[0].metadata.taskAllowNetwork, true);
   assert.equal(result.conversation.messages[1].sources[0].reply, "报告已整理");
   assert.equal(result.sources[0].sourceLink, "#agent/worker"); assert.equal(result.sources[0].status, "complete");
   const privateConversation = f.privateRecords.get(result.sources[0].conversationId);
   assert.equal(privateConversation.messages[0].content, "整理报告"); assert.equal(privateConversation.messages[1].status, "complete");
   assert.equal(privateConversation.messages[1].content, "报告已整理");
+});
+
+test("直接委派保留用户原话的禁网限制，不依赖模型转交摘要", async (t) => {
+  const userRequest = "让整理助手整理报告，不要联网";
+  const f = await fixture(t, async ({ tools }) => {
+    await tools.assign_agent_task.execute("offline-agent", { agentId: "worker", message: "查询公开资料并整理报告", userRequest: "让整理助手整理报告" });
+  });
+  await f.main.prompt(f.input(userRequest, "offline_agent_task"));
+  const delegated = f.calls.find((item) => item.type === "agent");
+  assert.equal(delegated.input.message, "查询公开资料并整理报告");
+  assert.equal(delegated.metadata.taskAllowNetwork, false);
+  assert.deepEqual(delegated.metadata.activityScope, { kind: "main", conversationId: f.conversation.id });
+  assert.equal(Object.hasOwn(delegated.input, "taskAllowNetwork"), false);
 });
 
 test("创建 Agent 在同一主对话澄清并用真实追问覆盖模型改写，确认直接保存稳定身份", async (t) => {

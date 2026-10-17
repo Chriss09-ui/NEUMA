@@ -141,6 +141,32 @@ test("宿主拦截本轮及长期不联网要求，同会话刷新使用当前�
   await assert.rejects(agents.prompt(turn("offline")), /不联网/); assert.equal(requests.length, 2);
 });
 
+test("主 Agent 可信禁网约束工作工具，复用会话不缓存权限且正文不能设置可信策略", async (t) => {
+  let allowSearch = true, requests = 0;
+  const { agents, records } = await fixture(t, { web: { async search() { requests++; return textResult; } },
+    work: async (record) => {
+      const search = () => record.tools.web_search.execute("search", { query: "example" });
+      if (allowSearch) await search();
+      else await assert.rejects(search(), /不联网/);
+    } });
+  const source = { activityScope: { kind: "main", conversationId: "main_delegation_conversation" } };
+  await agents.prompt({ ...turn(), taskAllowNetwork: false });
+  assert.equal(requests, 1, "HTTP 正文中的字段不能提供可信联网策略");
+  allowSearch = false;
+  await agents.prompt(turn(), undefined, { ...source, taskAllowNetwork: false });
+  assert.equal(requests, 1, "摘要没有禁网原话时仍在工具调用前拒绝");
+  allowSearch = true;
+  await agents.prompt(turn(), undefined, { ...source, taskAllowNetwork: true });
+  assert.equal(records.length, 1); assert.equal(requests, 2);
+  allowSearch = false;
+  await agents.prompt({ ...turn("alpha", "不要联网，仅整理资料"), taskAllowNetwork: true }, undefined,
+    { ...source, taskAllowNetwork: true });
+  assert.equal(requests, 2, "可信允许值也不能放宽本轮文字的禁网要求");
+  await assert.rejects(agents.prompt(turn(), undefined, { taskAllowNetwork: false }), /可信任务联网策略/);
+  await assert.rejects(agents.prompt(turn(), undefined, { ...source, taskAllowNetwork: "false" }), /可信任务联网策略/);
+  assert.equal(requests, 2);
+});
+
 test("专属模型仅影响所属 Agent，新任务绑定新配置并重建该会话", async (t) => {
   const { agents, records, roles } = await fixture(t);
   await agents.build({ id: "beta", name: "另一助手", draft: validDraft() });

@@ -224,7 +224,10 @@ export class ApplicationService {
     const { manifest, deliveryVersion } = await this.descriptor(agent.id);
     if (!manifest.actions.length) return [];
     return [{ name: "run_application_action", label: "执行应用操作", description: `执行已交付应用动作，与页面共用持久任务及状态。以真实任务结果回答。仅按以下动作输入契约传参：${JSON.stringify(applicationActionCatalog(manifest))}`,
-      parameters: { type: "object", properties: { actionId: { type: "string", enum: manifest.actions.map((action) => action.id) }, input: { type: "object" } }, required: ["actionId", "input"], additionalProperties: false },
+      // Preserve JSON input types through SDK validation; submit enforces the selected action's schema.
+      parameters: { type: "object", properties: { actionId: { type: "string", enum: manifest.actions.map((action) => action.id) },
+        input: { anyOf: [{ type: "object" }, { type: "array", items: {} }, { type: "string" }, { type: "number" }, { type: "boolean" }, { type: "null" }] } },
+        required: ["actionId", "input"], additionalProperties: false },
       executionMode: "sequential", execute: async (callId, params, signal) => {
         const submitted = await this.submit(agent.id, { ...params, deliveryVersion,
           mutationId: /^[\w-]{8,100}$/.test(callId) ? callId : randomUUID() },

@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { findPackageJSON } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { AgentStorage } from "../src/agents/agent-storage.mjs";
 import { AgentScheduler } from "../src/runtime/agent-scheduler.mjs";
 import { ApplicationTaskStore } from "../src/applications/task-store.mjs";
@@ -186,6 +188,47 @@ test("嵌套应用动作复用已持有槽位，避免等待同Agent自己释放
     const reply = await tool.execute("tool-call-one", { actionId: "analyze", input: { value: "model-step" } }, new AbortController().signal);
     assert.equal(JSON.parse(reply.content[0].text).status, "completed"); assert.equal(scheduler.snapshot().queued, 0);
   } finally { conversation.release(); }
+});
+
+test("聊天动作经实际SDK校验保留全部JSON输入类型，执行仍严格校验所选动作", async (t) => {
+  const manifestPath = findPackageJSON("@earendil-works/pi-ai", import.meta.resolve("@earendil-works/pi-coding-agent"));
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const validationPath = manifest.exports["./utils/*"].import.replace("*", "validation");
+  const { validateToolArguments } = await import(new URL(validationPath, pathToFileURL(manifestPath)).href);
+  const cases = [
+    { id: "text", input: "0", inputSchema: { type: "string" } },
+    { id: "items", input: ["0", ""], inputSchema: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 2 } },
+    { id: "numeric", input: 0, inputSchema: { type: "number", minimum: 0 } },
+    { id: "flag", input: false, inputSchema: { type: "boolean" } },
+    { id: "empty", input: null, inputSchema: { type: "null" } },
+    { id: "record", input: { value: "0" }, inputSchema: schema },
+  ];
+  const executed = [];
+  const { service, scheduler } = await fixture(t, async ({ actionId, input }) => {
+    executed.push({ actionId, input }); return { status: "passed", output: input };
+  });
+  const descriptor = service.descriptor;
+  service.descriptor = async (id) => {
+    const value = await descriptor(id);
+    return { ...value, manifest: { ...value.manifest, actions: cases.map(({ id, inputSchema }) => ({
+      id, title: id, inputSchema, outputSchema: inputSchema, connectionIds: [],
+    })) } };
+  };
+  const lease = await scheduler.acquire({ agentId: "one" });
+  try {
+    const [tool] = await service.tools({ id: "one" });
+    for (const { id, input } of cases) {
+      const params = validateToolArguments(tool, { name: tool.name, arguments: { actionId: id, input } });
+      assert.deepEqual(params.input, input);
+      const reply = JSON.parse((await tool.execute(`typed-input-${id}`, params, lease.signal)).content[0].text);
+      assert.equal(reply.status, "completed"); assert.deepEqual(reply.result, input);
+    }
+    for (const input of ["0", -1]) {
+      const params = validateToolArguments(tool, { name: tool.name, arguments: { actionId: "numeric", input } });
+      await assert.rejects(tool.execute("invalid-numeric-input", params, lease.signal), /应用契约无效/);
+    }
+  } finally { lease.release(); }
+  assert.deepEqual(executed, cases.map(({ id, input }) => ({ actionId: id, input })));
 });
 
 test("页面和聊天动作保存经过验证的本轮实例绑定，旧轮快照不进入任务记录", async (t) => {

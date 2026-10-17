@@ -276,7 +276,8 @@ export class MainAgent {
             if (event.type === "status") ctx.onProgress({ type: "status", phase: "tool", label: `「${agent.name ?? "Agent"}」正在处理委派任务…` });
             if (event.type === "text-start") privateReply = "";
             if (event.type === "text-delta") privateReply += event.delta;
-          }, { signal: metadata.signal, activityScope: { kind: "main", conversationId: ctx.conversationId } });
+          }, { signal: metadata.signal, activityScope: { kind: "main", conversationId: ctx.conversationId },
+            taskAllowNetwork: networkAllowed(ctx.message) });
           Object.assign(origin, { status: result.status ?? "complete", reply: result.reply });
           try { await savePrivate("complete", result.reply); }
           catch (error) { origin.conversationSaveStatus = error.reason === "conversation_conflict" ? "conflict" : "failed"; }

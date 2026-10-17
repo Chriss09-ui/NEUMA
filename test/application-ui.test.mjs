@@ -45,6 +45,104 @@ const input = (node, key) => descendants(node).find((item) => item.name === key)
 const instance = { instanceId: "instance-one", origin: "http://127.0.0.1:4011", url: "http://127.0.0.1:4011/ui/index.html", deliveryVersion: "delivery-7" };
 const application = { pageReady: true, deliveryVersion: "delivery-7", manifest: { protocolVersion: 2, page: { entrypoint: "ui/index.html" } }, actions: [{ id: "search", title: "搜寻资料", ready: true }] };
 
+async function materialPicker(materials) {
+  const ui = dom(), replies = [], pending = [];
+  let opened = 0, resource;
+  const view = createApplicationWorkspace({ ...ui, api: {
+    open: async () => (resource = { ...instance, instanceId: `instance-${++opened}` }), close: async () => {},
+    tasks: async () => ({ tasks: [] }), materials,
+  } });
+  async function enter() { view.route("one"); view.update("one", application); await settle(); }
+  function send(requestId) {
+    const frame = ui.get("agent-application-frame-host").children[0];
+    frame.contentWindow.postMessage = (message) => replies.push(message);
+    const request = ui.window.dispatchEvent({ type: "message", origin: resource.origin, source: frame.contentWindow,
+      data: { channel: "neuma.application", protocolVersion: 1, type: "request", instanceId: resource.instanceId,
+        deliveryVersion: resource.deliveryVersion, requestId, method: "materials.select", params: {} } });
+    pending.push(request); return request;
+  }
+  await enter();
+  return { ...ui, view, enter, send, replies, pending, dialog: ui.get("application-material-dialog"),
+    response: (id) => replies.find((message) => message.requestId === id),
+    async choose(index = 0) {
+      const checkbox = ui.get("application-material-list").children[index].children[0];
+      checkbox.checked = true; await checkbox.dispatchEvent({ type: "change" });
+      await ui.get("application-material-confirm").click(); await settle();
+    } };
+}
+
+test("材料选择在列表读取前拒绝并发请求，确认仅返回本次勾选", async () => {
+  let release, reads = 0;
+  const material = { id: "material-one", name: "第一份材料" };
+  const ui = await materialPicker(() => { reads++; return new Promise((resolve) => { release = resolve; }); });
+  try {
+    ui.send("first"); ui.send("second"); await settle();
+    assert.equal(reads, 1);
+    assert.match(ui.response("second")?.error.message, /已有材料选择/);
+    assert.equal(ui.response("first"), undefined);
+    release({ attachments: [material] }); await settle();
+    assert.equal(ui.get("application-material-list").children.length, 1);
+    await ui.choose(); await Promise.all(ui.pending);
+    assert.deepEqual(ui.response("first").result.materials, [material]);
+    assert.equal(ui.dialog.open, false);
+  } finally { release?.({ attachments: [] }); ui.view.close(); }
+});
+
+test("材料选择取消后可重试，旧窗口的迟到关闭事件不清除新选择", async () => {
+  const material = { id: "material-one", name: "第一份材料" };
+  const ui = await materialPicker(async () => ({ attachments: [material] })), closed = [];
+  ui.dialog.close = () => { ui.dialog.open = false; closed.push(() => ui.dialog.dispatchEvent({ type: "close" })); };
+  try {
+    ui.send("cancelled"); await settle();
+    await ui.dialog.dispatchEvent({ type: "cancel", preventDefault() {} }); await settle();
+    assert.deepEqual(ui.response("cancelled").result.materials, []);
+    ui.send("retry"); await settle();
+    assert.equal(ui.dialog.open, true);
+    await closed.shift()();
+    assert.equal(ui.response("retry"), undefined);
+    await ui.choose(); await Promise.all(ui.pending);
+    assert.deepEqual(ui.response("retry").result.materials, [material]);
+  } finally { ui.view.close(); }
+});
+
+test("材料选择切页再返回及关闭重开后丢弃旧实例的迟到列表", async () => {
+  const reads = [], ui = await materialPicker(() => new Promise((resolve) => reads.push(resolve)));
+  const material = { id: "current-material", name: "当前材料" };
+  try {
+    ui.send("before-route"); await settle();
+    ui.view.route("two"); await ui.enter();
+    ui.send("before-reopen"); await settle();
+    ui.view.close(); await ui.enter();
+    ui.send("current"); await settle();
+    reads[0]({ attachments: [{ id: "old-route", name: "旧页面材料" }] });
+    reads[1]({ attachments: [{ id: "old-instance", name: "旧实例材料" }] }); await settle();
+    assert.equal(ui.dialog.open, false);
+    assert.equal(ui.get("application-material-list").children.length, 0);
+    assert.equal(ui.response("current"), undefined);
+    reads[2]({ attachments: [material] }); await settle();
+    await ui.choose(); await Promise.all(ui.pending);
+    assert.deepEqual(ui.replies.map((message) => message.requestId), ["current"]);
+    assert.deepEqual(ui.response("current").result.materials, [material]);
+  } finally { for (const resolve of reads) resolve({ attachments: [] }); ui.view.close(); }
+});
+
+test("材料选择列表读取失败释放操作，可重新选择并关闭", async () => {
+  let reads = 0;
+  const ui = await materialPicker(async () => {
+    if (++reads === 1) throw new Error("材料列表读取失败");
+    return { attachments: [] };
+  });
+  try {
+    await ui.send("failed");
+    assert.match(ui.response("failed").error.message, /材料列表读取失败/);
+    assert.equal(ui.dialog.open, false);
+    ui.send("retry"); await settle();
+    assert.equal(reads, 2); assert.equal(ui.dialog.open, true);
+    await ui.get("application-material-close").click(); await Promise.all(ui.pending);
+    assert.deepEqual(ui.response("retry").result.materials, []);
+  } finally { ui.view.close(); }
+});
+
 test("页面桥拒绝伪造窗口、来源、实例及版本，身份只由宿主绑定且重复请求只执行一次", async () => {
   const ui = dom(), frame = ui.document.createElement("iframe"), calls = [], replies = [];
   frame.contentWindow.postMessage = (...value) => replies.push(value);

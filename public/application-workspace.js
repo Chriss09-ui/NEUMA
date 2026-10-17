@@ -16,7 +16,7 @@ export function applicationMode(storage, id, defaultEntry = "application") {
 export function createApplicationWorkspace({ document, window, api, storage }) {
   const byId = (id) => document.getElementById(id), root = byId("agent-workspace"), panel = byId("agent-application");
   let currentId = null, current = null, mode = "application", assistant = false, settingsOpen = false, instance = null, frame = null;
-  let detachBridge = null, generation = 0, opening = false, materialResolve = null;
+  let detachBridge = null, generation = 0, opening = false, materialSelection = null;
   const floatingAssistant = createApplicationAssistant({ document, window, root, storage });
   const settings = () => document.dispatchEvent(new CustomEvent("neuma:agent-connections-open"));
   const artifacts = () => byId("agent-artifacts-open").click();
@@ -55,6 +55,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
   }
   function closeResource({ keepalive = false } = {}) {
     generation++; opening = false;
+    finishMaterialSelection();
     detachBridge?.(); detachBridge = null;
     const previous = instance; instance = null;
     if (previous) releaseApplicationContext(previous.agentId, previous.instanceId);
@@ -103,22 +104,35 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
       byId("agent-application-retry").hidden = false;
     } finally { if (version === generation) opening = false; }
   }
-  async function selectMaterials(id) {
-    if (materialResolve) throw new Error("已有材料选择窗口打开。");
+  function finishMaterialSelection(operation = materialSelection, materials = [], error) {
+    if (!operation || materialSelection !== operation) return;
+    materialSelection = null;
+    if (operation.shown && byId("application-material-dialog").open) byId("application-material-dialog").close();
+    if (error) operation.reject(error); else operation.resolve({ materials });
+  }
+  async function loadMaterialSelection(operation) {
     const dialog = byId("application-material-dialog"), list = byId("application-material-list");
-    list.replaceChildren();
-    const result = await api.materials(id);
-    if (id !== currentId) return { materials: [] };
-    const selected = new Map();
+    const result = await api.materials(operation.agentId);
+    if (materialSelection !== operation || operation.agentId !== currentId
+      || operation.generation !== generation || operation.instance !== instance) return;
     for (const material of result.attachments || result.materials || []) {
       const label = document.createElement("label"), checkbox = document.createElement("input"), title = document.createElement("span");
       label.className = "application-material-option"; checkbox.type = "checkbox"; title.textContent = material.name || "材料";
-      checkbox.addEventListener("change", () => checkbox.checked ? selected.set(material.id, material) : selected.delete(material.id));
+      checkbox.addEventListener("change", () => checkbox.checked ? operation.selected.set(material.id, material) : operation.selected.delete(material.id));
       label.append(checkbox, title); list.append(label);
     }
     if (!list.children.length) { const empty = document.createElement("p"); empty.textContent = "还没有材料，可从助手对话上传。"; list.append(empty); }
     dialog.showModal();
-    return new Promise((resolve) => { materialResolve = { resolve, selected }; });
+    operation.shown = true;
+  }
+  function selectMaterials(id) {
+    if (materialSelection) throw new Error("已有材料选择窗口打开。");
+    return new Promise((resolve, reject) => {
+      const operation = { agentId: id, generation, instance, selected: new Map(), shown: false, resolve, reject };
+      materialSelection = operation;
+      byId("application-material-list").replaceChildren();
+      void loadMaterialSelection(operation).catch((error) => finishMaterialSelection(operation, [], error));
+    });
   }
   for (const [id, selected] of [["agent-view-application", "application"], ["agent-view-chat", "chat"]]) byId(id).addEventListener("click", () => {
     mode = selected; try { storage?.setItem(`neuma.agent.application-mode.v1.${currentId}`, mode); } catch {}
@@ -144,14 +158,17 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
   byId("agent-application-configure").addEventListener("click", settings);
   byId("agent-application-retry").addEventListener("click", () => { closeResource(); void openResource(); });
   byId("application-material-confirm").addEventListener("click", () => {
-    materialResolve?.resolve({ materials: [...materialResolve.selected.values()] }); materialResolve = null;
-    byId("application-material-dialog").close();
+    if (materialSelection?.shown) finishMaterialSelection(materialSelection, [...materialSelection.selected.values()]);
   });
-  byId("application-material-close").addEventListener("click", () => byId("application-material-dialog").close());
-  byId("application-material-dialog").addEventListener("close", () => { materialResolve?.resolve({ materials: [] }); materialResolve = null; });
+  byId("application-material-close").addEventListener("click", () => finishMaterialSelection());
+  byId("application-material-dialog").addEventListener("cancel", (event) => { event.preventDefault(); finishMaterialSelection(); });
+  byId("application-material-dialog").addEventListener("close", () => {
+    // Native close events may arrive after a new selection has already started.
+    if (!byId("application-material-dialog").open && materialSelection?.shown) finishMaterialSelection();
+  });
   return {
     route(id) {
-      if (id !== currentId) { closeResource(); currentId = id; current = null; assistant = false; settingsOpen = false; mode = applicationMode(storage, id); floatingAssistant.select(id); byId("application-material-dialog").close(); }
+      if (id !== currentId) { closeResource(); currentId = id; current = null; assistant = false; settingsOpen = false; mode = applicationMode(storage, id); floatingAssistant.select(id); }
       render();
     },
     update(id, application) {
