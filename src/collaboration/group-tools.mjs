@@ -130,7 +130,7 @@ const workRequest = ({ capabilityId, capabilityVersion, inputs, expectedOutput, 
     ...(expectedOutput !== undefined ? { expectedOutput: text(expectedOutput, "期望输出", 4000, true) } : {}),
     ...(acceptance !== undefined ? { acceptance: text(acceptance, "完成条件", 4000, true) } : {}) };
 };
-const requestMatches = (child, request) => ["capabilityId", "capabilityVersion", "inputs", "expectedOutput", "acceptance"].every((field) => child[field] === request[field]);
+const requestMatches = (child, request) => ["title", "description", "required", "capabilityId", "capabilityVersion", "inputs", "expectedOutput", "acceptance"].every((field) => child[field] === request[field]);
 const checkCapability = (member, request) => {
   if (!request.capabilityId) return;
   if (!request.capabilityVersion) throw new InputError("请引用完整能力卡中的 capabilityVersion");
@@ -202,15 +202,16 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
       service.queue(task, target, { kind: "question", messageId: posted.id }); return { questionId: posted.id, queued: true };
     })),
     tool("request_group_help", "请求本群成员承担一个明确的协助子任务；接收者自愿接受、需输入或 declined。显式能力须先完整读卡并引用当前版本。", { agentId: identifier, title: string(500), description: string(), required: { type: "boolean" }, ...requestProperties }, ["agentId", "title", "description"], async ({ agentId: target, title, description, required = true, ...fields }) => {
-      const request = workRequest(fields), cards = await service.validateTaskCapabilities(groupId, taskId, generation);
+      const request = { title: text(title, "子任务", 500), description: text(description, "子任务说明", 4000), required: required !== false, ...workRequest(fields) };
+      const cards = await service.validateTaskCapabilities(groupId, taskId, generation);
       checkRead(target, request); const capability = checkCapability(cards.find((value) => value.id === target), request);
       return mutate((record, task, sender) => {
         requireMember(record, task, target); if (target === agentId) throw new InputError("自己的任务请用 propose_group_task 后认领");
         checkTaskNetwork(record, task, request.capabilityId, capability);
         const parent = childFor(task);
-        let child = task.children.find((value) => value.requesterId === agentId && value.assigneeId === target && value.title === title && requestMatches(value, request) && !["failed", "declined"].includes(value.status));
+        let child = task.children.find((value) => value.requesterId === agentId && value.assigneeId === target && requestMatches(value, request) && !["failed", "declined"].includes(value.status));
         if (!child) {
-          child = service.makeChild(task, { title, description, assigneeId: target, required: required !== false, ...request }); child.requesterId = agentId;
+          child = service.makeChild(task, { ...request, assigneeId: target }); child.requesterId = agentId;
           message(record, sender, `请协助：${child.title}\n${child.description}`, { taskId, recipientId: target, visibility: "internal", kind: "coordination" });
           service.queue(task, target, { childId: child.id });
         } else if (child.status === "needs_input") {

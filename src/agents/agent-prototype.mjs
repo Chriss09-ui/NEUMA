@@ -847,7 +847,7 @@ export class PrototypeAgents {
     }
   }
 
-  async prompt({ agentId, sessionId, message = "", history, attachments: suppliedAttachments, applicationContext } = {}, onProgress = () => {}, { signal, activityScope } = {}) {
+  async prompt({ agentId, sessionId, message = "", history, attachments: suppliedAttachments, applicationContext } = {}, onProgress = () => {}, { signal, activityScope, taskAllowNetwork } = {}) {
     const runtimeEpoch = this.runtimeEpoch;
     const checkExternalCancellation = () => { if (signal?.aborted) throw modelError("cancelled"); };
     checkExternalCancellation();
@@ -856,6 +856,8 @@ export class PrototypeAgents {
       || Object.keys(activityScope).length !== 2 || activityScope.kind !== "main")) throw new InputError("工作任务来源无效");
     const activitySource = activityScope === undefined ? { kind: "private", sessionId }
       : { kind: "main", conversationId: validId(activityScope.conversationId, "主对话") };
+    if (taskAllowNetwork !== undefined && (activitySource.kind !== "main" || typeof taskAllowNetwork !== "boolean"))
+      throw new InputError("可信任务联网策略只接受主 Agent 传递的布尔值");
     if (sessionId.length < 16) throw new InputError("对话标识无效，请开启新对话");
     const attachments = normalizeAttachmentRefs(suppliedAttachments);
     if (typeof message !== "string" || (!message.trim() && !attachments.length) || message.length > 12_000)
@@ -886,7 +888,7 @@ export class PrototypeAgents {
     }
     item.busy = true; item.cancelled = false; item.failed = false; item.failure = null; item.retries = 0; item.turns = 0;
     item.applicationContext = application.context;
-    item.allowNetwork = networkAllowed(agent.draft, message); item.connectionSnapshot = connectionSnapshot;
+    item.allowNetwork = taskAllowNetwork !== false && networkAllowed(agent.draft, message); item.connectionSnapshot = connectionSnapshot;
     item.refreshWeb = /刷新|最新|\brefresh\b|\blatest\b/i.test(message);
     item.controller = new AbortController(); item.hasImages = false;
     let taskSignal = signal ? AbortSignal.any([signal, item.controller.signal]) : item.controller.signal;
