@@ -1,12 +1,26 @@
-import test from "node:test";
+import test, { after } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { createRequestHandler as createHandler } from "../src/server.mjs";
 import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../src/requirements/core.mjs";
 import { createProjectAddError } from "../src/projects/project-diagnostics.mjs";
+import { sufficientPreflight } from "./helpers/consultation.mjs";
 
-const createRequestHandler = (options) => createHandler({ projects: {}, projectAgent: {}, prototypeAgents: {}, ...options });
+const fixtureRoots = [], fixtureHandlers = [];
+after(async () => {
+  await Promise.allSettled(fixtureHandlers.map((handler) => handler.dispose()));
+  for (const root of fixtureRoots) rmSync(root, { recursive: true, force: true });
+});
+const createRequestHandler = (options) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "neuma-server-requirements-")); fixtureRoots.push(dataDir);
+  const handler = createHandler({ dataDir, projects: {}, projectAgent: {}, prototypeAgents: {}, ...options,
+    ...(options?.providers ? { providers: { preflight: sufficientPreflight, ...options.providers } } : {}) });
+  fixtureHandlers.push(handler); return handler;
+};
 
 function request(method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
@@ -417,7 +431,8 @@ test("确认清单与明确确认保持原文，无需额外调用模型", async
   const previewResult = preview.events().at(-1).result;
   assert.equal(previewResult.reply, `我整理出的需求是：\n${previewResult.summary}\n\n${CONFIRMATION_QUESTION}`);
   assert.equal(previewResult.confirmed, false);
-  const approved = requirementStream(handler, { message: "确认", draft, lastQuestion: CONFIRMATION_QUESTION });
+  const approved = requirementStream(handler, { message: "确认", requirementSessionId: previewResult.requirementSessionId,
+    requirementVersion: previewResult.requirementVersion });
   await approved.pending;
   const approvedResult = approved.events().at(-1).result;
   assert.equal(approvedResult.confirmed, true);

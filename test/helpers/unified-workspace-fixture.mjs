@@ -11,6 +11,7 @@ import { MainAgent } from "../../src/main/main-agent.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { emptyDraft } from "../../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./architecture.mjs";
+import { sufficientPreflight } from "./consultation.mjs";
 
 const textOf = (content) => typeof content === "string" ? content : (content ?? []).map((part) => part.text ?? "").join("");
 const fileCapabilities = ["conversation", "list_workspace_files", "read_workspace_file", "write_workspace_file"]
@@ -81,7 +82,9 @@ export async function startUnifiedWorkspaceFixture({ port = 4372 } = {}) {
       let name, args, reply, slow = false, role = "private";
       assert.equal(request.url, "/v1/chat/completions");
       if (!body.stream) {
-        role = "requirements"; const result = requirementResult(payload);
+        const preflight = textOf(body.messages[0]?.content).includes("独立架构预评估者");
+        role = preflight ? "preflight" : "requirements";
+        const result = preflight ? await sufficientPreflight() : requirementResult(payload);
         records.push({ role, message: payload.latestUserMessage });
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(result) }, finish_reason: "stop" }] })); return;
@@ -89,9 +92,16 @@ export async function startUnifiedWorkspaceFixture({ port = 4372 } = {}) {
       if (names.includes("submit_architecture")) {
         role = "designer"; name = "submit_architecture";
         args = validDesign(payload.requirements, { capabilities: fileCapabilities,
+          schemaVersion: 3,
+          interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "用户共享的固定短材料", results: "中文报告", persistentData: "生成的报告文件" },
+          connections: [], execution: { language: "none", hosting: "builtin", reason: "固定短材料的模拟任务使用已有文件工具" },
+          selectionBasis: { capacity: "本测试只输入一份明确的小型文字材料", process: "读取实际共享材料、核对内容并保存报告",
+            quality: "核对事实风险待办与共享原文及文件内容", requirementIds: payload.requirements.map((item) => item.id), assumptions: [] },
           instructions: "处理本轮用户明确提供的研究材料，核对关键事实、风险与待办，必要时保存文本报告；缺少信息必须标注，不能声称外部发送或联网。" });
       } else if (names.includes("submit_architecture_review")) {
         role = "reviewer"; name = "submit_architecture_review"; args = passingReview(payload.candidateHash);
+        if (payload.design?.schemaVersion === 3) args.checks.push(...["requirement_sufficiency", "acceptance_quality"]
+          .map((id) => ({ id, passed: true, evidence: "本机固定测试材料的规模与验收条件已明确，实际文件结果由后续断言核对" })));
       } else if (names.includes("assign_group_task")) {
         role = "main"; const message = payload.currentUserMessage;
         const isRequirement = /(?:创建|做|建|修改|迭代).*(?:Agent|智能体|助手)|补充需求|三列表格/i.test(message)
@@ -134,6 +144,8 @@ export async function startUnifiedWorkspaceFixture({ port = 4372 } = {}) {
             }
           }
         } else reply = "日常对话继续。你可以在这里交代工作、创建智能体，或查看群任务的实际进展。";
+      } else if (names.includes("submit_group_route")) {
+        role = "routing"; name = "submit_group_route"; args = { mode: "default" };
       } else if (names.includes("submit_group_intent")) {
         role = "intent"; const owner = payload.members[0].id;
         name = "submit_group_intent"; args = { participate: true, contribution: `${payload.memberId} 自愿核对共享材料并提交实际文本报告`, willingToIntegrate: payload.memberId === owner, integratorId: owner };

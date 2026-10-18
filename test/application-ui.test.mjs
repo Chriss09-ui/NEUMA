@@ -362,6 +362,31 @@ test("连接保存期间的新输入和其他Agent的表单不被迟到回执覆
   assert.equal(other.value, "other-agent"); await view.show("one"); assert.equal(input(container, "secret").value, "newer");
 });
 
+test("通用连接根据定义显示字段，动态资源发现与授权不丢失用户草稿", async () => {
+  const ui = dom(), container = ui.get("connections"), calls = [];
+  const requirement = { id: "data", kind: "business", protocol: "mcp", configFields: [
+    { key: "library", label: "资料库", type: "select", options: [{ value: "old", label: "原资料库" }] },
+    { key: "password", label: "附加密钥", type: "password" },
+  ] };
+  const connection = { id: "data", kind: "business", protocol: "mcp", authType: "oauth", configured: true };
+  const view = createConnectionView({ document: ui.document, container, api: {
+    connections: async () => ({ version: 1, connections: [connection], requirements: [requirement] }),
+    discoverConnection: async () => ({ tools: [{ name: "lookup" }], configurationChoices: { library: [{ value: "mine", label: "我的资料" }] } }),
+    authorizeConnection: async () => ({ authorizationUrl: "https://login.example/authorize" }),
+    saveConnection: async (_id, body) => { calls.push(body); return { version: 2, connection }; },
+  } });
+  await view.show("one");
+  input(container, "baseUrl").value = "https://service.example/mcp"; await input(container, "baseUrl").dispatchEvent({ type: "input" });
+  input(container, "values.password").value = "fixture-only"; await input(container, "values.password").dispatchEvent({ type: "input" });
+  await descendants(container).find((node) => node.textContent === "发现工具与资源").click();
+  assert.equal(input(container, "values.library").children[0].textContent, "我的资料");
+  await descendants(container).find((node) => node.tag === "button" && node.textContent === "登录授权").click();
+  assert.equal(descendants(container).find((node) => node.tag === "a").href, "https://login.example/authorize");
+  assert.equal(input(container, "baseUrl").value, "https://service.example/mcp");
+  await descendants(container).find((node) => node.tag === "form").dispatchEvent({ type: "submit", preventDefault() {} });
+  assert.equal(calls[0].values.password, "fixture-only"); assert.equal(input(container, "values.password").value, "");
+});
+
 test("应用API使用带版本的状态保存、幂等任务提交及专属连接的实际路由", async () => {
   const calls = [], api = createApplicationApi(async (path, options) => { calls.push({ path, ...options, body: options.body ? JSON.parse(options.body) : undefined }); return Response.json({ ok: true }); });
   await api.run("one", "search", { link: "https://example.com" }, "retry-key", "delivery-7");

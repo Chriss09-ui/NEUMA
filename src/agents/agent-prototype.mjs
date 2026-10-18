@@ -6,7 +6,7 @@ import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { ArchitectureDesigner } from "../architecture/architecture.mjs";
 import { supportedArchitectureVersion, requiresDevelopment, designHash } from "../architecture/architecture-contract.mjs";
-import { platformCapabilitySnapshotCompatible } from "../architecture/platform-contract.mjs";
+import { platformCapabilitySnapshotCompatible, createPlatformSnapshot } from "../architecture/platform-contract.mjs";
 import { DevelopmentController, developmentSummary } from "../development/development.mjs";
 import { AgentStorage } from "./agent-storage.mjs";
 import { AgentLibrary, normalizeAttachmentRefs } from "./agent-library.mjs";
@@ -19,6 +19,12 @@ import { AgentConnectionStore } from "./agent-connections.mjs";
 import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT, PUBLIC_CAPABILITY_VERSION } from "../runtime/web-capabilities.mjs";
 import { ApplicationService } from "../applications/application-service.mjs";
 import { validateApplicationManifest } from "../applications/application-contract.mjs";
+import { authorizeConfirmedRequirement, validateRequirementReceipt } from "../requirements/consultation.mjs";
+import { contentHash } from "../requirements/task-spec.mjs";
+import { ManagedServiceManager } from "../services/managed-service-manager.mjs";
+import { ServiceGateway } from "../services/service-gateway.mjs";
+import { ServiceDataMigrations } from "../services/service-data-migrations.mjs";
+import { openOAuthBrowser } from "../connections/oauth.mjs";
 import { groupCapabilityFacts } from "./agent-capabilities.mjs";
 
 const RUNTIME_BOUNDARY = `你是 NEUMA 中由用户创建的 Agent。按照以下工作指令处理本轮任务，简洁地给出实际结果。
@@ -253,19 +259,23 @@ function requireSuccess(session, state) {
 
 export class PrototypeAgents {
   constructor({ config, cwd, dataDir, sessionFactory = createPiSession, architecture, development,
-    storage = new AgentStorage({ dataDir }), materials = new MaterialStore({ storage }), connections, web, applications }) {
+    storage = new AgentStorage({ dataDir }), materials = new MaterialStore({ storage }), connections, connectionOptions = {}, web, applications,
+    services, enforceRequirementConfirmation = false }) {
     Object.assign(this, { config, cwd, dataDir, sessionFactory });
     this.storage = storage;
     this.materials = materials;
-    this.connections = connections ?? new AgentConnectionStore({ dataDir, storage });
+    this.connections = connections ?? new AgentConnectionStore({ dataDir, storage, openBrowser: openOAuthBrowser, ...connectionOptions });
+    this.enforceRequirementConfirmation = enforceRequirementConfirmation;
+    this.services = services ?? new ManagedServiceManager({ rootDir: join(dataDir, "services") });
+    this.dataMigrations = new ServiceDataMigrations({ rootDir: join(dataDir, "service-data-migrations"), services: this.services });
     this.web = web ?? new WebCapabilities({ connectionStore: this.connections });
     this.library = new AgentLibrary({ dataDir, storage,
       validateAttachments: (id, refs) => this.materials.resolve(id, refs) });
     this.architecture = architecture ?? new ArchitectureDesigner({ config, cwd, dataDir, storage, web: this.web,
       sessionFactory: (options) => this.sessionFactory(options) });
-    this.development = development ?? new DevelopmentController({ config, cwd, dataDir, storage, web: this.web,
+    this.development = development ?? new DevelopmentController({ config, cwd, dataDir, storage, web: this.web, services: this.services,
       sessionFactory: (options) => this.sessionFactory(options), getArchitecture: (id) => this.getArchitecture(id) });
-    this.agents = new Map(); this.sessions = new Map(); this.builds = new Map(); this.removing = new Set();
+    this.agents = new Map(); this.sessions = new Map(); this.builds = new Map(); this.removing = new Set(); this.dataTransitions = new Set();
     this.collaborationSessions = new Map(); this.lifecycleListeners = new Set();
     this.scheduler = new AgentScheduler();
     this.activities = new ActivityStore({ storage });
@@ -275,15 +285,34 @@ export class PrototypeAgents {
     this.persistence = Promise.resolve();
     this.ready = this.load();
     this.applications = applications ?? new ApplicationService({ agents: this });
+    this.gateway = new ServiceGateway({ agents: this });
+    this.runtimeReady = this.ready.then(() => this.services.restore({ isActive: async ({ agentId, deliveryVersion }) => {
+      const agent = this.agents.get(agentId);
+      return agent?.execution?.kind === "managed-service" && `${agent.developmentRef.id}:${agent.execution.codeHash}` === deliveryVersion;
+    } })); this.runtimeReady.catch(() => {});
     // Preserve the error for API callers without an unhandled rejection before the first request.
     this.ready.catch(() => {});
   }
 
   async load() {
     await this.activities.ready;
+    await this.dataMigrations.recover();
     const agents = new Map();
     for (const id of await this.storage.agentIds()) {
       if (await this.library.deleted(id)) continue;
+      const activation = await this.storage.readJson(id, "application/activation.json");
+      if (activation && activation.status !== "completed") {
+        if (activation.migrationId) {
+          const migration = await this.dataMigrations.get(activation.migrationId);
+          if (activation.direction === "rollback") {
+            if (migration.status !== "committed") await this.dataMigrations.reapply({ id: migration.id });
+          } else if (["committed", "committing"].includes(migration.status)) await this.dataMigrations.rollback({ id: migration.id });
+        }
+        if (activation.prior) await this.storage.writeJson(id, "definition.json", { version: 1, agent: activation.prior });
+        else await this.storage.removeFile(id, "definition.json");
+        await this.connections.activateProfile(id, activation.previousProfile ?? "legacy");
+        await this.storage.removeFile(id, "application/activation.json");
+      }
       const source = await this.storage.readJson(id, "definition.json");
       if (!source) continue;
       if (source.version !== 1 || source.agent?.id !== id) throw new InputError("Agent 定义身份与文件夹不一致，请保留原文件");
@@ -320,7 +349,7 @@ export class PrototypeAgents {
     if (!this.approvedDefinition(agent, architecture) || architecture.delivery !== "ready") return null;
     let development = null, application = null;
     try {
-      if (agent.execution?.kind === "node-action") {
+      if (["node-action", "managed-service"].includes(agent.execution?.kind)) {
         const descriptor = await this.applications.descriptor(id, { allowBuilding: true });
         development = developmentSummary(descriptor.record);
         application = await this.applications.summary(id);
@@ -334,7 +363,26 @@ export class PrototypeAgents {
   }
   async getDevelopment(id) { validId(id); return this.development.get(id); }
   async getRequirements() { await this.ready; return this.library.list(); }
-  async saveRequirements(id, value) { await this.ready; return this.library.saveRequirement(id, value); }
+  async saveRequirements(id, value, { confirmation, consultation } = {}) {
+    await this.ready;
+    let receipt;
+    if (confirmation) {
+      try { receipt = authorizeConfirmedRequirement(value.draft, confirmation); }
+      catch { throw new InputError("需求确认凭据无效，请继续澄清并确认当前版本"); }
+    } else if (this.enforceRequirementConfirmation || value?.draft?.taskSpec) {
+      const previous = await this.storage.readJson(id, "requirements.json");
+      if (!previous || previous.name !== value.name?.trim() || !validateRequirementReceipt(value.draft, previous.confirmationReceipt))
+        throw Object.assign(new InputError("请先在需求对话中完成当前版本的评估和确认"), { reason: "requirements_need_confirmation" });
+      receipt = previous.confirmationReceipt;
+    }
+    return this.library.saveRequirement(id, value, { confirmationReceipt: receipt, consultation });
+  }
+  async getRequirementConsultation(id) {
+    validId(id); await this.library.pending.get(id);
+    const saved = await this.storage.readJson(id, "requirements.json");
+    return saved?.consultation ? structuredClone(saved.consultation) : null;
+  }
+  async getRequirementHandoff(id) { const record = await this.getArchitecture(id); return record?.status === "needs_input" ? structuredClone(record.handoff) : null; }
   async getConversation(id) { await this.ready; return this.library.getConversation(id); }
   async saveConversation(id, value) { await this.ready; return this.library.saveConversation(id, value); }
   async listConversations(id) { await this.ready; return this.library.listConversations(id); }
@@ -345,14 +393,14 @@ export class PrototypeAgents {
   approvedDefinition(agent, architecture) {
     const toolIds = architecture?.design?.capabilities?.filter((item) => item.status === "available" && item.id !== "conversation").map((item) => item.id) ?? [];
     if (agent?.execution?.kind === "node-json") toolIds.push("run_developed_workflow");
-    if (agent?.execution?.kind === "node-action") toolIds.push("run_application_action");
-    return Boolean(agent?.mode === "designed" && architecture?.status === "passed"
+    if (["node-action", "managed-service"].includes(agent?.execution?.kind)) toolIds.push("run_application_action");
+    return Boolean(agent?.mode === "designed" && !agent.dataRecoveryRequired && architecture?.status === "passed"
       && supportedArchitectureVersion(architecture)
       && architecture.sourceFingerprint === agent.fingerprint
       && architecture.candidateHash === designHash(architecture.design)
       && agent.instructions === architecture.design.instructions
       && JSON.stringify([...(agent.toolIds ?? [])].sort()) === JSON.stringify(toolIds.sort())
-      && (!agent.execution || (["node-json", "node-action"].includes(agent.execution.kind)
+      && (!agent.execution || (["node-json", "node-action", "managed-service"].includes(agent.execution.kind)
         && agent.execution.buildId === agent.developmentRef?.id && agent.execution.codeHash === agent.developmentRef?.codeHash))
       && platformCapabilitySnapshotCompatible(architecture)
       && agent.architectureRef?.version === architecture.version
@@ -405,6 +453,13 @@ export class PrototypeAgents {
     let activationId;
     const rollback = async () => {
       if (!activationId || this.agents.get(architecture.agentId)?.developmentRef?.id !== activationId) return;
+      const transaction = await this.storage.readJson(architecture.agentId, "application/activation.json");
+      await this.services.stop({ agentId: architecture.agentId, deliveryVersion: transaction?.deliveryVersion });
+      if (transaction?.migrationId) {
+        const migration = await this.dataMigrations.get(transaction.migrationId);
+        if (["committed", "committing"].includes(migration.status)) await this.dataMigrations.rollback({ id: migration.id });
+      }
+      if (transaction) await this.connections.activateProfile(architecture.agentId, transaction.previousProfile);
       await this.commit((next) => {
         const current = next.get(architecture.agentId);
         if (current?.developmentRef?.id !== activationId) return;
@@ -417,13 +472,20 @@ export class PrototypeAgents {
         delete latest.developmentRef;
         await this.architecture.save(latest);
       }
+      await this.storage.removeFile(architecture.agentId, "application/activation.json");
+      if (!this.closing && !this.removing.has(architecture.agentId) && previous?.execution?.kind === "managed-service") await this.services.activate({
+        agentId: previous.id, deliveryVersion: `${previous.developmentRef.id}:${previous.execution.codeHash}`, scopeId: "private" });
     };
     try {
       const record = await this.development.run(architecture, { ...options, activate: (record, signal) => {
         activationId = record.id;
         return this.activateDevelopment(record, signal);
       } });
-      if (record.status !== "completed" || !["ready", ...(record.package?.runtime === "node-action" ? ["needs_connection"] : [])].includes(record.delivery)) await rollback();
+      if (record.status !== "completed" || !["ready", ...(["node-action", "managed-service"].includes(record.package?.runtime) ? ["needs_connection"] : [])].includes(record.delivery)) await rollback();
+      else {
+        const transaction = await this.storage.readJson(architecture.agentId, "application/activation.json");
+        if (transaction) await this.storage.writeJson(architecture.agentId, "application/activation.json", { ...transaction, status: "completed" });
+      }
       return record;
     } catch (error) { await rollback(); throw error; }
   }
@@ -433,14 +495,22 @@ export class PrototypeAgents {
     const architecture = await this.getArchitecture(record.agentId);
     if (architecture?.status !== "passed" || architecture.version !== record.architectureRef.version
       || architecture.candidateHash !== record.architectureRef.candidateHash) throw new InputError("架构版本已变化，不能激活旧研发结果");
-    const application = record.package?.runtime === "node-action";
+    const application = ["node-action", "managed-service"].includes(record.package?.runtime);
     if (!application && (architecture.design.capabilities.some((item) => item.status === "needs_connection") || architecture.draft.externalAction?.mode === "requested"))
       return { delivery: "needs_connection", summary: "代码与验收已完成，仍需连接并核实正式服务后才能运行。" };
     if (architecture.draft.usage?.mode !== "on_demand")
       return { delivery: "needs_development", summary: "代码与验收已完成，所需后台触发能力尚未接入，当前不能运行。" };
     const snapshot = await this.development.workspace.validateSnapshot(record.package.snapshot, record.agentId);
     if (application) validateApplicationManifest(record.package.application, { snapshot });
-    const smoke = application ? { status: (await this.development.executor.probe({ signal })).available ? "passed" : "not_run" }
+    const managed = record.package?.runtime === "managed-service";
+    const deliveryVersion = `${record.id}:${snapshot.hash}`;
+    const previousProfile = await this.connections.getActiveProfile(record.agentId);
+    const connectionProfile = architecture.design.schemaVersion === 3 ? architecture.candidateHash : previousProfile;
+    if (managed) await this.services.prepare({ agentId: record.agentId, deliveryVersion, manifest: record.package.application.service,
+      codeDir: snapshot.path, signal });
+    const smoke = managed ? { status: (await this.services.probe({ language: record.package.application.service.language,
+      host: record.package.application.service.host, signal })).available ? "passed" : "not_run" }
+      : application ? { status: (await this.development.executor.probe({ signal })).available ? "passed" : "not_run" }
       : await this.development.executor.run({ codeDir: snapshot.path, entrypoint: record.package.entrypoint,
         input: record.plan.cases[0].input, signal });
     signal.throwIfAborted();
@@ -456,11 +526,43 @@ export class PrototypeAgents {
     const agent = { ...definition, instructions: architecture.design.instructions, mode: "designed", status: "ready",
       architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash },
       developmentRef: { id: record.id, codeHash: snapshot.hash, planHash: record.planHash },
-      execution: { kind: application ? "node-action" : "node-json", buildId: record.id, codeHash: snapshot.hash, entrypoint: record.package.entrypoint },
+      execution: { kind: application ? record.package.runtime : "node-json", buildId: record.id, codeHash: snapshot.hash, entrypoint: record.package.entrypoint },
       toolIds: [...architecture.design.capabilities.filter((item) => item.status === "available" && item.id !== "conversation").map((item) => item.id), application ? "run_application_action" : "run_developed_workflow"],
       revision: prior?.developmentRef?.id === record.id && prior.developmentRef.codeHash === snapshot.hash ? prior.revision : (prior?.revision ?? 0) + 1,
       createdAt: prior?.createdAt ?? now, updatedAt: now };
+    let migration;
+    const activation = { status: "preparing", prior: prior ?? null, previousProfile, deliveryVersion };
+    const migrationGuard = async () => {
+      signal.throwIfAborted();
+      const current = await this.getArchitecture(record.agentId);
+      if (current?.candidateHash !== architecture.candidateHash || current.version !== architecture.version) throw new InputError("架构已变化，停止数据迁移");
+    };
     try {
+      if (prior?.developmentRef) {
+        const oldRecord = await this.development.store.getRun(prior.developmentRef.id);
+        if (oldRecord?.package?.application) {
+          if (oldRecord.package.application.stateVersion !== record.package.application?.stateVersion) {
+            if (!managed || !record.package.application.service.migration) throw new InputError("数据版本变化需要经过验收的迁移与验证动作，旧版仍保留");
+            await this.pauseDataWriters(record.agentId);
+            await this.services.stop({ agentId: record.agentId });
+            const agentRoot = await this.storage.directory(record.agentId);
+            migration = await this.dataMigrations.prepare({ agentId: record.agentId, agentRoot,
+              fromDeliveryVersion: `${prior.developmentRef.id}:${prior.execution.codeHash}`, toDeliveryVersion: deliveryVersion,
+              fromVersion: oldRecord.package.application.stateVersion, toVersion: record.package.application.stateVersion,
+              manifest: record.package.application.service, targets: [
+                { id: "business", path: join(agentRoot, "application", "business"), kind: "state-records" },
+                { id: "draft", path: join(agentRoot, "application", "draft"), kind: "state-records" },
+                { id: "workspace", path: await this.workspace(record.agentId), kind: "files" },
+              ], signal, guard: migrationGuard });
+            activation.migrationId = migration.id; agent.dataMigrationRef = migration.id;
+          }
+          await this.rememberDelivery(prior, oldRecord.package.application, previousProfile);
+        }
+      }
+      await this.storage.writeJson(record.agentId, "application/activation.json", activation);
+      if (migration) await this.dataMigrations.commit({ id: migration.id, signal, guard: migrationGuard });
+      if (managed) await this.services.start({ agentId: record.agentId, deliveryVersion, scopeId: "private", signal });
+      await this.connections.activateProfile(record.agentId, connectionProfile);
       await this.commit((next) => { const current = next.get(record.agentId);
         next.set(record.agentId, { ...agent, memory: current?.memory ?? "", profile: profileOf(current ?? agent) }); }, { signal });
       signal.throwIfAborted();
@@ -468,17 +570,103 @@ export class PrototypeAgents {
       latest.developmentRef = agent.developmentRef;
       await this.architecture.save(latest);
       signal.throwIfAborted();
+      if (managed) await this.services.activate({ agentId: record.agentId, deliveryVersion, scopeId: "private", signal });
+      if (application) await this.rememberDelivery(agent, record.package.application, connectionProfile);
     } catch (error) {
+      if (managed) await this.services.stop({ agentId: record.agentId, deliveryVersion, reason: "activation_failed" });
+      await this.connections.activateProfile(record.agentId, previousProfile);
+      if (migration) {
+        const current = await this.dataMigrations.get(migration.id);
+        if (["committed", "committing"].includes(current.status)) await this.dataMigrations.rollback({ id: migration.id });
+      }
       await this.commit((next) => {
         const current = next.get(record.agentId);
         if (current?.developmentRef?.id !== record.id) return;
         if (prior) next.set(record.agentId, { ...prior, memory: current.memory, profile: current.profile });
         else next.delete(record.agentId);
       });
+      if (!this.closing && !this.removing.has(record.agentId) && prior?.execution?.kind === "managed-service") await this.services.activate({ agentId: prior.id,
+        deliveryVersion: `${prior.developmentRef.id}:${prior.execution.codeHash}`, scopeId: "private" });
+      await this.storage.removeFile(record.agentId, "application/activation.json");
       throw error;
-    }
+    } finally { this.dataTransitions.delete(record.agentId); }
     return { delivery: "ready", summary: "研发、验收和运行检查已完成，可以开始任务。",
       runtimeCheck: { status: "passed", codeHash: snapshot.hash, checkedAt: now } };
+  }
+
+  async rememberDelivery(agent, manifest, connectionProfile) {
+    const history = await this.deliveryHistory(agent.id), deliveryVersion = `${agent.developmentRef.id}:${agent.execution.codeHash}`;
+    const value = { deliveryVersion, agent: structuredClone(agent), connectionProfile, stateVersion: manifest.stateVersion,
+      dataVersion: manifest.service?.dataVersion ?? 1, language: manifest.service?.language ?? "javascript", host: manifest.service?.host ?? "builtin" };
+    await this.storage.writeJson(agent.id, "application/deliveries.json", { version: 1,
+      deliveries: [...history.filter((item) => item.deliveryVersion !== deliveryVersion), value] });
+  }
+  async deliveryHistory(id) {
+    const record = await this.storage.readJson(id, "application/deliveries.json");
+    return record?.deliveries ?? [];
+  }
+  async changeService(id, operation, { signal } = {}) {
+    await this.ready; await this.closing;
+    if (this.builds.has(id) || this.removing.has(id)) throw new InputError("智能体正在更新，请等待完成");
+    const controller = new AbortController(), context = { controller, cancelled: false };
+    context.done = new Promise((done) => { context.finish = done; });
+    this.builds.set(id, context);
+    const abort = () => controller.abort(); signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort();
+    try { await this.notifyLifecycle("build", id); controller.signal.throwIfAborted(); return await operation(controller.signal); }
+    finally { signal?.removeEventListener("abort", abort); this.builds.delete(id); context.finish(); }
+  }
+  async rollbackDelivery(id, deliveryVersion, { signal } = {}) {
+    return this.changeService(id, async (activeSignal) => {
+      const previous = this.agents.get(id), previousProfile = await this.connections.getActiveProfile(id);
+      const saved = (await this.deliveryHistory(id)).find((item) => item.deliveryVersion === deliveryVersion);
+      if (!saved) throw new InputError("没有找到这个已交付版本");
+      const currentRecord = await this.development.store.getRun(previous?.developmentRef?.id);
+      const record = await this.development.store.getRun(saved.agent.developmentRef.id);
+      if (record?.status !== "completed" || !["ready", "needs_connection"].includes(record.delivery)) throw new InputError("这个版本没有通过交付验收");
+      const manifest = validateApplicationManifest(record.package.application, { snapshot: await this.development.workspace.validateSnapshot(record.package.snapshot, id) });
+      let migration;
+      if (saved.stateVersion !== currentRecord?.package?.application?.stateVersion
+        || saved.dataVersion !== (currentRecord?.package?.application?.service?.dataVersion ?? 1)) {
+        if (!previous?.dataMigrationRef) throw new InputError("没有对应数据备份，不能仅回退代码");
+        migration = await this.dataMigrations.get(previous.dataMigrationRef);
+        if (migration.fromDeliveryVersion !== deliveryVersion || migration.toDeliveryVersion !== `${previous.developmentRef.id}:${previous.execution.codeHash}`
+          || migration.fromVersion !== saved.dataVersion) throw new InputError("请选择与数据备份对应的上一个交付版本");
+      }
+      const target = { ...saved.agent, revision: (previous?.revision ?? 0) + 1, updatedAt: new Date().toISOString(),
+        memory: previous?.memory ?? "", profile: profileOf(previous ?? saved.agent) };
+      const transaction = { status: "preparing", direction: "rollback", prior: previous, previousProfile, deliveryVersion,
+        ...(migration ? { migrationId: migration.id } : {}) };
+      try {
+        if (manifest.runtime === "managed-service") await this.services.start({ agentId: id, deliveryVersion, scopeId: "private", signal: activeSignal });
+        await this.storage.writeJson(id, "application/activation.json", transaction);
+        if (migration) {
+          await this.pauseDataWriters(id); await this.services.stop({ agentId: id });
+          await this.dataMigrations.rollback({ id: migration.id, guard: () => activeSignal.throwIfAborted() });
+        }
+        await this.connections.activateProfile(id, saved.connectionProfile ?? "legacy");
+        await this.commit((next) => next.set(id, target), { signal: activeSignal });
+        if (manifest.runtime === "managed-service") await this.services.activate({ agentId: id, deliveryVersion, scopeId: "private", signal: activeSignal });
+        else await this.services.stop({ agentId: id });
+        await this.storage.writeJson(id, "application/activation.json", { ...transaction, status: "completed" });
+      } catch (error) {
+        await this.services.stop({ agentId: id });
+        if (migration) {
+          try {
+            if ((await this.dataMigrations.get(migration.id)).status !== "committed") await this.dataMigrations.reapply({ id: migration.id });
+          } catch (recoveryError) {
+            await this.commit((next) => next.set(id, { ...previous, dataRecoveryRequired: true }));
+            throw new InputError("数据恢复尚未完成，已暂停该智能体；请保留备份和运行记录后检查存储");
+          }
+        }
+        await this.connections.activateProfile(id, previousProfile);
+        await this.commit((next) => next.set(id, previous));
+        if (!this.closing && !this.removing.has(id) && previous?.execution?.kind === "managed-service") await this.services.activate({ agentId: id,
+          deliveryVersion: `${previous.developmentRef.id}:${previous.execution.codeHash}`, scopeId: "private" });
+        await this.storage.removeFile(id, "application/activation.json");
+        throw error;
+      } finally { this.dataTransitions.delete(id); }
+      return { deliveryVersion, restored: true };
+    }, { signal });
   }
 
   async developedTools(agent, root) {
@@ -545,7 +733,7 @@ export class PrototypeAgents {
       const connectionView = await this.connections.list(entry.id);
       const toolIds = createWorkspaceTools(this.cwd).map((tool) => tool.name).filter((id) => agent?.toolIds?.includes(id));
       let application = null, deliveryFailed = false, workflowChecked = false;
-      if (ready && agent.execution?.kind === "node-action") {
+      if (ready && ["node-action", "managed-service"].includes(agent.execution?.kind)) {
         try {
           const descriptor = await this.applications.descriptor(entry.id);
           application = { manifest: descriptor.manifest, deliveryVersion: descriptor.deliveryVersion, checkedAt: descriptor.record.updatedAt };
@@ -578,6 +766,16 @@ export class PrototypeAgents {
     await Promise.all([...this.lifecycleListeners].map((listener) => listener({ type, agentId })));
   }
 
+  async pauseDataWriters(agentId) {
+    this.dataTransitions.add(agentId);
+    const running = [...this.sessions.values(), ...this.collaborationSessions.values()].filter((item) => item.agentId === agentId && item.busy);
+    this.scheduler.cancelAgent(agentId);
+    for (const item of running) { item.cancelled = true; item.controller?.abort(); }
+    await Promise.allSettled(running.map((item) => item.session?.abort()));
+    await Promise.allSettled(running.map((item) => item.done));
+    await this.applications.store.settle();
+  }
+
   async businessTools(agent, workspaceRoot, applicationScope = {}) {
     const root = workspaceRoot ?? await this.workspace(agent.id);
     const guardWrite = async (file) => {
@@ -590,7 +788,7 @@ export class PrototypeAgents {
       throw new InputError("上传的输入材料不能覆盖，请将修改另存为任务产物");
     };
     const tools = createWorkspaceTools(root, { guardWrite }).filter((tool) => agent.toolIds?.includes(tool.name));
-    if (agent.execution?.kind === "node-action") tools.push(...await this.applications.tools(agent, { workspaceRoot: root, ...applicationScope }));
+    if (["node-action", "managed-service"].includes(agent.execution?.kind)) tools.push(...await this.applications.tools(agent, { workspaceRoot: root, ...applicationScope }));
     else if (agent.execution) tools.push(...await this.developedTools(agent, root));
     return { root, tools };
   }
@@ -603,6 +801,14 @@ export class PrototypeAgents {
       && /搜索|检索|搜寻|查找链接|search|research/i.test(JSON.stringify(draft ?? {})))
       requirements.push({ id: "search", purpose: "search", required: false, description: "可选专属搜索；留空使用平台免费联网", operations: [] });
     return requirements;
+  }
+
+  async connectionRequirementSets(id) {
+    const active = await this.getActiveArchitecture(id), latest = await this.getArchitecture(id);
+    const activeProfile = await this.connections.getActiveProfile(id);
+    const candidate = latest?.status === "passed" && latest.candidateHash !== active?.candidateHash
+      ? { profile: latest.candidateHash, requirements: structuredClone(latest.design.connections ?? []) } : null;
+    return { active: { profile: activeProfile, requirements: active ? await this.connectionRequirements(id) : [] }, candidate };
   }
 
   async recordWorkingModel(snapshot) {
@@ -637,7 +843,34 @@ export class PrototypeAgents {
       if (capability === "connection.call") {
         if (!webOptions.allowNetwork) throw new InputError("本轮要求不联网，未调用业务接口");
         if (!action.connectionIds.includes(args.connectionId)) throw new InputError("动作没有声明这个连接依赖");
-        return this.connections.call(connectionSnapshot, args, { requirements: descriptor.architecture.design.connections ?? [], signal: activeSignal });
+        return this.connections.call(connectionSnapshot, args, { requirements: descriptor.architecture.design.connections ?? [],
+          signal: activeSignal, scope: task.source.scope, resolveFile: async (reference) => {
+            if (typeof reference !== "string") throw new InputError("上传文件需要已授权的材料或产物引用");
+            let source;
+            if (reference.startsWith("material:")) {
+              const id = reference.slice(9);
+              if (task.source.scope === "private") source = await this.materials.raw(task.agentId, id);
+              else {
+                const reader = materials.find((tool) => tool.name === "read_group_material" && tool.resolveFile);
+                if (!reader) throw new InputError("本群没有这个已共享的材料读取入口");
+                source = await reader.resolveFile(id, activeSignal);
+              }
+            } else if (reference.startsWith("workspace:")) {
+              const file = reference.slice(10);
+              source = { path: await workspaceTarget(root)(file), name: file.split("/").at(-1), mimeType: "application/octet-stream" };
+            } else throw new InputError("文件引用需要 material:材料编号 或 workspace:相对路径");
+            const handle = await open(source.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+            try {
+              const info = await handle.stat();
+              if (!info.isFile() || info.nlink !== 1 || info.size > MAX_RUNTIME_FILE_BYTES || source.size !== undefined && info.size !== source.size) throw new InputError("上传材料已变化或超过文件大小限制");
+              return { data: await handle.readFile(), name: source.name, contentType: source.mimeType };
+            } finally { await handle.close(); }
+          } });
+      }
+      if (capability === "connection.readResult") {
+        if (!action.connectionIds.includes(args.connectionId)) throw new InputError("动作没有声明这个连接依赖");
+        return this.connections.readResult(task.agentId, args.resultRef,
+          { offset: args.offset, length: args.length, scope: task.source.scope, connectionIds: [args.connectionId] });
       }
       if (capability === "state.get") return this.applications.store.getState(task.agentId, stateOptions);
       if (capability === "state.set") return this.applications.store.setState(task.agentId, args, stateOptions);
@@ -767,6 +1000,15 @@ export class PrototypeAgents {
 
   async build(input, { signal, onProgress = () => {} } = {}) {
     const definition = buildInput(input); await this.ready; await this.closing; signal?.throwIfAborted();
+    if (this.enforceRequirementConfirmation || definition.draft.taskSpec) {
+      await this.library.pending.get(definition.id);
+      const saved = await this.storage.readJson(definition.id, "requirements.json");
+      const old = this.agents.get(definition.id);
+      const unchangedActive = old?.fingerprint === definition.fingerprint && await this.getActiveRuntime(definition.id);
+      if (!unchangedActive && (!saved || saved.name !== definition.name || !validateRequirementReceipt(definition.draft, saved.confirmationReceipt)
+        || saved.confirmationReceipt.platformHash !== contentHash(createPlatformSnapshot({ allowNetwork: networkAllowed(definition.draft) }))))
+        throw Object.assign(new InputError("当前需求尚未完成有效评估与确认，请返回需求对话继续"), { reason: "requirements_need_confirmation" });
+    }
     if (this.builds.has(definition.id) || this.removing.has(definition.id)) throw new InputError("这个 Agent 正在创建或移除，请等待完成");
     const controller = new AbortController(), context = { controller, session: null, cancelled: false, failed: false };
     context.done = new Promise((done) => { context.finish = done; }); this.builds.set(definition.id, context);
@@ -916,7 +1158,7 @@ export class PrototypeAgents {
       const lease = await this.scheduler.acquire({ agentId, signal: taskSignal });
       releaseSlot = lease.release; taskSignal = lease.signal;
       checkCancellation();
-      if (runtimeEpoch !== this.runtimeEpoch || this.removing.has(agentId)) throw modelError("cancelled");
+      if (runtimeEpoch !== this.runtimeEpoch || this.removing.has(agentId) || this.dataTransitions?.has(agentId)) throw modelError("cancelled");
       if (this.agents.get(agentId)?.revision !== agent.revision) throw new InputError("Agent 定义已更新，请重新发送任务");
       await this.activities.update(agentId, activity.id, { status: "running" });
       onProgress({ type: "status", phase: "thinking" });
@@ -952,7 +1194,7 @@ export class PrototypeAgents {
             return tool.execute(callId, { ...params, refresh: params.refresh === true || item.refreshWeb },
               toolSignal ? AbortSignal.any([item.controller.signal, toolSignal]) : item.controller.signal, ...args);
           } });
-        if (agent.execution?.kind === "node-action") customTools.push(...await this.applications.tools(agent, {
+        if (["node-action", "managed-service"].includes(agent.execution?.kind)) customTools.push(...await this.applications.tools(agent, {
           allowNetwork: () => item.allowNetwork, getApplicationContext: () => item.applicationContext }));
         else if (agent.execution) customTools.push(...await this.developedTools(agent, root));
         checkCancellation();
@@ -1158,6 +1400,8 @@ export class PrototypeAgents {
         item.session?.dispose(); this.sessions.delete(sessionId); this.collaborationSessions.delete(sessionId);
       }
       const removed = this.agents.has(id);
+      await this.gateway?.revoke(id);
+      await this.services?.stop({ agentId: id, reason: "agent_removed" });
       await this.commit((next) => next.delete(id));
       await this.library.remove(id);
       await this.architecture.remove(id);
@@ -1176,10 +1420,13 @@ export class PrototypeAgents {
       for (const item of sessions) { item.cancelled = true; item.controller?.abort(); }
       let applicationFailure;
       try { await this.applications.close(); } catch (error) { applicationFailure = error; }
+      const stopped = await Promise.allSettled([this.runtimeReady, this.gateway?.close(), this.connections?.close?.(), this.services?.close()]);
+      applicationFailure ??= stopped.find((item) => item.status === "rejected")?.reason;
       await this.materials.close();
       await this.development.close();
       await Promise.allSettled([...builds, ...sessions].map((item) => item.session?.abort()));
       await Promise.allSettled([...builds.map((item) => item.done), ...sessions.filter((item) => item.busy).map((item) => item.done)]);
+      await this.services?.close();
       for (const item of sessions) item.session?.dispose(); this.sessions.clear(); this.collaborationSessions.clear();
       await this.activities.persistence;
       if (applicationFailure) throw applicationFailure;

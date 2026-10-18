@@ -343,8 +343,9 @@
           </div>
           <aside id="agent-panel" class="agent-settings-panel" aria-labelledby="agent-details-title" hidden>
             <header class="agent-settings-header"><h2 id="agent-details-title" class="sr-only">智能体设置</h2><button id="agent-details-close" class="agent-settings-close" type="button" aria-label="关闭智能体设置" title="关闭智能体设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button><div id="agent-details-avatar" class="agent-settings-avatar" aria-hidden="true"></div><h3 id="agent-details-name"></h3><p id="agent-details-description" class="muted-note"></p><button id="agent-artifacts-open" class="secondary agent-artifacts-open" type="button" aria-haspopup="dialog" aria-controls="agent-file-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span>产物</span><span id="agent-artifacts-count" class="agent-artifacts-badge">0</span></button></header>
-            <nav class="agent-details-tabs" aria-label="智能体设置分类"><button id="agent-details-profile-tab" type="button" aria-pressed="true">基本资料</button><button id="agent-details-memory-tab" type="button" aria-pressed="false">记忆</button><button id="agent-details-connections-tab" type="button" aria-pressed="false">连接与模型</button></nav>
+            <nav class="agent-details-tabs" aria-label="智能体设置分类"><button id="agent-details-profile-tab" type="button" aria-pressed="true">基本资料</button><button id="agent-details-memory-tab" type="button" aria-pressed="false">记忆</button><button id="agent-details-connections-tab" type="button" aria-pressed="false">连接与模型</button><button id="agent-details-services-tab" type="button" aria-pressed="false">运行与接口</button></nav>
             <section id="agent-details-connections" class="agent-detail-section" aria-label="连接与模型" hidden><div id="agent-connections-content"></div></section>
+            <section id="agent-details-services" class="agent-detail-section" aria-label="运行与接口" hidden><div id="agent-services-content"></div></section>
             <div id="agent-details-unavailable" class="agent-detail-note" role="status" hidden>智能体生成后，就可以管理记忆和资料。</div>
             <section id="agent-details-memory" class="agent-detail-section" aria-label="智能体记忆" hidden>
               <form id="agent-memory-form"><label for="agent-memory-input">希望它长期记住的内容</label><p class="muted-note">填写你的背景、常用格式和工作偏好。仅用于这个智能体，新对话也会保留。</p><textarea id="agent-memory-input" rows="10" maxlength="12000" placeholder="例如：默认使用中文；先给结论，再解释细节；术语第一次出现时补充解释。"></textarea><div class="agent-detail-footer"><p id="agent-memory-feedback" class="muted-note small" role="status" aria-live="polite">保存后，从下一次任务开始使用。</p><button id="agent-memory-save" class="primary" type="submit">保存记忆</button></div></form>
@@ -748,6 +749,7 @@
     <script type="module" src="/agents.js"></script>
     <script type="module" src="/agent-details.js"></script>
     <script type="module" src="/agent-connections.js"></script>
+    <script type="module" src="/agent-services.js"></script>
     <script type="module" src="/application-workspace.js"></script>
     <script type="module" src="/projects.js"></script>
     <script type="module" src="/runtime.js"></script>

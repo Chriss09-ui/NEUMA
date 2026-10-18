@@ -1036,6 +1036,10 @@ document.addEventListener("neuma:agent-connections-changed", (event) => {
   const agent = agents.find((item) => item.id === event.detail.agentId);
   if (agent) void inspectAgent(agent, true);
 });
+document.addEventListener("neuma:agent-services-changed", (event) => {
+  const agent = agents.find((item) => item.id === event.detail.agentId);
+  if (agent) void inspectAgent(agent, true);
+});
 document.addEventListener("neuma:agent-profile-changed", (event) => {
   const { id } = event.detail ?? {};
   if (typeof id === "string") profileVersions.set(id, (profileVersions.get(id) || 0) + 1);

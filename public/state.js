@@ -76,6 +76,10 @@ function readSession(storage, key) {
       confirmed: status === "ready" && value.confirmed === true,
       lastQuestion: typeof value.lastQuestion === "string" ? value.lastQuestion : "",
       jev: value.jev && typeof value.jev === "object" ? value.jev : null,
+      ...(typeof value.requirementSessionId === "string" ? { requirementSessionId: value.requirementSessionId,
+        requirementVersion: Number.isSafeInteger(value.requirementVersion) ? value.requirementVersion : 0 } : {}),
+      ...(value.pendingRequest && typeof value.pendingRequest.id === "string" && typeof value.pendingRequest.message === "string"
+        ? { pendingRequest: value.pendingRequest } : {}),
     };
   } catch {
     return blankSession();
@@ -132,6 +136,7 @@ export function loadSavedRequirements(storage) {
       && typeof item.name === "string" && item.draft && typeof item.draft === "object")
       .map((item) => ({ id: item.id, name: item.name, draft: item.draft,
         updatedAt: item.updatedAt, persisted: true, dirty: item.pendingSync === true,
+        ...(typeof item.requirementSessionId === "string" ? { requirementSessionId: item.requirementSessionId } : {}),
         ...(item.pendingSync === true ? { pendingSync: true } : {}) }));
   } catch {
     return [];
@@ -142,6 +147,7 @@ export function normalizeAgentRequirement(item) {
   if (!item || typeof item.id !== "string" || typeof item.name !== "string" || !item.draft
     || typeof item.draft !== "object" || Array.isArray(item.draft)) return null;
   return { id: item.id, name: item.name, draft: structuredClone(item.draft), updatedAt: item.updatedAt,
+    ...(typeof item.requirementSessionId === "string" ? { requirementSessionId: item.requirementSessionId } : {}),
     persisted: true, dirty: false, ...(item.profile ? { profile: structuredClone(item.profile) } : {}) };
 }
 
@@ -172,8 +178,9 @@ export function saveRequirement(storage, item) {
   }
 }
 
-function requirementBackup({ id, name, draft, updatedAt, pendingSync }) {
-  return { id, name, draft, updatedAt, ...(pendingSync === true ? { pendingSync: true } : {}) };
+function requirementBackup({ id, name, draft, updatedAt, pendingSync, requirementSessionId }) {
+  return { id, name, draft, updatedAt, ...(pendingSync === true ? { pendingSync: true } : {}),
+    ...(typeof requirementSessionId === "string" ? { requirementSessionId } : {}) };
 }
 
 export function deleteRequirement(storage, id) {

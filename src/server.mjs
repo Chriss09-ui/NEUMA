@@ -4,7 +4,8 @@ import { open, readFile, realpath } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { InputError, ProviderError, processTurn } from "./requirements/core.mjs";
+import { InputError, ProviderError } from "./requirements/core.mjs";
+import { RequirementSessions } from "./requirements/requirement-sessions.mjs";
 import { getProviderConfig, makeProviders } from "./requirements/providers.mjs";
 import { ProjectManager } from "./projects/projects.mjs";
 import { createProjectFolderPicker } from "./projects/project-folder-picker.mjs";
@@ -20,6 +21,7 @@ import { routeCollaboration } from "./collaboration/collaboration-api.mjs";
 import { MainAgent } from "./main/main-agent.mjs";
 import { MAX_MATERIAL_BYTES } from "./materials/material-formats.mjs";
 import { routeApplication } from "./applications/application-api.mjs";
+import { routeServices } from "./services/service-api.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const KATEX_ROOT = dirname(fileURLToPath(import.meta.resolve("katex")));
@@ -70,7 +72,7 @@ const PUBLIC = new Map([
   ["/chat-ui.js", ["chat-ui.js", "text/javascript; charset=utf-8"]],
   ["/rich-text.js", ["rich-text.js", "text/javascript; charset=utf-8"]],
   ...["collaboration-api", "group-view", "group-materials", "group-capabilities", "group-mention-composer", "groups", "main-agent", "main-context", "main-materials"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
-  ...["application-api", "application-bridge", "application-context", "application-assistant", "application-tasks", "application-workspace", "agent-connections"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
+  ...["application-api", "application-bridge", "application-context", "application-assistant", "application-tasks", "application-workspace", "agent-connections", "agent-services"].map((name) => [`/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]]),
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
 
@@ -80,7 +82,7 @@ function sendJson(response, status, value) {
 }
 
 function safeFailure(error, config) {
-  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required"].includes(error.reason) ? error.reason : null;
+  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required", "requirement_conflict"].includes(error.reason) ? error.reason : null;
   const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason || ["collaboration_conflict", "main_conflict", "application_conflict", "connection_conflict"].includes(error.reason));
   const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";
@@ -193,7 +195,7 @@ async function buildAgentReply(request, response, agents, body, config, forceStr
   }
 }
 
-async function streamRequirementReply(response, providers, body, config, externalSignal) {
+async function streamRequirementReply(response, providers, body, config, externalSignal, processRequirement) {
   const controller = new AbortController();
   const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const disconnected = () => {
@@ -217,7 +219,7 @@ async function streamRequirementReply(response, providers, body, config, externa
   try {
     if (response.destroyed) return;
     write({ type: "status", phase: "thinking", label: "正在整理需求…" });
-    const result = await processTurn(body, providers, { signal, onProgress: write });
+    const result = await processRequirement(body, { signal, onProgress: write });
     signal.throwIfAborted();
     let replyDiagnostic = { mode: "direct" };
     // Confirmation text stays exact; ordinary replies may rephrase only the checked summary.
@@ -282,9 +284,19 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   agentModelConnectionTester = testAgentModelConnection,
   jevConnectionTester = testJevConnection,
   projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
-  prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir }),
+  prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir, enforceRequirementConfirmation: true }),
+  requirementSessions: injectedRequirementSessions,
   collaboration: injectedCollaboration, mainAgent: injectedMainAgent } = {}) {
-  let providers = injectedProviders ?? makeProviders(config);
+  const requirementProviders = () => makeProviders(config, fetch, { research: async ({ query, url }, { signal, platform }) => {
+    const options = { agentId: "requirements-preflight", scope: "public-technical-research", signal,
+      allowNetwork: platform?.network?.allowNetwork !== false };
+    if (!prototypeAgents.web) throw new InputError("只读资料核实通道尚未配置");
+    return url ? prototypeAgents.web.fetch({ url }, options) : prototypeAgents.web.search({ query, maxResults: 5 }, options);
+  } });
+  let providers = injectedProviders ?? requirementProviders();
+  let requirementSessions = injectedRequirementSessions;
+  const getRequirementSessions = () => requirementSessions ??= new RequirementSessions({ dataDir, agents: prototypeAgents });
+  const processRequirement = (body, options) => getRequirementSessions().turn(body, providers, options);
   let collaboration = injectedCollaboration, mainAgent = injectedMainAgent;
   const getCollaboration = () => collaboration ??= new CollaborationService({ dataDir, agents: prototypeAgents });
   const getMainAgent = () => mainAgent ??= new MainAgent({ config, dataDir, agents: prototypeAgents,
@@ -305,10 +317,12 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       await mainAgent?.close({ permanent: false });
       await collaboration?.close({ permanent: false });
       Object.assign(config, getProviderConfig({ ...configEnv(config), ...updates }));
-      if (!injectedProviders) providers = makeProviders(config);
+      if (!injectedProviders) providers = requirementProviders();
       // Keep the file, active config and session reset in the same save order.
       await projectAgent.dispose?.();
       await prototypeAgents.close();
+      await prototypeAgents.services?.restore();
+      await prototypeAgents.gateway?.resume();
       return settingsView(config);
     });
     settingsQueue = result.catch(() => {});
@@ -350,6 +364,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (path.startsWith("/api/")) { await settingsQueue; requestController.signal.throwIfAborted(); }
       if (await routeCollaboration({ request, response, address, getCollaboration, getMainAgent,
         readBody: (maxBytes) => readJson(request, maxBytes), sendJson, sendMaterialFile, safeFailure, config, signal: requestController.signal })) return;
+      if (await routeServices({ request, response, address, agents: prototypeAgents,
+        readBody: (maxBytes) => readJson(request, maxBytes), sendJson, signal: requestController.signal })) return;
       if (await routeApplication({ request, response, address, agents: prototypeAgents,
         readBody: (maxBytes) => readJson(request, maxBytes), sendJson, signal: requestController.signal })) return;
       if (path === "/api/skills" || path.startsWith("/api/skills/")) {
@@ -385,8 +401,12 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       if (request.method === "GET" && path === "/api/agent-requirements") return sendJson(response, 200, await prototypeAgents.getRequirements());
       const agentRequirement = path.match(/^\/api\/agents\/([\w-]+)\/requirements$/);
-      if (request.method === "POST" && agentRequirement)
-        return sendJson(response, 200, await prototypeAgents.saveRequirements(agentRequirement[1], await readJson(request, 512_000)));
+      if (request.method === "POST" && agentRequirement) {
+        const body = await readJson(request, 512_000);
+        return sendJson(response, 200, body.requirementSessionId
+          ? await getRequirementSessions().save(body.requirementSessionId, agentRequirement[1], body, prototypeAgents)
+          : await prototypeAgents.saveRequirements(agentRequirement[1], body));
+      }
       const agentConversation = path.match(/^\/api\/agents\/([\w-]+)\/conversation$/);
       if (agentConversation && request.method === "GET")
         return sendJson(response, 200, await prototypeAgents.getConversation(agentConversation[1]));
@@ -559,6 +579,9 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
           : action === "remove" ? await projects.remove(id, { removeOnly: body.removeOnly ?? false }) : await projects[action](id, action === "inspect" ? { signal: requestController.signal } : undefined);
         return sendJson(response, 200, { project });
       }
+      const requirementSession = path.match(/^\/api\/requirements\/sessions\/([\w-]+)$/);
+      if (request.method === "GET" && requirementSession)
+        return sendJson(response, 200, await getRequirementSessions().state(requirementSession[1]));
       if (request.method === "POST" && path === "/api/requirements/turn") {
         const body = await readJson(request);
         const { controller, release } = beginRequest();
@@ -566,8 +589,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         response.on?.("close", disconnected);
         try {
           if (request.headers.accept?.includes("application/x-ndjson"))
-            return await streamRequirementReply(response, providers, body, config, controller.signal);
-          const result = await processTurn(body, providers, { signal: controller.signal });
+            return await streamRequirementReply(response, providers, body, config, controller.signal, processRequirement);
+          const result = await processRequirement(body, { signal: controller.signal });
           if (!controller.signal.aborted) return sendJson(response, 200, { ...result,
             diagnostic: { ...result.diagnostic, providerModel: config.model || null } });
         } catch (error) { if (!controller.signal.aborted) throw error; }
@@ -607,7 +630,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   };
   const initialization = [prototypeAgents.ready, prototypeAgents.storage?.ready,
     prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready, prototypeAgents.applications?.ready,
-    prototypeAgents.connections?.ready, collaboration?.ready, mainAgent?.ready];
+    prototypeAgents.connections?.ready, prototypeAgents.runtimeReady, prototypeAgents.gateway?.ready,
+    prototypeAgents.applications?.workflowReady, collaboration?.ready, mainAgent?.ready];
   if (projects.load) initialization.push(projects.load());
   if (initialization.every((item) => item === undefined)) state = "ready";
   handler.ready = Promise.all(initialization).then(() => { if (state === "starting") state = "ready"; });
@@ -622,7 +646,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const cancelled = [() => mainAgent?.close(), () => collaboration?.close(), () => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.(), () => skillManager.dispose?.()]
         .map((close) => { try { return close(); } catch (error) { return Promise.reject(error); } });
       for (const result of await Promise.allSettled(cancelled)) if (result.status === "rejected") failures.push(result.reason);
-      for (const close of [() => settingsQueue, () => prototypeAgents.persistence,
+      for (const close of [() => settingsQueue, () => requirementSessions?.close(), () => prototypeAgents.persistence,
         () => prototypeAgents.architecture?.persistence, () => prototypeAgents.development?.store?.persistence,
         () => Promise.allSettled([...activeRequests.values()])]) {
         try { await close(); } catch (error) { failures.push(error); }

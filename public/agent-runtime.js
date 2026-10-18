@@ -8,6 +8,7 @@ export function agentSourceKey(agent) {
 const architectureLabels = {
   designing: "正在设计架构，尚未生成可运行的智能体。",
   evaluating: "正在检查架构，尚未生成可运行的智能体。",
+  needs_input: "需要补充影响交付的关键选择，请继续澄清需求。",
   needs_changes: "架构需要调整，请根据下列问题修改需求或重新检查。",
   needs_evidence: "架构待补充依据，补齐后才能继续生成。",
   infeasible: "当前方案无法满足需求，请调整需求或所需能力。",
@@ -99,7 +100,7 @@ function candidateBuildState(agent, { agent: definition, architecture, developme
       }
     }
     if (!label) { status = "blocked"; label = "架构状态尚未确认，请重新设计与检查。"; }
-    return { status, label: [label, ...new Set(details)].join(" ") };
+    return { status, label: [label, ...new Set(details)].join(" "), ...(architecture.handoff ? { handoff: architecture.handoff } : {}) };
   }
   if (!definition) return { status: "missing", label: "需求已确认，点击生成智能体开始设计与检查。" };
   return { status: "blocked", label: "旧原型已停用，请重新设计与检查后运行。" };

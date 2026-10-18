@@ -2896,7 +2896,7 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   assert.equal(writes[1].path, "/api/main/conversations/main-one/messages"); assert.equal(writes[1].body.message, "确认需求");
   assert.equal(ui.get("main-message").value, "我稍后要补充的主聊天草稿");
   assert.equal(events.filter((event) => event.build).length, 1); assert.deepEqual(events.find((event) => event.build).requirement, requirement);
-  assert.match(ui.text("main-context-content"), /正在设计架构/);
+  assert.match(ui.text("main-context-content"), /正在设计方案/);
   // Re-reading a saved conversation must never replay its build action, even without a visible recovery control.
   await ui.get("main-refresh").click(); await settle(); assert.equal(events.filter((event) => event.build).length, 1);
   assert.equal(requests.includes("/api/requirements/turn"), false);
