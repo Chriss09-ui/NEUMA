@@ -70,8 +70,8 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   assert.deepEqual(sessions.map((item) => item.role), ["designer", "reviewer"]);
   assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [8192, 4096]);
   assert.notEqual(sessions[0].session, sessions[1].session);
-  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "submit_architecture"]);
-  assert.deepEqual(Object.keys(sessions[1].tools), ["submit_architecture_review"]);
+  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture"]);
+  assert.deepEqual(Object.keys(sessions[1].tools), ["request_requirements", "submit_architecture_review"]);
   assert.deepEqual(researchCalls, []); assert.deepEqual(result.modules, []);
   assert.ok(sessions.every((item) => item.disposed));
   const ready = await designer.markReady(result);

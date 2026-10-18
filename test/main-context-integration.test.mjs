@@ -11,6 +11,7 @@ import { createPiSession } from "../src/runtime/pi-runtime.mjs";
 import { emptyDraft, processTurn } from "../src/requirements/core.mjs";
 import { agentBuildState } from "../public/agent-runtime.js";
 import { validDraft } from "./helpers/architecture.mjs";
+import { sufficientPreflight } from "./helpers/consultation.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const settle = async () => { for (let index = 0; index < 4; index++) await new Promise(setImmediate); };
@@ -33,7 +34,7 @@ function generate({ message, previousDraft }) {
 async function sdkFixture(t) {
   const root = await mkdtemp(join(tmpdir(), "neuma-main-context-sdk-")), requests = [], providerCalls = [], errors = [], saves = [];
   const sessions = []; let main, agents;
-  const providers = { generateDraft: async (input) => { providerCalls.push(structuredClone({ message: input.message, previousDraft: input.previousDraft })); return generate(input); } };
+  const providers = { preflight: sufficientPreflight, generateDraft: async (input) => { providerCalls.push(structuredClone({ message: input.message, previousDraft: input.previousDraft })); return generate(input); } };
   const model = createServer(async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
@@ -70,7 +71,7 @@ async function sdkFixture(t) {
   agents = new PrototypeAgents({ config, cwd: root, dataDir, sessionFactory: async () => assert.fail("确认需求不能冒充已经运行架构构建") });
   await agents.ready;
   const saveRequirements = agents.saveRequirements.bind(agents);
-  agents.saveRequirements = async (id, value) => { const saved = await saveRequirements(id, value); saves.push(saved.requirement); return saved; };
+  agents.saveRequirements = async (id, value, options) => { const saved = await saveRequirements(id, value, options); saves.push(saved.requirement); return saved; };
   const collaboration = { activity: async () => ({ agents: [], groups: [], tasks: [], activities: [] }), listGroups: async () => ({ groups: [] }) };
   const sessionFactory = async (options) => { const session = await createPiSession(options); sessions.push(session); return session; };
   main = new MainAgent({ config, dataDir, agents, collaboration, sessionFactory, getRequirementProviders: () => providers });

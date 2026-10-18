@@ -1,3 +1,6 @@
+import { emptyTaskSpec, mergeEvidence, normalizeTaskSpec, substantiveRequirementHash, validateTaskEvidence, validateTaskSpecTransition } from "./task-spec.mjs";
+import { consultationGate, evaluateConsultation, issueConfirmation, newConsultation } from "./consultation.mjs";
+
 const SOURCES = new Set(["user", "inferred", "default", "unknown"]);
 const USAGE_MODES = new Set(["on_demand", "scheduled", "event", "unclear"]);
 const ACTION_MODES = new Set(["none", "possible", "requested"]);
@@ -152,6 +155,7 @@ export function normalizeDraft(value) {
     capabilityDependencies: normalizeStrings(raw.capabilityDependencies),
     unresolved: normalizeStrings(raw.unresolved),
     conflict: conflict?.left && conflict?.right ? conflict : null,
+    ...(raw.taskSpec !== undefined ? { taskSpec: normalizeTaskSpec(raw.taskSpec) } : {}),
   };
 }
 
@@ -181,7 +185,8 @@ function requireModelDraft(value) {
     || typeof value.interaction.assistant.enabled !== "boolean" || typeof value.interaction.assistant.purpose !== "string")) {
     throw new ProviderError("需求模型返回的页面助手格式无效", { stage: "llm", reason: "invalid_draft", field: "interaction.assistant" });
   }
-  return normalizeDraft(value);
+  try { return normalizeDraft(value); }
+  catch (error) { throw new ProviderError(error.message, { stage: "llm", reason: "invalid_task_spec" }); }
 }
 
 function hasGroundedFact(item) {
@@ -320,12 +325,19 @@ function summaryFor(draft, status) {
         ? `对外动作：${[draft.externalAction.operation, draft.externalAction.target,
           draft.externalAction.scope, draft.externalAction.trigger].filter(Boolean).join("、")}`
         : "对外动作范围待明确"].filter(Boolean).join("；");
+  const dimensionLabels = { input_scale: "输入与规模", processing: "处理要求", delivery: "交付标准",
+    workflow: "工作过程", data_lifecycle: "数据保存与使用", external_conditions: "外部条件" };
+  const taskDetails = Object.entries(dimensionLabels).flatMap(([dimension, label]) => {
+    const items = (draft.taskSpec?.items ?? []).filter((item) => item.dimension === dimension && item.applicability === "applies");
+    return items.length ? [`${label}：${items.map((item) => item.content).join("；")}`] : [];
+  });
   return [
     `Agent 要解决的问题：${draft.goal.value || "待明确"}`,
     `核心使用场景：${draft.scenario.value || "待明确"}`,
     `输入：${draft.inputSource.value || "待明确"}`,
     `核心任务与处理方式：${draft.task.value || "待明确"}`,
     `输出：${draft.deliverable.value || "待明确"}`,
+    ...taskDetails,
     ...(draft.interaction ? [`打开方式：${draft.interaction.defaultEntry === "application" ? "以交互页面为主" : "以对话为主"}`,
       ...(draft.interaction.page ? [`页面 AI 助手：${draft.interaction.assistant?.enabled
         ? draft.interaction.assistant.purpose : "无需浮窗助手"}`] : [])] : []),
@@ -352,7 +364,8 @@ function confirmationOnly(draft, confirmed, question, reason) {
   };
 }
 
-export async function processTurn(request, { generateDraft, judgeJev }, { signal, onProgress } = {}) {
+export async function processTurn(request, { generateDraft, judgeJev, preflight, getPlatform, research: providerResearch },
+  { signal, onProgress, enforceConsultation = request?.draft?.taskSpec !== undefined, platform, requestId, research } = {}) {
   signal?.throwIfAborted();
   const message = cleanText(request?.message, 4000);
   if (!message) throw new InputError("请输入你希望 Agent 做什么，或说明要修改的内容");
@@ -363,10 +376,41 @@ export async function processTurn(request, { generateDraft, judgeJev }, { signal
   const lastQuestion = cleanText(request.lastQuestion, 500);
   const userMessages = userMessagesForTurn(request.userMessages);
   const awaitingConfirmation = isConfirmationPrompt(lastQuestion);
+  const consultation = enforceConsultation ? structuredClone(request.consultation ?? newConsultation()) : null;
+  if (consultation) {
+    consultation.evidenceMessages = mergeEvidence(consultation.evidenceMessages,
+      [...(request.evidenceMessages ?? []), ...(lastQuestion ? [{ role: "assistant", content: lastQuestion }] : []), { role: "user", content: message }]);
+  }
+  const actualPlatform = enforceConsultation ? platform ?? await getPlatform?.({ draft: previousDraft, message }) ?? {} : undefined;
+  const finish = async (result) => {
+    if (!enforceConsultation) return result;
+    result.draft.taskSpec ??= emptyTaskSpec();
+    try {
+      validateTaskEvidence(result.draft.taskSpec, consultation.evidenceMessages);
+      validateTaskSpecTransition(previousDraft.taskSpec, result.draft.taskSpec, consultation.evidenceMessages, message);
+    }
+    catch (error) { throw new ProviderError(error.message, { stage: "llm", reason: "invalid_evidence" }); }
+    const hasOutline = ["goal", "inputSource", "task", "deliverable"].every((key) => result.draft[key]?.value);
+    result.consultation = hasOutline ? await evaluateConsultation({ draft: result.draft, consultation,
+      platform: actualPlatform, requestId, preflight, research: research ?? providerResearch, signal, onProgress }) : consultation;
+    signal?.throwIfAborted();
+    const gate = consultationGate(result.draft, result.consultation, actualPlatform);
+    result.confirmationGate = gate;
+    if (!gate.allowed) {
+      result.confirmed = false; result.status = "needs_input"; result.confirmationQuestion = null;
+      result.question = result.question || gate.message;
+      result.summary = summaryFor(result.draft, "needs_input");
+    } else if (result.confirmed) {
+      result.confirmation = issueConfirmation(result.draft, result.consultation, {
+        platform: actualPlatform, requestId, displayedHash: request.consultation?.displayedHash });
+    }
+    if (result.status === "ready" && !result.confirmed) result.consultation.displayedHash = substantiveRequirementHash(result.draft);
+    return result;
+  };
   if (awaitingConfirmation && isRejection(message)) {
     if (lastQuestion === LEGACY_CONFIRMATION_QUESTION && shortReply(message) === "没有") {
-      return confirmationOnly(previousDraft, false, CONFIRMATION_CLARIFICATION_QUESTION,
-        "confirmation_unclear_or_rejected");
+      return finish(confirmationOnly(previousDraft, false, CONFIRMATION_CLARIFICATION_QUESTION,
+        "confirmation_unclear_or_rejected"));
     }
     addGap(previousDraft.unresolved, "goal");
     const result = confirmationOnly(previousDraft, false, REVISION_QUESTION, "requirements_rejected");
@@ -374,15 +418,16 @@ export async function processTurn(request, { generateDraft, judgeJev }, { signal
     result.diagnostic.decision.selectedGap = "goal";
     result.diagnostic.decision.gaps = ["goal"];
     result.jev.appliedGap = "goal";
-    return result;
+    return finish(result);
   }
   if (awaitingConfirmation && decideNext(previousDraft).status === "ready") {
     if (isApproval(message)) {
-      return confirmationOnly(previousDraft, true, null, "explicit_approval");
+      return finish(confirmationOnly(previousDraft, true, null, "explicit_approval"));
     }
   }
   const modelStartedAt = Date.now();
-  const modelResult = await generateDraft({ message, previousDraft, lastQuestion, userMessages, signal });
+  const modelResult = await generateDraft({ message, previousDraft, lastQuestion, userMessages, signal,
+    ...(enforceConsultation ? { evidenceMessages: consultation.evidenceMessages, consultation, platform: actualPlatform, taskSpecVersion: 1 } : {}) });
   signal?.throwIfAborted();
   const modelMs = Date.now() - modelStartedAt;
   const draft = requireModelDraft(modelResult?.draft);
@@ -426,7 +471,7 @@ export async function processTurn(request, { generateDraft, judgeJev }, { signal
     && !confirmed && !draftChanged;
   const status = needsConfirmationClarification ? "needs_input" : decision.status;
   const question = needsConfirmationClarification ? CONFIRMATION_OPTIONS_QUESTION : decision.question;
-  return {
+  return finish({
     draft,
     status,
     question,
@@ -445,5 +490,5 @@ export async function processTurn(request, { generateDraft, judgeJev }, { signal
         selectedBy: decision.selectedBy, questionSource: decision.questionSource,
         skipOptionalBoundary, needsConfirmationClarification },
     },
-  };
+  });
 }

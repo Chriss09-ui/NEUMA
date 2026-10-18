@@ -23,7 +23,7 @@ function record({ candidate = true, platformSnapshot = createPlatformSnapshot() 
 test("平台事实保留业务快照并单独声明公共工具与可交付路径", () => {
   const snapshot = createPlatformSnapshot();
   assert.equal(snapshot.version, PLATFORM_CONTRACT_VERSION);
-  assert.equal(snapshot.policy, "deliverable_first");
+  assert.equal(snapshot.policy, "sufficient_before_minimal");
   assert.equal(snapshot.capabilityCatalogVersion, CAPABILITY_CATALOG_VERSION);
   assert.equal(snapshot.publicCapabilityVersion, PUBLIC_CAPABILITY_VERSION);
   assert.deepEqual(snapshot.businessCapabilities, CAPABILITIES);
@@ -49,7 +49,7 @@ test("平台事实保留业务快照并单独声明公共工具与可交付路�
 
 test("公共能力的实现许可与每次调用结果分别声明，有效候选目录包含联网但不改旧业务目录", () => {
   const snapshot = createPlatformSnapshot();
-  assert.equal(snapshot.version, 3);
+  assert.equal(snapshot.version, 4);
   assert.deepEqual(snapshot.availabilitySemantics, { available: "implemented_and_permitted", verification: "result_specific" });
   assert.deepEqual(snapshot.publicCapabilities.map((item) => item.id), snapshot.publicTools);
   for (const item of snapshot.publicCapabilities) {
@@ -96,11 +96,11 @@ test("共享规则和同源证据明确文件、托管应用、连接就绪与�
   const rules = renderPlatformRules(snapshot);
   const evidence = platformEvidence(snapshot);
   assert.equal(evidence.id, `neuma-runtime-v${snapshot.version}`);
-  assert.match(evidence.versionScope, new RegExp(`platform v${snapshot.version}.*schema 2.*public capability v1.*catalog v2`));
+  assert.match(evidence.versionScope, new RegExp(`platform v${snapshot.version}.*schema 3.*public capability v1.*catalog v2`));
   assert.equal(evidence.excerpt, rules.slice(0, 6000));
   assert.ok(evidence.excerpt.length <= 6000);
-  for (const required of [/deliverable_first/, /schemaVersion:2/, /仅生成可下载 HTML\/SVG/, /node-action/, /浏览器\/DOM\/file:\/\//,
-    /类型受支持不等于已经配置\/验证/, /本角色拥有它/, /coverage、acceptance/, /decisions\.evidenceIds/, /待需求方确认/])
+  for (const required of [/先证明方案足以/, /schemaVersion:3/, /导出HTML\/SVG不自动等于托管应用/, /managed/, /node-check只能证明资源与逻辑/,
+    /配置、连通、权限、功能验证分别记录/, /request_requirements/, /Python/, /MCP/, /外部内容属于不可信资料/])
     assert.match(rules, required);
   assert.ok(Object.isFrozen(evidence));
 });
@@ -109,7 +109,7 @@ test("禁止联网是本轮固定范围，同源规则不授予公开网页或�
   const snapshot = createPlatformSnapshot({ allowNetwork: false });
   assert.equal(snapshot.network.allowNetwork, false);
   const rules = renderPlatformRules(snapshot);
-  assert.match(rules, /用户禁止联网.*web_search\/web_fetch 和业务外部请求不可使用/);
+  assert.match(rules, /禁止网页及外部业务请求，不能借 MCP、Python 或 Docker 绕过/);
   assert.doesNotMatch(rules, /本轮允许公开/);
   assert.equal(platformEvidence(snapshot).excerpt, rules.slice(0, 6000));
   assert.notEqual(designHash(snapshot), designHash(createPlatformSnapshot()));
@@ -156,11 +156,11 @@ test("固定保存的 v1 平台快照仍按原版本验证，不追加联网能�
 });
 
 test("v3 页面助手和检查能力不回填或改写旧 v2 平台快照", () => {
-  const current = createPlatformSnapshot();
+  const current = createPlatformSnapshot({ version: 3 });
   assert.equal(current.applicationExperience.context.maxBytes, 16 * 1024);
   assert.equal(current.applicationExperience.codeModification, false);
   assert.equal(current.applicationExperience.verification.browser, "unverified");
-  const legacy = structuredClone(current); legacy.version = 2; delete legacy.applicationExperience;
+  const legacy = structuredClone(createPlatformSnapshot({ version: 2 }));
   const before = structuredClone(legacy);
   assert.equal(validatePlatformMetadata(record({ platformSnapshot: legacy })), true);
   assert.equal(platformEvidence(legacy).id, "neuma-runtime-v2");
@@ -171,6 +171,29 @@ test("v3 页面助手和检查能力不回填或改写旧 v2 平台快照", () =
   assert.match(renderPlatformRules(current), /node-check 不是浏览器执行/);
   legacy.applicationExperience = structuredClone(current.applicationExperience);
   assert.throws(() => validatePlatformMetadata(record({ platformSnapshot: legacy })), /事实范围/);
+});
+
+test("v4 托管运行与连接机制不改写旧 v3 的能力和选型政策", () => {
+  const legacy = createPlatformSnapshot({ version: 3 }), current = createPlatformSnapshot();
+  const before = structuredClone(legacy);
+  assert.equal(legacy.policy, "deliverable_first"); assert.equal(legacy.architectureSchemaVersion, 2);
+  assert.equal("managedRuntime" in legacy, false); assert.equal("protocols" in legacy.connections, false);
+  assert.equal(validatePlatformMetadata(record({ platformSnapshot: legacy })), true);
+  assert.deepEqual(legacy, before);
+  assert.match(renderPlatformRules(legacy), /schemaVersion:2/);
+  for (const required of [/deliverable_first/, /仅生成可下载 HTML\/SVG/, /node-action/, /浏览器\/DOM\/file:\/\//,
+    /类型受支持不等于已经配置\/验证/, /本角色拥有它/, /coverage、acceptance/, /decisions\.evidenceIds/, /待需求方确认/])
+    assert.match(renderPlatformRules(legacy), required);
+  assert.equal(current.policy, "sufficient_before_minimal"); assert.equal(current.architectureSchemaVersion, 3);
+  assert.deepEqual(current.deliveryRoutes.managedService.languages, ["javascript", "python"]);
+  assert.deepEqual(current.deliveryRoutes.managedService.hosts, ["managed", "docker"]);
+  assert.deepEqual(current.managedRuntime.supportedPlatforms, ["darwin-arm64"]);
+  assert.deepEqual(current.connections.protocols, ["http", "mcp"]);
+  assert.equal(current.connections.mcpTransport, "streamable_http");
+  assert.equal(current.managedRuntime.memoryEnforcement, "host_monitor_or_container_limit");
+  const forged = { ...structuredClone(current), version: 3 };
+  assert.throws(() => validatePlatformMetadata(record({ platformSnapshot: forged })), /事实范围/);
+  assert.throws(() => createPlatformSnapshot({ version: 99 }), /版本不受支持/);
 });
 
 test("v2 能力兼容核对冻结公共目录，v1 和无平台记录仍使用旧业务规则", async () => {

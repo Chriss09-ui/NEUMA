@@ -47,6 +47,27 @@ export class MainMaterials {
       description: tool.description.replaceAll("当前 Agent", "当前主对话") }));
   }
 
+  async measure(conversationId, attachmentIds, { signal } = {}) {
+    const descriptors = await this.resolve(conversationId, attachmentIds);
+    const evidence = [];
+    for (const descriptor of descriptors) {
+      signal?.throwIfAborted();
+      const facts = { materialId: descriptor.id, name: descriptor.name, bytes: descriptor.size, kind: descriptor.kind };
+      try {
+        const parsed = await this.materials.parsed(conversationId, descriptor, signal);
+        let characters = 0;
+        for (const _character of parsed.text) characters++;
+        Object.assign(facts, { extractedCharacters: characters, extractionComplete: !parsed.truncated,
+          pageCount: parsed.pageCount, status: parsed.status, warnings: parsed.warnings ?? [] });
+      } catch {
+        signal?.throwIfAborted(); facts.status = "extraction_failed";
+      }
+      const content = JSON.stringify(facts);
+      evidence.push({ id: `measurement_${createHash("sha256").update(content).digest("hex").slice(0, 32)}`, role: "measurement", content });
+    }
+    return evidence;
+  }
+
   async forward(conversationId, groupId, attachmentIds, { mutationId, signal } = {}) {
     id(conversationId, "主对话"); id(groupId, "群"); id(mutationId, "操作");
     const refs = refsOf(attachmentIds), epoch = this.epoch;

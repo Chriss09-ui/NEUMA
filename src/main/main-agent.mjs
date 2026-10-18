@@ -331,8 +331,19 @@ export class MainAgent {
     const another = !agentId && record.requirement?.confirmed && /再.{0,6}(?:创建|做|建)|另一个|新建一个/i.test(ctx.message);
     const selectedMode = mode ?? (agentId ? "edit" : another || !record.requirement ? "new" : "continue");
     const current = await prepareRequirement({ record, conversationId: ctx.conversationId, mutationId: mutationId ?? ctx.mutationId, agentId, mode: selectedMode }, this.agents);
+    const measurements = ctx.attachmentIds?.length ? await this.materials.measure?.(ctx.conversationId, ctx.attachmentIds, { signal }) ?? [] : [];
+    this.guard(ctx, signal);
     let result;
-    try { result = await advanceRequirement(current, ctx.message, await this.getRequirementProviders(), { signal, onProgress: ctx.onProgress, agents: this.agents }); }
+    try { result = await advanceRequirement(current, ctx.message, await this.getRequirementProviders(), {
+      signal, onProgress: ctx.onProgress, agents: this.agents, requestId: ctx.mutationId,
+      evidenceMessages: [...record.messages.slice(-24).filter((item) => item.role === "user" || item.status === "complete")
+        .map(({ id, role, content }) => ({ id, role, content })), ...measurements],
+      research: async ({ query, url }, { signal: researchSignal } = {}) => {
+        this.guard(ctx, researchSignal);
+        const options = { agentId: "main", scope: `requirements:${ctx.conversationId}:${ctx.mutationId}`,
+          signal: researchSignal ?? signal, allowNetwork: networkAllowed(current.draft, ctx.message) };
+        return url ? this.web.fetch({ url }, options) : this.web.search({ query, maxResults: 3 }, options);
+      } }); }
     catch (error) { if (error.mainRequirementSource) ctx.sources.push(error.mainRequirementSource); throw error; }
     this.guard(ctx, signal);
     if (result.action) ctx.actions.push(result.action);

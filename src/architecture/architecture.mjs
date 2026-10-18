@@ -1,4 +1,5 @@
 import { InputError, ProviderError } from "../requirements/core.mjs";
+import { substantiveRequirementHash } from "../requirements/task-spec.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { ARCHITECTURE_VERSION, CAPABILITY_CATALOG_VERSION, CAPABILITIES, DESIGN_SCHEMA, REVIEW_SCHEMA,
@@ -18,6 +19,10 @@ const moduleResultSchema = object({ proposal: text(8000), interfaces: text(4000)
   unknowns: { type: "array", items: text(), maxItems: 12 } });
 const toolResult = (result) => ({ content: [{ type: "text", text: JSON.stringify(result) }], details: {} });
 const issue = (id, description, remedy) => ({ id, blocking: true, description, remedy });
+const handoffSchema = object({ issues: { type: "array", minItems: 1, maxItems: 8, items: object({
+  id: { ...text(80), pattern: "^[A-Za-z][A-Za-z0-9_-]*$" }, question: text(1000), impact: text(2000),
+  requirementIds: { type: "array", items: text(80), minItems: 1, maxItems: 100 },
+}) } });
 
 function submissionValidationIssue(message, schema, sdk = false) {
   if (typeof message !== "string" || sdk && !message.startsWith("Validation failed for tool ")) return null;
@@ -151,7 +156,7 @@ export class ArchitectureDesigner {
     this.persistence = task.catch(() => {}); return task;
   }
 
-  async role({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress }) {
+  async role({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress, allowHandoff = false }) {
     let result, session, unsubscribe = () => {}, failed = false, turns = 0, retries = 0, retryError = "", turnLimit = false, truncated = false;
     let submissionAttempts = 0, lastSubmissionError;
     const submissions = new Set(), phase = role === "reviewer" ? "evaluating" : "designing";
@@ -176,12 +181,28 @@ export class ArchitectureDesigner {
         session?.setAutoCompactionEnabled?.(false);
         return { ...toolResult({ submitted: true }), terminate: true };
       } };
+    const requestRequirements = { name: "request_requirements", label: "返回关键选择", parameters: handoffSchema,
+      description: "仅当缺少会改变交付承诺、必须由用户决定的关键选择时返回需求层。技术核实和未来输入检查不使用此工具。",
+      executionMode: "sequential", execute: async (_id, value) => {
+        signal?.throwIfAborted();
+        if (result !== undefined) throw new InputError("本阶段已经提交");
+        const ids = new Set((payload.requirements ?? []).map((item) => item.id));
+        if (!Array.isArray(value?.issues) || !value.issues.length || value.issues.length > 8
+          || new Set(value.issues.map((item) => item.id)).size !== value.issues.length
+          || value.issues.some((item) => !/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(item.id)
+            || !item.question?.trim() || item.question.length > 1000 || !item.impact?.trim() || item.impact.length > 2000
+            || !Array.isArray(item.requirementIds) || !item.requirementIds.length || item.requirementIds.some((id) => !ids.has(id))))
+          throw new InputError("返需问题必须说明用户选择、交付影响和对应需求");
+        result = { needsInput: value.issues.map((item) => ({ ...structuredClone(item), owner: "user", blocking: true })) };
+        session?.setAutoCompactionEnabled?.(false);
+        return { ...toolResult({ submitted: true, needsInput: true }), terminate: true };
+      } };
     try {
       signal?.throwIfAborted();
       signal?.addEventListener("abort", abort, { once: true });
       session = await this.sessionFactory({ config: this.config, cwd: this.cwd,
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
-        systemPrompt, customTools: [...tools, submit], maxOutputTokens: modelOutputBudget(this.config, role === "designer" ? 8192 : 4096) });
+        systemPrompt, customTools: [...tools, ...(allowHandoff ? [requestRequirements] : []), submit], maxOutputTokens: modelOutputBudget(this.config, role === "designer" ? 8192 : 4096) });
       signal?.throwIfAborted();
       unsubscribe = session.subscribe?.((event) => {
         if (event.toolName === submitName && ["tool_execution_start", "tool_execution_end"].includes(event.type)) {
@@ -216,6 +237,16 @@ export class ArchitectureDesigner {
       }
       throw modelFailure(retryError || error?.message, details());
     } finally { signal?.removeEventListener("abort", abort); unsubscribe(); session?.dispose(); }
+  }
+
+  async returnRequirements(record, issues) {
+    record.status = "needs_input"; record.delivery = "blocked";
+    record.summary = "需要补充影响交付的关键选择，已有版本仍保留";
+    const requirementHash = substantiveRequirementHash(record.draft);
+    record.handoff = { id: `handoff_${designHash({ agentId: record.agentId, version: record.version, requirementHash, issues }).slice(0, 32)}`,
+      requirementHash, architectureVersion: record.version, issues: structuredClone(issues) };
+    await this.save(record);
+    return structuredClone(record);
   }
 
   async design(definition, { signal, onProgress = () => {} } = {}) {
@@ -303,7 +334,8 @@ export class ArchitectureDesigner {
             previousDesign: record.design, issues: record.issues, modules: record.modules,
             researchGaps: record.researchGaps, remaining: { revisions: 1 - attempt, searches: 3 - searches, modules: 2 - delegates } },
           submitName: "submit_architecture", parameters: DESIGN_SCHEMA,
-          validate: (value) => validateDesign(value, context()), tools: [researchTool, delegateTool, ...webTools], signal, onProgress });
+          validate: (value) => validateDesign(value, context()), tools: [researchTool, delegateTool, ...webTools], signal, onProgress, allowHandoff: true });
+        if (design.needsInput) return this.returnRequirements(record, design.needsInput);
         const checks = checkDesign(design, context());
         if (!requiresDevelopment(design) && (["scheduled", "event"].includes(definition.draft.usage?.mode)
           || definition.draft.externalAction?.mode === "requested")) {
@@ -327,7 +359,12 @@ export class ArchitectureDesigner {
           payload: { requirement: definition.draft, ...context(), candidateHash: record.candidateHash,
             design, reviewContext: structuredClone(record.reviewContext), deterministicIssues: checks.issues, researchGaps: record.researchGaps },
           submitName: "submit_architecture_review", parameters: REVIEW_SCHEMA,
-          validate: (value) => validateReview(value, { candidateHash: record.candidateHash }), signal, onProgress });
+          validate: (value) => validateReview(value, { candidateHash: record.candidateHash, schemaVersion: design.schemaVersion }), signal, onProgress, allowHandoff: true });
+        if (review.needsInput) return this.returnRequirements(record, review.needsInput);
+        if (review.verdict === "needs_input") return this.returnRequirements(record, review.issues.filter((item) => item.blocking).map((item) => ({
+          id: item.id, question: item.remedy, impact: item.description, owner: "user", blocking: true,
+          requirementIds: record.requirements.map((requirement) => requirement.id),
+        })));
         record.review = review;
         record.issues = [...checks.issues, ...review.issues.map((entry) => ({ ...entry, source: "model" }))];
         for (const check of review.checks.filter((entry) => !entry.passed))

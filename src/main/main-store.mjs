@@ -61,6 +61,11 @@ function checked(value) {
       || requirement.userMessages.length > 12 || requirement.userMessages.some((message) => typeof message !== "string" || message.length > 4000)
       || !Number.isSafeInteger(requirement.version) || requirement.version < 1) throw new InputError("主对话需求记录无效");
     requirementIds.add(requirement.agentId);
+    if (requirement.consultation !== undefined && (requirement.consultation.version !== 1
+      || !Number.isSafeInteger(requirement.consultation.revision) || requirement.consultation.revision < 0
+      || !Array.isArray(requirement.consultation.evidenceMessages) || !Array.isArray(requirement.consultation.assessments)
+      || !Array.isArray(requirement.consultation.issues) || !Array.isArray(requirement.consultation.receipts)))
+      throw new InputError("主对话需求协商记录无效");
   }
   if (value.requirement && !requirementIds.has(value.requirement.agentId)) throw new InputError("当前主对话需求不属于已保存草稿");
   const ids = new Set();

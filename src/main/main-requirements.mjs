@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { CONFIRMATION_QUESTION, InputError, decideNext, emptyDraft, normalizeDraft, processTurn } from "../requirements/core.mjs";
+import { claimRequirementHandoff, newConsultation } from "../requirements/consultation.mjs";
+import { substantiveRequirementHash } from "../requirements/task-spec.mjs";
 
 const stableId = (conversationId, mutationId) => `agent_${createHash("sha256").update(`${conversationId}:${mutationId}`).digest("hex").slice(0, 32)}`;
 export const isMainConfirmation = (message) => typeof message === "string" && /^(?:确认需求|确认)[\s。！!，,]*$/.test(message.trim());
@@ -17,6 +19,9 @@ export function requirementContext(requirement) {
   const { agentId, mode, draft, status, confirmed, lastQuestion, summary, question, confirmationQuestion, savedRequirement, version } = requirement;
   return { type: "requirements", agentId, mode, draft: structuredClone(draft), name: savedRequirement?.name ?? draft.name?.value ?? "",
     status, confirmed, lastQuestion, summary, question, confirmationQuestion, version, needsBuild: status === "needs_build",
+    ...(requirement.consultation ? { consultation: { revision: requirement.consultation.revision,
+      issues: structuredClone(requirement.consultation.issues),
+      lastAssessment: structuredClone(requirement.consultation.assessments.at(-1) ?? null) } } : {}),
     ...(savedRequirement ? { savedRequirement: structuredClone(savedRequirement), requirement: structuredClone(savedRequirement) } : {}) };
 }
 
@@ -37,7 +42,10 @@ export async function prepareRequirement({ record, conversationId, mutationId, a
   if (mode !== "new" && existing && !refresh) {
     const restored = structuredClone(existing);
     if (mode === "edit") restored.mode = "edit";
-    return restored;
+    restored.consultation ??= newConsultation();
+    const handoff = await agents.getRequirementHandoff?.(restored.agentId);
+    return handoff && restored.consultation.handoff?.id !== handoff.id
+      ? claimRequirementHandoff(restored, handoff) : restored;
   }
   const targetId = agentId ?? (refresh ? existing.agentId : undefined);
   let draft = emptyDraft(), savedRequirement;
@@ -52,25 +60,33 @@ export async function prepareRequirement({ record, conversationId, mutationId, a
     draft = normalizeDraft(savedRequirement.draft);
   }
   const decision = decideNext(draft), ready = decision.status === "ready";
-  return { agentId: targetId ?? stableId(conversationId, mutationId), mode: targetId ? "edit" : "create", draft,
+  const savedConsultation = targetId ? await agents.getRequirementConsultation?.(targetId) : null;
+  const samePriorDraft = existing && substantiveRequirementHash(existing.draft) === substantiveRequirementHash(draft);
+  const requirement = { agentId: targetId ?? stableId(conversationId, mutationId), mode: targetId ? "edit" : "create", draft,
     status: decision.status, confirmed: false, lastQuestion: ready ? CONFIRMATION_QUESTION : decision.question,
     question: ready ? null : decision.question, confirmationQuestion: ready ? CONFIRMATION_QUESTION : null, summary: "",
-    userMessages: [], version: refresh ? existing.version + 1 : 1, createdAt: refresh ? existing.createdAt : new Date().toISOString(), updatedAt: new Date().toISOString(),
+    userMessages: [], consultation: structuredClone(savedConsultation ?? (samePriorDraft ? existing.consultation : null) ?? newConsultation()),
+    version: refresh ? existing.version + 1 : 1, createdAt: refresh ? existing.createdAt : new Date().toISOString(), updatedAt: new Date().toISOString(),
     ...(savedRequirement ? { savedRequirement: structuredClone(savedRequirement) } : {}) };
+  const handoff = targetId && await agents.getRequirementHandoff?.(targetId);
+  return handoff ? claimRequirementHandoff(requirement, handoff) : requirement;
 }
 
-export async function advanceRequirement(requirement, message, providers, { signal, onProgress, agents } = {}) {
+export async function advanceRequirement(requirement, message, providers, { signal, onProgress, agents, requestId, evidenceMessages, platform, research } = {}) {
   signal?.throwIfAborted();
   const userMessages = recentMessages([...(requirement.userMessages ?? []), message]);
-  const result = await processTurn({ message, draft: requirement.draft, lastQuestion: requirement.lastQuestion, userMessages }, providers, { signal, onProgress });
+  const result = await processTurn({ message, draft: requirement.draft, lastQuestion: requirement.lastQuestion, userMessages,
+    consultation: requirement.consultation, evidenceMessages }, providers, { signal, onProgress, enforceConsultation: true,
+    requestId: requestId ?? `req_${requirement.agentId}_${requirement.version}`, platform, research });
   signal?.throwIfAborted();
   const next = { ...structuredClone(requirement), draft: result.draft, status: result.confirmed ? "needs_build" : result.status,
     confirmed: result.confirmed, lastQuestion: result.question ?? result.confirmationQuestion ?? "", question: result.question,
-    confirmationQuestion: result.confirmationQuestion, summary: result.summary, userMessages, version: requirement.version + 1,
+    confirmationQuestion: result.confirmationQuestion, summary: result.summary, userMessages, consultation: result.consultation, version: requirement.version + 1,
     updatedAt: new Date().toISOString() };
   let action, source;
   if (result.confirmed) {
-    const saved = await agents.saveRequirements(next.agentId, { name: next.draft.name.value || "我的 Agent", draft: next.draft });
+    const saved = await agents.saveRequirements(next.agentId, { name: next.draft.name.value || "我的 Agent", draft: next.draft },
+      { confirmation: result.confirmation, requestId: result.confirmation.requestId, consultation: result.consultation });
     if (!saved?.requirement || saved.requirement.id !== next.agentId) throw new InputError("需求未能保存到对应 Agent，请重试；不会创建重复 Agent");
     next.savedRequirement = structuredClone(saved.requirement);
     action = { type: "build_agent", agentId: next.agentId, label: "开始制作智能体", requirement: next.savedRequirement };

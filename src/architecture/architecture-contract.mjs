@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { InputError, normalizeDraft, decideNext } from "../requirements/core.mjs";
+import { taskSpecRequirementItems } from "../requirements/task-spec.mjs";
+import { CONNECTION_DEFINITION_SCHEMA, validateConnectionDefinition } from "../connections/connection-contract.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
-export const CURRENT_ARCHITECTURE_VERSION = 2;
-export const supportedArchitectureVersion = (record) => [1, 2].includes(record?.contractVersion)
+export const CURRENT_ARCHITECTURE_VERSION = 3;
+export const supportedArchitectureVersion = (record) => [1, 2, 3].includes(record?.contractVersion)
   && record.contractVersion === (record?.design?.schemaVersion ?? 1);
 export const requiresDevelopment = (design) => ["workflow", "custom"].includes(design?.profile)
-  || design?.interaction?.page === true || design?.interaction?.operations === true;
+  || design?.interaction?.page === true || design?.interaction?.operations === true
+  || ["managed", "docker"].includes(design?.execution?.hosting);
 export const CAPABILITY_CATALOG_VERSION = 2;
 export const LEGACY_CAPABILITIES = Object.freeze([
   { id: "conversation", status: "available", scope: "基于用户提供的文本进行对话与生成；不包含联网检索、外部动作或定时运行。" },
@@ -55,7 +58,7 @@ export function capabilitySnapshotCompatible(record, capabilities = CAPABILITIES
     const snapshot = new Map(record.capabilitySnapshot.map((item) => [item.id, item]));
     const current = new Map(capabilities.map((item) => [item.id, item]));
     const publicCurrent = new Map(publicCapabilities.map((item) => [item.id, item]));
-  const publicSnapshot = new Map([2, 3].includes(record.platformSnapshot?.version) ? (record.platformSnapshot.publicCapabilities ?? [])
+  const publicSnapshot = new Map([2, 3, 4].includes(record.platformSnapshot?.version) ? (record.platformSnapshot.publicCapabilities ?? [])
       .map(({ id, version, status, scope }) => [id, { id, version, status, scope }]) : []);
     return used.every(({ id }) => {
       const saved = snapshot.has(id) ? snapshot.get(id) : publicSnapshot.get(id);
@@ -73,6 +76,7 @@ const object = (properties) => ({ type: "object", properties, required: Object.k
 const references = (minItems = 0) => ({ ...list(identifier, minItems), uniqueItems: true });
 const issueSchema = object({ id: identifier, blocking: { type: "boolean" }, description: text(), remedy: text() });
 const REVIEW_CHECKS = ["requirements", "feasibility", "minimality", "interfaces", "failure_handling", "verification"];
+const EXTENDED_REVIEW_CHECKS = [...REVIEW_CHECKS, "requirement_sufficiency", "acceptance_quality"];
 
 export const LEGACY_DESIGN_SCHEMA = object({
   profile: choice("light", "workflow", "custom"),
@@ -108,13 +112,19 @@ export const CONNECTION_SCHEMA = object({ id: identifier, purpose: choice("searc
 });
 export const DESIGN_V2_SCHEMA = object({ ...LEGACY_DESIGN_SCHEMA.properties, schemaVersion: { type: "integer", enum: [2] },
   interaction: INTERACTION_SCHEMA, connections: list(CONNECTION_SCHEMA, 0, 40) });
+export const DESIGN_V3_SCHEMA = object({ ...DESIGN_V2_SCHEMA.properties, schemaVersion: { type: "integer", enum: [3] },
+  connections: list(CONNECTION_DEFINITION_SCHEMA, 0, 40),
+  execution: object({ language: choice("none", "javascript", "python"), hosting: choice("builtin", "managed", "docker"), reason: text(4000) }),
+  selectionBasis: object({ capacity: text(4000), process: text(4000), quality: text(4000), requirementIds: references(1), assumptions: list(text()) }),
+});
 // The tool accepts both generations; validation below selects an exact version.
-export const DESIGN_SCHEMA = { ...DESIGN_V2_SCHEMA, required: LEGACY_DESIGN_SCHEMA.required };
+export const DESIGN_SCHEMA = { ...DESIGN_V3_SCHEMA,
+  properties: { ...DESIGN_V3_SCHEMA.properties, schemaVersion: { type: "integer", enum: [2, 3] } }, required: LEGACY_DESIGN_SCHEMA.required };
 
 export const REVIEW_SCHEMA = object({
   candidateHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
-  verdict: choice("pass", "revise", "insufficient", "infeasible"),
-  checks: list(object({ id: choice(...REVIEW_CHECKS), passed: { type: "boolean" }, evidence: text(4000) }), 6, 6),
+  verdict: choice("pass", "revise", "insufficient", "infeasible", "needs_input"),
+  checks: list(object({ id: choice(...EXTENDED_REVIEW_CHECKS), passed: { type: "boolean" }, evidence: text(4000) }), 6, 8),
   issues: list(issueSchema),
   summary: text(4000),
 });
@@ -122,16 +132,21 @@ export const REVIEW_SCHEMA = object({
 function fail(message) { throw new InputError(`架构契约无效：${message}`); }
 
 function validateSchema(value, schema, path = "design") {
+  if (schema.anyOf) {
+    if (!schema.anyOf.some((branch) => { try { validateSchema(value, branch, path); return true; } catch { return false; } })) fail(`${path} 格式无效`);
+    return;
+  }
+  if (!schema.type) return;
   if (schema.type === "object") {
     if (!value || typeof value !== "object" || Array.isArray(value)
         || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail(`${path} 必须为对象`);
     for (const key of schema.required) if (!Object.hasOwn(value, key)) fail(`${path}.${key} 缺失`);
     for (const key of Object.keys(value)) {
-      if (!Object.hasOwn(schema.properties, key)) fail(`${path}.${key} 不受支持`);
+      if (!Object.hasOwn(schema.properties, key)) { if (schema.additionalProperties === true) continue; fail(`${path}.${key} 不受支持`); }
       validateSchema(value[key], schema.properties[key], `${path}.${key}`);
     }
   } else if (schema.type === "array") {
-    if (!Array.isArray(value) || value.length < schema.minItems || value.length > schema.maxItems) fail(`${path} 条目数量无效`);
+    if (!Array.isArray(value) || value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? 1000)) fail(`${path} 条目数量无效`);
     value.forEach((item, index) => validateSchema(item, schema.items, `${path}[${index}]`));
     if (schema.uniqueItems && new Set(value).size !== value.length) fail(`${path} 包含重复引用`);
   } else if (schema.type === "string") {
@@ -141,7 +156,9 @@ function validateSchema(value, schema, path = "design") {
         || (schema.enum && !schema.enum.includes(value))) fail(`${path} 文本或取值无效`);
   } else if (schema.type === "integer") {
     if (!Number.isSafeInteger(value) || (schema.enum && !schema.enum.includes(value))) fail(`${path} 版本无效`);
-  } else if (typeof value !== "boolean") fail(`${path} 必须为布尔值`);
+  } else if (schema.type === "number") { if (typeof value !== "number" || !Number.isFinite(value)) fail(`${path} 数字无效`); }
+  else if (schema.type === "null") { if (value !== null) fail(`${path} 必须为空`); }
+  else if (typeof value !== "boolean") fail(`${path} 必须为布尔值`);
 }
 
 function uniqueIds(items, label, key = "id") {
@@ -176,16 +193,20 @@ export function requirementItems(value) {
     items.push(...operations.map((operation, index) => ({ id: `operation_${index + 1}`, text: `页面操作：${operation}` })));
   }
   items.push(...(draft.connections ?? []).map((connection, index) => ({ id: `connection_${index + 1}`, text: `服务依赖：${JSON.stringify(connection)}` })));
+  items.push(...taskSpecRequirementItems(draft).map((item) => ({ id: `spec_${designHash(item.id).slice(0, 24)}`,
+    text: `任务要求 ${item.id}（${item.dimension}，依据=${item.source}，关键=${item.critical}）：${item.text}` })));
   return items;
 }
 
-export function validateDesign(value, { requirements, capabilities = CAPABILITIES, evidence = [] } = {}) {
-  validateSchema(value, value?.schemaVersion === 2 ? DESIGN_V2_SCHEMA : LEGACY_DESIGN_SCHEMA);
-  if (value.schemaVersion === 2) {
+export function validateDesign(value, { requirements, capabilities = CAPABILITIES, evidence = [], draft } = {}) {
+  if (draft?.taskSpec && value?.schemaVersion !== 3) fail("包含任务规格的新需求必须使用 v3 架构，不能绕过规模与验收依据");
+  validateSchema(value, value?.schemaVersion === 3 ? DESIGN_V3_SCHEMA : value?.schemaVersion === 2 ? DESIGN_V2_SCHEMA : LEGACY_DESIGN_SCHEMA);
+  if (value.schemaVersion >= 2) {
     if (value.interaction.defaultEntry === "application" && !value.interaction.page) fail("应用入口必须交付页面");
     if (value.interaction.assistant?.enabled && (!value.interaction.page || !value.interaction.assistant.purpose.trim())) fail("页面助手必须有托管页面及具体用途");
     uniqueIds(value.connections, "connections");
     for (const connection of value.connections) {
+      if (value.schemaVersion === 3) { validateConnectionDefinition(connection); continue; }
       uniqueIds(connection.operations, "connection.operations");
       if (connection.purpose !== "business" && connection.operations.length) fail("仅业务连接可以声明业务操作");
       if (connection.purpose === "business" && !connection.operations.length) fail("业务连接必须声明实际操作");
@@ -199,6 +220,12 @@ export function validateDesign(value, { requirements, capabilities = CAPABILITIE
   if (!Array.isArray(requirements) || !requirements.length) fail("缺少已确认的需求清单");
   for (const requirement of requirements) validateSchema(requirement, object({ id: identifier, text: text(4000) }), "requirements");
   const requirementIds = uniqueIds(requirements, "requirements");
+  if (value.schemaVersion === 3) {
+    value.selectionBasis.requirementIds.forEach((id) => assertReference(id, requirementIds, "selectionBasis.requirementIds"));
+    if (value.execution.language === "none" && value.execution.hosting !== "builtin") fail("独立服务必须选择实际运行语言");
+    if (value.execution.language === "python" && value.execution.hosting === "builtin") fail("Python 必须通过受管或 Docker 运行器交付");
+    if (value.profile === "workflow" && value.execution.hosting === "builtin") fail("新流程必须使用支持持久检查点的受管运行方式");
+  }
   const componentIds = uniqueIds(value.components, "components");
   const stepIds = uniqueIds(value.steps, "steps");
   uniqueIds(value.capabilities, "capabilities");
@@ -261,7 +288,7 @@ export function checkDesign(value, context) {
   const confirmed = context?.draft?.interaction;
   const requiresPage = confirmed?.page === true;
   const requiresOperations = Array.isArray(confirmed?.operations) && confirmed.operations.length > 0;
-  if ((requiresPage || requiresOperations) && (design.schemaVersion !== 2
+  if ((requiresPage || requiresOperations) && (![2, 3].includes(design.schemaVersion)
     || requiresPage && design.interaction.page !== true
     || requiresOperations && design.interaction.operations !== true)) issues.push({
     id: "confirmed_interaction", blocking: true, source: "program",
@@ -269,7 +296,7 @@ export function checkDesign(value, context) {
     description: "候选没有保留已确认的托管页面或应用操作需求，不能以旧版结构或关闭交付字段缩减需求。",
     remedy: "提交 schemaVersion:2，按已确认需求设置 interaction.page/operations，并通过现有研发通道交付；同步核对步骤、需求覆盖和验收，不能降为普通对话或下载文件。",
   });
-  if (design.schemaVersion === 2 && (confirmed?.defaultEntry && confirmed.defaultEntry !== design.interaction.defaultEntry
+  if (design.schemaVersion >= 2 && (confirmed?.defaultEntry && confirmed.defaultEntry !== design.interaction.defaultEntry
     || confirmed?.assistant && (confirmed.assistant.enabled !== design.interaction.assistant?.enabled
       || confirmed.assistant.purpose !== design.interaction.assistant?.purpose)
     || design.interaction.assistant?.enabled && !confirmed?.assistant?.enabled)) issues.push({
@@ -310,11 +337,11 @@ export function checkDesign(value, context) {
     && !issues.some((item) => item.blocking) };
 }
 
-export function validateReview(value, { candidateHash } = {}) {
+export function validateReview(value, { candidateHash, schemaVersion = 1 } = {}) {
   validateSchema(value, REVIEW_SCHEMA, "review");
   if (value.candidateHash !== candidateHash) fail("评估结果与当前候选版本不匹配");
   const checks = uniqueIds(value.checks, "review.checks");
-  for (const id of REVIEW_CHECKS) if (!checks.has(id)) fail(`缺少评估项 ${id}`);
+  for (const id of schemaVersion >= 3 ? EXTENDED_REVIEW_CHECKS : REVIEW_CHECKS) if (!checks.has(id)) fail(`缺少评估项 ${id}`);
   uniqueIds(value.issues, "review.issues");
   if (value.verdict === "pass" && (value.checks.some((item) => !item.passed)
       || value.issues.some((item) => item.blocking))) fail("评估未全部通过或仍有阻断问题，不能判定 pass");

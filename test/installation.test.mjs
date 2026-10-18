@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFile, cp, mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
+import { copyFile, cp, mkdtemp, readFile, rm, writeFile, readdir, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -158,6 +158,11 @@ test("源码入口可以启动，不被循环模块等待卡住", {
   await cp(join(source, "public"), join(root, "public"), { recursive: true });
   for (const dependency of ["marked", "katex"])
     await cp(join(source, "node_modules", dependency), join(root, "node_modules", dependency), { recursive: true });
+  const manifest = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
+  for (const dependency of Object.keys(manifest.dependencies).filter((name) => !["marked", "katex"].includes(name))) {
+    const destination = join(root, "node_modules", dependency); await mkdir(dirname(destination), { recursive: true });
+    await symlink(join(source, "node_modules", dependency), destination, "dir");
+  }
   const child = spawn(process.execPath, [join(root, "src", "server.mjs")], { cwd: root,
     env: { PATH: process.env.PATH, PORT: "0", NODE_OPTIONS: "--max-old-space-size=128" },
     stdio: ["ignore", "pipe", "pipe"] });
