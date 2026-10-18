@@ -4,7 +4,10 @@ import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { designHash, supportedArchitectureVersion, requiresDevelopment } from "../architecture/architecture-contract.mjs";
 import { renderPlatformRules, platformCapabilityCatalog, validatePlatformMetadata } from "../architecture/platform-contract.mjs";
-import { PLAN_SCHEMA, PLAN_V2_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
+import { PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
+import { verifyManagedApplication } from "./managed-verification.mjs";
+import { SERVICE_MANIFEST_SCHEMA } from "../services/service-contract.mjs";
+import { serviceErrorMessage } from "../services/service-errors.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
@@ -44,12 +47,13 @@ export function developmentSummary(record) {
 }
 
 export class DevelopmentController {
-  constructor({ config, cwd, dataDir, storage, sessionFactory = createPiSession, store, workspace, executor, getArchitecture, web, limits = {} }) {
+  constructor({ config, cwd, dataDir, storage, sessionFactory = createPiSession, store, workspace, executor, services, getArchitecture, web, limits = {} }) {
     Object.assign(this, { config, cwd, dataDir, sessionFactory, getArchitecture });
     this.storage = storage ?? store?.storage ?? workspace?.storage ?? new AgentStorage({ dataDir });
     this.store = store ?? new DevelopmentStore({ dataDir, storage: this.storage });
     this.workspace = workspace ?? new DevelopmentWorkspace({ dataDir, storage: this.storage });
     this.executor = executor ?? new DevelopmentExecutor();
+    this.services = services;
     this.web = web ?? new WebCapabilities();
     this.limits = { ...DEFAULT_LIMITS, ...limits };
     this.active = new Map();
@@ -124,7 +128,7 @@ export class DevelopmentController {
     validatePlatformMetadata(ctx.record.architecture);
     const platform = ctx.record.architecture.platformSnapshot;
     const name = kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review";
-    const schemas = { planner: ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
+    const schemas = { planner: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
     const handle = { kind, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false };
     const submit = { name, label: "提交阶段结果", description: "提交经过结构校验的阶段结果；提交不表示整体通过。",
       parameters: schemas[kind], executionMode: "sequential", execute: async (_id, value) => {
@@ -220,6 +224,7 @@ export class DevelopmentController {
       capabilities: platformCapabilityCatalog(r.architecture.platformSnapshot) } : {};
     return { architectureRef: r.architectureRef, requirements: r.architecture.requirements,
       design: r.architecture.design, entrypoint: r.plan?.entrypoint, runtime: r.plan?.runtime, application: r.plan?.application,
+      ...(r.architecture.design.schemaVersion === 3 ? { serviceManifestSchema: SERVICE_MANIFEST_SCHEMA } : {}),
       ...platform, handoffs: r.handoffs.slice(-12), remaining: r.budgets };
   }
 
@@ -240,7 +245,25 @@ export class DevelopmentController {
     const oldPlan = ctx.record.plan;
     const counter = ctx.record.planning;
     const handle = await this.role(ctx, { kind: "planner", counter, limit: this.limits.reviewerTurns,
-      tools: await this.workspace.tools(ctx.record.agentId, ctx.record.id, { readOnly: true, signal: ctx.signal }),
+      tools: [...await this.workspace.tools(ctx.record.agentId, ctx.record.id, { readOnly: true, signal: ctx.signal }),
+        ...(this.services && ctx.record.architecture.design.schemaVersion === 3 ? [{ name: "resolve_service_dependencies", label: "核实服务依赖",
+          description: "从受支持的官方包目录解析固定版本及完整依赖工件，不执行包代码。返回的URL与摘要用于服务清单，不能自己猜测。",
+          parameters: { type: "object", properties: { packages: { type: "array", maxItems: 40, items: { type: "object", properties: {
+            name: { type: "string" }, version: { type: "string" } }, required: ["name", "version"], additionalProperties: false } } }, required: ["packages"], additionalProperties: false },
+          executionMode: "sequential", execute: async (_id, value) => {
+            this.guard(ctx);
+            if (!networkAllowed(ctx.record.architecture.draft)) throw new InputError("当前需求禁止联网，不能下载未缓存的依赖");
+            const result = await this.services.resolveDependencies({ language: ctx.record.architecture.design.execution.language,
+              host: ctx.record.architecture.design.execution.hosting, packages: value.packages, signal: ctx.signal });
+            this.guard(ctx); return toolResult(result);
+          } }, { name: "resolve_service_image", label: "核实容器镜像",
+          description: "查询 Docker Hub 官方镜像的 linux/arm64 固定摘要；仅核实清单，不执行或安装容器。",
+          parameters: { type: "object", properties: { image: { type: "string" } }, required: ["image"], additionalProperties: false },
+          executionMode: "sequential", execute: async (_id, value) => {
+            this.guard(ctx); if (!networkAllowed(ctx.record.architecture.draft)) throw new InputError("当前需求不允许联网核实镜像");
+            const result = await this.services.resolveDockerImage({ image: value.image, signal: ctx.signal });
+            this.guard(ctx); return toolResult(result);
+          } }] : [])],
       validate: (value) => validatePlan(value, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined }) });
     try {
       for (;;) {
@@ -274,7 +297,7 @@ export class DevelopmentController {
     const selected = new Set(ctx.record.tasks.filter((item) => item.status === "verified").map((item) => item.id));
     if (task) selected.add(task.id);
     const cases = !task || task.integration ? ctx.record.plan.cases : ctx.record.plan.cases.filter((item) => selected.has(item.taskId));
-    const report = await this.executor.verify({ snapshot, entrypoint: ctx.record.plan.entrypoint, cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, validateResources: !task || Boolean(task.integration),
+    const report = await this.verifyExecution(ctx, { snapshot, entrypoint: ctx.record.plan.entrypoint, cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, validateResources: !task || Boolean(task.integration),
       stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
     this.guard(ctx);
     if (report.codeHash !== snapshot.hash) throw new Stop("测试证据对应的代码版本不一致", "failed");
@@ -288,6 +311,14 @@ export class DevelopmentController {
     return { passed: report.status === "passed" && review.verdict === "pass", report: evidence, review };
   }
 
+  verifyExecution(ctx, options) {
+    if (options.runtime === "managed-service") {
+      if (!this.services) return Promise.resolve({ status: "not_run", codeHash: options.snapshot?.hash, results: [], summary: "受管服务运行器尚未接入" });
+      return verifyManagedApplication({ ...options, services: this.services, executor: this.executor, agentId: ctx.record.agentId });
+    }
+    return this.executor.verify(options);
+  }
+
   async task(ctx, task) {
     let handle;
     const create = async () => this.role(ctx, { kind: "developer", counter: task, limit: this.limits.developerTurns,
@@ -296,7 +327,7 @@ export class DevelopmentController {
           parameters: { type: "object", properties: {}, required: [], additionalProperties: false }, executionMode: "sequential",
           execute: async () => {
             const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
-            const report = await this.executor.verify({ snapshot, entrypoint: ctx.record.plan.entrypoint,
+            const report = await this.verifyExecution(ctx, { snapshot, entrypoint: ctx.record.plan.entrypoint,
               cases: ctx.record.plan.cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
             this.guard(ctx);
             const evidence = { ...report, id: randomUUID(), mode: "self_test", planHash: ctx.record.planHash };
@@ -378,10 +409,27 @@ export class DevelopmentController {
       await this.current(ctx);
       await this.phase(ctx, "intake");
       await this.workspace.create(ctx.record.agentId, ctx.record.id);
-      const probe = await this.executor.probe({ signal: ctx.signal });
+      const execution = architecture.design.execution;
+      if (execution && execution.hosting !== "builtin" && this.services) {
+        await this.phase(ctx, "intake", "正在准备并检查所需运行环境…");
+        try { await this.services.prepareEnvironment({ language: execution.language, host: execution.hosting, signal: ctx.signal,
+          onProgress: (value) => ctx.onProgress({ type: "status", phase: "intake", label: value.status === "downloading"
+            ? `正在下载受管运行环境（已接收 ${Math.round(value.bytes / 1048576)} MiB）…`
+            : value.status === "installing" ? "正在校验并安装受管环境…" : "运行环境已准备…" }) }); }
+        catch (error) {
+          if (ctx.signal.aborted) throw error;
+          throw new Stop("所需运行环境未准备完成；检查网络或环境后可继续当前研发。", "blocked",
+            { stage: "environment", phase: "intake", reason: error.reason ?? "environment_preparation_failed" });
+        }
+      }
+      const probe = execution && execution.hosting !== "builtin"
+        ? this.services ? await this.services.probe({ language: execution.language, host: execution.hosting, signal: ctx.signal }) : { available: false, reason: "受管运行器尚未接入" }
+        : await this.executor.probe({ signal: ctx.signal });
       this.guard(ctx);
       ctx.record.execution = probe;
-      if (!probe.available) throw new Stop(probe.reason || "隔离执行环境尚不可用，已保留研发记录");
+      if (!probe.available) throw new Stop(execution?.hosting === "docker"
+        ? "待准备环境：请安装并启动 Docker，然后继续当前研发。" : "待准备环境：本机隔离运行检查未通过，已保留研发记录。", "blocked",
+        { stage: "environment", phase: "intake", reason: probe.reason ?? "runtime_unavailable" });
       if (resume) {
         const actual = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
         if (ctx.record.snapshot?.hash !== actual.hash) {
@@ -414,7 +462,7 @@ export class DevelopmentController {
         await this.phase(ctx, "packaging");
         ctx.record.package = { id: `pkg_${randomUUID()}`, buildId: ctx.record.id, architectureRef: ctx.record.architectureRef, codeHash: snapshot.hash,
           planHash: ctx.record.planHash, entrypoint: ctx.record.plan.entrypoint, runtime: ctx.record.plan.runtime, snapshot,
-          ...(ctx.record.plan.runtime === "node-action" ? { protocolVersion: 2,
+          ...(["node-action", "managed-service"].includes(ctx.record.plan.runtime) ? { protocolVersion: ctx.record.plan.application.protocolVersion,
             application: bindApplicationManifest(ctx.record.plan.application, snapshot, [result.report.id]) } : {}),
           verificationId: result.report.id };
         (ctx.record.deliveries ??= []).push({ package: clone(ctx.record.package), status: "verified" });
@@ -446,10 +494,12 @@ export class DevelopmentController {
       if (!ctx.record) throw error;
       Object.assign(ctx.record, { status: ctx.signal.aborted ? "cancelled" : error instanceof Stop ? error.status : "failed",
         delivery: "blocked", summary: ctx.signal.aborted ? "研发已停止，已保存代码与交接记录，可继续。"
-          : error instanceof Stop || error instanceof InputError ? error.message : "研发未完成，检查点已保留，可继续并核实当前步骤。" });
+          : error instanceof Stop || error instanceof InputError ? error.message
+            : error.name === "ServiceError" ? serviceErrorMessage(error.reason) : "研发未完成，检查点已保留，可继续并核实当前步骤。" });
       ctx.record.diagnostic = ctx.signal.aborted ? { stage: "development", phase: ctx.record.phase, reason: "cancelled" }
         : error instanceof Stop && error.diagnostic ? error.diagnostic
-          : { stage: "development", phase: ctx.record.phase, reason: error instanceof InputError ? "invalid_result" : "execution_failed" };
+          : { stage: error.name === "ServiceError" ? "runtime" : "development", phase: ctx.record.phase,
+            reason: error instanceof InputError ? "invalid_result" : error.name === "ServiceError" ? error.reason : "execution_failed" };
       await this.save(ctx);
       return clone(ctx.record);
     } finally {

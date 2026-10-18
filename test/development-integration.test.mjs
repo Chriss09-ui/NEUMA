@@ -165,6 +165,6 @@ test("真实Pi结构化计划被程序拒绝时不能继续开发或用自然语
   assert.equal(result.plan, null); assert.equal(result.package, null);
   assert.equal(fixture.checks.length, 0); assert.equal(fixture.sessions.length, 1);
   assert.deepEqual(fixture.toolCalls.map(({ name }) => name), ["submit_development_plan"]);
-  assert.match(JSON.stringify(fixture.requests.at(-1).body.messages), /入口必须是任务文件清单/);
+  assert.match(JSON.stringify(fixture.requests.at(-1).body.messages), /运行入口必须匹配所选语言并包含在任务文件清单中/);
   assert.equal(fixture.sessions[0].disposed, true);
 });

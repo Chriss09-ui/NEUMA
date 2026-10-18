@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { WorkflowController } from "../services/workflow-controller.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { ApplicationTaskStore, taskFinished } from "./task-store.mjs";
 import { ApplicationResources } from "./application-resources.mjs";
-import { validateApplicationManifest, validateActionInput, validateActionOutput } from "./application-contract.mjs";
+import { validateApplicationManifest, validateActionInput, validateActionOutput, validateActionValue } from "./application-contract.mjs";
 import { normalizeApplicationContext, applicationContextBinding, applicationInteraction, applicationActionCatalog,
   applicationConversationContext } from "./application-context.mjs";
 
@@ -11,7 +13,16 @@ const cleanError = (error) => error instanceof InputError ? error.message : "应
 export class ApplicationService {
   constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources() }) {
     this.agents = agents; this.store = store; this.resources = resources;
-    this.running = new Map(); this.submitting = new Set(); this.epoch = 0; this.closing = null; this.ready = store.ready;
+    this.running = new Map(); this.submitting = new Set(); this.stateWrites = new Set(); this.epoch = 0; this.closing = null; this.ready = store.ready;
+    this.workflows = new WorkflowController({ rootDir: join(agents.dataDir ?? agents.storage.dataDir, "workflows"),
+      runAction: (options) => this.runManaged(options.context.item, options),
+      onChange: async (record) => {
+        const item = [...this.running.values()].find((item) => item.task.workflowId === record.id);
+        if (item) await this.store.update(record.agentId, item.task.id,
+          { progress: { message: `流程：${record.steps.filter((step) => step.status === "completed").length}/${record.steps.length} 个阶段完成` },
+            checkpoint: { workflowId: record.id, status: record.status, steps: record.steps.map(({ id, status }) => ({ id, status })) } }, "checkpoint");
+      } });
+    this.workflowReady = this.workflows.recover(); this.workflowReady.catch(() => {});
     this.unsubscribe = agents.onLifecycle(async ({ agentId, type }) => this.interruptAgent(agentId, {
       preserveResources: type === "build" && Boolean(await agents.getActiveRuntime?.(agentId)),
     }));
@@ -19,7 +30,7 @@ export class ApplicationService {
   async descriptor(id, { optional = false, allowBuilding = false } = {}) {
     await this.agents.ready;
     const agent = this.agents.agents.get(id);
-    if (agent?.execution?.kind !== "node-action") {
+    if (!["node-action", "managed-service"].includes(agent?.execution?.kind)) {
       if (optional) return null;
       throw new InputError("这个 Agent 尚未交付应用操作");
     }
@@ -71,10 +82,17 @@ export class ApplicationService {
     if (version !== undefined && version !== deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
     return this.store.getState(id, { stateVersion: manifest.stateVersion });
   }
-  async saveState(id, body) {
-    const { manifest, deliveryVersion } = await this.descriptor(id);
-    if (body.deliveryVersion !== undefined && body.deliveryVersion !== deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
-    return this.store.setState(id, body, { stateVersion: manifest.stateVersion });
+  saveState(id, body) {
+    if (this.closing || this.agents.closing) return Promise.reject(new InputError("应用服务正在关闭"));
+    const item = { agentId: id, epoch: this.epoch, done: null }; this.stateWrites.add(item);
+    item.done = (async () => {
+      const { manifest, deliveryVersion } = await this.descriptor(id);
+      this.assertOpen(item.epoch);
+      if (this.agents.builds?.has(id)) throw new InputError("智能体正在更新，请稍后保存页面草稿");
+      if (body.deliveryVersion !== undefined && body.deliveryVersion !== deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
+      return this.store.setState(id, body, { stateVersion: manifest.stateVersion });
+    })();
+    const settled = () => this.stateWrites.delete(item); item.done.then(settled, settled); return item.done;
   }
   assertOpen(epoch) {
     if (this.closing || this.agents.closing || epoch !== this.epoch) throw new InputError("应用服务正在关闭或已重置，请重新提交任务");
@@ -112,7 +130,8 @@ export class ApplicationService {
     }
     const { task, created } = await this.store.create(id, { actionId: action.id, input: body.input, mutationId: body.mutationId,
       source: taskSource, deliveryVersion: descriptor.deliveryVersion, revision: descriptor.agent.revision,
-      configVersion: connectionSnapshot.version, connectionVersions: connectionSnapshot.connections, allowNetwork });
+      configVersion: connectionSnapshot.version, connectionProfile: connectionSnapshot.profile,
+      connectionVersions: connectionSnapshot.connections, allowNetwork });
     submission.task = task;
     this.assertOpen(submission.epoch);
     if (created) {
@@ -145,9 +164,8 @@ export class ApplicationService {
       await this.check(item);
       await this.store.update(task.agentId, task.id, { status: "running", startedAt: new Date().toISOString() });
       const capability = await this.agents.applicationCapabilities({ ...item, signal, check: () => this.check(item) });
-      const run = await this.agents.development.executor.runAction({ codeDir: descriptor.snapshot.path,
-        entrypoint: descriptor.manifest.entrypoint, actionId: task.actionId, input: task.input, signal,
-        onCapability: async (call) => {
+      item.signal = signal;
+      item.onCapability = async (call) => {
           await this.check(item);
           try { const result = await capability(call); await this.check(item); return result; }
           catch (error) {
@@ -157,19 +175,105 @@ export class ApplicationService {
             }
             throw error;
           }
-        }, onProgress: async (progress) => {
+        };
+      item.onProgress = async (progress) => {
           await this.check(item);
           try { await this.store.update(task.agentId, task.id, { progress }, "progress"); }
           catch (error) { item.terminalStatus = "failed"; controller.abort(); throw error; }
-        } });
+        };
+      let run;
+      if (descriptor.manifest.runtime === "managed-service") {
+        const definition = descriptor.manifest.service.workflow;
+        if (definition?.entryActionId === task.actionId) {
+          await this.workflowReady;
+          task.workflowId ??= `workflow_${task.id}`;
+          await this.store.update(task.agentId, task.id, { workflowId: task.workflowId });
+          const workflow = item.resume ? await this.workflows.resume({ id: task.workflowId, ...item.resume, signal, context: { item } })
+            : await this.workflows.start({ id: task.workflowId, agentId: task.agentId, deliveryVersion: task.deliveryVersion,
+              scopeId: task.source.scope, definition, input: task.input, signal, context: { item } });
+          await this.check(item);
+          if (workflow.status !== "completed") {
+            const waiting = this.workflowWaiting(workflow, descriptor.manifest);
+            await this.store.update(task.agentId, task.id, { status: workflow.status, waiting,
+              error: workflow.reason ? "流程已暂停，检查已有结果后可继续" : null });
+            return;
+          }
+          const outputs = await Promise.all(Object.entries(workflow.resultRefs).map(async ([id, ref]) => [id, await this.workflows.readResult(workflow, ref)]));
+          run = { status: "passed", output: outputs.length === 1 ? outputs[0][1] : Object.fromEntries(outputs) };
+        } else run = await this.runManaged(item, { actionId: task.actionId, input: task.input, signal });
+      } else run = await this.agents.development.executor.runAction({ codeDir: descriptor.snapshot.path,
+        entrypoint: descriptor.manifest.entrypoint, actionId: task.actionId, input: task.input, signal,
+        onCapability: item.onCapability, onProgress: item.onProgress });
       await this.check(item);
-      if (run.status !== "passed") throw new InputError(run.reason === "timeout" ? "操作超过 120 秒时限；已有结果保留，请拆分步骤继续" : "应用程序未成功完成，实际执行结果已保留");
+      if (run.status !== "passed") throw new InputError(run.reason === "timeout" ? "操作超过已配置的时限；已有结果保留，请拆分步骤继续" : "应用程序未成功完成，实际执行结果已保留");
       validateActionOutput(action, run.output);
       await this.store.update(task.agentId, task.id, { status: "completed", result: run.output });
     } catch (error) {
       try { await this.store.update(task.agentId, task.id, { status: item.terminalStatus ?? (controller.signal.aborted || error?.name === "AbortError" ? "cancelled" : "failed"), error: cleanError(error) }); }
       finally { controller.abort(); }
     } finally { release(); }
+  }
+  workflowWaiting(workflow, manifest) {
+    if (!workflow.waiting) return null;
+    const step = workflow.definition.steps.find((step) => step.id === workflow.waiting.stepId);
+    const operation = manifest.service.operations.find((operation) => operation.id === step?.actionId);
+    return { ...workflow.waiting, ...(operation ? { outputSchema: operation.outputSchema } : {}) };
+  }
+  async runManaged(item, { actionId, input, signal }) {
+    const { task, descriptor } = item;
+    const operation = descriptor.manifest.service.operations.find((operation) => operation.id === actionId);
+    if (!operation) throw new InputError("流程动作未经过交付验收");
+    validateActionInput(operation, input);
+    const result = await this.agents.services.run({ agentId: task.agentId, deliveryVersion: descriptor.deliveryVersion,
+      scopeId: task.source.scope, actionId, input, signal,
+      capabilityHandler: async (name, args, context) => {
+        if (name === "connection.call" && !(operation.connectionIds ?? []).includes(args.connectionId)) throw new InputError("步骤没有声明这个连接依赖");
+        return item.onCapability({ capability: name, args, signal: context.signal });
+      }, onProgress: item.onProgress });
+    if (result.status === "passed") validateActionOutput(operation, result.output);
+    return result;
+  }
+  resume(id, taskId, body, options = {}) {
+    if (this.closing || this.agents.closing) return Promise.reject(new InputError("应用服务正在关闭"));
+    const submission = { epoch: this.epoch, task: null, done: null };
+    this.submitting.add(submission);
+    submission.done = this.resumeTask(id, taskId, body, options, submission);
+    const settled = () => this.submitting.delete(submission); submission.done.then(settled, settled);
+    return submission.done;
+  }
+  async resumeTask(id, taskId, body, { scope = "private", workspaceRoot, materialTools, heldLease = false, signal, allowNetwork = true } = {}, submission) {
+    const task = await this.store.get(id, taskId);
+    if (task.source.scope !== scope) throw new InputError("任务范围不匹配");
+    const descriptor = await this.descriptor(id);
+    if (descriptor.deliveryVersion !== task.deliveryVersion) throw new InputError("请恢复任务原交付版本后再继续，不能用新版代码继续旧检查点");
+    const action = descriptor.manifest.actions.find((action) => action.id === task.actionId);
+    if (!task.workflowId || !action) throw new InputError("这个任务没有可继续的流程");
+    await this.workflowReady;
+    const workflow = await this.workflows.get(task.workflowId);
+    if (workflow.agentId !== id || workflow.deliveryVersion !== task.deliveryVersion || workflow.scopeId !== scope) throw new InputError("检查点身份不匹配");
+    if (workflow.status === "waiting_input") validateActionValue(body.input, workflow.waiting.inputSchema);
+    if (workflow.status === "needs_review") {
+      const resolution = body.resolution;
+      if (!resolution || resolution.stepId !== workflow.waiting.stepId || resolution.index !== workflow.waiting.index) throw new InputError("请先核实这个步骤是否已经完成");
+      if (resolution.outcome === "completed") validateActionValue(resolution.output, this.workflowWaiting(workflow, descriptor.manifest).outputSchema);
+      else if (resolution.outcome !== "retry" || resolution.explicitlyApproved !== true) throw new InputError("重试外部操作需要明确确认");
+    }
+    const connectionSnapshot = await this.agents.connections.snapshot(id);
+    for (const connectionId of action.connectionIds) await this.agents.connections.assertActive(connectionSnapshot, connectionId);
+    this.assertOpen(submission.epoch);
+    const resumed = await this.store.resume(id, taskId, body, { configVersion: connectionSnapshot.version,
+      connectionProfile: connectionSnapshot.profile, connectionVersions: connectionSnapshot.connections,
+      allowNetwork: task.allowNetwork !== false && allowNetwork });
+    submission.task = resumed.task; this.assertOpen(submission.epoch);
+    if (resumed.created) {
+      const item = { task: resumed.task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease,
+        controller: new AbortController(), resume: { input: body.input, resolution: body.resolution } };
+      const abort = () => item.controller.abort();
+      if (heldLease) { signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort(); }
+      this.running.set(taskId, item);
+      item.done = this.run(item).finally(() => { signal?.removeEventListener("abort", abort); this.running.delete(taskId); }); item.done.catch(() => {});
+    }
+    return { taskId, task: resumed.task };
   }
   async wait(id, taskId) {
     await this.running.get(taskId)?.done;
@@ -180,12 +284,14 @@ export class ApplicationService {
     if (!taskFinished(task)) {
       const item = this.running.get(taskId);
       if (item) { item.terminalStatus = status; item.controller.abort(); }
+      if (task.workflowId && status === "cancelled") await this.workflows.cancel(task.workflowId);
       await this.store.update(id, taskId, { status, error: status === "interrupted" ? "Agent 更新或 NEUMA 关闭，任务已中断；已有产物保留" : "任务已停止；已有产物及外部操作保留" });
     }
     return { task: await this.store.get(id, taskId) };
   }
   async interruptAgent(id, { preserveResources = false } = {}) {
     await this.ready;
+    await Promise.allSettled([...this.stateWrites].filter((item) => item.agentId === id).map((item) => item.done));
     const running = [...this.running.values()].filter((item) => item.task.agentId === id);
     for (const item of running) { item.terminalStatus = "interrupted"; item.controller.abort(); }
     let failure;
@@ -214,7 +320,8 @@ export class ApplicationService {
       const late = submissions.map((submission) => submission.task).filter((task) => task && !running.some((item) => item.task.id === task.id));
       outcomes.push(...await Promise.allSettled(late.map((task) => this.cancel(task.agentId, task.id, "interrupted"))));
       await Promise.allSettled(running.map((item) => item.done));
-      await this.resources.closeAll(); await this.store.settle();
+      await Promise.allSettled([...this.stateWrites].map((item) => item.done));
+      await this.workflows.close(); await this.resources.closeAll(); await this.store.settle();
       const failure = outcomes.find((outcome) => outcome.status === "rejected");
       if (failure) throw failure.reason;
     })().finally(() => { this.closing = null; });
@@ -234,7 +341,18 @@ export class ApplicationService {
           { source: { kind: scope === "private" ? "conversation" : "group", scope }, heldLease: true, workspaceRoot, materialTools, signal,
             allowNetwork: allowNetwork(), validatedApplicationContext: getApplicationContext() });
         const task = await this.wait(agent.id, submitted.taskId);
-        return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id, status: task.status, result: task.result, error: task.error }) }], details: {} };
-      } }];
+        return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id, status: task.status, result: task.result, error: task.error,
+          waiting: task.waiting, version: task.sequence }) }], details: {} };
+      } }, ...(manifest.service?.workflow ? [{ name: "resume_application_task", label: "继续流程任务",
+      description: "用户明确回答待补充信息后继续同一任务，不能重复提交新任务。对needs_review必须请用户核实外部结果，不能自行选择重试。",
+      parameters: { type: "object", properties: { taskId: { type: "string" }, expectedVersion: { type: "integer" },
+        input: {}, resolution: { type: "object", additionalProperties: true } }, required: ["taskId", "expectedVersion"], additionalProperties: false },
+      executionMode: "sequential", execute: async (callId, params, signal) => {
+        const result = await this.resume(agent.id, params.taskId, { ...params, mutationId: /^[\w-]{8,100}$/.test(callId) ? callId : randomUUID() },
+          { scope, workspaceRoot, materialTools, heldLease: true, signal, allowNetwork: allowNetwork() });
+        const task = await this.wait(agent.id, result.taskId);
+        return { content: [{ type: "text", text: JSON.stringify({ taskId: task.id, status: task.status, result: task.result,
+          waiting: task.waiting, version: task.sequence, error: task.error }) }], details: {} };
+      } }] : [])];
   }
 }

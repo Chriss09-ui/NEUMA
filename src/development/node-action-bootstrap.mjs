@@ -10,7 +10,7 @@ const call=(capability,args={})=>new Promise((resolve,reject)=>{
  const id='call_'+(++sequence);pending.set(id,{resolve,reject});send({type:'call',id,capability,args});
 });
 const group=(name,methods)=>Object.freeze(Object.fromEntries(methods.map(method=>[method,(args={})=>call(name+'.'+method,args)])));
-const ctx=Object.freeze({web:group('web',['search','fetch']),model:group('model',['call']),connection:group('connection',['call']),
+const ctx=Object.freeze({web:group('web',['search','fetch']),model:group('model',['call']),connection:group('connection',['call','readResult']),
  material:group('material',['list','read','image']),files:group('files',['list','read','write']),state:group('state',['get','set']),
  progress:(value)=>{if(!finished)send({type:'progress',value})}});
 const lines=createInterface({input:process.stdin,crlfDelay:Infinity});
@@ -33,4 +33,4 @@ lines.on('line',async line=>{
 });
 `;
 
-export const ACTION_CAPABILITIES = Object.freeze(["web.search", "web.fetch", "model.call", "connection.call", "material.list", "material.read", "material.image", "files.list", "files.read", "files.write", "state.get", "state.set"]);
+export const ACTION_CAPABILITIES = Object.freeze(["web.search", "web.fetch", "model.call", "connection.call", "connection.readResult", "material.list", "material.read", "material.image", "files.list", "files.read", "files.write", "state.get", "state.set"]);

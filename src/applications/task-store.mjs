@@ -108,6 +108,26 @@ export class ApplicationTaskStore {
       this.event(task, type, patch); await this.save(id, record); return this.view(task);
     });
   }
+  async resume(id, taskId, { expectedVersion, mutationId, input, resolution }, patch = {}) {
+    await this.ready;
+    if (typeof mutationId !== "string" || !/^[\w-]{8,100}$/.test(mutationId)) throw new InputError("继续任务需要稳定的请求编号");
+    const requestHash = createHash("sha256").update(JSON.stringify([input ?? null, resolution ?? null])).digest("hex");
+    return this.serial(id, async () => {
+      const record = await this.record(id), task = record.tasks.find((task) => task.id === taskId);
+      if (!task?.workflowId) throw new InputError("这个任务没有可继续的流程检查点");
+      const receipt = (task.resumeReceipts ?? []).find((item) => item.mutationId === mutationId);
+      if (receipt) {
+        if (receipt.requestHash !== requestHash) throw applicationConflict("请求编号已用于不同的继续操作");
+        return { task: this.view(task), created: false };
+      }
+      if (expectedVersion !== task.sequence) throw applicationConflict("任务状态已变化，请刷新后继续");
+      if (!["waiting_input", "interrupted", "needs_review", "failed"].includes(task.status)) throw applicationConflict("任务当前不能继续");
+      Object.assign(task, json(patch), { status: "queued", error: null, finishedAt: null });
+      task.resumeReceipts = [...(task.resumeReceipts ?? []), { mutationId, requestHash }].slice(-100);
+      this.event(task, "resuming"); await this.save(id, record);
+      return { task: this.view(task), created: true };
+    });
+  }
   async appendArtifact(id, taskId, artifact) {
     await this.ready;
     const clean = json(artifact);

@@ -526,7 +526,8 @@ test("缺少已验证隔离环境时阻塞且不调用任何模型", async (t) =
   const { controller, sessions, architecture } = await fixture(t, { onProbe: () => ({ available: false, kind: "test-fake", reason: "模拟隔离环境不可用" }) });
   const result = await controller.run(architecture);
   assert.equal(result.status, "blocked"); assert.equal(result.delivery, "blocked"); assert.equal(result.package, null);
-  assert.match(result.summary, /隔离环境不可用/); assert.equal(sessions.length, 0);
+  assert.match(result.summary, /待准备环境：本机隔离运行检查未通过/); assert.equal(sessions.length, 0);
+  assert.equal(result.diagnostic.stage, "environment"); assert.equal(result.diagnostic.reason, "模拟隔离环境不可用");
   assert.deepEqual(result.budgets, { corrections: 6, planRevisions: 1, integrationRepairs: 2 });
 });
 

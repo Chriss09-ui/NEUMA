@@ -35,6 +35,23 @@ async function fixture(t, runAction = async ({ input }) => ({ status: "passed", 
   return { service, store, agents, scheduler, resources, lifecycle: (...args) => lifecycle(...args) };
 }
 
+test("版本切换等待已开始的页面状态保存，迟到校验不能跨过更新锁", async (t) => {
+  const { service, store, agents, lifecycle } = await fixture(t);
+  const gate = deferred(), entered = deferred(), original = store.setState.bind(store);
+  store.setState = async (...args) => { entered.resolve(); await gate.promise; return original(...args); };
+  const writing = service.saveState("one", { state: { value: "kept" }, expectedVersion: 0, deliveryVersion: "delivery-v1" });
+  await entered.promise;
+  let interrupted = false;
+  const interrupting = lifecycle({ agentId: "one", type: "build" }).then(() => { interrupted = true; });
+  await Promise.resolve(); assert.equal(interrupted, false);
+  gate.resolve(); await writing; await interrupting;
+  assert.deepEqual((await store.getState("one")).state, { value: "kept" });
+  const current = service.descriptor.bind(service);
+  service.descriptor = async (...args) => { const value = await current(...args); agents.builds = new Map([["one", {}]]); return value; };
+  await assert.rejects(service.saveState("one", { state: { value: "late" }, expectedVersion: 1 }), /正在更新/);
+  assert.deepEqual((await store.getState("one")).state, { value: "kept" });
+});
+
 test("持久应用任务立即返回且不绑定页面请求取消，同一幂等提交只实际执行一次", async (t) => {
   const gate = deferred(), started = deferred(); let calls = 0;
   const { service, store } = await fixture(t, async ({ input }) => { calls++; started.resolve(); await gate.promise; return { status: "passed", output: input }; });
