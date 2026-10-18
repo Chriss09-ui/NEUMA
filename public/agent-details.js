@@ -41,7 +41,7 @@ function renderIdentity() {
 
 function refreshAvailability() {
   const id = currentId(), ready = Boolean(id && runtime?.definition), item = id ? state(id) : null;
-  byId("agent-details-unavailable").hidden = ready || view === "connections";
+  byId("agent-details-unavailable").hidden = ready || ["connections", "services"].includes(view);
   for (const name of ["name", "description", "icon"]) byId(`agent-profile-${name}`).disabled = !ready;
   byId("agent-profile-custom-icon").disabled = !ready;
   byId("agent-avatar-reset").disabled = !ready;
@@ -110,7 +110,7 @@ function selectView(next) {
   const animate = changed && showing(currentId()) && !reducedMotion.matches && typeof content.animate === "function";
   if (changed) stopViewTransitions();
   view = next; panel.dataset.view = view;
-  for (const tab of ["memory", "profile", "connections"]) {
+  for (const tab of ["memory", "profile", "connections", "services"]) {
     byId(`agent-details-${tab}`).hidden = tab !== view;
     byId(`agent-details-${tab}-tab`).setAttribute("aria-pressed", String(tab === view));
   }
@@ -120,6 +120,7 @@ function selectView(next) {
   if (view === "profile") renderProfile();
   if (view === "memory") { renderMemory(); if (runtime.definition) void loadMemory(currentId()); }
   emit("neuma:agent-connections-view", { agentId: currentId(), active: view === "connections" });
+  emit("neuma:agent-services-view", { agentId: currentId(), active: view === "services" });
   if (animate) {
     viewTransitions = [content.animate([
       { opacity: 0, transform: `translateX(${view === "memory" ? 8 : -8}px)` },
@@ -181,6 +182,7 @@ function closePanel({ restoreFocus = true, animate = true } = {}) {
   panelVisibility(false, { animate });
   stopViewTransitions();
   emit("neuma:agent-connections-view", { agentId: id, active: false });
+  emit("neuma:agent-services-view", { agentId: id, active: false });
   emit("neuma:agent-settings-view", { agentId: id, active: false });
   if (restoreFocus && currentId() === id && states.has(id)) byId("agent-panel-toggle").focus({ preventScroll: true });
 }
@@ -396,8 +398,9 @@ byId("agent-profile-form").addEventListener("submit", async (event) => {
 });
 
 byId("agent-panel-toggle").addEventListener("click", () => settingsAgentId ? closePanel() : openPanel("profile"));
-for (const tab of ["memory", "profile", "connections"]) byId(`agent-details-${tab}-tab`).addEventListener("click", () => selectView(tab));
+for (const tab of ["memory", "profile", "connections", "services"]) byId(`agent-details-${tab}-tab`).addEventListener("click", () => selectView(tab));
 document.addEventListener("neuma:agent-connections-open", () => openPanel("connections"));
+document.addEventListener("neuma:agent-services-open", () => openPanel("services"));
 byId("agent-details-close").addEventListener("click", () => closePanel());
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || event.defaultPrevented || !settingsAgentId || document.querySelector("dialog[open]")) return;

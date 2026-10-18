@@ -298,6 +298,11 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
   ];
   const rename = { list_materials: "list_group_materials", read_material: "read_group_material", read_material_image: "read_group_material_image" };
   return [...tools, ...service.materials.tools(groupId).map((value) => ({ ...value, name: rename[value.name], description: value.description.replaceAll("当前 Agent", "当前群"),
+    ...(value.name === "read_material" ? { resolveFile: async (id, callSignal) => {
+      callSignal?.throwIfAborted(); signal.throwIfAborted();
+      service.guard(await service.store.get(groupId), taskId, agentId, generation);
+      await service.requireMaterial(groupId, id); return service.materials.raw(groupId, id);
+    } } : {}),
     execute: async (...args) => {
       signal.throwIfAborted(); const record = await service.store.get(groupId); service.guard(record, taskId, agentId, generation);
       if (value.name === "list_materials") return result(await service.sharedMaterials(groupId));

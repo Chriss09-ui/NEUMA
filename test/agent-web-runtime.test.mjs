@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +33,7 @@ async function fixture(t, { work = async () => {}, web, draft = validDraft(), de
     record.session = session; (role === "worker" ? records : roles).push(record); return session;
   };
   const options = { config: { llmConfigured: true, chatUrl: "https://platform.example/v1/chat/completions", model: "platform-model", apiKey: "fixture-platform" },
-    cwd: root, dataDir: join(root, "data"), sessionFactory, ...(web ? { web } : {}) };
+    cwd: root, dataDir: join(root, "data"), connectionOptions: { credentialKeySource: async () => Buffer.alloc(32, 9) }, sessionFactory, ...(web ? { web } : {}) };
   const agents = new PrototypeAgents(options);
   t.after(async () => { await agents.close(); await rm(root, { recursive: true, force: true }); });
   await agents.build({ id: "alpha", name: "资料助手", draft });
@@ -218,7 +218,7 @@ test("专属模型原始错误不会暴露凭据，专属失败不自动调用�
 
 test("真实 Pi SDK 的工具续轮在模型连接撤销后不会再发 HTTP", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-model-revocation-"));
-  const store = new AgentConnectionStore({ dataDir: join(root, "data") }); let requests = 0, checks = 0;
+  const store = new AgentConnectionStore({ dataDir: join(root, "data"), credentialKeySource: async () => Buffer.alloc(32, 9) }); let requests = 0, checks = 0;
   const model = createServer(async (request, response) => {
     for await (const _ of request) {} requests++;
     response.writeHead(200, { "content-type": "text/event-stream" });
@@ -244,7 +244,7 @@ test("真实 Pi SDK 的工具续轮在模型连接撤销后不会再发 HTTP", a
 
 test("匿名专属模型通过真实 Pi 请求且没有认证头，平台与Bearer不继承匿名标记", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-model-anonymous-")), requests = [];
-  const store = new AgentConnectionStore({ dataDir: join(root, "data") });
+  const store = new AgentConnectionStore({ dataDir: join(root, "data"), credentialKeySource: async () => Buffer.alloc(32, 9) });
   const model = createServer(async (request, response) => {
     for await (const _ of request) {} requests.push(request.headers);
     response.writeHead(200, { "content-type": "text/event-stream" });
@@ -291,4 +291,25 @@ test("专属模型验证状态保存期间取消不能发布迟到完成", async
   const rejected = assert.rejects(pending, (error) => error.diagnostic?.reason === "cancelled");
   await started.promise; await agents.cancel(request.sessionId); release.resolve();
   await rejected;
+});
+
+test("实际业务上传只读取当前智能体材料或任务工作目录，拒绝跨智能体和未共享群材料", async (t) => {
+  const { agents } = await fixture(t), seen = [];
+  const requirements = [{ id: "upload", purpose: "business", required: true, operations: [{ id: "send", method: "POST", path: "/upload", request: { encoding: "multipart" } }] }];
+  agents.connections.fetchImpl = async (_url, options) => { seen.push(await options.body.get("file").text()); return Response.json({ stored: true }); };
+  await agents.connections.save("alpha", { id: "upload", kind: "business", baseUrl: "http://localhost:41000", authType: "none" }, requirements);
+  const own = await agents.materials.upload("alpha", { name: "own.txt", source: Buffer.from("owned material") });
+  const other = await agents.materials.upload("beta", { name: "other.txt", source: Buffer.from("other material") });
+  const workspaceRoot = await agents.workspace("alpha"); await writeFile(join(workspaceRoot, "result.txt"), "owned result");
+  const options = { task: { id: "upload-task", agentId: "alpha", source: { scope: "private" }, allowNetwork: true, input: {} },
+    descriptor: { agent: await agents.get("alpha"), architecture: { design: { connections: requirements } }, manifest: { stateVersion: 1 } },
+    action: { connectionIds: ["upload"] }, connectionSnapshot: await agents.connections.snapshot("alpha"), workspaceRoot,
+    signal: new AbortController().signal, check: async () => {} };
+  const privateCall = await agents.applicationCapabilities(options), send = (fileRef) => ({ capability: "connection.call", args: { connectionId: "upload", operationId: "send", input: { file: { fileRef } } } });
+  await privateCall(send(`material:${own.attachment.id}`)); await privateCall(send("workspace:result.txt"));
+  await assert.rejects(privateCall(send(`material:${other.attachment.id}`)), { reason: "material_missing" });
+  await assert.rejects(privateCall(send("workspace:../private/connections.json")));
+  const groupCall = await agents.applicationCapabilities({ ...options, task: { ...options.task, source: { scope: "group:one:task" } }, materialTools: [] });
+  await assert.rejects(groupCall(send(`material:${own.attachment.id}`)), /已共享/);
+  assert.deepEqual(seen, ["owned material", "owned result"]);
 });

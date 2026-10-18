@@ -394,7 +394,8 @@ async function saveAgent(id) {
   }
   const saving = (async () => {
     try {
-      const result = await agentApi.saveRequirements(id, { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt });
+      const result = await agentApi.saveRequirements(id, { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt,
+        ...(agent.requirementSessionId ? { requirementSessionId: agent.requirementSessionId } : {}) });
       const requirement = normalizeAgentRequirement(result.requirement);
       if (!requirement || requirement.id !== id || agentSourceKey(requirement) !== sourceKey) throw new Error("Agent 需求保存尚未确认");
       let currentSaved = false;
@@ -513,11 +514,16 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
   showError("");
   render();
   try {
+    session.requirementSessionId ??= `req_${crypto.randomUUID()}`;
+    session.requirementVersion ??= 0;
+    if (session.pendingRequest?.message !== message) session.pendingRequest = { id: `turn_${crypto.randomUUID()}`, message };
+    saveSession(browserStorage, session);
     const response = await fetch("/api/requirements/turn", {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/x-ndjson" },
       body: JSON.stringify({ message, draft: session.draft, lastQuestion: session.lastQuestion,
-        userMessages }),
+        userMessages, requirementSessionId: session.requirementSessionId, requirementVersion: session.requirementVersion,
+        requestId: session.pendingRequest.id, ...(activeAgentId ? { agentId: activeAgentId } : {}) }),
       signal: controller.signal,
     });
     httpStatus = response.status;
@@ -538,6 +544,9 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     if (!response.ok) throw new Error(payload.error || "需求整理失败，请重试");
     stage = "update_session";
     session.draft = payload.draft;
+    session.requirementSessionId = payload.requirementSessionId;
+    session.requirementVersion = payload.requirementVersion;
+    delete session.pendingRequest;
     session.status = payload.status;
     session.confirmed = payload.confirmed === true;
     session.lastQuestion = payload.question || payload.confirmationQuestion || "";
@@ -560,11 +569,23 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
       const updated = upsertConfirmedRequirement(agents, activeAgentId, session.draft, crypto.randomUUID());
       agents = updated.items;
       activeAgentId = updated.activeId;
+      agents = agents.map((item) => item.id === activeAgentId ? { ...item, requirementSessionId: session.requirementSessionId } : item);
       buildId = activeAgentId;
     }
     pendingLegacy = null;
   } catch (error) {
     const stopped = controller.signal.aborted || error.reason === "cancelled";
+    if (error.reason === "requirement_conflict" && session.requirementSessionId) {
+      try {
+        const response = await fetch(`/api/requirements/sessions/${encodeURIComponent(session.requirementSessionId)}`);
+        const latest = await response.json();
+        if (response.ok) {
+          Object.assign(session, { draft: latest.draft, status: latest.status, confirmed: latest.confirmed,
+            lastQuestion: latest.question || latest.confirmationQuestion || "", requirementVersion: latest.requirementVersion });
+          delete session.pendingRequest; saveSession(browserStorage, session);
+        }
+      } catch { /* The current draft stays available if recovery cannot reach the local server. */ }
+    }
     user.delivery = stopped ? "stopped" : "failed";
     reply.status = stopped ? "stopped" : "error";
     if (!stopped && !inputEl.value.trim()) { inputEl.value = message; inputEl.dispatchEvent(new Event("input")); }

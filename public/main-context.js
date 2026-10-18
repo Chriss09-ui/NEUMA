@@ -1,5 +1,11 @@
-import { button, internalLinks, node, notice, renderTasks, taskLabels } from "./group-view.js";
+import { button, internalLinks, node, notice, renderTasks } from "./group-view.js";
 import { agentBuildState } from "./agent-runtime.js";
+
+const buildLabels = { checking: "正在读取制作进度…", unchecked: "正在读取制作进度…",
+  building: "正在制作智能体…", designing: "正在设计方案…", evaluating: "正在检查方案…", developing: "正在开发与验收…",
+  needs_connection: "需要配置连接，请打开智能体查看。", needs_development: "制作尚未完成，请打开智能体继续。",
+  needs_input: "需要补充影响交付的关键选择。",
+  cancelled: "制作已停止，可以打开智能体继续。" };
 
 export function createMainContext({ api, current, submit, edit, build }) {
   const byId = (id) => document.getElementById(id);
@@ -68,10 +74,14 @@ export function createMainContext({ api, current, submit, edit, build }) {
     if (hasDraft && !context.confirmed && context.lastQuestion) { const question = node("div", "main-context-question"); question.append(node("h3", "", "当前待确认"), node("p", "", context.lastQuestion)); target.append(question); }
     const actions = node("div", "panel-actions");
     if (!context.confirmed && context.status === "ready") actions.append(button("确认需求并开始制作", () => submit("确认需求"), "primary"));
-    if (context.confirmed && context.agentId) actions.append(button("制作智能体", () => build(context.agentId, context.requirement), "primary"));
+    const handoff = context.buildState?.handoff || context.buildState?.updateStatus?.handoff;
+    if (handoff) actions.append(button("继续澄清需求", () => submit("继续澄清这个智能体的需求"), "primary"));
+    else if (context.confirmed && context.agentId) actions.append(button("制作智能体", () => build(context.agentId, context.requirement), "primary"));
     if (actions.children.length) target.append(actions);
-    if (context.buildState || context.buildStatus) target.append(node("p", "main-context-status", context.buildState?.label || taskLabels[context.buildStatus] || context.buildStatus));
-    else if (context.confirmed) target.append(node("p", "muted-note small", "需求确认后仍需架构评估与运行检查，进度会依据实际状态更新。"));
+    const buildStatus = context.buildState?.status || context.buildStatus;
+    if (buildStatus && buildStatus !== "ready") target.append(node("p", "main-context-status",
+      buildLabels[buildStatus] || "制作尚未完成，请打开智能体查看。"));
+    else if (!buildStatus && context.confirmed) target.append(node("p", "muted-note small", "需求确认后仍需架构评估与运行检查，进度会依据实际状态更新。"));
     const disclosure = (label) => {
       const details = node("details", "panel-disclosure"), summary = node("summary", "", label), mark = node("span", "", "＋");
       const key = `${identity()}:${label}`; details.open = disclosureState.get(key) === true;
@@ -79,6 +89,16 @@ export function createMainContext({ api, current, submit, edit, build }) {
       mark.setAttribute("aria-hidden", "true"); summary.append(mark);
       const body = node("div", "disclosure-content"); details.append(summary, body); target.append(details); return body;
     };
+    const taskItems = (draft.taskSpec?.items || []).filter((item) => item.applicability === "applies" && item.content);
+    if (taskItems.length) {
+      const requirements = disclosure(`具体任务要求（${taskItems.length}项）`), list = node("ul", "task-spec-list");
+      const labels = { input_scale: "输入与规模", processing: "处理要求", delivery: "交付标准", workflow: "工作过程",
+        data_lifecycle: "数据保存与使用", external_conditions: "外部条件" };
+      for (const item of taskItems) {
+        const row = node("li"); row.append(node("strong", "", labels[item.dimension] || "任务要求"), node("p", "", item.content)); list.append(row);
+      }
+      requirements.append(list);
+    }
     const tools = disclosure("保存与导出"), toolActions = node("div", "panel-actions");
     toolActions.append(button("继续修改", () => edit("我想修改这项需求："), "secondary"));
     const exportButton = button("导出需求 JSON", () => {

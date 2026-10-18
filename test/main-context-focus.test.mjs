@@ -104,9 +104,56 @@ test("保存与导出展开态跨制作状态更新保留，不串入其他主�
     candidateHash: "fixture-candidate", status: "designing", delivery: "blocked", summary: "正在设计研究方案", issues: [] } };
   await ui.poll();
   assert.notEqual(disclosure(), original); assert.equal(disclosure().open, true);
-  assert.match(ui.text(), /正在设计研究方案/);
+  assert.match(ui.text(), /正在设计方案/);
+  assert.doesNotMatch(ui.text(), /正在设计研究方案/);
   ui.select("main-two"); ui.panel.reset(context); await settle(); assert.equal(disclosure().open, false);
   ui.select("main-one"); ui.panel.reset(context); await settle(); assert.equal(disclosure().open, true);
+  ui.panel.reset(null);
+});
+
+test("需求说明在智能体就绪后移除状态段，评估详情和更新报告不进入面板", async () => {
+  const draft = validDraft("核对共同材料"), requirement = { id: "analyst", name: "研究助手", draft };
+  const detail = "内部评估与运行假设。".repeat(100);
+  const architecture = { agentId: requirement.id, name: requirement.name, draft, version: 1, candidateHash: "active-candidate",
+    status: "passed", delivery: "ready", summary: detail, issues: [{ description: detail, remedy: detail }] };
+  const definition = { ...requirement, mode: "designed", status: "ready", revision: 1,
+    architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash } };
+  let snapshot = { agent: definition, architecture };
+  const ui = setup({ inspectAgent: async () => structuredClone(snapshot) });
+  ui.panel.set({ type: "requirements", agentId: requirement.id, draft, requirement, confirmed: true, status: "needs_build" }, { reveal: true });
+  await settle();
+  assert.equal(ui.panel.capture().context.buildState.status, "ready");
+  assert.equal(ui.get("main-context-content").querySelectorAll(".main-context-status").length, 0);
+  assert.equal(ui.text().includes(detail), false);
+  assert.ok(ui.button("制作智能体"));
+  snapshot = { agent: definition, architecture: { ...architecture, version: 2, candidateHash: "failed-update", status: "failed", delivery: "blocked" },
+    activeRuntime: { architecture, development: null } };
+  await ui.poll();
+  assert.equal(ui.panel.capture().context.buildState.updateStatus.status, "failed");
+  assert.equal(ui.get("main-context-content").querySelectorAll(".main-context-status").length, 0);
+  assert.equal(ui.text().includes(detail), false);
+  ui.panel.runtime({ agentId: requirement.id, status: "ready", label: detail });
+  assert.equal(ui.get("main-context-content").querySelectorAll(".main-context-status").length, 0);
+  ui.panel.reset(null);
+});
+
+test("需求说明只显示简短制作进度，失败与待连接不展开内部评估正文", async () => {
+  const draft = validDraft("核对共同材料"), requirement = { id: "analyst", name: "研究助手", draft };
+  const detail = "内部检查依据与修复建议。".repeat(100);
+  let architecture = { agentId: requirement.id, name: requirement.name, draft, version: 1, candidateHash: "fixture-candidate",
+    status: "designing", delivery: "blocked", summary: detail, issues: [{ description: detail, remedy: detail }] };
+  const ui = setup({ inspectAgent: async () => ({ agent: null, architecture: structuredClone(architecture) }) });
+  ui.panel.set({ type: "requirements", agentId: requirement.id, draft, requirement, confirmed: true, status: "needs_build" }, { reveal: true });
+  await settle();
+  const status = () => ui.get("main-context-content").querySelector(".main-context-status").textContent;
+  assert.match(status(), /正在设计/); assert.ok(status().length < 50);
+  assert.equal(ui.text().includes(detail), false);
+  architecture = { ...architecture, status: "failed" }; await ui.poll();
+  assert.match(status(), /查看/); assert.ok(status().length < 50);
+  assert.equal(ui.text().includes(detail), false);
+  ui.panel.runtime({ agentId: requirement.id, status: "needs_connection", label: detail });
+  assert.match(status(), /配置连接/); assert.ok(status().length < 50);
+  assert.equal(ui.text().includes(detail), false);
   ui.panel.reset(null);
 });
 
@@ -119,5 +166,28 @@ test("群任务状态变化仍更新结果并移除已结束任务的停止按�
   await ui.poll();
   assert.match(ui.text(), /已完成/); assert.match(ui.text(), /共同材料已核对/);
   assert.equal(ui.get("main-context-content").querySelectorAll("button").some((item) => item.textContent === "停止任务"), false);
+  ui.panel.reset(null);
+});
+
+test("具体任务要求默认折叠，刷新保留展开状态，不展示内部评审长文", async () => {
+  const draft = validDraft("处理用户材料");
+  draft.taskSpec = { version: 1, items: [{ id: "scale", dimension: "input_scale", content: "每批约五十份，支持分批处理", applicability: "applies" }] };
+  const ui = setup({ inspectAgent: async () => ({ agent: null }) });
+  ui.panel.set({ type: "requirements", agentId: "agent", draft, confirmed: false, status: "ready" }, { reveal: true });
+  const detail = ui.get("main-context-content").querySelectorAll("details").find((item) => item.children[0].textContent.includes("具体任务要求"));
+  assert.ok(detail); assert.equal(detail.open, false); assert.match(ui.text(), /每批约五十份/);
+  detail.toggle(true);
+  ui.panel.runtime({ agentId: "agent", status: "evaluating", label: "不能展示的内部评审长文" });
+  const refreshed = ui.get("main-context-content").querySelectorAll("details").find((item) => item.children[0].textContent.includes("具体任务要求"));
+  assert.equal(refreshed.open, true); assert.doesNotMatch(ui.text(), /不能展示的内部评审长文/); ui.panel.reset(null);
+});
+
+test("架构返需提供继续澄清入口，活动旧版不掩盖更新的返需", async () => {
+  const draft = validDraft("处理用户材料"), ui = setup({ inspectAgent: async () => ({ agent: null }) });
+  ui.panel.set({ type: "requirements", agentId: "agent", draft, confirmed: false, status: "needs_input" }, { reveal: true });
+  ui.panel.runtime({ agentId: "agent", status: "ready", updateStatus: { status: "needs_input", handoff: {
+    id: "handoff", issues: [{ question: "需要保留历史结果吗？" }] } } });
+  assert.ok(ui.button("继续澄清需求"));
+  assert.equal(ui.get("main-context-content").querySelectorAll("button").some((item) => item.textContent === "制作智能体"), false);
   ui.panel.reset(null);
 });

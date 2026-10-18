@@ -61,8 +61,8 @@ test("构建保留原始需求、原子持久化，等价需求复用定义，�
   const first = await agents.build(input());
   assert.equal(first.agent.mode, "designed"); assert.equal(first.agent.status, "ready"); assert.equal(first.agent.revision, 1);
   assert.deepEqual(first.agent.draft, draft()); assert.equal(first.agent.fingerprint, undefined);
-  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "submit_architecture"]);
-  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["submit_architecture_review"]);
+  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture"]);
+  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["request_requirements", "submit_architecture_review"]);
   assert.equal(first.architecture.status, "passed"); assert.equal(first.architecture.delivery, "ready");
   assert.deepEqual(first.agent.architectureRef, { version: first.architecture.version, candidateHash: designHash(first.architecture.design) });
   assert.notEqual(records[0].session, records.reviews[0].session);
@@ -472,8 +472,8 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
     const names = body.tools.map((tool) => tool.function.name), builder = names.includes("submit_architecture"), reviewer = names.includes("submit_architecture_review");
-    const expectedTools = builder ? ["delegate_module", "search_technical_sources", "submit_architecture", "web_fetch", "web_search"]
-      : reviewer ? ["submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
+    const expectedTools = builder ? ["delegate_module", "request_requirements", "search_technical_sources", "submit_architecture", "web_fetch", "web_search"]
+      : reviewer ? ["request_requirements", "submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
     assert.deepEqual(names.sort(), expectedTools);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",

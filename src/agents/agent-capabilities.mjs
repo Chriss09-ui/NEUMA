@@ -69,7 +69,7 @@ export function groupCapabilityFacts({ agent, agentId = agent?.id, architecture,
     reason: workflowChecked ? "流程交付和快照已核对，实际业务结果仍需本次执行验证" : "专用流程交付未能核对，不能执行",
     verification: workflowChecked ? verification("delivery_checked", agent.updatedAt, "专用流程交付和代码快照已核对，不代表本次业务输入已经成功") : verification(),
   });
-  if (agent?.execution?.kind === "node-action") {
+  if (["node-action", "managed-service"].includes(agent?.execution?.kind)) {
     const manifest = application?.manifest;
     if (!manifest || manifest.actions.length > 0) add("run_application_action", "应用动作入口；必须选择下列具体 action 能力，入口存在不代表所有动作都具备执行条件", {
       label: "执行应用动作", availability: manifest ? "conditional" : deliveryFailed ? "unavailable" : "unknown",
