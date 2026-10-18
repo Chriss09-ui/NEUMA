@@ -33,6 +33,11 @@ export const PLAN_V2_SCHEMA = object({ ...LEGACY_PLAN_SCHEMA.properties,
   schemaVersion: { type: "integer", enum: [2] }, runtime: choice("node-action"),
   application: { type: "object", properties: {}, required: [], additionalProperties: true }, cases: list(actionCase, 1, 200),
 });
+export const PLAN_V3_SCHEMA = object({ ...PLAN_V2_SCHEMA.properties,
+  schemaVersion: { type: "integer", enum: [3] }, runtime: choice("node-action", "managed-service"),
+  cases: list({ ...actionCase, properties: { ...actionCase.properties,
+    workflowInputs: list(object({ stepId: identifier, inputJson: text(60_000) }), 0, 100) } }, 1, 200),
+});
 export const PLAN_SCHEMA = LEGACY_PLAN_SCHEMA;
 
 export const REVIEW_SCHEMA = object({
@@ -110,17 +115,35 @@ function safeAssertionPath(value) {
 }
 
 export function validatePlan(value, { architecture, previousPlan } = {}) {
+  if (architecture?.design?.schemaVersion === 3 && value?.schemaVersion !== 3) fail("v3 架构必须使用 v3 研发计划");
   if (architecture?.design?.schemaVersion === 2 && (value?.schemaVersion !== 2 || value?.runtime !== "node-action")) {
     fail("已批准的 v2 架构必须使用 schemaVersion=2 和 node-action，不能降级为旧执行协议");
   }
-  validateSchema(value, value?.schemaVersion === 2 ? PLAN_V2_SCHEMA : LEGACY_PLAN_SCHEMA, "plan");
-  if (value.schemaVersion === 2) {
+  validateSchema(value, value?.schemaVersion === 3 ? PLAN_V3_SCHEMA : value?.schemaVersion === 2 ? PLAN_V2_SCHEMA : LEGACY_PLAN_SCHEMA, "plan");
+  if (value.schemaVersion >= 2) {
     validateApplicationManifest(value.application, { allowUnverified: true });
+    if (value.runtime !== value.application.runtime) fail("计划与应用运行协议不一致");
+    if (architecture?.design?.schemaVersion === 3) {
+      const execution = architecture.design.execution;
+      if (execution.hosting === "builtin" ? value.runtime !== "node-action" : value.runtime !== "managed-service"
+        || value.application.service?.language !== execution.language || value.application.service?.host !== execution.hosting)
+        fail("研发运行语言和托管方式必须保持已评审选择");
+    }
     if (value.application.entrypoint !== value.entrypoint) fail("应用入口与研发入口不一致");
     if (architecture?.design?.interaction && architecture.design.interaction.page !== Boolean(value.application.page)) fail("页面交付必须匹配已评估的交互形式");
     const connections = new Set((architecture?.design?.connections ?? []).map((item) => item.id));
     for (const action of value.application.actions) for (const id of action.connectionIds) if (!connections.has(id)) fail("动作引用了架构未设计的连接");
     for (const test of value.cases) {
+      if (test.workflowInputs) {
+        const workflow = value.application.service?.workflow;
+        if (!workflow || test.actionId !== workflow.entryActionId) fail("流程回复只能用于已冻结的流程入口");
+        if (new Set(test.workflowInputs.map((item) => item.stepId)).size !== test.workflowInputs.length) fail("流程回复步骤重复");
+        for (const reply of test.workflowInputs) {
+          const step = workflow.steps.find((step) => step.id === reply.stepId);
+          if (!step?.waitForInput) fail("流程回复引用没有等待输入的步骤");
+          validateActionInput({ inputSchema: step.waitForInput.inputSchema }, parsedExpected(reply.inputJson));
+        }
+      }
       if (test.kind === "node-check") {
         if (!value.application.page || Object.hasOwn(test, "actionId") || Object.hasOwn(test, "mocks")) fail("Node 检查只用于页面验收，不能声明业务动作或能力替身");
         safeRelativePath(test.entrypoint);
@@ -129,7 +152,7 @@ export function validatePlan(value, { architecture, previousPlan } = {}) {
         continue;
       }
       if (Object.hasOwn(test, "entrypoint") || !Array.isArray(test.mocks)) fail("动作验收必须提供能力替身列表，不能指定其他入口");
-      const action = value.application.actions.find((item) => item.id === test.actionId);
+      const action = (value.application.service?.operations ?? value.application.actions).find((item) => item.id === test.actionId);
       if (!action) fail("验收用例引用不存在的动作");
       validateActionInput(action, parsedExpected(test.input));
       for (const mock of test.mocks) {
@@ -138,6 +161,10 @@ export function validatePlan(value, { architecture, previousPlan } = {}) {
       }
     }
     if (value.application.actions.some((action) => !value.cases.some((item) => item.kind !== "node-check" && item.actionId === action.id))) fail("每个动作必须有实际验收用例");
+    if (value.application.service?.migration) {
+      const migration = value.application.service.migration;
+      for (const id of [migration.actionId, migration.verifyActionId]) if (!value.cases.some((item) => item.actionId === id)) fail("迁移与迁移验证动作必须分别有实际验收用例");
+    }
   }
   const requirements = architecture?.requirements;
   const acceptance = architecture?.design?.acceptance;
@@ -165,7 +192,8 @@ export function validatePlan(value, { architecture, previousPlan } = {}) {
     if (!files.has(safeRelativePath(resource.path))) fail("页面资源必须包含在任务文件清单中");
   }
   safeRelativePath(value.entrypoint);
-  if (!/\.(?:mjs|js)$/.test(value.entrypoint) || !files.has(value.entrypoint)) fail("Node 入口必须是任务文件清单中的 .mjs 或 .js 文件");
+  const entryPattern = value.application?.service?.language === "python" ? /\.py$/ : /\.(?:mjs|js|cjs)$/;
+  if (!entryPattern.test(value.entrypoint) || !files.has(value.entrypoint)) fail("运行入口必须匹配所选语言并包含在任务文件清单中");
   const visiting = new Set(), visited = new Set();
   function visit(id) {
     if (visiting.has(id)) fail("任务依赖存在循环");
@@ -202,7 +230,8 @@ export function validatePlan(value, { architecture, previousPlan } = {}) {
       const current = cases.get(old.id);
       if (!current || current.acceptanceId !== old.acceptanceId || current.input !== old.input || current.actionId !== old.actionId
         || (current.kind ?? "action") !== (old.kind ?? "action") || current.entrypoint !== old.entrypoint
-        || hashValue(current.mocks ?? []) !== hashValue(old.mocks ?? [])) fail("修订计划不能删除或替换已确认的验收用例");
+        || hashValue(current.mocks ?? []) !== hashValue(old.mocks ?? [])
+        || hashValue(current.workflowInputs ?? []) !== hashValue(old.workflowInputs ?? [])) fail("修订计划不能删除或替换已确认的验收用例");
       for (const assertion of old.assertions) {
         const unchanged = current.assertions.find((entry) => entry.path === assertion.path);
         if (!unchanged || hashValue(parsedExpected(unchanged.expectedJson)) !== hashValue(parsedExpected(assertion.expectedJson))) {
