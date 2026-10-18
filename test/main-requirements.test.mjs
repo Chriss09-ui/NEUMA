@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { CONFIRMATION_QUESTION, InputError } from "../src/requirements/core.mjs";
 import { advanceRequirement, prepareRequirement, rememberRequirement, requirementContext } from "../src/main/main-requirements.mjs";
 import { validDraft } from "./helpers/architecture.mjs";
+import { sufficientPreflight } from "./helpers/consultation.mjs";
 
-const providers = { generateDraft: async () => ({ draft: validDraft("核对用户提供的会议记录"), proposedGap: "none", question: "" }) };
+const providers = { preflight: sufficientPreflight, generateDraft: async () => ({ draft: validDraft("核对用户提供的会议记录"), proposedGap: "none", question: "" }) };
 const agents = { getRequirements: async () => ({ requirements: [{ id: "existing", name: "已有助手", draft: validDraft("已有任务") }] }),
   saveRequirements: async (id, input) => ({ requirement: { id, ...input, updatedAt: "2026-10-11T00:00:00Z" } }) };
 
@@ -23,7 +24,7 @@ test("原需求确认规则保持，未确认不保存，明确确认保存同�
   let saved = 0, generated = 0;
   const customAgents = { ...agents, async saveRequirements(id, input) { saved++; return agents.saveRequirements(id, input); } };
   const draft = await prepareRequirement({ record: {}, conversationId: "one", mutationId: "new", mode: "new" }, customAgents);
-  const drafted = await advanceRequirement(draft, "创建一个会议助手", { generateDraft: async (input) => { generated++; return providers.generateDraft(input); } }, { agents: customAgents });
+  const drafted = await advanceRequirement(draft, "创建一个会议助手", { preflight: sufficientPreflight, generateDraft: async (input) => { generated++; return providers.generateDraft(input); } }, { agents: customAgents });
   assert.equal(drafted.requirement.status, "ready"); assert.equal(drafted.requirement.lastQuestion, CONFIRMATION_QUESTION);
   assert.equal(saved, 0); assert.match(drafted.reply, /这份需求可以确认吗/);
   const confirmed = await advanceRequirement(drafted.requirement, "确认需求", { generateDraft: async () => { throw new Error("明确确认不应请求模型"); } }, { agents: customAgents });
@@ -55,8 +56,8 @@ test("显式迭代已确认草稿读取另一会话保存的新需求，确认�
   assert.equal(reads, 1); assert.equal(edited.agentId, "existing"); assert.deepEqual(edited.draft, latest.draft);
   assert.deepEqual(edited.savedRequirement, latest); assert.equal(edited.confirmed, false); assert.equal(edited.status, "ready");
   assert.equal(edited.version, confirmed.requirement.version + 1); assert.equal(edited.createdAt, confirmed.requirement.createdAt);
-  await advanceRequirement(edited, "确认需求", { generateDraft: async () => assert.fail("确认不请求模型") }, { agents: currentAgents });
-  assert.deepEqual(saved.draft, latest.draft); assert.deepEqual(record, before);
+  await advanceRequirement(edited, "确认需求", { preflight: sufficientPreflight, generateDraft: async () => assert.fail("确认不请求需求重写模型") }, { agents: currentAgents });
+  assert.deepEqual(saved.draft, { ...latest.draft, taskSpec: { version: 1, items: [] } }); assert.deepEqual(record, before);
 });
 
 test("显式迭代保留当前会话未确认的修改，不用已保存版本覆盖工作草稿", async () => {

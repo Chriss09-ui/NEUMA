@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "./agent-storage.mjs";
 
@@ -137,7 +138,7 @@ export class AgentLibrary {
     return { requirements: requirements.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)) };
   }
 
-  saveRequirement(id, input) {
+  saveRequirement(id, input, metadata = {}) {
     const value = requirement(id, input);
     return this.queue(id, async () => {
       if (await this.deleted(id)) {
@@ -145,12 +146,22 @@ export class AgentLibrary {
         throw new InputError("这个 Agent 已删除，请创建新的 Agent");
       }
       const previous = await this.storage.readJson(id, "requirements.json");
+      if (metadata.confirmationReceipt?.requestId && previous?.confirmationReceipt?.requestId === metadata.confirmationReceipt.requestId) {
+        if (!isDeepStrictEqual(previous.draft, value.draft) || previous.name !== value.name) throw new InputError("这次确认已用于其他需求内容，请刷新后重试");
+        return { requirement: requirement(id, previous) };
+      }
       if (input.importOnly && previous) {
         const browserIsNewer = previous._legacyFallback === "definition" || (previous._legacyFallback === "architecture"
           && Date.parse(value.updatedAt) > Date.parse(previous.updatedAt));
         if (!browserIsNewer) return { requirement: requirement(id, previous) };
       }
-      await this.storage.writeJson(id, "requirements.json", value);
+      const preserved = previous && isDeepStrictEqual(previous.draft, value.draft) && previous.name === value.name ? previous : {};
+      const confirmationReceipt = metadata.confirmationReceipt ?? preserved.confirmationReceipt;
+      const consultation = metadata.consultation ?? preserved.consultation;
+      const saved = { ...value, ...(confirmationReceipt ? { confirmationReceipt: structuredClone(confirmationReceipt) } : {}),
+        ...(consultation ? { consultation: structuredClone(consultation) } : {}) };
+      if (Buffer.byteLength(JSON.stringify(saved)) > 2 * 1024 * 1024) throw new InputError("需求协商记录超过保存上限");
+      await this.storage.writeJson(id, "requirements.json", saved);
       return { requirement: structuredClone(value) };
     });
   }

@@ -1,4 +1,6 @@
 import { InputError } from "../requirements/core.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { validateServiceManifest } from "../services/service-contract.mjs";
 
 export const APPLICATION_PROTOCOL_VERSION = 2;
 const id = /^[A-Za-z][A-Za-z0-9_-]{0,79}$/;
@@ -69,10 +71,13 @@ export const validateActionInput = (action, value) => validateActionValue(value,
 export const validateActionOutput = (action, value) => validateActionValue(value, action.outputSchema, "output");
 
 export function validateApplicationManifest(value, { snapshot, allowUnverified = false } = {}) {
-  fields(value, ["protocolVersion", "runtime", "entrypoint", "page", "actions", "stateVersion", "evidenceIds"], "manifest");
-  if (value.protocolVersion !== 2 || value.runtime !== "node-action" || !Number.isSafeInteger(value.stateVersion) || value.stateVersion < 1) fail("协议或状态版本无效");
+  const managed = value?.protocolVersion === 3;
+  fields(value, ["protocolVersion", "runtime", "entrypoint", "page", "actions", "stateVersion", "evidenceIds", ...(managed ? ["service"] : [])], "manifest");
+  if (!(managed ? value.runtime === "managed-service" : value.protocolVersion === 2 && value.runtime === "node-action")
+    || !Number.isSafeInteger(value.stateVersion) || value.stateVersion < 1) fail("协议或状态版本无效");
   safePath(value.entrypoint);
-  if (!/\.(mjs|js)$/.test(value.entrypoint)) fail("后端入口必须为 Node 模块");
+  const service = managed ? validateServiceManifest(value.service) : null;
+  if (managed ? service.entrypoint !== value.entrypoint : !/\.(mjs|js)$/.test(value.entrypoint)) fail("后端入口与运行协议不一致");
   const files = snapshot ? new Map(snapshot.files.map((file) => [file.path, file])) : null;
   if (files && !files.has(value.entrypoint)) fail("后端入口不在验收快照中");
   if (value.page !== null) {
@@ -96,6 +101,13 @@ export function validateApplicationManifest(value, { snapshot, allowUnverified =
     unique(action.connectionIds, "连接依赖");
   }
   unique(value.actions.map((action) => action.id), "动作标识");
+  const publicOperations = service?.operations.filter((operation) => operation.visibility !== "internal");
+  if (service && service.dataVersion !== value.stateVersion) fail("服务数据版本与应用状态版本必须一致");
+  if (service && (publicOperations.length !== value.actions.length || publicOperations.some((operation) => {
+    const action = value.actions.find((item) => item.id === operation.id);
+    return !action || !isDeepStrictEqual(action.inputSchema, operation.inputSchema) || !isDeepStrictEqual(action.outputSchema, operation.outputSchema)
+      || !isDeepStrictEqual([...action.connectionIds].sort(), [...(operation.connectionIds ?? [])].sort());
+  }))) fail("服务动作与应用公开契约不一致");
   if (!Array.isArray(value.evidenceIds) || (!allowUnverified && !value.evidenceIds.length) || value.evidenceIds.length > 200
     || value.evidenceIds.some((item) => typeof item !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(item))) fail("验收证据引用无效");
   unique(value.evidenceIds, "验收证据");

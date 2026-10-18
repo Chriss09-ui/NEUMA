@@ -463,7 +463,7 @@ test("旧记录没有平台元数据仍按历史状态读取，不自动重评�
   assert.equal(await readFile(path, "utf8"), before, "读取不重写历史记录");
 });
 
-test("持久化的 v1 平台记录保留原候选与历史结果，主动重设计才使用 v2 联网目录", async (t) => {
+test("持久化的 v1 平台记录保留原候选与历史结果，主动重设计才使用 v4 平台契约", async (t) => {
   const { designer, config, sessions } = await fixture(t, async ({ record, submit }) => record.role === "designer"
     ? submit(validDesign(record.payload.requirements)) : submit(passingReview(record.payload.candidateHash)));
   const result = await designer.design(definition());
@@ -490,7 +490,7 @@ test("持久化的 v1 平台记录保留原候选与历史结果，主动重设�
   assert.equal(await readFile(path, "utf8"), before);
   const next = await restarted.design(definition());
   assert.equal(next.version, legacy.version + 1);
-  assert.equal(next.platformContractVersion, 3);
+  assert.equal(next.platformContractVersion, 4);
   assert.notEqual(next.platformHash, legacy.platformHash);
   assert.equal(sessions.length, 4);
   const stored = JSON.parse(await readFile(path, "utf8"));

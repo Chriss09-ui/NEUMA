@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { MainAgent } from "../src/main/main-agent.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft } from "./helpers/architecture.mjs";
+import { sufficientPreflight } from "./helpers/consultation.mjs";
 import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
@@ -73,7 +74,7 @@ async function fixture(t, onPrompt, options = {}) {
     async forward(cid, groupId, ids, metadata) { calls.push({ type: "forward", cid, groupId, ids, metadata }); return { attachmentIds: ids.map((value) => `copy_${value}`) }; },
     async close() {},
   };
-  const providers = { generateDraft: async () => ({ draft: validDraft("按用户本轮目标整理材料"), proposedGap: "none", question: "" }) };
+  const providers = { preflight: sufficientPreflight, generateDraft: async () => ({ draft: validDraft("按用户本轮目标整理材料"), proposedGap: "none", question: "" }) };
   const main = new MainAgent({ config, dataDir, agents, collaboration, mainMaterials, getRequirementProviders: () => providers, sessionFactory: model(records, onPrompt), ...options });
   await main.ready; t.after(async () => { await main.close(); await rm(root, { recursive: true, force: true }); });
   const { conversation } = await main.createConversation({ mutationId: "create_once" });
@@ -423,7 +424,7 @@ test("旧主对话重新迭代读取其他会话确认的新需求，快捷确�
   const editing = await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "latest_edit" });
   assert.deepEqual(editing.context.draft, updated.draft); assert.deepEqual(editing.context.savedRequirement, updated);
   const result = await f.main.prompt(f.input("确认需求", "confirm_latest"));
-  assert.deepEqual(f.requirements.get("worker").draft, updated.draft); assert.equal(result.context.agentId, "worker");
+  assert.deepEqual(f.requirements.get("worker").draft, { ...updated.draft, taskSpec: { version: 1, items: [] } }); assert.equal(result.context.agentId, "worker");
   assert.equal(f.records.length, 0); assert.equal(result.actions[0].type, "build_agent");
 });
 
