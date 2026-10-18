@@ -14,7 +14,7 @@ const requirements = [{ id: "orders", purpose: "business", required: true, descr
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-connections-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  return { dataDir, store: new AgentConnectionStore({ dataDir, ...options }) };
+  return { dataDir, store: new AgentConnectionStore({ dataDir, credentialKeySource: async () => Buffer.alloc(32, 7), ...options }) };
 }
 
 test("connections stay per agent, redacted and private; failed save preserves prior state", async (t) => {
@@ -25,7 +25,7 @@ test("connections stay per agent, redacted and private; failed save preserves pr
   assert.deepEqual((await store.list("beta")).connections, []);
   assert.equal(JSON.stringify(await store.snapshot("alpha")).includes(secret), false);
   const path = join(dataDir, "agents/alpha/private/connections.json");
-  assert.equal((await stat(path)).mode & 0o777, 0o600); assert.ok((await readFile(path, "utf8")).includes(secret));
+  assert.equal((await stat(path)).mode & 0o777, 0o600); assert.equal((await readFile(path, "utf8")).includes(secret), false);
   await assert.rejects(store.save("alpha", { id: "search", kind: "search", provider: "tavily", secret: "changed", expectedVersion: 0 }), { reason: "connection_conflict" });
   const write = store.storage.writeJson; store.storage.writeJson = async () => { throw new Error("disk failed"); };
   await assert.rejects(store.save("alpha", { id: "search", kind: "search", provider: "tavily", secret: "changed" }));
