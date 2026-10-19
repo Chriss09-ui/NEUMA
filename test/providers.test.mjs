@@ -8,7 +8,7 @@ const config = {
   model: "example-model",
   apiKey: "test-key",
   jevApiKey: "test-jev-key",
-  jevModel: "jev-1.13.0",
+  jevModel: "jev-1.14.0",
   llmConfigured: true,
   jevConfigured: true,
 };
@@ -203,7 +203,7 @@ test("Jev 每轮只发一个含场景与任务判断的结构化请求", async (
   const fetchImpl = async (url, init) => {
     calls++;
     seen = { url, body: JSON.parse(init.body), authorization: init.headers.authorization };
-    return new Response(JSON.stringify({ model: "jev-1.13.0", answers: {} }), {
+    return new Response(JSON.stringify({ model: "jev-1.14.0", answers: {} }), {
       status: 200, headers: { "content-type": "application/json" },
     });
   };
@@ -211,7 +211,7 @@ test("Jev 每轮只发一个含场景与任务判断的结构化请求", async (
   await judgeJev({ message: "创建周报助手", draft: {} });
   assert.equal(calls, 1);
   assert.equal(seen.url, "https://api.typesafe.ai/v1/systemone");
-  assert.equal(seen.body.model, "jev-1.13.0");
+  assert.equal(seen.body.model, "jev-1.14.0");
   assert.equal(Object.keys(seen.body.questions).length, 10);
   assert.equal(seen.body.questions.scenario_clear.type, "noul");
   assert.equal(seen.body.questions.task_clear.type, "noul");
