@@ -112,7 +112,7 @@ export function getProviderConfig(env = process.env) {
   const model = configValue(env, "NEUMA_LLM_MODEL");
   const apiKey = configValue(env, "NEUMA_LLM_API_KEY");
   const jevApiKey = configValue(env, "TYPESAFE_API_KEY");
-  const jevModel = configValue(env, "TYPESAFE_MODEL") || "jev-1.13.0";
+  const jevModel = configValue(env, "TYPESAFE_MODEL") || "jev-1.14.0";
   const configuredTimeout = Number(configValue(env, "NEUMA_LLM_TIMEOUT_MS"));
   const llmTimeoutMs = Number.isInteger(configuredTimeout)
     && configuredTimeout >= 10_000 && configuredTimeout <= 300_000
