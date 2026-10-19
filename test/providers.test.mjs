@@ -21,6 +21,12 @@ test("兼容模型返回无效 JSON 时报告错误", async () => {
   await assert.rejects(generateDraft({ message: "创建助手", previousDraft: {}, lastQuestion: "" }), ProviderError);
 });
 
+test("Jev 默认使用固定的 1.14 版本，显式配置仍然优先", () => {
+  assert.equal(getProviderConfig({}).jevModel, "jev-1.14.0");
+  assert.equal(getProviderConfig({ TYPESAFE_MODEL: "  " }).jevModel, "jev-1.14.0");
+  assert.equal(getProviderConfig({ TYPESAFE_MODEL: " jev-1.13.0 " }).jevModel, "jev-1.13.0");
+});
+
 test("Pro 请求默认等待 90 秒，并允许合理范围内配置", () => {
   assert.equal(getProviderConfig({}).llmTimeoutMs, 90_000);
   assert.equal(getProviderConfig({ NEUMA_LLM_TIMEOUT_MS: "120000" }).llmTimeoutMs, 120_000);

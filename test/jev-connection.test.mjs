@@ -55,11 +55,11 @@ test("Jev 测试发送现有 TypeSafe 判断协议，不调用兼容模型", asy
 
 test("Jev 不依赖兼容模型配置，缺省 Jev 模型沿用现有默认值", async () => {
   const result = await testJevConnection({ jevApiKey: config.jevApiKey }, {}, { fetchImpl: async (_url, init) => {
-    assert.equal(JSON.parse(init.body).model, "jev-1.13.0");
+    assert.equal(JSON.parse(init.body).model, "jev-1.14.0");
     return reply();
   } });
   assert.equal(result.ok, true);
-  assert.equal(result.model, "jev-1.13.0");
+  assert.equal(result.model, "jev-1.14.0");
 });
 
 test("Jev 接受临时模型与密钥，空密钥继续使用保存配置", async () => {
@@ -106,7 +106,7 @@ test("Jev 复用设置校验，只接受 Jev 字段和对应清除选项", async
   }
   assert.equal(calls, 0);
   const resetDefault = await testJevConnection(config, { jevModel: "" }, { fetchImpl: success });
-  assert.equal(resetDefault.model, "jev-1.13.0");
+  assert.equal(resetDefault.model, "jev-1.14.0");
 });
 
 test("Jev 的有效 noul 判断即为连通，0 和中间值也成功", async () => {
