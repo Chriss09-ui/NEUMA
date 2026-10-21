@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "kind": "deidentified-minimal-public-failure-patterns",
+    "exactTranscript": false,
+    "deliveryEvidence": false,
+    "description": "Derived from saved public submission diagnostics and tool results. Business values, identities and unrelated fields are replaced; response bodies were not retained in the source record."
+  },
+  "unsubmittedReview": {
+    "source": { "caseAlias": "A", "architectureVersion": 22 },
+    "observed": {
+      "modelCalls": 2,
+      "formalSubmissionAttempts": 0,
+      "finalReason": "submission_incomplete",
+      "diagnostics": [
+        { "status": "ineligible", "reason": "schema_rejected", "reasons": ["required_field", "unknown_field"] },
+        { "status": "eligible_unsubmitted", "reason": "schema_valid_unsubmitted" }
+      ]
+    },
+    "firstResponseMutations": { "omitCandidateHash": true, "unknownCheckField": "unsupportedDiagnostic" },
+    "secondResponse": { "verdict": "revise", "failedCheck": "verification", "summary": "Recorded failure-shape replay; no formal tool submission." }
+  },
+  "computedPlaceholder": {
+    "source": { "caseAlias": "A", "architectureVersions": [20, 21, 22, 23], "decisionId": "D8_placeholder_mock_integrity" },
+    "recordedAssumption": "The harness expands computed placeholders and compares the generated text.",
+    "claimedDynamicPlaceholders": true,
+    "guidePointer": "/adapters/action/executionFacts/dynamicPlaceholders",
+    "args": { "file": "output.json", "content": "<computed-result-json>" },
+    "receipt": { "saved": true, "integrity": { "sha256": "<computed-result-json-sha256>", "bytes": 0, "utf16Units": 0 } }
+  },
+  "legalInputAssignedToRejection": {
+    "source": { "caseAlias": "B", "kind": "public-save-plan-cases-failure" },
+    "observedReason": "input_rejection_not_rejected",
+    "originalObservedMeasurement": { "target": "task-envelope", "bytes": 448, "limit": 131072 },
+    "inputSchema": { "type": "object", "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 10 } }, "required": ["value"], "additionalProperties": false },
+    "input": { "value": 1 },
+    "rejectionAssertions": [
+      { "path": "rejected", "expectedJson": "true" },
+      { "path": "reason", "expectedJson": "\"input_contract_rejected\"" }
+    ]
+  },
+  "inconsistentReview": {
+    "source": { "caseAlias": "B", "architectureVersions": [30, 31] },
+    "observedReasons": ["missing_check_issue", "missing_scope_issue"],
+    "observedInsufficientAcceptancePositions": [9, 21],
+    "localInsufficientAcceptancePositions": [0, 1],
+    "failedCheckWithoutIssue": "verification",
+    "acceptanceQualityPassed": true
+  }
+}

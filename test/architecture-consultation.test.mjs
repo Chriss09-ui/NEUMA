@@ -10,6 +10,8 @@ import { substantiveRequirementHash } from "../src/requirements/task-spec.mjs";
 import { processTurn } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { handoffChecker, requirementReference } from "./helpers/handoff.mjs";
+import { fidelityChecker } from "./helpers/fidelity.mjs";
 
 function sourceDraft() {
   return { ...validDraft("逐项核对材料并输出完整清单"), taskSpec: { version: 1, items: [{ id: "full_coverage", dimension: "processing",
@@ -23,14 +25,16 @@ function design(requirements) {
   selectionBasis: { capacity: "测试使用固定小型材料", process: "逐项处理并核对全量覆盖", quality: "结果与每项输入逐一对应",
     requirementIds: requirements.map((item) => item.id), assumptions: [] } });
 }
-function review(hash) {
-  const value = passingReview(hash);
-  value.checks.push(...["requirement_sufficiency", "acceptance_quality"].map((id) => ({ id, passed: true, evidence: "已核对来源与可区分的交付标准" })));
+function review(hash, candidate) {
+  const value = passingReview(hash, candidate);
+  value.checks.push(...["requirement_sufficiency", "acceptance_quality"].filter((id) => !value.checks.some((item) => item.id === id)).map((id) => ({ id, passed: true, evidence: "已核对来源与可区分的交付标准" })));
   return value;
 }
 async function fixture(t, action) {
   const root = await mkdtemp(join(tmpdir(), "neuma-architecture-consultation-")), calls = [];
   const designer = new ArchitectureDesigner({ config: { llmConfigured: true }, cwd: root, dataDir: root,
+    handoffSessionFactory: handoffChecker(),
+    fidelitySessionFactory: fidelityChecker(),
     sessionFactory: async ({ customTools }) => {
       const tools = Object.fromEntries(customTools.map((tool) => [tool.name, tool]));
       const role = tools.submit_architecture ? "designer" : "reviewer";
@@ -66,8 +70,8 @@ test("v3独立评审必须含需求充分性与验收质量，不能沿用旧六
 for (const returningRole of ["designer", "reviewer"]) test(`${returningRole}可正式返需，交接持久绑定需求和架构版本，补充后重新确认`, async (t) => {
   const f = await fixture(t, async ({ role, payload, tools, submit }) => {
     if (role === returningRole) return tools.request_requirements.execute("return", { issues: [{ id: "scale", question: "通常每批有多少份材料？",
-      impact: "决定处理批次和失败恢复方式", requirementIds: ["inputSource"] }] });
-    return submit(role === "designer" ? design(payload.requirements) : review(payload.candidateHash));
+      impact: "决定处理批次和失败恢复方式", requirementIds: ["inputSource"], references: [requirementReference(payload, "inputSource")] }] });
+    return submit(role === "designer" ? design(payload.requirements) : review(payload.candidateHash, payload.design));
   });
   const result = await f.designer.design(f.definition);
   assert.equal(result.status, "needs_input"); assert.equal(result.delivery, "blocked");
@@ -82,7 +86,12 @@ for (const returningRole of ["designer", "reviewer"]) test(`${returningRole}可�
   const changed = structuredClone(claimed.draft); changed.inputSource.value += "；每批五十份";
   let seenHandoff;
   const answer = await processTurn({ message: "每批五十份", draft: claimed.draft, consultation: claimed.consultation, lastQuestion: claimed.lastQuestion },
-    { generateDraft: async () => ({ draft: changed, proposedGap: "none", question: "" }), preflight: async (input) => { seenHandoff = input.handoff; return sufficientPreflight(); } },
+    { generateDraft: async () => ({ draft: changed, proposedGap: "none", question: "" }), preflight: async (input) => {
+      seenHandoff = input.handoff;
+      const evidence = input.evidenceMessages.findLast((entry) => entry.role === "user" && entry.content === "每批五十份");
+      return { ...await sufficientPreflight(), issueDecisions: [{ issueId: "scale", status: "resolved", reason: "用户给出了批次范围",
+        evidence: [{ messageId: evidence.id, quote: "每批五十份" }] }] };
+    } },
     { enforceConsultation: true, requestId: "answer", platform: {} });
   assert.equal(seenHandoff.id, result.handoff.id); assert.equal(answer.status, "ready"); assert.equal(answer.confirmed, false);
   assert.equal(answer.consultation.handoff.resolved, true);
@@ -100,7 +109,7 @@ test("正式返需不能引用不存在的要求，也不能写成方案通过",
 });
 
 test("完整v3设计经八项独立评审通过；正式任务规格引用也可在预评估中继续核对", async (t) => {
-  const f = await fixture(t, async ({ role, payload, submit }) => submit(role === "designer" ? design(payload.requirements) : review(payload.candidateHash)));
+  const f = await fixture(t, async ({ role, payload, submit }) => submit(role === "designer" ? design(payload.requirements) : review(payload.candidateHash, payload.design)));
   const result = await f.designer.design(f.definition);
   assert.equal(result.status, "passed"); assert.equal(result.review.checks.length, 8); assert.equal(result.delivery, "blocked");
   const preflight = await sufficientPreflight(), specId = result.requirements.find((item) => item.id.startsWith("spec_")).id;

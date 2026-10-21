@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { InputError, emptyDraft } from "../src/requirements/core.mjs";
 import { ARCHITECTURE_VERSION, CAPABILITY_CATALOG_VERSION, CAPABILITIES, LEGACY_CAPABILITIES, PUBLIC_TOOL_IDS,
   capabilitySnapshotCompatible, requirementItems, validateDesign, validateReview, checkDesign, designHash } from "../src/architecture/architecture-contract.mjs";
+import { designSubmissionSchema, DESIGN_V3_SCHEMA } from "../src/architecture/architecture-contract.mjs";
+import Ajv from "ajv";
 
 function readyDraft() {
   const draft = emptyDraft();
@@ -35,6 +37,94 @@ function review(candidateHash = designHash(design())) {
   return { candidateHash, verdict: "pass", checks: ["requirements", "feasibility", "minimality", "interfaces", "failure_handling", "verification"]
     .map((id) => ({ id, passed: true, evidence: `已核对候选中的 ${id} 相关字段和需求映射` })), issues: [], summary: "设计在现有文本能力范围内可执行" };
 }
+
+function currentDesign(overrides = {}) {
+  const value = { ...design(), schemaVersion: 3, interaction: { defaultEntry: "conversation", page: false, operations: false,
+    inputs: "用户提供的会议记录", results: "中文摘要", persistentData: "不保存业务历史" }, connections: [],
+  execution: { language: "none", hosting: "builtin", reason: "已有工具处理文本即可" },
+  selectionBasis: { capacity: "本轮固定的会议记录", process: "核对每条决定和待办", quality: "逐项匹配原记录",
+    requirementIds: requirements.map((item) => item.id), assumptions: [] }, ...overrides };
+  value.acceptance = value.acceptance.map((item) => ({ ...item,
+    verification: item.verification ?? { stage: "development", owner: "generated-code", adapterId: "action" } }));
+  return value;
+}
+
+test("新候选的提交工具完整公布v3必填字段和正式需求引用，旧调用保持兼容", () => {
+  const schema = designSubmissionSchema({ taskSpec: { version: 1 } }, { requirements });
+  const validate = new Ajv({ strict: false }).compile(schema), candidate = currentDesign();
+  assert.deepEqual(schema.required, DESIGN_V3_SCHEMA.required);
+  assert.equal(validate(candidate), true);
+  for (const field of ["schemaVersion", "interaction", "connections", "execution", "selectionBasis"]) {
+    const missing = structuredClone(candidate); delete missing[field];
+    assert.equal(validate(missing), false, `${field} 应由公开工具schema直接要求`);
+  }
+  candidate.selectionBasis.requirementIds = ["original_task_item"];
+  assert.equal(validate(candidate), false, "需求引用只接受正式需求表编号");
+  const legacy = new Ajv({ strict: false }).compile(designSubmissionSchema(readyDraft(), { requirements }));
+  assert.equal(legacy(design()), true);
+});
+
+test("v3通用连接的自由接口schema与参数映射可同时通过SDK和架构校验", () => {
+  const connection = { id: "service", purpose: "business", required: false, description: "已授权检索接口", protocol: "http",
+    configFields: [{ key: "collection", label: "资料库", type: "select", required: true,
+      options: [{ value: "docs", label: "文档" }] }], operations: [{ id: "search", method: "POST", path: "/search", readOnly: true,
+      inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" } }, additionalProperties: false },
+      outputSchema: { type: "array", items: { type: "string" } },
+      request: { body: { q: "query", collection: { config: "collection" }, limit: { literal: 10 } }, encoding: "json" } }] };
+  const value = currentDesign({ profile: "custom", execution: { language: "javascript", hosting: "managed", reason: "专属检索功能" },
+    connections: [connection, { id: "local_mcp", purpose: "business", required: false, description: "授权的本机MCP", protocol: "mcp",
+      operations: [{ id: "lookup", tool: "lookup", inputSchema: { type: "object", properties: { keyword: { type: "string" } } } }] }] });
+  assert.equal(new Ajv({ strict: false }).compile(DESIGN_V3_SCHEMA)(value), true);
+  assert.doesNotThrow(() => validateDesign(value, context));
+  assert.equal(checkDesign(value, context).issues.some((issue) => issue.blocking), false);
+  const invalid = structuredClone(value); invalid.connections[0].operations[0].timeoutMs = 0;
+  assert.throws(() => validateDesign(invalid, context), /connections\[0\].operations\[0\].timeoutMs/);
+  invalid.connections[0].operations[0].timeoutMs = 1000; invalid.connections[0].operations[0].method = "EXECUTE";
+  assert.throws(() => validateDesign(invalid, context), /method.*不受支持/);
+  const missing = structuredClone(value); delete missing.connections[1].operations[0].tool;
+  assert.throws(() => validateDesign(missing, context), (error) => error instanceof InputError
+    && error.validationIssue.path === "design.connections[1]" && /MCP/.test(error.message));
+});
+
+test("无代码和实际研发交付矛盾时程序阻断，不自动删除操作或改写已确认需求", () => {
+  for (const overrides of [{ profile: "custom" }, { interaction: { ...currentDesign().interaction, operations: true } },
+    { interaction: { ...currentDesign().interaction, page: true, defaultEntry: "application" } }]) {
+    const value = currentDesign(overrides), original = structuredClone(value);
+    const checked = checkDesign(value, context);
+    assert.equal(checked.runnable, false);
+    assert.ok(checked.issues.some((item) => item.id === "execution_consistency" && item.blocking));
+    assert.deepEqual(value, original);
+  }
+  const backwards = currentDesign({ execution: { language: "javascript", hosting: "builtin", reason: "代码动作" } });
+  assert.ok(checkDesign(backwards, context).issues.some((item) => item.id === "execution_consistency" && item.blocking));
+  const builtinCode = currentDesign({ interaction: { ...currentDesign().interaction, operations: true },
+    execution: { language: "javascript", hosting: "builtin", reason: "实际交付后台操作" } });
+  assert.equal(checkDesign(builtinCode, context).issues.some((item) => item.blocking), false);
+  assert.equal(checkDesign(currentDesign(), context).runnable, true);
+  const legacy = design(); legacy.profile = "custom";
+  assert.deepEqual(checkDesign(legacy, context), { issues: [], runnable: false }, "历史架构不回填执行方式");
+});
+
+test("宿主文件保存和读回仍走无代码交付，不因工具调用被一致性门槛误送研发", () => {
+  const value = currentDesign();
+  value.capabilities.push(...["read_workspace_file", "write_workspace_file"].map((id) => ({ id, status: "available", reason: "使用现有专属目录工具保存并核对文本产物" })));
+  value.acceptance.push({ id: "save_failure", kind: "tool_failure", requirementIds: ["deliverable"],
+    input: "宿主文件保存失败", expected: "保留文本结果并说明尚未保存，不能宣称可下载" });
+  const before = structuredClone(value), checked = checkDesign(value, context);
+  assert.equal(checked.runnable, true); assert.deepEqual(checked.issues, []);
+  assert.deepEqual(value, before); assert.equal(value.interaction.operations, false); assert.equal(value.execution.language, "none");
+});
+
+test("引用校验保留准确字段与允许的需求编号，不回显错误引用和用户正文", () => {
+  const value = currentDesign(), secret = "PRIVATE_PAYLOAD_SENTINEL";
+  value.instructions = secret; value.selectionBasis.requirementIds = [secret];
+  assert.throws(() => validateDesign(value, context), (error) => {
+    assert.deepEqual(error.validationIssue, { path: "design.selectionBasis.requirementIds[0]", reason: "invalid_reference",
+      allowedReferences: requirements.map((item) => item.id) });
+    assert.doesNotMatch(error.message + JSON.stringify(error.validationIssue), new RegExp(secret));
+    return true;
+  });
+});
 
 function interactionFixture(interaction, { schemaVersion, page = false, operations = false } = {}) {
   const draft = readyDraft();
@@ -90,6 +180,19 @@ test("需求交接使用现有 ready 门禁，保留约束、触发与外部边�
   assert.ok(items.some((item) => item.id === "capability_1"));
   draft.unresolved = ["boundary"];
   assert.throws(() => requirementItems(draft), /未解决/);
+});
+
+test("无页面的后台操作使用中性需求文案并保留稳定编号", () => {
+  const draft = readyDraft();
+  draft.interaction = { defaultEntry: "conversation", page: false, operations: ["处理清单并返回统计", "通过本机接口调用"],
+    inputs: "JSON 清单", results: "JSON 与 CSV", persistentData: "不跨调用保留业务数据", source: "user" };
+  const original = structuredClone(draft);
+  const operations = requirementItems(draft).filter((item) => item.id.startsWith("operation_"));
+  assert.deepEqual(operations, [
+    { id: "operation_1", text: "需实现的操作：处理清单并返回统计" },
+    { id: "operation_2", text: "需实现的操作：通过本机接口调用" },
+  ]);
+  assert.deepEqual(draft, original);
 });
 
 test("有效设计返回独立副本，轻量真实能力才能直接运行", () => {
@@ -244,6 +347,29 @@ test("需求覆盖和验收种类必须完整，工具失败场景按能力要�
   assert.throws(() => validateDesign(tool, context), /tool_failure/);
   tool.acceptance.push({ id: "tool_error", kind: "tool_failure", requirementIds: ["inputSource"], input: "请求读取不存在的记录文件", expected: "报告未找到文件，请用户确认文件或粘贴文本" });
   assert.equal(checkDesign(tool, context).runnable, true);
+});
+
+test("设计覆盖与验收同时缺多条需求时一次报告全部正式编号，未知候选字符串不进入反馈", () => {
+  const missing = ["task", "successCriteria", "routingCondition"].filter((id) => requirements.some((item) => item.id === id));
+  for (const target of ["coverage", "acceptance"]) {
+    const value = design(); value.instructions = "PRIVATE_PAYLOAD_SENTINEL";
+    if (target === "coverage") value.coverage = value.coverage.filter((item) => !missing.includes(item.requirementId));
+    else for (const item of value.acceptance) item.requirementIds = item.requirementIds.filter((id) => !missing.includes(id));
+    assert.throws(() => validateDesign(value, context), (error) => {
+      assert.deepEqual(error.validationIssue, { path: `design.${target}`, reason: "missing_coverage",
+        allowedReferences: requirements.map((item) => item.id), missingReferences: missing });
+      assert.ok(missing.every((id) => error.message.includes(id)));
+      assert.doesNotMatch(error.message + JSON.stringify(error.validationIssue), /PRIVATE_PAYLOAD_SENTINEL/);
+      return true;
+    });
+  }
+  const unknown = design(); unknown.coverage[0].requirementId = "PRIVATE_PAYLOAD_SENTINEL";
+  assert.throws(() => validateDesign(unknown, context), (error) => {
+    assert.equal(error.validationIssue.reason, "missing_coverage");
+    assert.deepEqual(error.validationIssue.missingReferences, [requirements[0].id]);
+    assert.doesNotMatch(error.message + JSON.stringify(error.validationIssue), /PRIVATE_PAYLOAD_SENTINEL/);
+    return true;
+  });
 });
 
 test("不允许把未知能力伪称 available，证据引用必须实际存在", () => {

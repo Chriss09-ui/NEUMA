@@ -1,3 +1,5 @@
+import { textWithinLimit } from "../runtime/text-length.mjs";
+
 const TOPICS = ["code", "sdk", "langchain", "langgraph"];
 const MAX_SOURCES = 3;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -49,7 +51,7 @@ class ResearchFailure extends Error {}
 function selectSources(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)
     || Object.keys(input).some((key) => !["query", "topics"].includes(key))
-    || typeof input.query !== "string" || !input.query.trim() || input.query.length > 1000) {
+    || !textWithinLimit(input.query, 1000) || !input.query.trim()) {
     throw new TypeError("技术检索需要 1–1000 字的 query，且只能提供 query 和 topics。");
   }
   if (input.topics !== undefined && (!Array.isArray(input.topics)
