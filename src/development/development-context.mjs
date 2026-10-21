@@ -1,8 +1,9 @@
 import { InputError } from "../requirements/core.mjs";
+import { createHash } from "node:crypto";
 
 const forbiddenSections = new Set(["__proto__", "prototype", "constructor"]);
 const sectionPattern = /^[A-Za-z_][A-Za-z0-9_]{0,79}$/;
-const notice = "这里只提供不完整摘要。完整计划、用例和失败证据请调用 read_development_context，按 contextSections 的 section 分页读取；不能把摘要当作完整验收依据。";
+const notice = "部分字段是不完整摘要，或仅提供分页索引。contextSections.delivery=full 表示该字段已完整提供，无须重新读取；summary 表示不完整摘要，paged 表示正文尚未提供。只对当前工作实际需要的 summary/paged 字段调用 read_development_context，按 section 和 nextOffset 读取；不能把摘要当作完整验收依据。";
 
 function validSection(value) {
   if (typeof value !== "string" || !sectionPattern.test(value) || forbiddenSections.has(value)) {
@@ -106,6 +107,21 @@ function summaries(payload, limit, count) {
   }
   if (payload.plan) result.plan = summarizePlan(payload.plan, limit);
   if (payload.previousPlan) result.previousPlan = summarizePlan(payload.previousPlan, limit);
+  if (payload.caseFacts) result.caseFacts = { ...brief(payload.caseFacts,
+    ["schemaVersion", "planSchemaVersion", "planHash", "runtime", "scope", "planSource", "trust", "generatedCodeExecuted", "hostCallsExecuted",
+      "totalCases", "measuredInputs", "unmeasuredInputs", "measuredValueBytes", "measuredTextWorkBytes", "measurementBudgetExhausted"], 160),
+    notice: shortText(payload.caseFacts.notice, limit) };
+  if (payload.developmentRevision) result.developmentRevision = { ...brief(payload.developmentRevision,
+    ["schemaVersion", "trust", "status", "planHash", "reason"], 160),
+    source: brief(payload.developmentRevision.source, ["agentId", "runId", "runVersion", "runRevision", "recordHash"], 160),
+    ...(payload.developmentRevision.caseFactsReference ? { caseFactsReference: brief(payload.developmentRevision.caseFactsReference,
+      ["section", "planHash", "trust"], 160) } : {}),
+    ...(payload.developmentRevision.historicalPlanningReference ? { historicalPlanningReference: {
+      ...brief(payload.developmentRevision.historicalPlanningReference, ["schemaVersion", "trust", "current", "status", "reason", "planHash"], 160),
+      source: brief(payload.developmentRevision.historicalPlanningReference.source, ["agentId", "runId", "recordHash"], 160),
+      cases: payload.developmentRevision.historicalPlanningReference.plan?.cases?.length ?? 0,
+      activationCases: payload.developmentRevision.historicalPlanningReference.plan?.activationCases?.length ?? 0,
+      detailSection: "developmentRevision", detailPath: "historicalPlanningReference" } } : {}) };
   if (payload.design) result.design = { ...brief(payload.design, ["profile"], 160), ...brief(payload.design, ["rationale"], limit) };
   if (payload.remaining) result.remaining = brief(payload.remaining, ["corrections", "planRevisions", "integrationRepairs"], 160);
   return result;
@@ -121,22 +137,111 @@ export function compactDevelopmentContext(payload, maxChars = 16_000) {
     catch { throw new InputError("研发上下文无法建立独立副本"); }
   }
   const contextSections = [];
+  const sectionSources = new Map();
   for (const section of Object.keys(payload)) {
     validSection(section);
     const value = encoded(payload[section]);
-    if (value !== undefined) contextSections.push({ section, path: `/${section}`, totalChars: value.length });
+    if (value !== undefined) {
+      contextSections.push({ section, path: `/${section}`, totalChars: value.length });
+      sectionSources.set(section, value);
+    }
   }
+  const describeDelivery = (value) => ({ ...value, contextSections: contextSections.map((item) => ({ ...item,
+    delivery: !Object.hasOwn(value, item.section) ? "paged"
+      : encoded(value[item.section]) === sectionSources.get(item.section) ? "full" : "summary",
+  })) });
   const bindings = {};
-  for (const field of ["architectureRef", "subjectHash", "mode"]) {
+  for (const field of ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract"]) {
     if (Object.hasOwn(payload, field) && payload[field] !== undefined) bindings[field] = structuredClone(payload[field]);
   }
-  const base = { contextTruncated: true, contextNotice: notice, ...bindings, contextSections };
+  const base = describeDelivery({ contextTruncated: true, contextNotice: notice, ...bindings });
   if (encoded(base).length > maxChars) throw new InputError("上下文上限不足以保留架构绑定和字段索引，请扩大上限或减少顶层字段");
   for (const [limit, count] of [[4000, 6], [1600, 4], [800, 3], [400, 2], [160, 1], [64, 1], [24, 1]]) {
-    const result = { ...base, ...summaries(payload, limit, count) };
-    if (encoded(result).length <= maxChars) return result;
+    let result = describeDelivery({ ...base, ...summaries(payload, limit, count) });
+    if (encoded(result).length <= maxChars) {
+      // Put actual task material ahead of repeated schema guides; full evidence remains pageable.
+      for (const field of ["task", "feedback", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
+        if (!Object.hasOwn(payload, field)) continue;
+        const candidate = describeDelivery({ ...result, [field]: payload[field] });
+        if (encoded(candidate).length <= maxChars) result = { ...candidate, [field]: structuredClone(payload[field]) };
+      }
+      return result;
+    }
   }
   throw new InputError("上下文上限不足以保留任务目标和失败摘要，请扩大上限");
+}
+
+const contextDigest = (value) => createHash("sha256").update(value).digest("hex");
+const deliveryMetadata = new Set(["contextTruncated", "contextNotice", "contextSections", "contextReuse", "architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "task", "remaining"]);
+
+function deliveredUserMessages(messages) {
+  const completed = new Map();
+  let current, text;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message.role === "user") {
+      const content = message.content;
+      text = typeof content === "string" ? content : Array.isArray(content) && content.length === 1
+        && content[0]?.type === "text" ? content[0].text : undefined;
+      current = typeof text === "string" ? contextDigest(text) : undefined;
+    } else if (current && message.role === "assistant" && ["stop", "toolUse"].includes(message.stopReason)) completed.set(current, text);
+  }
+  return completed;
+}
+
+/** A receipt refers to exact host messages still present in Pi's active context, never its lossy summary. */
+export function developmentContextMessage(payload, maxChars, { reference, messages } = {}) {
+  const initial = compactDevelopmentContext(payload, maxChars), sections = initial.contextSections
+    ?? Object.keys(payload).filter((section) => encoded(payload[section]) !== undefined)
+      .map((section) => ({ section, path: `/${section}`, totalChars: encoded(payload[section]).length, delivery: "full" }));
+  const bindingHash = reference?.bindingHash;
+  const prior = reference?.contextDelivery;
+  const completed = deliveredUserMessages(messages), receipts = new Map();
+  if (typeof bindingHash === "string" && typeof reference?.file === "string" && Number.isSafeInteger(reference.turns) && reference.turns > 0
+    && prior?.version === 1 && prior.bindingHash === bindingHash && Array.isArray(prior.sections)) {
+    for (const item of prior.sections) if (item && typeof item.section === "string" && /^[a-f0-9]{64}$/.test(item.contentHash ?? "")
+      && /^[a-f0-9]{64}$/.test(item.messageHash ?? "") && completed.has(item.messageHash)) {
+      try {
+        const delivered = JSON.parse(completed.get(item.messageHash));
+        if (delivered && Object.hasOwn(delivered, item.section) && contextDigest(encoded(delivered[item.section])) === item.contentHash
+          && (!delivered.contextSections || delivered.contextSections.some((entry) => entry.section === item.section && entry.delivery === "full"))) receipts.set(item.section, item);
+      } catch { /* A receipt must prove exact original contents, not merely refer to an existing message. */ }
+    }
+  }
+  let prepared = initial;
+  const reused = [];
+  for (const item of sections) {
+    if (item.delivery !== "full" || deliveryMetadata.has(item.section)) continue;
+    const receipt = receipts.get(item.section);
+    if (receipt?.contentHash === contextDigest(encoded(payload[item.section]))) reused.push(item.section);
+  }
+  if (reused.length) {
+    const reuseSet = new Set(reused), candidate = { ...initial };
+    for (const section of reused) delete candidate[section];
+    candidate.contextSections = sections.map((item) => reuseSet.has(item.section) ? { ...item, delivery: "session" } : { ...item });
+    candidate.contextReuse = { version: 1, bindingHash, sections: reused,
+      instruction: "delivery=session的字段已由宿主核实完整原消息仍在当前Pi会话，并已收到成功回复；继续使用这些原文，不必重复读取。新值和新反馈以本轮为准；完整当前事实始终可用read_development_context按section精确读取。压缩摘要不能替代原文证明。" };
+    if (encoded(candidate).length < encoded(initial).length && encoded(candidate).length <= maxChars) prepared = candidate;
+  }
+  const message = encoded(prepared), messageHash = contextDigest(message), full = new Map(sections.map((item) => [item.section, item.delivery]));
+  const activeReused = new Set(prepared.contextReuse?.sections ?? []);
+  const delivered = Object.keys(payload).filter((section) => !deliveryMetadata.has(section) && full.get(section) === "full")
+    .map((section) => activeReused.has(section) ? receipts.get(section)
+      : { section, contentHash: contextDigest(encoded(payload[section])), messageHash });
+  return { message, delivery: typeof bindingHash === "string" ? { version: 1, bindingHash, sections: delivered } : undefined };
+}
+
+export function restoreDevelopmentContext(messages, payload, maxChars, prepared) {
+  const reused = prepared && JSON.parse(prepared.message).contextReuse?.sections;
+  if (!reused?.length) return messages;
+  const completed = deliveredUserMessages(messages), receipts = new Map(prepared.delivery.sections.map((item) => [item.section, item]));
+  if (reused.every((section) => completed.has(receipts.get(section)?.messageHash))) return messages;
+  const full = encoded(compactDevelopmentContext(payload, maxChars));
+  const target = messages.findLastIndex((message) => message.role === "user" && (typeof message.content === "string"
+    ? message.content : message.content?.length === 1 && message.content[0]?.type === "text" ? message.content[0].text : undefined) === prepared.message);
+  // Request-local projection runs after native compaction and before each model request.
+  // It preserves tool-call/result ordering and does not manufacture persisted history.
+  return target < 0 ? [...messages, { role: "user", content: [{ type: "text", text: full }], timestamp: Date.now() }]
+    : messages.map((message, index) => index === target ? { ...message, content: [{ type: "text", text: full }] } : message);
 }
 
 export function createContextReadTool(getPayload) {
@@ -160,7 +265,10 @@ export function createContextReadTool(getPayload) {
       }
       const payload = checkedPayload(await getPayload());
       signal?.throwIfAborted();
-      if (!Object.hasOwn(payload, section)) throw new InputError("当前轮上下文不存在这个顶层字段");
+      if (!Object.hasOwn(payload, section)) {
+        const sections = Object.keys(payload).filter((key) => sectionPattern.test(key) && !forbiddenSections.has(key));
+        throw new InputError("当前轮上下文不存在这个顶层字段；可读取的section：" + JSON.stringify(sections));
+      }
       const source = encoded(payload[section]);
       if (source === undefined) throw new InputError("当前字段没有可读取的 JSON 内容");
       if (offset > source.length || dividesCharacter(source, offset)) throw new InputError("续读位置无效，请使用上一页返回的 nextOffset");

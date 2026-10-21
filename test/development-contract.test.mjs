@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Ajv from "ajv";
 import { InputError } from "../src/requirements/core.mjs";
-import { PLAN_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, hashValue, safeRelativePath,
+import { PLAN_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, hashValue, safeRelativePath,
   validatePlan, validateReview, validateWork } from "../src/development/development-contract.mjs";
+import { recordSubmission, submissionIssues } from "../src/development/development-diagnostics.mjs";
 
 function architecture() {
   return { requirements: [{ id: "goal", text: "提取记录" }, { id: "input", text: "处理空输入" }],
@@ -74,6 +76,79 @@ test("structured submit schemas disallow extra properties and require all fields
   assert.equal(checked.cases[1].assertions[0].path, "");
   checked.tasks[0].title = "changed";
   assert.equal(original.tasks[0].title, "提取");
+});
+
+test("new plan tools declare complete application fields while retaining arbitrary valid action schemas", () => {
+  const application = PLAN_V3_SCHEMA.properties.application;
+  assert.deepEqual(application.required, ["protocolVersion", "runtime", "entrypoint", "page", "actions", "stateVersion", "evidenceIds"]);
+  assert.equal(application.additionalProperties, false);
+  assert.equal(application.properties.service.additionalProperties, true, "共享服务清单仍由正式服务契约校验");
+  const current = pagePlan(); current.schemaVersion = 3;
+  const approved = architecture(); approved.design = { ...approved.design, schemaVersion: 3,
+    execution: { language: "javascript", hosting: "builtin" }, interaction: { page: true } };
+  assert.deepEqual(validatePlan(current, { architecture: approved }), current);
+  approved.design.execution.language = "none";
+  assert.throws(() => validatePlan(current, { architecture: approved }), /无需代码研发/);
+});
+
+test("单个研发任务能完整关联230条源需求和24条验证要求，公开结构与执行校验一致", () => {
+  const current = pagePlan(); current.schemaVersion = 3;
+  const approved = architecture(), ids = [...Array.from({ length: 230 }, (_, index) => `source_${index}`),
+    ...Array.from({ length: 24 }, (_, index) => `verification_${index}`)];
+  approved.requirements = ids.map(id => ({ id, text: `已确认要求 ${id}` }));
+  approved.design = { ...approved.design, schemaVersion: 3, execution: { language: "javascript", hosting: "builtin" },
+    interaction: { page: true }, acceptance: approved.design.acceptance.map((item, index) => ({ ...item,
+      requirementIds: index ? [ids[0]] : ids })) };
+  current.tasks[0].requirementIds = ids;
+  current.tasks[1].requirementIds = [ids[0]];
+  const schema = new Ajv({ strict: false, allErrors: true, coerceTypes: false }).compile(PLAN_V3_SCHEMA);
+  assert.equal(current.tasks[0].requirementIds.length, 254);
+  assert.equal(schema(current), true, JSON.stringify(schema.errors));
+  assert.deepEqual(validatePlan(current, { architecture: approved }), current);
+  const oversized = structuredClone(current); oversized.tasks[0].requirementIds.push("extra_requirement");
+  assert.equal(schema(oversized), false);
+  assert.throws(() => validatePlan(oversized, { architecture: approved }), InputError);
+});
+
+test("研发计划、开发交接和独立评审的非BMP文本在公开字符边界通过，多一个字符拒绝", () => {
+  const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false }), current = plan();
+  current.summary = "😀".repeat(4000); current.tasks[0].title = "𠀀".repeat(200);
+  current.cases[0].input = "😀".repeat(12_000);
+  current.cases[0].assertions[0].expectedJson = JSON.stringify("𠀀".repeat(59_998));
+  const work = { summary: "😀".repeat(4000), changedFiles: ["main.mjs"], knownIssues: ["𠀀".repeat(4000)],
+    nextAction: "😀".repeat(4000), continue: true };
+  const subjectHash = hashValue(current), review = { subjectHash, verdict: "revise", summary: "😀".repeat(4000),
+    issues: [{ id: "followup", blocking: true, kind: "code", description: "𠀀".repeat(4000), remedy: "😀".repeat(4000) }] };
+  for (const [value, schema, validate, fields] of [
+    [current, PLAN_SCHEMA, check, [value => { value.summary += "字"; }, value => { value.tasks[0].title += "字"; },
+      value => { value.cases[0].input += "字"; }, value => { value.cases[0].assertions[0].expectedJson = JSON.stringify("𠀀".repeat(59_999)); }]],
+    [work, WORK_SCHEMA, validateWork, [value => { value.summary += "字"; }, value => { value.knownIssues[0] += "字"; },
+      value => { value.nextAction += "字"; }]],
+    [review, REVIEW_SCHEMA, value => validateReview(value, { subjectHash }), [value => { value.summary += "字"; },
+      value => { value.issues[0].description += "字"; }, value => { value.issues[0].remedy += "字"; }]],
+  ]) {
+    const published = ajv.compile(schema);
+    assert.equal(published(value), true, JSON.stringify(published.errors));
+    assert.deepEqual(validate(value), value);
+    for (const mutate of fields) {
+      const oversized = structuredClone(value); mutate(oversized);
+      assert.equal(published(oversized), false); assert.throws(() => validate(oversized), InputError);
+    }
+  }
+});
+
+test("submission diagnostics keep schema paths and fixed remedies without submitted values or dynamic keys", () => {
+  const invalid = plan(); invalid.summary = "PRIVATE_RAW_VALUE".repeat(400); invalid.PRIVATE_DYNAMIC_KEY = "PRIVATE_SECRET";
+  const issues = submissionIssues(invalid, PLAN_SCHEMA, { root: "plan", sdk: true });
+  assert.ok(issues.some((item) => item.path === "plan.summary" && item.reason === "maxLength"));
+  assert.ok(issues.some((item) => item.path === "plan" && item.reason === "additionalProperties"));
+  assert.doesNotMatch(JSON.stringify(issues), /PRIVATE_/);
+  const record = {};
+  for (let index = 0; index < 30; index++) recordSubmission(record, { role: "planner", phase: "planning", turn: index,
+    stage: "sdk", status: "rejected", issues });
+  assert.equal(record.submissionAttempts.length, 24);
+  assert.deepEqual(record.submissionCounts.planner, { attempts: 30, accepted: 0, rejected: 30 });
+  assert.equal(record.submissionAttempts.at(-1).sequence, 30);
 });
 
 test("plan rejects unsupported fields, runtime, missing data and duplicate references", () => {
