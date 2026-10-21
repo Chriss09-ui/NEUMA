@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CONFIRMATION_QUESTION, decideNext, emptyDraft, normalizeDraft, processTurn, ProviderError } from "../src/requirements/core.mjs";
+import { REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS } from "../src/requirements/requirement-limits.mjs";
 
 function completeDraft() {
   const draft = emptyDraft();
@@ -33,6 +34,46 @@ function jevAnswers(overrides = {}) {
     },
   };
 }
+
+test("需求接收完整12000个Unicode字符，规范化不截断合法非BMP字段", async () => {
+  const message = "😀".repeat(REQUIREMENT_MESSAGE_MAX_CHARACTERS), draft = completeDraft();
+  draft.goal.value = "𠮷".repeat(1200);
+  let seen;
+  const result = await processTurn({ message, userMessages: [message] }, {
+    generateDraft: async (input) => { seen = input; return { draft, proposedGap: "none" }; },
+  });
+  assert.equal(seen.message, message); assert.deepEqual(seen.userMessages, [message]);
+  assert.equal(result.draft.goal.value, draft.goal.value);
+  await assert.rejects(processTurn({ message: `${message}字` }, {
+    generateDraft: async () => assert.fail("超限输入不能进入模型"),
+  }), /12000/);
+});
+
+test("名称源字段与保存上限同为120个Unicode字符，超限明确拒绝而不截短", async () => {
+  const draft = completeDraft(); draft.name.value = "😀".repeat(REQUIREMENT_NAME_MAX_CHARACTERS);
+  assert.deepEqual(normalizeDraft(draft), draft);
+  const invalid = structuredClone(draft); invalid.name.value += "字";
+  assert.throws(() => normalizeDraft(invalid), error => error.reason === "requirement_name_too_long"
+    && error.field === "name.value" && error.limitCharacters === REQUIREMENT_NAME_MAX_CHARACTERS);
+  await assert.rejects(processTurn({ message: "创建这个助手" }, { generateDraft: async () => ({ draft: invalid }) }),
+    error => error instanceof ProviderError && error.diagnostic.reason === "requirement_name_too_long"
+      && error.diagnostic.field === "name.value" && error.diagnostic.limitCharacters === REQUIREMENT_NAME_MAX_CHARACTERS);
+  assert.equal(invalid.name.value, `${draft.name.value}字`);
+});
+
+test("合法单项组成的超量需求在生成接收时整体拒绝，不裁剪依据", async () => {
+  const draft = completeDraft();
+  draft.taskSpec = { version: 1, items: Array.from({ length: 120 }, (_, index) => ({ id: `requirement_${index}`,
+    dimension: "processing", applicability: "applies", content: "任务".repeat(1000), critical: false,
+    source: { kind: "user", evidence: Array.from({ length: 12 }, () => ({ messageId: "user_original", quote: "原文".repeat(2000) })) } })) };
+  const before = structuredClone(draft);
+  assert.throws(() => normalizeDraft(draft), error => error.reason === "requirement_draft_too_large"
+    && error.bytes > REQUIREMENT_DRAFT_MAX_BYTES && error.limitBytes === REQUIREMENT_DRAFT_MAX_BYTES);
+  await assert.rejects(processTurn({ message: "描述任务" }, { generateDraft: async () => ({ draft }) }),
+    error => error instanceof ProviderError && error.diagnostic.reason === "requirement_draft_too_large"
+      && error.diagnostic.limitBytes === REQUIREMENT_DRAFT_MAX_BYTES);
+  assert.deepEqual(draft, before);
+});
 
 test("页面入口与助手选择进入确认摘要，旧草稿不回填助手", async () => {
   const legacy = completeDraft();

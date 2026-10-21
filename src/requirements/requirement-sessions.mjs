@@ -4,8 +4,14 @@ import { GroupStorage, id } from "../collaboration/group-store.mjs";
 import { InputError, normalizeDraft, processTurn } from "./core.mjs";
 import { contentHash } from "./task-spec.mjs";
 import { issueConfirmation, newConsultation } from "./consultation.mjs";
+import { assertRequirementDraftSize, REQUIREMENT_CONVERSATION_MAX_BYTES } from "./requirement-limits.mjs";
 
 const conflict = () => Object.assign(new InputError("这份需求已在另一窗口更新，请重新打开后继续"), { reason: "requirement_conflict" });
+const checkRecordSize = (record) => {
+  const bytes = Buffer.byteLength(JSON.stringify(record), "utf8");
+  if (bytes > REQUIREMENT_CONVERSATION_MAX_BYTES) throw Object.assign(new InputError("需求会话已达 32 MiB，请开始新会话；已有记录保留"),
+    { reason: "requirement_conversation_too_large", bytes, limitBytes: REQUIREMENT_CONVERSATION_MAX_BYTES });
+};
 
 /** Server-owned state: client drafts are only an initial import, never an approval. */
 export class RequirementSessions {
@@ -23,9 +29,14 @@ export class RequirementSessions {
 
   async get(sessionId) {
     id(sessionId, "需求会话");
-    const value = await this.storage.readJson(sessionId, "session.json");
+    const value = await this.storage.readJson(sessionId, "session.json", { maxBytes: REQUIREMENT_CONVERSATION_MAX_BYTES });
     if (value && (value.schemaVersion !== 1 || value.id !== sessionId || !Number.isSafeInteger(value.version)
       || !Array.isArray(value.requests) || !value.consultation)) throw new InputError("需求协商记录损坏，请保留文件并检查");
+    if (value) {
+      try { assertRequirementDraftSize(value.draft); }
+      catch (error) { throw Object.assign(new InputError(error.reason ? error.message : "需求协商记录损坏，请保留文件并检查"),
+        error.reason ? { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes } : {}); }
+    }
     return value;
   }
 
@@ -59,8 +70,12 @@ export class RequirementSessions {
         record.consultation = await this.agents.getRequirementConsultation?.(body.agentId) ?? newConsultation();
       }
       const result = await processTurn({ message: body.message, draft: record.draft, lastQuestion: record.lastQuestion,
-        consultation: record.consultation, userMessages: [] }, providers,
-      { signal, onProgress, enforceConsultation: true, requestId });
+        consultation: record.consultation, userMessages: [], evidenceMessages: [{
+          id: `request_user_${contentHash({ sessionId, requestId }).slice(0, 32)}`,
+          role: "user", content: typeof body.message === "string" ? body.message.trim() : "",
+        }] }, providers,
+      { signal, onProgress, enforceConsultation: true, requestId,
+        ...(record.boundAgentId ? { verificationContext: { agentId: record.boundAgentId } } : {}) });
       signal?.throwIfAborted();
       const { confirmation, consultation, ...publicResult } = result;
       const version = record.version + 1;
@@ -68,6 +83,7 @@ export class RequirementSessions {
       const next = { ...record, version, draft: result.draft, lastQuestion: result.question ?? result.confirmationQuestion ?? "",
         consultation, confirmed: result.confirmed, confirmedRequestId: result.confirmed ? requestId : null,
         requests: [...record.requests, { id: requestId, inputHash, result: response }].slice(-100), updatedAt: new Date().toISOString() };
+      checkRecordSize(next);
       await this.storage.writeJson(sessionId, "session.json", next, { signal });
       return response;
     });
@@ -81,7 +97,7 @@ export class RequirementSessions {
         || contentHash(normalizeDraft(value.draft)) !== contentHash(record.draft)) throw new InputError("这份需求尚未在当前会话确认，或确认后内容已改变");
       const confirmation = issueConfirmation(record.draft, record.consultation, { requestId: record.confirmedRequestId });
       // Bind before saving, so a disconnected response cannot duplicate one confirmation under another Agent ID.
-      if (!record.boundAgentId) { record.boundAgentId = agentId; await this.storage.writeJson(sessionId, "session.json", record); }
+      if (!record.boundAgentId) { record.boundAgentId = agentId; checkRecordSize(record); await this.storage.writeJson(sessionId, "session.json", record); }
       return agents.saveRequirements(agentId, { name: value.name, draft: record.draft },
         { confirmation, requestId: record.confirmedRequestId, consultation: record.consultation });
     });
