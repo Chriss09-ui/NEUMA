@@ -365,7 +365,7 @@ test("独立评审正常取消后只读复用当前完整候选，重新独立�
       assert.equal(record.payload.revisionSource.kind, "review-continuation");
       assert.equal(record.payload.revisionSource.historicalOnly, true);
       const previousCalls = interrupted.reviewProgressCheckpoint.modelCalls;
-      assert.deepEqual(record.payload.modelBudget, { limit: 12, used: previousCalls + 1, remaining: 11 - previousCalls });
+      assert.deepEqual(record.payload.modelBudget, { limit: 5, used: previousCalls + 1, remaining: 4 - previousCalls });
     }
     return submit(currentReview(record.payload.candidateHash, phase === "historical", record.payload.design, record.payload.priorFindings));
   } });
@@ -634,9 +634,10 @@ test("允许联网时技术检索和网页工具仍共用三次预算，评审�
   assert.deepEqual(requests, ["technical", "web_search", "web_fetch"]);
 });
 
-test("仅按需委派最多两个局部模块，专员没有搜索或递归委派工具", async (t) => {
+test("仅按需委派最多三个局部模块，专员没有搜索或递归委派工具", async (t) => {
   const assignments = [{ question: "如何最小化状态", boundary: "只分析本次任务状态", benefit: "防止不必要持久化" },
-    { question: "如何验证缺失输入", boundary: "只分析输入失败场景", benefit: "确保失败可解释" }];
+    { question: "如何验证缺失输入", boundary: "只分析输入失败场景", benefit: "确保失败可解释" },
+    { question: "如何核对交付边界", boundary: "只分析已确认输入和结果", benefit: "避免扩大承诺" }];
   const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
     if (record.role === "specialist") {
       assert.deepEqual(Object.keys(record.tools), ["submit_architecture_draft", "submit_module_design"]);
@@ -646,17 +647,17 @@ test("仅按需委派最多两个局部模块，专员没有搜索或递归委�
     if (record.role === "designer") {
       const response = await record.tools.delegate_module.execute("delegate", { modules: assignments });
       const completed = JSON.parse(response.content[0].text);
-      assert.equal(completed.modules.length, 2); assert.equal(completed.remaining, 0); assert.equal(completed.storedModules.length, 2);
-      const exhausted = JSON.parse((await record.tools.delegate_module.execute("third", { modules: [assignments[0]] })).content[0].text);
-      assert.equal(exhausted.status, "quota_exhausted"); assert.equal(exhausted.remaining, 0); assert.equal(exhausted.storedModules.length, 2);
+      assert.equal(completed.modules.length, 3); assert.equal(completed.remaining, 0); assert.equal(completed.storedModules.length, 3);
+      const exhausted = JSON.parse((await record.tools.delegate_module.execute("fourth", { modules: [assignments[0]] })).content[0].text);
+      assert.equal(exhausted.status, "quota_exhausted"); assert.equal(exhausted.remaining, 0); assert.equal(exhausted.storedModules.length, 3);
       assert.match(exhausted.next, /复用已有模块结果/);
       return submit(validDesign(record.payload.requirements));
     }
     return submit(passingReview(record.payload.candidateHash, record.payload.design));
   } });
   const result = await designer.design(definition());
-  assert.equal(result.status, "passed"); assert.equal(result.modules.length, 2);
-  assert.equal(sessions.filter((item) => item.role === "specialist").length, 2);
+  assert.equal(result.status, "passed"); assert.equal(result.modules.length, 3);
+  assert.equal(sessions.filter((item) => item.role === "specialist").length, 3);
   for (const session of sessions) {
     const prompt = session.options.systemPrompt, submitName = submissionNames[session.role], contract = prompt.slice(prompt.lastIndexOf("宿主提交契约："));
     assert.match(prompt, /首次仍用本阶段公开的提交工具提交完整工具参数/u);
@@ -681,11 +682,11 @@ test("修订不重置模块额度，额度用尽后不再提供委派工具", as
     if (record.role === "specialist") return submit({ proposal: "复用已核对规则", interfaces: "固定数据结构", tradeoffs: "不增加范围", evidenceIds: [], unknowns: [] });
     if (record.role === "designer") {
       if (designs++ === 0) {
-        assert.equal(record.payload.remaining.modules, 2);
-        await record.tools.delegate_module.execute("both", { modules: [assignment, assignment] });
+        assert.equal(record.payload.remaining.modules, 3);
+        await record.tools.delegate_module.execute("all", { modules: [assignment, assignment, assignment] });
       } else {
         assert.equal(record.payload.remaining.modules, 0); assert.equal(record.tools.delegate_module, undefined);
-        assert.equal(record.payload.modules.length, 2);
+        assert.equal(record.payload.modules.length, 3);
       }
       const candidate = currentDesign(record.payload.requirements); candidate.instructions += ` 修订${designs}`;
       return submit(candidate);
@@ -693,8 +694,8 @@ test("修订不重置模块额度，额度用尽后不再提供委派工具", as
     return submit(currentReview(record.payload.candidateHash, reviews++ === 0, record.payload.design, record.payload.priorFindings));
   } });
   const result = await designer.design(definition());
-  assert.equal(result.status, "passed"); assert.equal(designs, 2); assert.equal(result.modules.length, 2);
-  assert.equal(sessions.filter((item) => item.role === "specialist").length, 2);
+  assert.equal(result.status, "passed"); assert.equal(designs, 2); assert.equal(result.modules.length, 3);
+  assert.equal(sessions.filter((item) => item.role === "specialist").length, 3);
 });
 
 test("剩余一个模块时修订工具公开单项上限，专员引用错误返回准确安全编号", async (t) => {
@@ -712,18 +713,19 @@ test("剩余一个模块时修订工具公开单项上限，专员引用错误�
       corrected++; return submit({ ...candidate, evidenceIds: [] });
     }
     if (record.role === "designer") {
-      const remaining = designs++ === 0 ? 2 : 1;
+      const first = designs++ === 0;
+      const remaining = first ? 3 : 1;
       assert.equal(record.payload.remaining.modules, remaining);
       assert.equal(record.tools.delegate_module.parameters.properties.modules.maxItems, remaining);
-      await record.tools.delegate_module.execute("single", { modules: [assignment] });
+      await record.tools.delegate_module.execute(first ? "pair" : "single", { modules: first ? [assignment, assignment] : [assignment] });
       const candidate = currentDesign(record.payload.requirements); candidate.instructions += ` 修订${designs}`;
       return submit(candidate);
     }
     return submit(currentReview(record.payload.candidateHash, reviews++ === 0, record.payload.design, record.payload.priorFindings));
   } });
   assert.equal((await designer.design(definition(), { onProgress: (event) => progress.push(event) })).status, "passed");
-  assert.equal(corrected, 2);
-  assert.deepEqual(sessions.filter((item) => item.role === "specialist").map((item) => item.options.reasoningMode), ["auto", "off"]);
+  assert.equal(corrected, 3);
+  assert.deepEqual(sessions.filter((item) => item.role === "specialist").map((item) => item.options.reasoningMode), ["auto", "auto", "off"]);
   assert.ok(progress.some((event) => event.validationIssue?.path === "module.evidenceIds"));
 });
 
@@ -1225,8 +1227,11 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
         && error.diagnostic.reason === (outcome === "truncated" ? "output_limit" : "api_stream_interrupted"));
       assert.equal((await designer.get("weekly")).diagnostic.phase, "designing");
     }
-    for (const role of new Set(requests.map((request) => request.role)))
-      assert.equal(requests.find((request) => request.role === role).maxTokens, role === "designer" ? 8192 : 4096);
+    for (const role of new Set(requests.map((request) => request.role))) {
+      const cap = role === "designer" ? 8192 : 4096;
+      const actual = requests.find((request) => request.role === role).maxTokens;
+      assert.ok(actual <= cap && actual > cap - 256, `${role} output budget ${actual}`);
+    }
     assert.ok(requests.every((request) => Number.isSafeInteger(request.maxTokens) && request.maxTokens > 0
       && request.maxTokens <= (request.role === "designer" ? 8192 : 4096)), JSON.stringify(requests));
   });

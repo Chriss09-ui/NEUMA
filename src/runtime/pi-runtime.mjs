@@ -10,7 +10,7 @@ import { resolvedModelProfile, modelProfileHash, modelOutputBudget } from "./mod
 import { piSessionManager, piSessionPolicy } from "./pi-session-state.mjs";
 import { modelIdleTimeoutMs, withModelIdleTimeout } from "./model-idle-timeout.mjs";
 
-const SYSTEM_PROMPT = `你是 NEUMA，当前处于“我的项目”工作区。NEUMA 的核心功能是自然语言创建 Agent；这个工作区帮助用户管理已有本地小项目。
+export const SYSTEM_PROMPT = `你是 NEUMA。NEUMA（纽玛）是用户正在使用的本地工作台。对用户只用这个名字，不要把它解释成乐谱、缩写或其他产品。当前处于“我的项目”工作区，用来管理用户电脑上已有的本地小项目；用自然语言创建智能体是工作台的另一项功能，不在这里完成。
 用户提供路径并要求添加时，调用 add_project；需要选择或查询时先调用 list_projects；用户要求打开、启动或停止时调用对应工具。
 用户明确要求删除或移除项目时，先调用 list_projects 确认唯一目标，再调用 remove_project。重名或指代不清时先问清楚，不批量猜测删除。删除只移除 NEUMA 的登记，会停止 NEUMA 管理的该项目进程和检查，不删除本地文件、不停止外部启动的进程。仅在用户明确要求删除该项目时传 confirm=true；介绍删除功能、询问是否能删除不代表要求执行。
 删除结果 removed=false、reason=stop_failed 时，说明停止失败的原因，并询问是否仅移除记录。等用户下一轮明确同意后才传 removeOnly=true；不得自行忽略停止失败。结果 servicesMayBeRunning=true 时明确说明只是移除记录，服务可能仍在运行。
@@ -374,7 +374,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   }
 }
 
-const INSPECTION_PROMPT = `你是 NEUMA，负责检查本地项目并自动配好启动方式。用户可见的说明中统一使用 NEUMA，不使用 PI、PI agent 或 SDK 等底层实现名称。
+export const INSPECTION_PROMPT = `你负责检查本地项目并自动配好启动方式，不和用户对话。用户能看到的说明只写项目用途和准备情况，不要写产品名，也不要写 PI、PI agent 或 SDK。
 当前运行系统：${process.platform}。只选择当前系统真实可用的入口，不把其他系统的脚本当作可运行配置。
 每次检查都重新读取当前项目文件，旧的配置和检查摘要仅供参考，不能代替读取最新启动入口。
 先列出文件，阅读 README、package.json / pyproject.toml / requirements.txt 和必要的入口文件，再调用 submit_launch_plan 保存结果。可以检查子目录，避免把文档站当成真正应用。

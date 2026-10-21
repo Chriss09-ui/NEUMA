@@ -199,10 +199,10 @@ test("只对新需求评审pass启动复核，有效narrowed和unproven直接停
   }
 });
 
-test("原评审与子复核共享12轮，子模型故障不能转成需求缺口或pass", async (t) => {
-  const last = await roleFixture(t, { mainCalls: 11, retry: true }); assert.equal((await last.run()).verdict, "pass");
-  const exhausted = await roleFixture(t, { mainCalls: 12 });
-  await assert.rejects(exhausted.run(), (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 12);
+test("原评审与子复核共享5轮，子模型故障不能转成需求缺口或pass", async (t) => {
+  const last = await roleFixture(t, { mainCalls: 4, retry: true }); assert.equal((await last.run()).verdict, "pass");
+  const exhausted = await roleFixture(t, { mainCalls: 5 });
+  await assert.rejects(exhausted.run(), (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 5);
   const fault = await roleFixture(t, { childFactory: async () => { throw new Error("PRIVATE_PROVIDER_ERROR"); } });
   await assert.rejects(fault.run(), (error) => error.diagnostic.reason === "scope_evaluation_incomplete" && !error.message.includes("PRIVATE_"));
 });

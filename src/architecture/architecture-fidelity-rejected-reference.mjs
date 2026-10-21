@@ -1,4 +1,4 @@
-import { designHash, validateReview } from "./architecture-contract.mjs";
+import { architectureTurnBudgetSpent, designHash, validateReview } from "./architecture-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
   reviewCheckpointOwn as own } from "./architecture-review-binding.mjs";
 import { architectureReviewEvidenceContext } from "./architecture-review-evidence.mjs";
@@ -53,7 +53,7 @@ export async function readArchitectureRejectedFidelityReference(record, evidence
   try {
     signal?.throwIfAborted();
     const binding = recordBinding(record), checkpoint = readMainReviewCheckpoint(record), progress = readArchitectureFidelityProgress(record);
-    if (!binding || !checkpoint || checkpoint.fidelityStatus !== "pending" || !progress || progress.parentModelCalls !== 12
+    if (!binding || !checkpoint || checkpoint.fidelityStatus !== "pending" || !progress || !architectureTurnBudgetSpent(progress.parentModelCalls)
       || !["failed", "cancelled"].includes(own(record, "status")) || own(record, "review") != null || own(record, "requirementFidelity") != null
       || !evidenceContext || progress.state.calls < 1) return null;
     if (own(record, "reviewProgressCheckpoint") !== undefined && !readReviewProgressCheckpoint(record)) return null;
@@ -110,6 +110,6 @@ export async function readArchitectureRejectedFidelityReference(record, evidence
       contextHash: checked.contextHash, schemaHash: checked.schemaHash, contextManifestHash: designHash(expected.contextManifest),
       acceptanceAdapterGuideHash: designHash(guide), sessionBindingHash: native.bindingHash, sessionHash: native.sessionHash,
       toolCallId: call.id, submissionHash: designHash(submission), diagnosticHash: designHash(checked) },
-    modelCalls: 12, fidelityModelCalls: state.calls, submission, diagnostic: checked };
+    modelCalls: progress.parentModelCalls, fidelityModelCalls: state.calls, submission, diagnostic: checked };
   } catch { signal?.throwIfAborted(); return null; }
 }

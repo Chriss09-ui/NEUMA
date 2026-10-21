@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { REVIEW_PROMPT, renderArchitectureReviewPrompt } from "../src/architecture/architecture-prompts.mjs";
+import { DESIGN_PROMPT, REVIEW_PROMPT, renderArchitectureReviewPrompt } from "../src/architecture/architecture-prompts.mjs";
+import { HANDOFF_POLICY } from "../src/architecture/architecture-handoff-verification.mjs";
+
+test("返需只针对需求本身不清楚，技术问题不返回用户", () => {
+  for (const prompt of [HANDOFF_POLICY, DESIGN_PROMPT, REVIEW_PROMPT, renderArchitectureReviewPrompt({ batchMode: true })]) {
+    assert.match(prompt, /需求本身仍不清楚|需求原文仍未写明/);
+    assert.match(prompt, /技术问题|技术核实/);
+  }
+  assert.match(DESIGN_PROMPT, /禁止返回给用户/);
+  assert.match(HANDOFF_POLICY, /技术问题禁止返回用户/);
+  assert.doesNotMatch(DESIGN_PROMPT, /保留阻断或正式返需/);
+});
 
 test("完整评审路径原文兼容，分批模式不再同时要求先修整份旧稿", () => {
   assert.equal(renderArchitectureReviewPrompt(), REVIEW_PROMPT);
@@ -48,7 +59,7 @@ test("最终阶段保留完整覆盖、负评通道及原独立复核和预算",
   assert.match(batch, /每个blocking问题必须关联passed:false的检查/);
   assert.match(batch, /sufficient:false须对应acceptance_quality:false/);
   assert.match(batch, /原完整结构、覆盖、语义、历史问题校验和独立需求范围复核/);
-  assert.match(batch, /最多两次范围复核计入原12轮实际总预算/);
+  assert.match(batch, /最多两次范围复核计入原5轮实际总预算/);
   assert.match(batch, /连续三次相同受控提交失败仍停止/);
   assert.match(batch, /取消、持久化失败、截断、网络故障或预算耗尽保留未完成状态/);
 });

@@ -217,7 +217,7 @@ test("真实Pi批量取得范围回执后提交短行，独立不足结论保持
         const content = body.messages.findLast((message) => message.role === "user").content;
         const payload = JSON.parse(typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join(""));
         assert.equal(payload.reviewEvidenceIndex.acceptanceScope.length, candidate.acceptance.length);
-        assert.equal(payload.modelBudget.limit, 12);
+        assert.equal(payload.modelBudget.limit, 5);
         name = "read_architecture_evidence";
         args = { requests: payload.reviewEvidenceIndex.acceptanceScope.map((row) => ({ source: "acceptanceAdapterGuide",
           pointer: "/adapters/action/executionRule", acceptanceId: row.acceptanceId })) };
@@ -226,7 +226,7 @@ test("真实Pi批量取得范围回执后提交短行，独立不足结论保持
         const content = body.messages.findLast((message) => message.role === "tool").content;
         const blocks = typeof content === "string" ? [content] : content.filter((item) => item.type === "text").map((item) => item.text);
         const objects = blocks.flatMap((text) => text.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line)));
-        assert.equal(objects.at(-1).hostModelBudget.limit, 12);
+        assert.equal(objects.at(-1).hostModelBudget.limit, 5);
         assert.equal(objects.at(-1).hostModelBudget.used, 1);
         name = "submit_architecture_review"; args = passingReview(candidateHash, candidate);
         args.verdict = "revise"; args.checks.find((item) => item.id === "acceptance_quality").passed = false;
@@ -492,7 +492,7 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
         assert.ok(body.tools.some((item) => item.function.name === "read_architecture_evidence"));
         assert.deepEqual(payload.reviewEvidenceIndex.candidate.acceptance, payload.design.acceptance.map((item, index) => ({ id: item.id, path: `/acceptance/${index}` })));
         assert.ok(payload.reviewEvidenceIndex.requirements.some((item) => item.id === payload.requirements[0].id && item.path === "/0"));
-        assert.equal(payload.modelBudget.limit, 12); assert.equal(payload.modelBudget.remaining, 12 - payload.modelBudget.used);
+        assert.equal(payload.modelBudget.limit, 5); assert.equal(payload.modelBudget.remaining, 5 - payload.modelBudget.used);
         if (reviewerCalls === 1) toolCalls = [{ name: "read_architecture_evidence", args: { requests: [
           { source: "candidate", pointer: "/instructions", limit: 3 }, { source: "requirements", pointer: "/0/text", limit: 3 },
           { source: "acceptanceAdapterGuide", pointer: "/adapters/action/doesNotProve" },
@@ -512,7 +512,7 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
             assert.equal(batch.results[5].reason, "empty_slice");
             receipts.push(...batch.results.slice(0, 3).map((item) => item.receiptId));
             const budget = objects.at(-1).hostModelBudget;
-            assert.equal(budget.limit, 12); assert.equal(budget.remaining, 12 - budget.used);
+            assert.equal(budget.limit, 5); assert.equal(budget.remaining, 5 - budget.used);
             assert.deepEqual(objects.at(-1).reviewReadProgress, { calls: 1, requests: 6, found: 5, missing: 1, empty: 1, more: 3, repeated: 1 });
           }
           if ([2, 3, 4].includes(reviewerCalls)) {

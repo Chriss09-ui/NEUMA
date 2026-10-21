@@ -11,6 +11,13 @@ import { textLength } from "../runtime/text-length.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
 export const CURRENT_ARCHITECTURE_VERSION = 3;
+/** Live model turns for one architecture role. Resume keeps the count; designer and reviewer each have their own. */
+export const ARCHITECTURE_ROLE_TURN_LIMIT = 5;
+/** Checkpoints written under the previous ceiling remain readable. Counts from the live limit through this ceiling are already spent. */
+export const ARCHITECTURE_STORED_TURN_LIMIT = 12;
+export const ARCHITECTURE_MODULE_LIMIT = 3;
+export const architectureTurnBudgetSpent = (calls) => Number.isSafeInteger(calls)
+  && calls >= ARCHITECTURE_ROLE_TURN_LIMIT && calls <= ARCHITECTURE_STORED_TURN_LIMIT;
 export const supportedArchitectureVersion = (record) => [1, 2, 3].includes(record?.contractVersion)
   && record.contractVersion === (record?.design?.schemaVersion ?? 1);
 export const requiresDevelopment = (design) => ["workflow", "custom"].includes(design?.profile)

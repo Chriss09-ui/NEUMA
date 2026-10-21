@@ -111,7 +111,7 @@ for (const reason of ["submission_incomplete", "api_connection", "cancelled"]) {
     assert.equal(result.revisionSource.version, f.source.version);
     const previousCalls = f.source.reviewProgressCheckpoint.modelCalls;
     assert.equal(previousCalls, reason === "submission_incomplete" ? 2 : 1);
-    assert.deepEqual(calls[0].payload.modelBudget, { limit: 12, used: previousCalls + 1, remaining: 11 - previousCalls });
+    assert.deepEqual(calls[0].payload.modelBudget, { limit: 5, used: previousCalls + 1, remaining: 4 - previousCalls });
     assert.equal(result.diagnostic, undefined);
     assert.equal(designHash(await f.designer.getVersion(f.definition.id, f.source.version)), before);
   });

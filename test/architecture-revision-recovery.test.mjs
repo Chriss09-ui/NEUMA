@@ -99,9 +99,9 @@ for (const failedRole of ["designer", "reviewer"]) for (const [reason, modelErro
     }
     const firstPayload = payload ?? reviewPayload;
     assert.equal(firstPayload.revisionSource.interruptedVersion, f.interrupted.version);
-    assert.equal(firstPayload.revisionSource.historicalOnly, true); assert.equal(firstPayload.modelBudget.limit, 12);
+    assert.equal(firstPayload.revisionSource.historicalOnly, true); assert.equal(firstPayload.modelBudget.limit, 5);
     const carriedCalls = failedRole === "reviewer" ? f.interrupted.reviewProgressCheckpoint.modelCalls : 0;
-    assert.equal(firstPayload.modelBudget.used, carriedCalls + 1); assert.equal(firstPayload.modelBudget.remaining, 11 - carriedCalls);
+    assert.equal(firstPayload.modelBudget.used, carriedCalls + 1); assert.equal(firstPayload.modelBudget.remaining, 4 - carriedCalls);
     const reviews = f.prompts.filter((item) => item.run === 3 && !item.isDesign);
     assert.equal(reviews.length, 1); assert.equal(reviews[0].payload.candidateHash, result.candidateHash);
     assert.equal(result.attempts.length, 1); assert.equal(result.attempts[0].review.verdict, "pass");

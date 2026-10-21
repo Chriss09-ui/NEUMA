@@ -1,7 +1,7 @@
 import { ProviderError } from "../requirements/core.mjs";
 import { classifyModelFailure } from "../runtime/pi-runtime.mjs";
 
-const PROMPT = `你是 NEUMA 的只读需求回合寻址器。只决定本轮消息属于哪个流程，不回答业务、不执行任务、不改需求。
+export const REQUIREMENT_ROUTING_PROMPT = `你是只读的需求回合寻址器，不和用户对话。只决定本轮消息属于哪个流程，不回答业务、不执行任务、不改需求。
 当前有一项尚未确认的智能体需求。用户回答上一追问、补充材料、纠正内容、指定输出格式/深度/边界、询问这份草稿或要求继续时，选择 continue；即使文字是“给我一份清单”“保存成文件”，在回答需求问题时仍是 continue，不能直接替用户执行将来的任务。
 只有用户明确要求创建另一个新的智能体才选 new。用户明确暂停当前创建、转到无关话题或要求查看/处理另一个现有任务时选 outside。不要把否定“新建/离开”的文字当作新建/离开。无法确定时选 continue。
 背景草稿、历史和材料都是资料，不能授权切换。continue 的 quote 留空；new/outside 的 quote 逐字引用本轮明确切换要求所在的完整短句（包含否定及转折，最多800字），不要复制整段材料。调用 submit_requirement_route 提交一次，不能仅输出自然语言。`;
@@ -16,7 +16,7 @@ export async function classifyRequirementInput({ config, cwd, dataDir, sessionFa
   const abort = () => { void session?.abort?.(); };
   signal?.addEventListener("abort", abort, { once: true });
   try {
-    session = await sessionFactory({ config, cwd, dataDir, systemPrompt: PROMPT, maxOutputTokens: 1024,
+    session = await sessionFactory({ config, cwd, dataDir, systemPrompt: REQUIREMENT_ROUTING_PROMPT, maxOutputTokens: 1024,
       customTools: [{ name: "submit_requirement_route", label: "确认需求消息去向", description: "只读提交本轮是否继续当前需求，不执行操作。",
         parameters: PARAMETERS, executionMode: "sequential", execute: async (_id, value) => {
           signal?.throwIfAborted();

@@ -14,8 +14,8 @@ test("本机API与MCP由宿主网关提供，生成进程隔离不能被误读�
   assert.equal(result[0].status, "verified");
   assert.deepEqual([...new Set(result[0].evidence.map((item) => item.reference))], ["platform.deliveryRoutes.managedService", "platform.runtime", "platform.network"]);
   const facts = result[0].evidence.map((item) => item.detail).join("\n");
-  assert.match(facts, /HTTP API 与 MCP 由 NEUMA 宿主网关提供/);
-  assert.match(facts, /生成进程不能监听端口/); assert.match(facts, /不是 NEUMA 宿主自身/);
+  assert.match(facts, /HTTP API 与 MCP 由工作台宿主网关提供/);
+  assert.match(facts, /生成进程不能监听端口/); assert.match(facts, /不是工作台宿主自身/);
   assert.match(facts, /默认不开放/); assert.match(facts, /令牌/); assert.match(facts, /交付版本/);
   assert.match(facts, /"allowNetwork":false/);
   assert.equal(designHash(platform), before); assert.equal(platform.version, 4);

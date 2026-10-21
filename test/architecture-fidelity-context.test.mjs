@@ -117,10 +117,10 @@ test("主评审实际发送完整同版事实；旧待复核检查点只续原�
       payload: { ...source, design: source.candidate, candidateHash, requireAcceptanceVerification: true }, reviewEvidenceContext: evidenceContext,
       parameters: reviewSubmissionSchema({ evidenceRequired: true }), submitName: "submit_architecture_review",
       validate: value => validateReview(value, { candidateHash, schemaVersion: 3, evidenceContext }),
-      ...(legacy ? { resumeMainReview: { review, modelCalls: 11 }, initialModelCalls: 11 } : {}),
+      ...(legacy ? { resumeMainReview: { review, modelCalls: 4 }, initialModelCalls: 4 } : {}),
       onFidelity: value => { evidence = value; }, onDiagnostics: value => { diagnostic = value; } });
     assert.equal(result.verdict, "pass"); assert.equal(inspected, 1); assert.equal(mainCalls, legacy ? 0 : 1);
-    assert.equal(diagnostic.modelCalls, legacy ? 12 : 2);
+    assert.equal(diagnostic.modelCalls, legacy ? 5 : 2);
     assert.equal(evidence.verdict, "preserved"); assert.equal(evidence.contextVersion, legacy ? undefined : "full-v2");
   }
 });

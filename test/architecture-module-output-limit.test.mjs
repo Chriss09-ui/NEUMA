@@ -131,10 +131,10 @@ test("子length之后测试护栏拒发下一请求，保留原子原因并单�
   assert.doesNotMatch(JSON.stringify(diagnostic), /fixture-private-guard-message|api_error|unknown_tool_error/u);
 });
 
-test("原生Pi产品原十二轮限制保留turn_limit主因，拒发证据单列且不执行第十三个请求", { timeout: 20000 }, async t => {
+test("原生Pi产品原五轮限制保留turn_limit主因，拒发证据单列且不执行第六个请求", { timeout: 20000 }, async t => {
   const f = await fixture(t, { loop: true }); let diagnostic;
   await assert.rejects(f.runRole(), error => { diagnostic = error.diagnostic; return diagnostic.reason === "turn_limit"; });
-  assert.equal(f.requests.length, 12); assert.equal(diagnostic.modelCalls, 12);
+  assert.equal(f.requests.length, 5); assert.equal(diagnostic.modelCalls, 5);
   assert.deepEqual(diagnostic.requestAdmission, { reason: "request_blocked", requestSent: false, source: "model_call_policy",
     causeReason: "turn_limit", purpose: "agent", retryAttempt: 0 });
 });

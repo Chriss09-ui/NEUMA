@@ -20,9 +20,9 @@ const freeze = (value) => {
 };
 const hostDeliveryCapabilities = [
   ...SERVICE_HOSTS.flatMap((host) => SERVICE_LANGUAGES.map((language) => ({ id: `${host}_${language}_runtime`, version: 1, status: "available",
-    scope: `NEUMA已实现${host}方式的${language}代码交付通道；这是平台机制而非工作工具。当前交付仍须研发、依赖准备、实际隔离探测及启动验收；不证明此电脑环境就绪或业务规模已经通过。` }))),
-  { id: "gateway_http_api", version: 1, status: "available", scope: "NEUMA已实现回环HTTP API网关；这是平台机制而非工作工具。须显式选择动作、授权并绑定交付版本，真实检查通过后才可用；不证明当前已开启或任何业务结果已经通过。" },
-  { id: "gateway_mcp", version: 1, status: "available", scope: "NEUMA已实现回环Streamable HTTP MCP网关；这是平台机制而非工作工具。仅公开选定动作和授权任务，需实际协议检查；不证明当前已开启、已授权或业务结果已经通过。" },
+    scope: `工作台已实现${host}方式的${language}代码交付通道；这是平台机制而非工作工具。当前交付仍须研发、依赖准备、实际隔离探测及启动验收；不证明此电脑环境就绪或业务规模已经通过。` }))),
+  { id: "gateway_http_api", version: 1, status: "available", scope: "工作台已实现回环HTTP API网关；这是平台机制而非工作工具。须显式选择动作、授权并绑定交付版本，真实检查通过后才可用；不证明当前已开启或任何业务结果已经通过。" },
+  { id: "gateway_mcp", version: 1, status: "available", scope: "工作台已实现回环Streamable HTTP MCP网关；这是平台机制而非工作工具。仅公开选定动作和授权任务，需实际协议检查；不证明当前已开启、已授权或业务结果已经通过。" },
 ];
 
 export function hostDeliveryCapabilityCatalog(runtimeCapabilities) {
