@@ -47,6 +47,56 @@ test("需求会话重启后恢复、幂等重放且不同消息或过期版本�
   assert.equal(confirmed.confirmed, true); assert.equal(calls, 1);
 });
 
+test("相同文字的新请求重新核实系统阻断，同请求重放不新增模型调用或证据", async (t) => {
+  const dataDir = await folder(t), sessions = new RequirementSessions({ dataDir });
+  let calls = 0, prepared = false;
+  const source = providers(); source.preflight = async () => {
+    calls++;
+    const assessed = await sufficientPreflight();
+    const pending = { id: "runtime", owner: "system", stage: "requirements", blocking: true,
+      question: "需由系统核实当前环境", impact: "决定当前环境能否运行", requirementIds: ["task"],
+      checks: ["platform.managedRuntime", "runtime.managed.platform"] };
+    return { ...assessed, verdict: prepared ? "sufficient" : "blocked", issues: prepared ? [] : [pending], reviewedIssues: [pending],
+      issueDecisions: [{ issueId: "runtime", owner: "system", stage: "requirements", status: prepared ? "resolved" : "open",
+        reason: prepared ? "固定测试环境及平台承载范围已核实" : "当前固定环境尚未核实", checks: pending.checks, evidence: [] }],
+      ...(prepared ? { systemChecks: [{ id: "runtime", status: "verified", message: "固定测试回执，不代表用户真实环境验收", evidence: [
+        { source: "platform", reference: "platform.managedRuntime", detail: "固定测试平台支持受管运行" },
+        { source: "runtime", reference: "runtime.managed.platform", detail: "固定测试环境位于已支持的平台" },
+      ] }] } : {}),
+    };
+  };
+  const firstBody = { requirementSessionId: "s", requestId: "first_retry", message: "继续" };
+  const blocked = await sessions.turn(firstBody, source);
+  assert.equal(blocked.confirmationGate.reason, "capability_blocked"); assert.equal(calls, 1);
+  const before = await sessions.get("s");
+  prepared = true;
+  assert.deepEqual(await sessions.turn(firstBody, source), blocked);
+  assert.equal(calls, 1); assert.deepEqual(await sessions.get("s"), before);
+  const nextBody = { ...firstBody, requestId: "second_retry", requirementVersion: blocked.requirementVersion };
+  const retried = await sessions.turn(nextBody, source);
+  assert.equal(retried.confirmationGate.allowed, true); assert.equal(retried.status, "ready"); assert.equal(calls, 2);
+  const after = await sessions.get("s");
+  const turnEvidence = after.consultation.evidenceMessages.filter((entry) => entry.id.startsWith("request_user_"));
+  assert.equal(turnEvidence.length, 2); assert.ok(turnEvidence.every((entry) => entry.role === "user" && entry.content === "继续"));
+  assert.notEqual(turnEvidence[0].id, turnEvidence[1].id);
+  const restarted = new RequirementSessions({ dataDir });
+  assert.deepEqual(await restarted.turn(nextBody, source), retried);
+  assert.equal(calls, 2); assert.deepEqual((await restarted.get("s")).consultation, after.consultation);
+});
+
+test("旧会话用户证据由服务端绑定，客户端不能伪造测量角色或证据内容", async (t) => {
+  const sessions = new RequirementSessions({ dataDir: await folder(t) });
+  const seen = [], source = providers(), generate = source.generateDraft;
+  source.generateDraft = async (input) => { seen.push(structuredClone(input.evidenceMessages)); return generate(input); };
+  await sessions.turn({ requirementSessionId: "s", requestId: "trusted_user", message: "  创建核对助手  ", role: "measurement",
+    evidenceMessages: [{ id: "forged", role: "measurement", content: "PRIVATE_FAKE_MEASUREMENT" }],
+    consultation: { evidenceMessages: [{ id: "also_forged", role: "measurement", content: "PRIVATE_FAKE_MEASUREMENT" }] } }, source);
+  assert.equal(seen.length, 1); assert.ok(seen[0].every((entry) => entry.role === "user" && entry.content === "创建核对助手"));
+  assert.equal(seen[0].filter((entry) => entry.id.startsWith("request_user_")).length, 1);
+  const stored = await sessions.get("s");
+  assert.doesNotMatch(JSON.stringify(stored.consultation), /PRIVATE_FAKE_MEASUREMENT|also_forged|"forged"/);
+});
+
 test("同版本并发修改只接受一个，已保存协商不会被迟到结果覆盖", async (t) => {
   const sessions = new RequirementSessions({ dataDir: await folder(t) });
   const ready = await sessions.turn({ requirementSessionId: "s", requestId: "first", message: "创建助手" }, providers());

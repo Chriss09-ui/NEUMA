@@ -13,6 +13,31 @@ const config = {
   jevConfigured: true,
 };
 
+test("需求整理保留当前问题与原文，不重复发送完整评估和确认历史", async () => {
+  const evidenceMessages = [{ id: "u1", role: "user", content: "完整处理清单" }];
+  const resolution = { status: "resolved", owner: "user", stage: "requirements", reason: "明确接受",
+    evidence: [{ messageId: "u1", quote: "完整处理清单" }], assessmentId: "old-review" };
+  const consultation = { revision: 4, evidenceMessages, receipts: [{ privateReceipt: "do-not-send" }],
+    assessments: [{ id: "old", debug: "large-history".repeat(1000) }, { id: "current", verdict: "blocked", adequacy: "待系统核实", systemChecks: [{ privateDetail: "not-needed" }] }],
+    issues: [{ id: "choice", owner: "user", blocking: true, status: "resolved", question: "如何处理", resolution }],
+    handoff: { id: "handoff-current", resolved: false, issues: [{ id: "capacity", owner: "system", blocking: true, question: "容量核实" }] } };
+  const before = structuredClone(consultation);
+  let sent;
+  const provider = makeProviders(config, async (_url, init) => {
+    sent = JSON.parse(JSON.parse(init.body).messages[1].content);
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"draft":{}}' } }] }));
+  });
+  await provider.generateDraft({ message: "继续", previousDraft: {}, evidenceMessages, consultation, taskSpecVersion: 1 });
+  assert.deepEqual(sent.evidenceMessages, evidenceMessages);
+  assert.equal(sent.consultation.issues[0].status, "resolved");
+  assert.deepEqual(sent.consultation.issues[0].resolution.evidence, resolution.evidence);
+  assert.equal(sent.consultation.handoff.issues[0].id, "capacity");
+  assert.deepEqual(sent.consultation.lastAssessment, { verdict: "blocked", adequacy: "待系统核实" });
+  for (const excluded of ["large-history", "do-not-send", "not-needed", "old-review"])
+    assert.equal(JSON.stringify(sent).includes(excluded), false);
+  assert.deepEqual(consultation, before);
+});
+
 test("兼容模型返回无效 JSON 时报告错误", async () => {
   const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: "not json" } }] }), {
     status: 200, headers: { "content-type": "application/json" },
@@ -21,19 +46,30 @@ test("兼容模型返回无效 JSON 时报告错误", async () => {
   await assert.rejects(generateDraft({ message: "创建助手", previousDraft: {}, lastQuestion: "" }), ProviderError);
 });
 
+test("需求提供者明确区分名称120字符与普通字段1200字符", async () => {
+  let prompt;
+  const provider = makeProviders(config, async (_url, init) => {
+    prompt = JSON.parse(init.body).messages[0].content;
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"draft":{}}' } }] }));
+  });
+  await provider.generateDraft({ message: "创建助手", previousDraft: {} });
+  assert.match(prompt, /name\.value 最多 120 字，其他 value 最多 1200 字/);
+  assert.match(prompt, /用户指定的名称超限时请用户缩短/);
+});
+
 test("Jev 默认使用固定的 1.14 版本，显式配置仍然优先", () => {
   assert.equal(getProviderConfig({}).jevModel, "jev-1.14.0");
   assert.equal(getProviderConfig({ TYPESAFE_MODEL: "  " }).jevModel, "jev-1.14.0");
   assert.equal(getProviderConfig({ TYPESAFE_MODEL: " jev-1.13.0 " }).jevModel, "jev-1.13.0");
 });
 
-test("Pro 请求默认等待 90 秒，并允许合理范围内配置", () => {
+test("模型默认连续无响应 90 秒才超时，旧配置字段仍兼容", () => {
   assert.equal(getProviderConfig({}).llmTimeoutMs, 90_000);
   assert.equal(getProviderConfig({ NEUMA_LLM_TIMEOUT_MS: "120000" }).llmTimeoutMs, 120_000);
   assert.equal(getProviderConfig({ NEUMA_LLM_TIMEOUT_MS: "999999" }).llmTimeoutMs, 90_000);
 });
 
-test("通用兼容接口的连接失败与整体超时给出不同提示", async () => {
+test("通用兼容接口的连接失败与连续无响应超时给出不同提示", async () => {
   let calls = 0;
   const connectionFailed = async () => { calls += 1; throw new TypeError("fetch failed"); };
   await assert.rejects(makeProviders(config, connectionFailed).generateDraft({
@@ -44,7 +80,7 @@ test("通用兼容接口的连接失败与整体超时给出不同提示", async
   const timedOut = async () => { throw new DOMException("timed out", "TimeoutError"); };
   await assert.rejects(makeProviders({ ...config, llmTimeoutMs: 10_000 }, timedOut).generateDraft({
     message: "做周报助手", previousDraft: {}, lastQuestion: "",
-  }), /兼容模型响应超过 10 秒/);
+  }), (error) => error.diagnostic.reason === "idle_timeout" && /兼容模型连续 10 秒未收到模型响应/.test(error.message));
 });
 
 test("连接阶段超时、响应正文中断和鉴权失败分别报告", async () => {
@@ -86,13 +122,13 @@ test("MiMo 的暂时性连接失败会在同一轮自动恢复", async () => {
   assert.equal(calls, 2);
 });
 
-test("MiMo 连续连接失败最多请求三次，使用同一总时限并给出具体原因", async () => {
+test("MiMo 连续连接失败最多请求三次，每次独立计时并给出具体原因", async () => {
   let calls = 0;
-  let firstSignal;
+  const signals = new Set();
   const fetchImpl = async (_url, init) => {
     calls += 1;
-    firstSignal ??= init.signal;
-    assert.equal(init.signal, firstSignal);
+    assert.equal(init.signal.aborted, false);
+    signals.add(init.signal);
     throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
   };
   const provider = makeProviders({ ...config,
@@ -107,6 +143,7 @@ test("MiMo 连续连接失败最多请求三次，使用同一总时限并给出
     return true;
   });
   assert.equal(calls, 3);
+  assert.equal(signals.size, 3);
 });
 
 test("MiMo 的 503 可重试，鉴权失败与无效 JSON 不重试", async () => {
@@ -147,7 +184,7 @@ test("小米 MiMo 使用 JSON 模式并关闭需求提取时的深度思考", as
     chatUrl: "https://api.xiaomimimo.com/v1/chat/completions", model: "mimo-v2.6-pro" }, fetchImpl);
   await generateDraft({ message: "做周报助手", previousDraft: {}, lastQuestion: "" });
   assert.equal(body.model, "mimo-v2.6-pro");
-  assert.equal(body.max_completion_tokens, 131072);
+  assert.equal(body.max_completion_tokens, 8192);
   assert.equal(body.max_tokens, undefined);
   assert.deepEqual(body.response_format, { type: "json_object" });
   assert.deepEqual(body.thinking, { type: "disabled" });
@@ -413,7 +450,7 @@ test("流式鉴权、超时与连接错误使用安全提示", async () => {
   for (const [fetchImpl, expected] of [
     [async () => new Response("private server response", { status: 401 }), /鉴权失败/],
     [async () => new Response("private server response", { status: 429 }), /请求过于频繁/],
-    [async () => { throw new DOMException("private server response", "TimeoutError"); }, /响应超过/],
+    [async () => { throw new DOMException("private server response", "TimeoutError"); }, /连续 90 秒未收到模型响应/],
     [async () => { throw new Error("private server response"); }, /连接失败/],
   ]) {
     await assert.rejects(makeProviders(config, fetchImpl).streamReply({ summary: "资料整理" }), (error) => {
@@ -472,20 +509,23 @@ test("等待提取请求重试时也可取消", async () => {
   assert.equal(calls, 1);
 });
 
-test("流式总时限到达会取消上游，并报告超时而非用户取消", async () => {
+test("流式连续无响应会取消上游，空闲超时不盲目重试或误报用户取消", async () => {
   let cancelled = false;
+  let calls = 0;
   const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
     headers: { "content-type": "text/event-stream" },
   });
   const keepAlive = setTimeout(() => {}, 1_000);
   try {
-    const provider = makeProviders({ ...config, llmTimeoutMs: 20 }, async () => response);
+    const provider = makeProviders({ ...config, llmTimeoutMs: 20 }, async () => { calls++; return response; });
     await assert.rejects(provider.streamReply({ summary: "资料整理" }), (error) => {
       assert.ok(error instanceof ProviderError);
-      assert.equal(error.diagnostic.reason, "timeout");
+      assert.equal(error.diagnostic.reason, "idle_timeout");
+      assert.match(error.message, /连续 1 秒未收到模型响应/);
       return true;
     });
     assert.equal(cancelled, true);
+    assert.equal(calls, 1);
   } finally {
     clearTimeout(keepAlive);
   }
@@ -555,18 +595,41 @@ test("需求输出被截断单独诊断，不作为无效 JSON 或连接失败",
   }
 });
 
+test("需求 JSON 错误只报告安全形态和位置，不泄露模型正文或增加调用", async () => {
+  const privateText = "private-fixture-sensitive";
+  for (const content of [`{\"draft\":\"${privateText}\" broken}`, `${privateText}：请先回答问题`, "[]", ""]) {
+    let calls = 0;
+    const provider = makeProviders(config, async () => {
+      calls++;
+      return Response.json({ choices: [{ finish_reason: privateText, message: { content } }] });
+    });
+    await assert.rejects(provider.generateDraft({ message: "资料整理", previousDraft: {} }), (error) => {
+      assert.equal(error.diagnostic.reason, "invalid_model_json");
+      assert.equal(error.diagnostic.contentLength, content.length);
+      assert.equal(error.diagnostic.finishReason, "unknown");
+      assert.equal(error.diagnostic.fenced, false);
+      assert.ok(["empty", "object", "array", "other"].includes(error.diagnostic.contentForm));
+      assert.equal(JSON.stringify(error.diagnostic).includes(privateText), false);
+      assert.equal(error.message.includes(privateText), false);
+      if ("parseOffset" in error.diagnostic) assert.ok(Number.isSafeInteger(error.diagnostic.parseOffset));
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const draftReply = () => new Response(JSON.stringify({ choices: [{ message: { content: '{"draft":{}}' } }] }));
 const shortReply = () => streamResponse(streamEvent({ content: "已记下。" }, "stop") + "data: [DONE]\n\n");
 const turnInput = { message: "资料整理", previousDraft: {}, summary: "资料整理" };
 
-test("通用兼容接口的瞬态传输与 503 错误在同一总时限内恢复", async (t) => {
+test("通用兼容接口的瞬态传输与 503 错误保留三次尝试且独立计时", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
-  let calls = 0, firstSignal;
+  let calls = 0;
+  const signals = new Set();
   const provider = makeProviders(config, async (_url, init) => {
     calls++;
-    firstSignal ??= init.signal;
-    assert.equal(init.signal, firstSignal);
+    signals.add(init.signal);
     if (calls === 1) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
     return calls === 2 ? new Response("busy", { status: 503 }) : draftReply();
   });
@@ -577,6 +640,7 @@ test("通用兼容接口的瞬态传输与 503 错误在同一总时限内恢复
   t.mock.timers.tick(900);
   assert.deepEqual(await result, { draft: {} });
   assert.equal(calls, 3);
+  assert.equal(signals.size, 3);
 });
 
 test("需求和短流重试尊重 Retry-After 秒数与 HTTP 日期", async (t) => {
@@ -604,7 +668,7 @@ test("需求和短流重试尊重 Retry-After 秒数与 HTTP 日期", async (t) 
   }
 });
 
-test("无效 Retry-After 使用有界退避，过长或超出剩余时限的等待不提前重试", async (t) => {
+test("无效 Retry-After 使用有界退避，超过 30 秒的等待不提前重试", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
   for (const name of ["generateDraft", "streamReply"]) {
     for (const retryAfter of ["invalid", "-1", "1.5"]) {
@@ -623,7 +687,7 @@ test("无效 Retry-After 使用有界退避，过长或超出剩余时限的等�
       await result;
       assert.equal(calls, 2);
     }
-    for (const [retryAfter, timeoutMs] of [["31", 90_000], ["1", 500]]) {
+    for (const [retryAfter, timeoutMs] of [["31", 90_000], ["31", 500]]) {
       let calls = 0;
       const provider = makeProviders({ ...config, llmTimeoutMs: timeoutMs }, async () => {
         calls++;
@@ -648,14 +712,14 @@ test("普通接口的鉴权和输入 HTTP 错误不重试", async () => {
   }
 });
 
-test("短流仅在尚未输出文字时恢复传输中断和暂时 HTTP 错误", async (t) => {
+test("短流仅在尚未输出文字时恢复传输中断和暂时 HTTP 错误，每次独立计时", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
-  let calls = 0, firstSignal;
+  let calls = 0;
+  const signals = new Set();
   const chunks = [];
   const provider = makeProviders(config, async (_url, init) => {
     calls++;
-    firstSignal ??= init.signal;
-    assert.equal(init.signal, firstSignal);
+    signals.add(init.signal);
     if (calls === 1) return new Response(new ReadableStream({ start(controller) {
       controller.error(Object.assign(new Error("private"), { code: "ECONNRESET" }));
     } }), { headers: { "content-type": "text/event-stream" } });
@@ -668,10 +732,11 @@ test("短流仅在尚未输出文字时恢复传输中断和暂时 HTTP 错误",
   t.mock.timers.tick(900);
   assert.equal(await result, "已记下。");
   assert.equal(calls, 3);
+  assert.equal(signals.size, 3);
   assert.deepEqual(chunks, ["已记下。"]);
 });
 
-test("短流持续失败最多请求三次，剩余时限不足时停止重试", async (t) => {
+test("短流持续失败最多请求三次，退避超过空闲时限仍保留原尝试次数", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
   for (const timeoutMs of [90_000, 350]) {
     let calls = 0;
@@ -680,13 +745,13 @@ test("短流持续失败最多请求三次，剩余时限不足时停止重试",
       return new Response("busy", { status: 503 });
     });
     const result = assert.rejects(provider.streamReply(turnInput), (error) => error.diagnostic.reason === "http_error"
-      && error.diagnostic.attempts === (timeoutMs === 350 ? 2 : 3));
+      && error.diagnostic.attempts === 3);
     await settle();
     t.mock.timers.tick(300);
     await settle();
-    if (timeoutMs !== 350) t.mock.timers.tick(900);
+    t.mock.timers.tick(900);
     await result;
-    assert.equal(calls, timeoutMs === 350 ? 2 : 3);
+    assert.equal(calls, 3);
   }
 });
 
@@ -705,7 +770,7 @@ test("取消短流 Retry-After 等待立即停止，不再发起请求", async (
   assert.equal(calls, 1);
 });
 
-test("已确认 MiMo 模型的需求和正式回复均使用官方完整输出预算", async () => {
+test("已确认 MiMo 模型的需求和正式回复使用各自任务预算", async () => {
   const bodies = [];
   const provider = makeProviders({ ...config, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions", model: "mimo-v2.6-pro" },
     async (_url, init) => {
@@ -716,13 +781,14 @@ test("已确认 MiMo 模型的需求和正式回复均使用官方完整输出�
   await provider.generateDraft(turnInput);
   await provider.streamReply(turnInput);
   assert.equal(bodies.length, 2);
-  for (const body of bodies) {
-    assert.equal(body.max_completion_tokens, 131072);
+  for (const [index, body] of bodies.entries()) {
+    assert.equal(body.max_completion_tokens, index === 0 ? 8192 : 2048);
     assert.equal(body.max_tokens, undefined);
   }
 });
 
-test("503 响应正文取消停滞时，15ms 总预算也能终结而不悬挂", async () => {
+test("503 响应正文取消停滞不阻塞重试，空闲时限不约束退避等待", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
   let cancelled = false, calls = 0;
   const provider = makeProviders({ ...config, llmTimeoutMs: 15 }, async () => {
     calls++;
@@ -731,14 +797,103 @@ test("503 响应正文取消停滞时，15ms 总预算也能终结而不悬挂",
       return new Promise(() => {});
     } } };
   });
-  let timer;
-  try {
-    await Promise.race([
-      assert.rejects(provider.generateDraft(turnInput), (error) => error instanceof ProviderError
-        && error.diagnostic.httpStatus === 503 && error.diagnostic.attempts === 1),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("响应清理阻塞了总预算")), 95); }),
-    ]);
-  } finally { clearTimeout(timer); }
+  const result = assert.rejects(provider.generateDraft(turnInput), (error) => error instanceof ProviderError
+    && error.diagnostic.httpStatus === 503 && error.diagnostic.attempts === 3);
+  await settle();
+  t.mock.timers.tick(300);
+  await settle();
+  t.mock.timers.tick(900);
+  await result;
   assert.equal(cancelled, true);
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
+});
+
+test("需求 JSON、短流及 Jev 持续收到字节时，累计处理超过空闲时限仍完成", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
+  for (const name of ["generateDraft", "streamReply", "judgeJev"]) {
+    const interval = name === "judgeJev" ? 2000 : 40;
+    const idleMs = name === "judgeJev" ? 3000 : 50;
+    const raw = JSON.stringify(name === "judgeJev" ? { answers: { goal_clear: true } }
+      : { choices: [{ message: { content: '{"draft":{}}' } }] });
+    const parts = name === "streamReply" ? [streamEvent({ content: "持续" }), ": keepalive\n\n",
+      streamEvent({ content: "响应" }, "stop") + "data: [DONE]\n\n"]
+      : [raw.slice(0, 10), raw.slice(10, 20), raw.slice(20)];
+    let upstream, calls = 0;
+    const response = new Response(new ReadableStream({ start(controller) { upstream = controller; } }), {
+      headers: { "content-type": name === "streamReply" ? "text/event-stream" : "application/json" },
+    });
+    const provider = makeProviders({ ...config, llmTimeoutMs: 5, llmIdleTimeoutMs: 50 }, async () => { calls++; return response; });
+    const started = Date.now();
+    const result = provider[name]({ ...turnInput, draft: {} });
+    await settle();
+    for (let index = 0; index < parts.length; index++) {
+      if (index) t.mock.timers.tick(interval);
+      upstream.enqueue(new TextEncoder().encode(parts[index]));
+      if (index === parts.length - 1) upstream.close();
+      await settle();
+    }
+    const value = await result;
+    assert.ok(Date.now() - started > idleMs);
+    assert.equal(calls, 1);
+    if (name === "streamReply") assert.equal(value, "持续响应");
+    else assert.deepEqual(value, name === "judgeJev" ? { answers: { goal_clear: true } } : { draft: {} });
+  }
+});
+
+test("等待首响应和兼容正文读取的空闲超时均只请求一次", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
+  for (const name of ["generateDraft", "streamReply"]) {
+    for (const phase of ["headers", "body"]) {
+      let calls = 0;
+      const provider = makeProviders({ ...config, llmIdleTimeoutMs: 40 }, async () => {
+        calls++;
+        if (phase === "headers") return new Promise(() => {});
+        if (name === "generateDraft") return { ok: true, text: () => new Promise(() => {}) };
+        return new Response(new ReadableStream({}), { headers: { "content-type": "text/event-stream" } });
+      });
+      const result = assert.rejects(provider[name](turnInput), (error) => error instanceof ProviderError
+        && error.diagnostic.reason === "idle_timeout" && error.diagnostic.attempts === 1
+        && /连续 1 秒未收到模型响应/.test(error.message));
+      await settle();
+      t.mock.timers.tick(40);
+      await result;
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test("Retry-After 等待长于空闲时限仍按原次数重试，不当成无响应", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
+  for (const name of ["generateDraft", "streamReply"]) {
+    let calls = 0;
+    const provider = makeProviders({ ...config, llmIdleTimeoutMs: 50 }, async () => {
+      calls++;
+      return calls === 1 ? new Response("busy", { status: 429, headers: { "retry-after": "2" } })
+        : name === "generateDraft" ? draftReply() : shortReply();
+    });
+    const result = provider[name](turnInput);
+    await settle();
+    t.mock.timers.tick(1999);
+    await settle();
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    await result;
+    assert.equal(calls, 2);
+  }
+});
+
+test("空闲计时前的用户取消优先，不泄露原因或自动重试", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
+  for (const name of ["generateDraft", "streamReply", "judgeJev"]) {
+    const controller = new AbortController();
+    let calls = 0;
+    const provider = makeProviders({ ...config, llmIdleTimeoutMs: 40 }, async () => { calls++; return new Promise(() => {}); });
+    const result = assert.rejects(provider[name]({ ...turnInput, draft: {}, signal: controller.signal }),
+      (error) => error.name === "AbortError" && !/连续|private/.test(error.message));
+    await settle();
+    t.mock.timers.tick(39);
+    controller.abort(new Error("private cancellation reason"));
+    await result;
+    assert.equal(calls, 1);
+  }
 });

@@ -1,5 +1,8 @@
 import { emptyTaskSpec, mergeEvidence, normalizeTaskSpec, substantiveRequirementHash, validateTaskEvidence, validateTaskSpecTransition } from "./task-spec.mjs";
-import { consultationGate, evaluateConsultation, issueConfirmation, newConsultation } from "./consultation.mjs";
+import { consultationGate, evaluateConsultation, issueConfirmation, mergeConsultationIssues, newConsultation, separateSystemUnresolved } from "./consultation.mjs";
+import { normalizeVerificationContext } from "../applications/input-framing.mjs";
+import { textLength, textWithinLimit, truncateText } from "../runtime/text-length.mjs";
+import { assertRequirementDraftSize, REQUIREMENT_HISTORY_MAX_CHARACTERS, REQUIREMENT_HISTORY_MAX_MESSAGES, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS } from "./requirement-limits.mjs";
 
 const SOURCES = new Set(["user", "inferred", "default", "unknown"]);
 const USAGE_MODES = new Set(["on_demand", "scheduled", "event", "unclear"]);
@@ -23,7 +26,7 @@ export class ProviderError extends Error {
 }
 
 function cleanText(value, max = 1200) {
-  return typeof value === "string" ? value.trim().slice(0, max) : "";
+  return typeof value === "string" ? truncateText(value.trim(), max) : "";
 }
 
 function shortReply(value) {
@@ -49,9 +52,9 @@ function isRejection(value) {
 
 function userMessagesForTurn(value) {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 12
-      || value.some((item) => typeof item !== "string" || item.length > 4000)
-      || value.reduce((total, item) => total + item.length, 0) > 12000) {
+  if (!Array.isArray(value) || value.length > REQUIREMENT_HISTORY_MAX_MESSAGES
+      || value.some((item) => !textWithinLimit(item, REQUIREMENT_MESSAGE_MAX_CHARACTERS))
+      || value.reduce((total, item) => total + textLength(item), 0) > REQUIREMENT_HISTORY_MAX_CHARACTERS) {
     throw new InputError("当前对话原文格式无效或过长");
   }
   return value.map((item) => item.trim()).filter(Boolean);
@@ -101,6 +104,9 @@ function normalizeStrings(value) {
 
 export function normalizeDraft(value) {
   const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  if (typeof raw.name?.value === "string" && !textWithinLimit(raw.name.value, REQUIREMENT_NAME_MAX_CHARACTERS))
+    throw Object.assign(new InputError(`智能体名称不能超过 ${REQUIREMENT_NAME_MAX_CHARACTERS} 字，请提供更短的名称；原名称未被截断或保存`),
+      { reason: "requirement_name_too_long", field: "name.value", limitCharacters: REQUIREMENT_NAME_MAX_CHARACTERS });
   const usage = raw.usage && typeof raw.usage === "object" ? raw.usage : {};
   const action = raw.externalAction && typeof raw.externalAction === "object"
     ? raw.externalAction : {};
@@ -108,7 +114,7 @@ export function normalizeDraft(value) {
   const conflict = raw.conflict && typeof raw.conflict === "object"
     ? { left: cleanText(raw.conflict.left, 500), right: cleanText(raw.conflict.right, 500) }
     : null;
-  return {
+  const draft = {
     name: normalizeField(raw.name),
     agentType: normalizeField(raw.agentType),
     goal: normalizeField(raw.goal),
@@ -157,6 +163,8 @@ export function normalizeDraft(value) {
     conflict: conflict?.left && conflict?.right ? conflict : null,
     ...(raw.taskSpec !== undefined ? { taskSpec: normalizeTaskSpec(raw.taskSpec) } : {}),
   };
+  try { return assertRequirementDraftSize(draft); }
+  catch (error) { throw Object.assign(new InputError(error.message), { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes }); }
 }
 
 function requireModelDraft(value) {
@@ -186,7 +194,9 @@ function requireModelDraft(value) {
     throw new ProviderError("需求模型返回的页面助手格式无效", { stage: "llm", reason: "invalid_draft", field: "interaction.assistant" });
   }
   try { return normalizeDraft(value); }
-  catch (error) { throw new ProviderError(error.message, { stage: "llm", reason: "invalid_task_spec" }); }
+  catch (error) { throw new ProviderError(error.message, { stage: "llm", reason: error.reason ?? "invalid_task_spec",
+    ...(error.reason === "requirement_draft_too_large" ? { bytes: error.bytes, limitBytes: error.limitBytes } : {}),
+    ...(error.reason === "requirement_name_too_long" ? { field: error.field, limitCharacters: error.limitCharacters } : {}) }); }
 }
 
 function hasGroundedFact(item) {
@@ -364,24 +374,39 @@ function confirmationOnly(draft, confirmed, question, reason) {
   };
 }
 
-export async function processTurn(request, { generateDraft, judgeJev, preflight, getPlatform, research: providerResearch },
-  { signal, onProgress, enforceConsultation = request?.draft?.taskSpec !== undefined, platform, requestId, research } = {}) {
+function canResumeSystemAssessment(message, draft, consultation, previousConsultation) {
+  const resumptions = new Set(["继续", "重试", "继续核实", "重试核实", "继续检查", "重试检查"]);
+  if (!resumptions.has(shortReply(message))
+    || !draft.taskSpec
+    || draft.taskSpec.items.some((item) => item.critical && (item.applicability === "unknown" || item.source.kind === "unknown"))) return false;
+  const priorUsers = new Set((previousConsultation?.evidenceMessages ?? []).filter((entry) => entry.role === "user").map((entry) => entry.id));
+  if (consultation.evidenceMessages.some((entry) => entry.role === "user" && !priorUsers.has(entry.id)
+    && !resumptions.has(shortReply(entry.content)))) return false;
+  const assessment = consultation?.assessments?.findLast((item) => item.requirementHash === substantiveRequirementHash(draft));
+  if (!assessment || assessment.verdict === "sufficient" && !assessment.failure) return false;
+  return ![...mergeConsultationIssues(consultation.issues, consultation.handoff), ...(assessment.issues ?? [])]
+    .some((issue) => issue.owner === "user" && issue.blocking && issue.status !== "resolved" && issue.current !== false);
+}
+
+export async function processTurn(request, { generateDraft, judgeJev, preflight, getPlatform, research: providerResearch, verifySystemIssues },
+  { signal, onProgress, enforceConsultation = request?.draft?.taskSpec !== undefined, platform, requestId, research, verificationContext } = {}) {
   signal?.throwIfAborted();
-  const message = cleanText(request?.message, 4000);
-  if (!message) throw new InputError("请输入你希望 Agent 做什么，或说明要修改的内容");
-  if (typeof request?.message !== "string" || request.message.length > 4000) {
-    throw new InputError("本轮输入不能超过 4000 字");
+  if (!textWithinLimit(request?.message, REQUIREMENT_MESSAGE_MAX_CHARACTERS)) {
+    throw new InputError(`本轮输入不能超过 ${REQUIREMENT_MESSAGE_MAX_CHARACTERS} 字`);
   }
+  const message = request.message.trim();
+  if (!message) throw new InputError("请输入你希望 Agent 做什么，或说明要修改的内容");
   const previousDraft = normalizeDraft(request.draft);
   const lastQuestion = cleanText(request.lastQuestion, 500);
   const userMessages = userMessagesForTurn(request.userMessages);
   const awaitingConfirmation = isConfirmationPrompt(lastQuestion);
   const consultation = enforceConsultation ? structuredClone(request.consultation ?? newConsultation()) : null;
   if (consultation) {
+    const messageId = request.evidenceMessages?.findLast((entry) => entry.role === "user" && entry.content === message)?.id;
     consultation.evidenceMessages = mergeEvidence(consultation.evidenceMessages,
-      [...(request.evidenceMessages ?? []), ...(lastQuestion ? [{ role: "assistant", content: lastQuestion }] : []), { role: "user", content: message }]);
+      [...(request.evidenceMessages ?? []), ...(lastQuestion ? [{ role: "assistant", content: lastQuestion }] : []),
+        { ...(messageId ? { id: messageId } : {}), role: "user", content: message }]);
   }
-  const actualPlatform = enforceConsultation ? platform ?? await getPlatform?.({ draft: previousDraft, message }) ?? {} : undefined;
   const finish = async (result) => {
     if (!enforceConsultation) return result;
     result.draft.taskSpec ??= emptyTaskSpec();
@@ -390,19 +415,29 @@ export async function processTurn(request, { generateDraft, judgeJev, preflight,
       validateTaskSpecTransition(previousDraft.taskSpec, result.draft.taskSpec, consultation.evidenceMessages, message);
     }
     catch (error) { throw new ProviderError(error.message, { stage: "llm", reason: "invalid_evidence" }); }
+    const actualPlatform = platform ?? await getPlatform?.({ draft: result.draft, message }) ?? {};
     const hasOutline = ["goal", "inputSource", "task", "deliverable"].every((key) => result.draft[key]?.value);
     result.consultation = hasOutline ? await evaluateConsultation({ draft: result.draft, consultation,
-      platform: actualPlatform, requestId, preflight, research: research ?? providerResearch, signal, onProgress }) : consultation;
+      platform: actualPlatform, requestId, preflight, research: research ?? providerResearch, verifySystemIssues,
+      verificationContext: normalizeVerificationContext(verificationContext), signal, onProgress }) : consultation;
     signal?.throwIfAborted();
     const gate = consultationGate(result.draft, result.consultation, actualPlatform);
     result.confirmationGate = gate;
     if (!gate.allowed) {
       result.confirmed = false; result.status = "needs_input"; result.confirmationQuestion = null;
-      result.question = result.question || gate.message;
+      result.question = !hasOutline && gate.reason === "assessment_missing"
+        ? result.question || decideNext(result.draft).question || gate.message
+        : ["needs_input", "critical_requirement_unknown"].includes(gate.reason)
+          ? gate.issue?.question ?? result.question ?? gate.message : gate.message;
       result.summary = summaryFor(result.draft, "needs_input");
     } else if (result.confirmed) {
       result.confirmation = issueConfirmation(result.draft, result.consultation, {
         platform: actualPlatform, requestId, displayedHash: request.consultation?.displayedHash });
+    }
+    if (gate.allowed && !result.confirmed && decideNext(result.draft).status === "ready"
+      && result.diagnostic?.decision?.selectedBy !== "confirmation") {
+      result.status = "ready"; result.question = null; result.confirmationQuestion = CONFIRMATION_QUESTION;
+      result.summary = summaryFor(result.draft, "ready");
     }
     if (result.status === "ready" && !result.confirmed) result.consultation.displayedHash = substantiveRequirementHash(result.draft);
     return result;
@@ -425,9 +460,22 @@ export async function processTurn(request, { generateDraft, judgeJev, preflight,
       return finish(confirmationOnly(previousDraft, true, null, "explicit_approval"));
     }
   }
+  if (enforceConsultation && canResumeSystemAssessment(message, previousDraft, consultation, request.consultation)) {
+    const separated = separateSystemUnresolved(previousDraft, consultation);
+    const resumeDraft = separated?.draft ?? previousDraft;
+    if (decideNext(resumeDraft).status === "ready") {
+      if (separated) consultation.notes = separated.notes;
+      const result = confirmationOnly(resumeDraft, false, null, "resume_system_assessment");
+      result.diagnostic.decision.selectedBy = "system_retry";
+      result.diagnostic.decision.selectedGap = "none";
+      result.diagnostic.decision.questionSource = "none";
+      result.jev.appliedGap = "none";
+      return finish(result);
+    }
+  }
   const modelStartedAt = Date.now();
   const modelResult = await generateDraft({ message, previousDraft, lastQuestion, userMessages, signal,
-    ...(enforceConsultation ? { evidenceMessages: consultation.evidenceMessages, consultation, platform: actualPlatform, taskSpecVersion: 1 } : {}) });
+    ...(enforceConsultation ? { evidenceMessages: consultation.evidenceMessages, consultation, platform, taskSpecVersion: 1 } : {}) });
   signal?.throwIfAborted();
   const modelMs = Date.now() - modelStartedAt;
   const draft = requireModelDraft(modelResult?.draft);
