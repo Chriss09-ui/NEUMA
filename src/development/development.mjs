@@ -1,27 +1,70 @@
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
-import { modelOutputBudget } from "../runtime/model-limits.mjs";
+import { developmentModelOutputBudget } from "../runtime/model-limits.mjs";
+import { toolInputValidation } from "../runtime/tool-input-diagnostics.mjs";
+import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash, supportedArchitectureVersion, requiresDevelopment } from "../architecture/architecture-contract.mjs";
 import { renderPlatformRules, platformCapabilityCatalog, validatePlatformMetadata } from "../architecture/platform-contract.mjs";
-import { PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue } from "./development-contract.mjs";
+import { PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA, validatePlan, validateReview, validateWork, hashValue, nextReadyDevelopmentTask } from "./development-contract.mjs";
 import { verifyManagedApplication } from "./managed-verification.mjs";
 import { SERVICE_MANIFEST_SCHEMA } from "../services/service-contract.mjs";
+import { TEST_FIXTURE_SCHEMA, FIXTURE_LIMITS } from "./development-fixtures.mjs";
 import { serviceErrorMessage } from "../services/service-errors.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
 import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT } from "./development-prompts.mjs";
-import { compactDevelopmentContext, createContextReadTool } from "./development-context.mjs";
-import { bindApplicationManifest } from "../applications/application-contract.mjs";
+import { compactDevelopmentContext, developmentContextMessage, restoreDevelopmentContext, createContextReadTool } from "./development-context.mjs";
+import { developmentCaseFacts } from "./development-case-facts.mjs";
+import { bindApplicationManifest, VALUE_SCHEMA_DESCRIPTION } from "../applications/application-contract.mjs";
 import { WebCapabilities, createWebTools, WEB_RUNTIME_PROMPT, networkAllowed } from "../runtime/web-capabilities.mjs";
 import { AgentStorage } from "../agents/agent-storage.mjs";
+import { recordSubmission, submissionIssues, lastSubmissionDiagnostic, planningToolIssues } from "./development-diagnostics.mjs";
+import { developmentSessionBinding, developmentSessionStorage, bindDevelopmentSessionFile } from "./development-sessions.mjs";
+import { DevelopmentArtifacts, PLAN_ARTIFACT_GUIDE } from "./development-artifacts.mjs";
+import { planReviewSubject } from "../verification/plan-review-subject.mjs";
+import { JSON_VALUE_SCHEMA_DESCRIPTION } from "../applications/value-schema-rules.mjs";
+import { createDevelopmentFileTools } from "./development-file-tools.mjs";
+import { createDevelopmentPlanningBlocker, planningBlockerOutcome, isPlanningBlockerOutcome, samePlanningBlocker } from "./development-planning-blocker.mjs";
+import { createAcceptanceLedger, recordDevelopmentAcceptance, recordIndependentAcceptance, assertAcceptanceComplete, summarizeAcceptanceLedger, ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
 
 const LABELS = { intake: "正在接收设计与准备工作区…", planning: "正在拆分并检查研发任务…",
   implementing: "正在开发当前任务…", verifying: "正在运行测试与独立验收…", packaging: "正在整理经过验证的交付物…" };
 const DEFAULT_LIMITS = Object.freeze({ corrections: 6, planRevisions: 1, taskRepairs: 2, integrationRepairs: 2, developerTurns: 40, reviewerTurns: 12 });
 const toolResult = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
 const clone = (value) => structuredClone(value);
+
+function planningDraftBinding(record) {
+  return hashValue({ agentId: record.agentId, architecture: record.architecture });
+}
+
+function unacceptedPlanning(record) {
+  return record?.phase === "planning" && !record.plan && !record.planHash
+    && !(record.tasks?.length) && !record.package;
+}
+
+function planningCaseFacts(record, signal) {
+  const current = record.pendingPlan?.plan ?? record.feedback?.rejectedPlan ?? record.plan;
+  if (current) return { ...developmentCaseFacts(current, { signal }), planSource: record.pendingPlan?.plan ? "pendingPlan.plan"
+    : record.feedback?.rejectedPlan ? "feedback.rejectedPlan" : "record.plan", trust: "measurement-only" };
+  const revision = record.architecture.developmentRevision;
+  if (revision?.schemaVersion === 1 && revision.trust === "untrusted-reference" && revision.status === "available"
+    && revision.source?.agentId === record.agentId && revision.plan)
+    return { ...developmentCaseFacts(revision.plan, { planHash: revision.planHash, signal }),
+      planSource: "developmentRevision.plan", trust: "untrusted-reference" };
+}
+
+function historicalPlanReview(record) {
+  const attempt = record.planAttempts?.at(-1);
+  if (!attempt || attempt.review?.verdict !== "revise" || attempt.planHash !== hashValue(attempt.plan)) return;
+  try {
+    const versions = attempt.review.subjectVersion === undefined ? [1, 2] : [attempt.review.subjectVersion];
+    if (!versions.some((version) => attempt.review.subjectHash === hashValue(planReviewSubject(record.architectureRef, attempt.plan, attempt.planHash, version)))) return;
+  } catch { return; }
+  return { sourceRunId: record.id, reviewedPlanHash: attempt.planHash, review: clone(attempt.review),
+    instruction: "这是旧计划版本的独立评语，不能当作当前材料已验证或所有结论仍成立；依据当前材料及程序实测逐项核对，保留真实业务问题，明确已修复或不成立的依据。不能改动架构或验收承诺以通过。" };
+}
 
 class Stop extends Error {
   constructor(message, status = "blocked", diagnostic) { super(message); this.status = status; this.diagnostic = diagnostic; }
@@ -34,11 +77,26 @@ function modelStop(ctx, handle, value) {
   });
 }
 
+function validateTaskWork(value, task) {
+  const work = validateWork(value);
+  if (work.changedFiles.some((file) => !task.files.includes(file))) throw Object.assign(
+    new InputError("开发结果声明了任务授权范围之外的改动，需要修订任务"), { reason: "work_file_unauthorized" });
+  return work;
+}
+
 export function developmentSummary(record) {
   if (!record) return null;
+  const freshPlanningRound = record.status === "failed" && unacceptedPlanning(record)
+    && (["turn_limit", "correction_limit"].includes(record.diagnostic?.reason)
+      || record.budgets?.planRevisions === 0 && record.reviews?.findLast((entry) => entry.mode === "plan")?.verdict === "revise"
+      || Object.values(record.sessions ?? {}).some((entry) => entry.role === "planner" && Number.isSafeInteger(entry.limit)
+        && entry.limit > 0 && entry.turns >= entry.limit));
   return clone({ id: record.id, agentId: record.agentId, name: record.name, version: record.version,
     architectureRef: record.architectureRef, status: record.status, phase: record.phase, summary: record.summary,
     diagnostic: record.diagnostic ?? null,
+    ...(freshPlanningRound ? { continuation: { mode: "fresh", sourceRunId: record.id, reason: "planning_budget_exhausted", historyPreserved: true } } : {}),
+    acceptance: record.acceptanceLedger ? summarizeAcceptanceLedger(record.acceptanceLedger, { allowPendingActivationAdapters: ["host-gateway"] }) : null,
+    submissionCounts: record.submissionCounts ?? {},
     delivery: record.delivery, currentTaskId: record.currentTaskId, budgets: record.budgets,
     tasks: (record.tasks ?? []).map(({ id, title, status, attempts, repairs, summary }) => ({ id, title, status, attempts, repairs, summary })),
     package: record.package ? { codeHash: record.package.codeHash, planHash: record.package.planHash, entrypoint: record.package.entrypoint } : null,
@@ -52,6 +110,7 @@ export class DevelopmentController {
     this.storage = storage ?? store?.storage ?? workspace?.storage ?? new AgentStorage({ dataDir });
     this.store = store ?? new DevelopmentStore({ dataDir, storage: this.storage });
     this.workspace = workspace ?? new DevelopmentWorkspace({ dataDir, storage: this.storage });
+    this.artifacts = new DevelopmentArtifacts({ storage: this.storage });
     this.executor = executor ?? new DevelopmentExecutor();
     this.services = services;
     this.web = web ?? new WebCapabilities();
@@ -102,7 +161,9 @@ export class DevelopmentController {
     if (budgets.corrections <= 0 || (kind === "plan" && budgets.planRevisions <= 0)
       || (kind === "integration" && budgets.integrationRepairs <= 0)
       || (kind === "task" && task.repairs >= this.limits.taskRepairs))
-      throw new Stop("自动修订预算已用完，代码和失败证据已保存", "failed");
+      throw new Stop("自动修订预算已用完，代码和失败证据已保存", "failed", {
+        stage: "development", phase: ctx.record.phase, reason: "correction_limit", kind,
+      });
     budgets.corrections--;
     if (kind === "plan") budgets.planRevisions--;
     if (kind === "integration") budgets.integrationRepairs--;
@@ -124,17 +185,123 @@ export class DevelopmentController {
     });
   }
 
-  async role(ctx, { kind, tools = [], validate, counter, limit }) {
+  async role(ctx, { kind, tools = [], validate, counter, limit, scope }) {
     validatePlatformMetadata(ctx.record.architecture);
     const platform = ctx.record.architecture.platformSnapshot;
     const name = kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review";
     const schemas = { planner: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
-    const handle = { kind, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false };
+    const filePlan = kind === "planner" && ctx.record.architecture.design.schemaVersion >= 2;
+    const freshWorkspace = filePlan && ctx.planningWorkspace?.empty === true;
+    const submitSchema = filePlan ? { type: "object", properties: { indexPath: { type: "string", minLength: 1, maxLength: 500,
+      description: "独立规划目录内的 JSON 索引相对路径；计划和用例已用 write/edit 保存" } }, required: ["indexPath"], additionalProperties: false } : schemas[kind];
+    const handle = { kind, submitName: name, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false, submissionCalls: new Map() };
+    const planningBlocker = kind === "planner" ? createDevelopmentPlanningBlocker(ctx.record, {
+      acceptanceAdapterGuide: ctx.record.architecture.runtimeCapabilities ? ACCEPTANCE_ADAPTER_GUIDE : null }) : null;
+    if (planningBlocker) handle.planningBlocker = planningBlocker.context;
+    let rejectedPlanningMaterial = null;
+    const persistent = await developmentSessionStorage(this.storage, ctx.record, developmentSessionBinding(ctx.record, kind, scope));
+    persistent.reference.limit ??= limit;
+    if (!Number.isSafeInteger(persistent.reference.limit) || persistent.reference.limit < 1) throw new InputError("研发会话预算记录无效");
+    limit = Math.min(limit, persistent.reference.limit);
+    handle.limit = limit;
+    counter.turns = Math.max(counter.turns, persistent.reference.turns);
+    const rejectedInputCalls = new Set();
+    const checkToolInputs = () => {
+      if (persistent.reference.toolInputFailure?.count === 3) throw new Stop("相同工具参数已连续三次未通过结构检查，已停止继续请求并保留诊断；请先核对字段与公开工具契约。", "failed", {
+        stage: "development", phase: ctx.record.phase, role: kind, reason: "repeated_tool_error", attempts: 3,
+      });
+    };
+    const clearToolInputFailure = async (toolName) => {
+      const failure = persistent.reference.toolInputFailure;
+      if (failure?.toolName !== toolName || failure.count === 3) return;
+      delete persistent.reference.toolInputFailure;
+      await this.save(ctx);
+    };
+    handle.checkToolInputs = checkToolInputs;
+    const charge = async ({ purpose = "agent", retryAttempt = 0 } = {}) => {
+      this.guard(ctx);
+      checkToolInputs();
+      if (handle.submitted && isPlanningBlockerOutcome(handle.result)) throw new Stop("规划技术阻断已保存");
+      if (retryAttempt > 0) {
+        persistent.reference.retryAttempts = (persistent.reference.retryAttempts ?? 0) + 1;
+      } else {
+        if (counter.turns >= limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
+          stage: "development", phase: ctx.record.phase, role: kind, reason: "turn_limit",
+        });
+        counter.turns++;
+        persistent.reference.turns = counter.turns;
+        if (purpose === "compaction") persistent.reference.compactions = (persistent.reference.compactions ?? 0) + 1;
+      }
+      await this.save(ctx);
+    };
+    handle.charge = charge;
+    handle.reference = persistent.reference;
+    handle.validate = validate;
+    const budget = () => ({ limit, used: counter.turns, remaining: Math.max(0, limit - counter.turns),
+      ...(kind === "planner" ? { guidance: "读写、格式修复和提交共用此上限。已有完整字段无需重读；可同轮调用多个写入工具，合并小批用例。预留至少两轮处理程序拒绝；已有完整候选请尽早提交。" } : {}) });
+    const root = kind === "planner" ? "plan" : kind === "developer" ? "work" : "review";
+    const noteSubmission = async (id, value, { status, stage = "contract", error, diagnosticIssues } = {}) => {
+      const call = handle.submissionCalls.get(id);
+      if (call?.recorded) return;
+      if (call) call.recorded = true;
+      const issues = status === "rejected" ? diagnosticIssues ?? submissionIssues(value, stage === "sdk" ? submitSchema : schemas[kind], {
+        root, error, sdk: stage === "sdk", architecture: ctx.record.architecture }) : [];
+      recordSubmission(ctx.record, { role: kind, phase: ctx.record.phase, taskId: ctx.record.currentTaskId,
+        turn: counter.turns, stage, status, issues });
+      await this.save(ctx);
+      return issues;
+    };
     const submit = { name, label: "提交阶段结果", description: "提交经过结构校验的阶段结果；提交不表示整体通过。",
-      parameters: schemas[kind], executionMode: "sequential", execute: async (_id, value) => {
+      parameters: submitSchema, executionMode: "sequential", execute: async (_id, value) => {
         this.guard(ctx);
+        checkToolInputs();
         if (!handle.accepting || handle.submitted) throw new InputError("本阶段已提交，请结束本轮");
-        const result = validate(value);
+        let result, artifact;
+        try {
+          if (filePlan) {
+            if (!value || typeof value.indexPath !== "string" || Object.keys(value).some((key) => key !== "indexPath"))
+              throw new InputError("请只提交规划文件的 indexPath");
+            artifact = await this.artifacts.submit(ctx.record.agentId, ctx.record.id, value.indexPath, { signal: ctx.signal });
+          }
+          result = await validate(artifact?.plan ?? value);
+        }
+        catch (error) {
+          let complete;
+          if (filePlan && typeof value?.indexPath === "string") {
+            try {
+              complete = await this.artifacts.diagnose(ctx.record.agentId, ctx.record.id, value.indexPath,
+                { schema: schemas.planner, architecture: ctx.record.architecture, previousPlan: ctx.record.plan ?? undefined, freshWorkspace,
+                  limit: 40, signal: ctx.signal });
+            } catch (diagnosticError) {
+              this.guard(ctx);
+              if (!(diagnosticError instanceof InputError)) throw diagnosticError;
+            }
+          }
+          const issues = await noteSubmission(_id, artifact?.plan ?? value, { status: "rejected", error,
+            ...(complete?.diagnostics.total ? { diagnosticIssues: complete.diagnostics.issues } : {}) });
+          if (complete?.diagnostics.total) {
+            const unchanged = rejectedPlanningMaterial?.hash === complete.hash && rejectedPlanningMaterial.indexPath === value.indexPath;
+            rejectedPlanningMaterial = { hash: complete.hash, indexPath: value.indexPath };
+            const feedback = unchanged ? { unchanged: true, total: complete.diagnostics.total, retained: complete.diagnostics.retained,
+              truncated: complete.diagnostics.truncated, offset: complete.diagnostics.offset, nextOffset: complete.diagnostics.nextOffset,
+              diagnosticsTool: { name: "read_plan_diagnostics", arguments: { indexPath: value.indexPath, expectedHash: complete.hash, offset: 0, limit: 40 } },
+              nextAction: "材料整组hash与上次被拒时相同，没有修改。本次仍未提交通过；原完整问题页继续有效。先按原source修改，或用read_plan_diagnostics按该hash分页核对尚未处理的问题，再正式重交；重复提交仍占原预算。" }
+              : { ...complete.diagnostics, nextAction: "按source中的文件、稳定caseId和局部索引修正全部独立问题；有nextOffset时用read_plan_diagnostics按本hash继续分页。编辑失败时原文件不变，应先读取或按ID与当前hash局部修订，不能重复提交未变材料。" };
+            throw new InputError("提交未通过：" + JSON.stringify({ submitted: false, indexPath: value.indexPath, hash: complete.hash, bundleHash: complete.hash, hashScope: "bundle",
+              ...feedback, hostModelBudget: budget() }));
+          }
+          throw new InputError(`提交未通过：${(issues ?? []).map((item) => `${item.path} [${item.reason}]：${item.remedy}`).join("；") || "请按当前提交契约修正后重交。"}`);
+        }
+        rejectedPlanningMaterial = null;
+        await clearToolInputFailure(name);
+        await noteSubmission(_id, value, { status: "accepted" });
+        this.guard(ctx);
+        if (artifact) ctx.record.planningArtifact = artifact.snapshot;
+        const acceptedSnapshot = kind === "developer" ? await this.workspace.snapshot(ctx.record.agentId, ctx.record.id) : null;
+        persistent.reference.pendingResult = { result: clone(result), subjectHash: handle.payload?.subjectHash ?? null,
+          planHash: ctx.record.planHash ?? null, codeHash: acceptedSnapshot?.hash ?? null };
+        await this.save(ctx);
+        this.guard(ctx);
         handle.result = result; handle.submitted = true;
         handle.session?.setAutoCompactionEnabled?.(false);
         return { ...toolResult({ submitted: true }), terminate: true };
@@ -142,21 +309,160 @@ export class DevelopmentController {
     const webTools = kind === "reviewer" ? [] : createWebTools({ web: this.web, agentId: ctx.record.agentId,
       scope: `development:${ctx.record.id}`, signal: ctx.signal,
       allowNetwork: platform?.network.allowNetwork !== false && networkAllowed(ctx.record.architecture.requirements) });
+    const blockerTool = planningBlocker ? { name: "submit_development_blocker", label: "提交规划技术阻断",
+      description: "无需合法计划即可正式报告阻止规划的架构或环境问题；逐字引用当前design、runtimeCapabilities或acceptanceAdapterGuide原文。仅保存规划者的不可信技术意见，不修改需求或代表独立评审通过。",
+      parameters: planningBlocker.parameters, executionMode: "sequential", execute: async (_id, value) => {
+        this.guard(ctx);
+        checkToolInputs();
+        if (!handle.accepting || handle.submitted) throw new InputError("本阶段已提交或失效，不能提交规划阻断");
+        await this.current(ctx);
+        const report = planningBlocker.submit(value, ctx.record);
+        await clearToolInputFailure("submit_development_blocker");
+        Object.assign(ctx.record, { status: "blocked", delivery: "blocked", summary: report.summary,
+          feedback: { report }, diagnostic: { stage: "development", phase: "planning", role: "planner", reason: "planning_blocked",
+            trust: "untrusted-reference", issueKinds: [...new Set(report.issues.map((issue) => issue.kind))] } });
+        await this.save(ctx);
+        await this.current(ctx);
+        delete persistent.reference.pendingResult;
+        handle.result = planningBlockerOutcome(report); handle.submitted = true;
+        handle.session?.setAutoCompactionEnabled?.(false);
+        return { ...toolResult({ submitted: true, blocked: true, role: "planner", trust: "untrusted-reference", reportHash: report.reportHash,
+          hostModelBudget: budget() }), terminate: true };
+      } } : null;
     const guardedTools = [...tools, ...webTools, createContextReadTool(() => handle.payload)].map((tool) => ({ ...tool, execute: async (...args) => {
       this.guard(ctx);
+      checkToolInputs();
       if (!handle.accepting || handle.submitted) throw new InputError("当前阶段不能继续修改或读取工具，请等待下一项工作");
       const result = await tool.execute(...args);
-      this.guard(ctx); return result;
+      this.guard(ctx);
+      await clearToolInputFailure(tool.name);
+      let draftCheck, fileState;
+      if (filePlan && ["write", "edit", "save_plan_cases", "edit_plan_cases", "save_plan_json", "update_plan_json", "restore_plan_file"].includes(tool.name)) {
+        const parameters = args[1];
+        if (["write", "save_plan_json", "restore_plan_file"].includes(tool.name)) {
+          try {
+            if (tool.name === "save_plan_json") {
+              const saved = JSON.parse(result.content[0].text);
+              if (saved.planningIndex === true) ctx.record.planningIndexPath = saved.path;
+            } else if (tool.name === "restore_plan_file") {
+              if (parameters.path === ctx.record.planningDraftSource?.snapshot.indexPath) ctx.record.planningIndexPath = parameters.path;
+            } else {
+              const value = JSON.parse(parameters.content);
+              if (value && Array.isArray(value.caseFiles)) ctx.record.planningIndexPath = parameters.path;
+            }
+          } catch { /* Incomplete JSON can be corrected with the native editor. */ }
+        }
+        const candidate = await this.artifacts.diagnose(ctx.record.agentId, ctx.record.id,
+          ctx.record.planningIndexPath ?? "index.json", { schema: schemas.planner, architecture: ctx.record.architecture, freshWorkspace,
+            previousPlan: ctx.record.plan ?? undefined, signal: ctx.signal });
+        const written = candidate.files?.find((entry) => entry.path === parameters.path);
+        if (written) fileState = { path: written.path, fileHash: written.hash, hashScope: "file", bytes: written.size };
+        draftCheck = { status: candidate.status, hash: candidate.hash, bundleHash: candidate.hash, hashScope: "bundle", ...candidate.diagnostics,
+          message: candidate.status === "valid" ? "当前材料已通过程序检查；请正式提交索引，随后仍需独立评审。"
+            : "按稳定问题编号修正；read_plan_diagnostics 可继续读取完整诊断，不必反复提交探测下一处错误。" };
+        const history = ctx.record.planDraftChecks ??= [];
+        history.push({ turn: counter.turns, status: draftCheck.status, hash: candidate.hash, ...candidate.diagnostics });
+        if (history.length > 24) history.splice(0, history.length - 24);
+        await this.save(ctx);
+        this.guard(ctx);
+      }
+      if (tool.name === "read_development_context") {
+        const [first, ...rest] = result.content;
+        return { ...result, content: [{ ...first, text: JSON.stringify({ ...JSON.parse(first.text), hostModelBudget: budget() }) }, ...rest] };
+      }
+      return { ...result, content: [...result.content, { type: "text", text: JSON.stringify({ hostModelBudget: budget(),
+        ...(fileState ? { fileState } : {}), ...(draftCheck ? { planDraftCheck: draftCheck } : {}) }) }] };
     } }));
+    const sessionTools = [...guardedTools, ...(blockerTool ? [blockerTool] : []), submit];
+    const previousInputFailure = persistent.reference.toolInputFailure;
+    if (previousInputFailure?.schemaHash) {
+      const previousTool = sessionTools.find((tool) => tool.name === previousInputFailure.toolName);
+      if (!previousTool || hashValue(previousTool.parameters) !== previousInputFailure.schemaHash)
+        delete persistent.reference.toolInputFailure;
+    }
+    const inputFeedback = (toolName, args) => {
+      const tool = sessionTools.find((entry) => entry.name === toolName);
+      if (!tool) return;
+      const structural = toolInputValidation(args, tool.parameters, { root: toolName === name ? root : toolName });
+      if (structural.valid) return;
+      const issues = toolName === name ? submissionIssues(args, submitSchema, { root, sdk: true })
+        : planningToolIssues(args, tool.parameters, toolName);
+      const boundIssue = (entry) => {
+        const result = { ...entry };
+        for (const key of ["allowedFields", "requiredFields", "allowedValues"]) if (result[key]?.length > 8) {
+          result[key] = result[key].slice(0, 8); result[`${key}Truncated`] = true;
+        }
+        if (result.alternatives) {
+          result.alternatives = result.alternatives.slice(0, 2).map(boundIssue);
+          if (entry.alternatives.length > 2) result.alternativesTruncated = true;
+        }
+        return result;
+      };
+      const feedback = { ...(toolName === name || toolName === blockerTool?.name ? { submitted: false } : { saved: false }),
+        issues: issues.map(boundIssue), total: structural.total, retained: issues.length, truncated: structural.total > issues.length,
+        hostModelBudget: budget() };
+      while (feedback.issues.length > 1 && JSON.stringify(feedback).length > 14500) {
+        feedback.issues.pop(); feedback.retained = feedback.issues.length; feedback.truncated = true;
+      }
+      return feedback;
+    };
+    handle.structuredSubmissionTools = [...(blockerTool ? [blockerTool] : []), submit];
     handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
+      reasoningMode: kind === "reviewer" ? "off" : "auto",
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
       systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind]
-        + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT) + (platform ? "\n" + renderPlatformRules(platform) : ""),
-      customTools: [...guardedTools, submit], maxOutputTokens: modelOutputBudget(this.config, { planner: 8192, developer: 16384, reviewer: 4096 }[kind]) });
-    if (kind === "developer") handle.session.setAutoCompactionEnabled?.(false);
+        + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT) + (platform ? "\n" + renderPlatformRules(platform, { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities }) : "")
+        + "\n" + renderPiSubmissionContract({ role: kind, submitName: name, tools: sessionTools, alternativeTools: blockerTool ? [blockerTool.name] : [], structuredResponse: true }),
+      customTools: sessionTools, sessionStorage: persistent.options, onModelCall: charge,
+      transformContext: (messages) => handle.contextMessage
+        ? restoreDevelopmentContext(messages, handle.payload, handle.contextMaxChars, handle.contextMessage) : messages,
+      rawInputValidators: Object.fromEntries(sessionTools.map((tool) => [tool.name, async ({ args, toolCallId }) => {
+        const feedback = inputFeedback(tool.name, args);
+        if (!feedback) return { valid: true };
+        const callHash = typeof toolCallId === "string" && toolCallId.length <= 512
+          ? hashValue({ toolName: tool.name, toolCallId, turn: counter.turns }) : null;
+        if (callHash && !rejectedInputCalls.has(callHash)) {
+          rejectedInputCalls.add(callHash);
+          const fingerprint = hashValue({ toolName: tool.name, schema: tool.parameters, args });
+          const previous = persistent.reference.toolInputFailure;
+          if (previous?.count !== 3 && previous?.callHash !== callHash) {
+            persistent.reference.toolInputFailure = { toolName: tool.name, fingerprint, schemaHash: hashValue(tool.parameters), callHash,
+              count: previous?.fingerprint === fingerprint ? Math.min(3, previous.count + 1) : 1 };
+            await this.save(ctx);
+          }
+        }
+        return { valid: false, reason: JSON.stringify(feedback) };
+      }])),
+      toolErrorResult: ({ toolName, args }) => {
+        const feedback = inputFeedback(toolName, args);
+        return feedback ? toolResult(feedback) : undefined;
+      },
+      onToolDiagnostic: async (diagnostic) => {
+        this.guard(ctx);
+        if (![name, "write", "edit", "save_plan_cases", "edit_plan_cases", "save_plan_json", "update_plan_json", "read_plan_diagnostics", "restore_plan_file"].includes(diagnostic.toolName)) return;
+        const entries = ctx.record.argumentDiagnostics ??= [];
+        entries.push({ role: kind, phase: ctx.record.phase, turn: counter.turns, ...diagnostic });
+        if (entries.length > 24) entries.splice(0, entries.length - 24);
+        await this.save(ctx);
+      },
+      maxOutputTokens: developmentModelOutputBudget(this.config, kind) });
+    bindDevelopmentSessionFile(persistent.reference, handle.session.sessionFile);
+    await this.save(ctx);
     ctx.handles.add(handle);
     if (ctx.signal.aborted) { await handle.session.abort?.(); this.dispose(ctx, handle); this.guard(ctx); }
     handle.unsubscribe = handle.session.subscribe?.((event) => {
+      if (["message_end", "turn_end"].includes(event.type) && event.message?.role === "assistant")
+        handle.lastAssistant = event.message;
+      if (event.type === "tool_execution_start" && event.toolName === name) {
+        handle.submissionCalls.set(event.toolCallId, { value: event.args, recorded: false });
+      }
+      if (event.type === "tool_execution_end" && event.toolName === name) {
+        const call = handle.submissionCalls.get(event.toolCallId);
+        if (event.isError && !call?.recorded && handle.accepting && !ctx.signal.aborted)
+          void noteSubmission(event.toolCallId, call?.value, { status: "rejected", stage: "sdk" })
+            .catch(() => { handle.failed = true; void handle.session.abort?.(); });
+        handle.submissionCalls.delete(event.toolCallId);
+      }
       if (event.type === "auto_retry_start") {
         if (Number.isInteger(event.attempt) && event.attempt >= 0 && event.attempt <= 5) handle.retries = event.attempt;
         handle.failure = classifyModelFailure(event.errorMessage);
@@ -164,15 +470,11 @@ export class DevelopmentController {
       if (event.type === "auto_retry_end" && !event.success) {
         handle.failed = true; handle.failure = event.finalError ? classifyModelFailure(event.finalError) : handle.failure ?? classifyModelFailure();
       }
-      if (event.type === "turn_end" && ++handle.turnsInPrompt > 1) {
+      if (event.type === "turn_end" && !handle.session.modelCallAccounting && ++handle.turnsInPrompt > 1) {
         counter.turns++;
+        persistent.reference.turns = counter.turns;
         if (counter.turns > limit) { handle.failed = true; void handle.session.abort?.(); }
         void this.save(ctx).catch(() => { handle.failed = true; void handle.session.abort?.(); });
-      }
-      if (event.type === "turn_end" && kind === "developer" && !handle.submitted && !handle.failed
-        && handle.session.getContextUsage?.()?.percent >= 65) {
-        handle.rotate = true;
-        void handle.session.abort?.();
       }
     }) ?? (() => {});
     return handle;
@@ -185,67 +487,189 @@ export class DevelopmentController {
 
   async ask(ctx, handle, payload) {
     this.guard(ctx);
+    handle.checkToolInputs?.();
+    ctx.lastRole = handle.kind;
+    handle.payload = clone({ ...payload, ...(handle.planningBlocker ? { planningBlockerContract: handle.planningBlocker } : {}) });
+    handle.payload.modelBudget = { limit: handle.limit, used: handle.counter.turns, remaining: Math.max(0, handle.limit - handle.counter.turns) };
+    const accepted = handle.reference.pendingResult;
+    if (accepted) {
+      if (accepted.subjectHash !== (payload.subjectHash ?? null) || accepted.planHash !== (ctx.record.planHash ?? null))
+        throw new InputError("已保存的阶段提交与当前评审或计划不一致");
+      if (handle.kind === "developer" && (await this.workspace.snapshot(ctx.record.agentId, ctx.record.id)).hash !== accepted.codeHash)
+        throw new InputError("已保存的开发提交对应代码已改变，不能恢复旧提交");
+      try { return await handle.validate(clone(accepted.result)); }
+      catch (error) {
+        if (handle.kind !== "developer" || error?.reason !== "work_file_unauthorized") throw error;
+        // Earlier records could persist a structurally valid submission before checking its
+        // declared files. Discard only this known bad result, not its history or spent turns.
+        delete handle.reference.pendingResult;
+        const issues = submissionIssues(accepted.result, WORK_SCHEMA, { root: "work", error });
+        handle.payload.submissionFeedback = { submitted: false, issues };
+        handle.payload.feedback = { ...handle.payload.feedback, reason: issues[0].remedy };
+        recordSubmission(ctx.record, { role: handle.kind, phase: ctx.record.phase, taskId: ctx.record.currentTaskId,
+          turn: handle.counter.turns, stage: "contract", status: "rejected", issues });
+        await this.save(ctx);
+      }
+    }
     if (handle.counter.turns >= handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
       stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
     });
-    handle.counter.turns++;
-    await this.save(ctx);
-    Object.assign(handle, { accepting: true, submitted: false, result: undefined, turnsInPrompt: 0, rotate: false });
-    handle.payload = clone(payload);
+    Object.assign(handle, { accepting: true, submitted: false, result: undefined, turnsInPrompt: 0 });
+    handle.session.setAutoCompactionEnabled?.(true);
     try {
-      const maxChars = Math.min(16_000, Math.max(4096, Math.floor((handle.session.model?.contextWindow ?? 32768) / 2)));
-      try { await handle.session.prompt(JSON.stringify(compactDevelopmentContext(handle.payload, maxChars))); }
-      catch (error) {
-        if (ctx.signal.aborted || error instanceof InputError) throw error;
-        if (!handle.rotate || handle.failed) throw modelStop(ctx, handle, error?.message);
+      const maxChars = Math.min(128_000, Math.max(4096, Math.floor((handle.session.model?.contextWindow ?? 32768) / 2)));
+      const prepared = developmentContextMessage(handle.payload, maxChars, { reference: handle.reference, messages: handle.session.messages });
+      handle.contextMessage = prepared;
+      handle.contextMaxChars = maxChars;
+      handle.reference.contextDelivery = prepared.delivery;
+      await this.save(ctx);
+      let message = prepared.message, continued = false;
+      for (;;) {
+        if (!handle.session.modelCallAccounting) await handle.charge();
+        handle.turnsInPrompt = 0; handle.lastAssistant = undefined;
+        const messageCount = handle.session.messages?.length ?? 0;
+        try { await handle.session.prompt(message); }
+        catch (error) {
+          if (!ctx.signal.aborted && handle.submitted && isPlanningBlockerOutcome(handle.result)) {
+            await this.current(ctx); return handle.result;
+          }
+          if (ctx.signal.aborted || error instanceof InputError || error instanceof Stop) throw error;
+          throw modelStop(ctx, handle, error?.message);
+        }
+        await ctx.writes;
+        this.guard(ctx);
+        handle.checkToolInputs?.();
+        const last = handle.lastAssistant ?? handle.session.messages?.slice(messageCount).findLast((entry) => entry.role === "assistant");
+        if (handle.counter.turns > handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
+          stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
+        });
+        if (handle.failed || ["error", "aborted"].includes(last?.stopReason))
+          throw modelStop(ctx, handle, last?.errorMessage);
+        if (last?.stopReason === "length") throw new Stop("模型输出达到上限，本阶段结果尚未完整提交，进度已保存，可继续。", "failed", {
+          stage: "model", phase: ctx.record.phase, role: handle.kind, reason: "output_limit", retries: handle.retries ?? 0,
+        });
+        if (handle.submitted) return handle.result;
+        const structured = readPiStructuredSubmission(last, { tools: handle.structuredSubmissionTools });
+        let structuredFeedback;
+        if (structured) {
+          try {
+            await structured.tool.execute(`structured_submission_${handle.counter.turns}`, structured.args);
+          } catch (error) {
+            this.guard(ctx);
+            if (!(error instanceof InputError)) throw error;
+            structuredFeedback = error.message;
+          }
+          if (handle.submitted) return handle.result;
+        }
+        if (continued || last?.stopReason !== "stop") throw new Stop("本阶段没有提交有效的结构化结果，不能推进", "failed", {
+          stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "submission_incomplete",
+        });
+        if (handle.counter.turns >= handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
+          stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
+        });
+        await this.current(ctx);
+        continued = true;
+        handle.reference.submissionContinuations = (handle.reference.submissionContinuations ?? 0) + 1;
+        await this.save(ctx);
+        message = JSON.stringify({ submissionContinuation: { reason: "submission_incomplete", attempt: 1, maximum: 1,
+          requiredTool: handle.submitName,
+          ...(handle.planningBlocker ? { allowedTerminalTools: [handle.submitName, "submit_development_blocker"] } : {}),
+          instruction: "上一轮正常结束但尚未正式提交。继续当前会话、已保存草稿和已有工具拒绝反馈，完成当前阶段后调用指定提交工具；若有allowedTerminalTools，也可按公开证据契约正式提交规划技术阻断。不能以文字说明代替提交，不改变冻结需求、授权和验收。完整资料仍可用read_development_context分页读取，无需从头重写。",
+          modelBudget: { limit: handle.limit, used: handle.counter.turns, remaining: Math.max(0, handle.limit - handle.counter.turns) },
+          ...(handle.payload.feedback || handle.payload.issues ? { existingFailureFeedback: compactDevelopmentContext({
+            ...(handle.payload.feedback ? { feedback: handle.payload.feedback } : {}),
+            ...(handle.payload.issues ? { issues: handle.payload.issues } : {}),
+          }, 4096) } : {}),
+          ...(lastSubmissionDiagnostic(ctx.record, handle.kind) ? { submissionFeedback: lastSubmissionDiagnostic(ctx.record, handle.kind) } : {}),
+          ...(structuredFeedback ? { structuredSubmissionFeedback: structuredFeedback } : {}),
+          ...(handle.kind === "planner" && ctx.record.planningIndexPath ? { planningIndexPath: ctx.record.planningIndexPath } : {}),
+        } });
       }
-      await ctx.writes;
-      this.guard(ctx);
-      if (handle.rotate && !handle.failed) return validateWork({ summary: "已保存当前代码，正在按检查点续接上下文。",
-        changedFiles: [], knownIssues: [], nextAction: "读取当前任务、代码和最近失败证据，继续未完成的实现。", continue: true });
-      const last = handle.session.messages?.findLast((message) => message.role === "assistant");
-      if (handle.counter.turns > handle.limit) throw new Stop("本任务模型回合预算已用完，已保留进度", "failed", {
-        stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
-      });
-      if (handle.failed || ["error", "aborted"].includes(last?.stopReason))
-        throw modelStop(ctx, handle, last?.errorMessage);
-      if (last?.stopReason === "length") throw new Stop("模型输出达到上限，本阶段结果尚未完整提交，进度已保存，可继续。", "failed", {
-        stage: "model", phase: ctx.record.phase, role: handle.kind, reason: "output_limit", retries: handle.retries ?? 0,
-      });
-      if (!handle.submitted) throw new Stop("本阶段没有提交有效的结构化结果，不能推进", "failed");
-      return handle.result;
     } finally { handle.accepting = false; }
   }
 
-  base(ctx) {
+  base(ctx, caseFacts) {
     const r = ctx.record;
+    const developmentRevision = r.architecture.developmentRevision ? clone(r.architecture.developmentRevision) : null;
+    if (caseFacts?.planSource === "developmentRevision.plan" && developmentRevision?.planHash === caseFacts.planHash
+      && developmentRevision.caseFacts?.planHash === caseFacts.planHash) {
+      delete developmentRevision.caseFacts;
+      developmentRevision.caseFactsReference = { section: "caseFacts", planHash: caseFacts.planHash, trust: "untrusted-reference" };
+    }
     const platform = r.architecture.platformSnapshot ? { platformSnapshot: clone(r.architecture.platformSnapshot),
       platformContractVersion: r.architecture.platformContractVersion, platformHash: r.architecture.platformHash,
-      capabilities: platformCapabilityCatalog(r.architecture.platformSnapshot) } : {};
-    return { architectureRef: r.architectureRef, requirements: r.architecture.requirements,
-      design: r.architecture.design, entrypoint: r.plan?.entrypoint, runtime: r.plan?.runtime, application: r.plan?.application,
+      capabilities: platformCapabilityCatalog(r.architecture.platformSnapshot, { runtimeCapabilities: r.architecture.runtimeCapabilities }) } : {};
+    return { architectureRef: r.architectureRef,
+      ...(ctx.planningWorkspace ? { planningWorkspace: clone(ctx.planningWorkspace) } : {}),
+      ...(r.architecture.runtimeCapabilities ? { acceptanceAdapterGuide: clone(ACCEPTANCE_ADAPTER_GUIDE), jsonValueSchemaGuide: JSON_VALUE_SCHEMA_DESCRIPTION } : {}), requirements: r.architecture.requirements,
+      design: r.architecture.design,
+      ...(r.architecture.runtimeCapabilities ? { runtimeCapabilities: clone(r.architecture.runtimeCapabilities) } : {}),
+      verificationAssignments: (r.architecture.design?.acceptance ?? []).map(({ id, verification }) => ({ acceptanceId: id, verification: verification ?? { stage: "development", owner: "generated-code", adapterId: "action" } })), entrypoint: r.plan?.entrypoint, runtime: r.plan?.runtime, application: r.plan?.application,
+      ...(r.architecture.deferredVerifications ? { deferredVerifications: clone(r.architecture.deferredVerifications) } : {}),
+      ...(developmentRevision ? { developmentRevision } : {}),
       ...(r.architecture.design.schemaVersion === 3 ? { serviceManifestSchema: SERVICE_MANIFEST_SCHEMA } : {}),
+      ...(r.architecture.design.schemaVersion >= 2 ? { testFixtureSchema: TEST_FIXTURE_SCHEMA, testFixtureLimits: FIXTURE_LIMITS, valueSchemaGuide: VALUE_SCHEMA_DESCRIPTION } : {}),
       ...platform, handoffs: r.handoffs.slice(-12), remaining: r.budgets };
   }
 
   async review(ctx, mode, payload, snapshot) {
-    const subjectHash = hashValue({ mode, architectureRef: ctx.record.architectureRef, ...payload });
+    const subjectVersion = mode === "plan" && payload.plan?.schemaVersion >= 2 ? 2 : 1;
+    const subject = mode === "plan" ? planReviewSubject(ctx.record.architectureRef, payload.plan, payload.planHash, subjectVersion)
+      : { mode, architectureRef: ctx.record.architectureRef, ...payload };
+    if (subjectVersion === 2) payload = { ...payload, admissionFacts: subject.admissionFacts };
+    const subjectHash = hashValue(subject);
+    if (mode === "plan") payload = { ...payload, caseFacts: { ...developmentCaseFacts(payload.plan, { planHash: payload.planHash, signal: ctx.signal }),
+      planSource: "plan", trust: "measurement-only" } };
+    ctx.record.pendingReview = { mode, subjectHash, planHash: payload.planHash ?? null, codeHash: snapshot?.hash ?? null,
+      reportId: payload.report?.id ?? null };
+    await this.save(ctx);
     const counter = { turns: 0 };
     const handle = await this.role(ctx, { kind: "reviewer", counter, limit: this.limits.reviewerTurns,
+      scope: { subjectHash },
       tools: snapshot ? await this.workspace.snapshotTools(snapshot, ctx.record.agentId) : [], validate: (value) => validateReview(value, { subjectHash }) });
     try {
-      const result = await this.ask(ctx, handle, { ...this.base(ctx), mode, subjectHash, ...payload });
+      let result = await this.ask(ctx, handle, { ...this.base(ctx), mode, subjectHash, ...payload });
+      if (subjectVersion === 2) result = { ...result, subjectVersion };
       ctx.record.reviews.push({ ...result, mode, codeHash: snapshot?.hash ?? null, planHash: payload.planHash ?? null });
+      ctx.record.pendingReview = null;
+      delete handle.reference.pendingResult;
       await this.save(ctx); return result;
     } finally { this.dispose(ctx, handle); }
   }
 
   async plan(ctx) {
     await this.phase(ctx, "planning");
+    const workspace = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
+    this.guard(ctx);
+    ctx.planningWorkspace = { empty: workspace.files.length === 0, codeHash: workspace.hash };
+    const freshWorkspace = ctx.planningWorkspace.empty;
+    let historicalPlanningDraft, historicalDraft;
+    if (ctx.record.planningDraftSource && unacceptedPlanning(ctx.record)) {
+      const source = ctx.record.planningDraftSource;
+      if (source.bindingHash !== planningDraftBinding(ctx.record)) throw new InputError("历史规划草稿与当前架构事实不一致");
+      historicalDraft = source.snapshot;
+      const currentCheck = await this.artifacts.diagnose(ctx.record.agentId, ctx.record.id, source.snapshot.indexPath, {
+        schema: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA,
+        architecture: ctx.record.architecture, freshWorkspace, signal: ctx.signal, limit: 40 });
+      historicalPlanningDraft = { trust: "unverified", source: { runId: source.snapshot.runId,
+        indexPath: source.snapshot.indexPath, bundleHash: source.snapshot.hash,
+        files: source.snapshot.files.map(({ path, size, hash }) => ({ path, bytes: size, fileHash: hash, hashScope: "file" })) },
+        currentCheck: { status: currentCheck.status, bundleHash: currentCheck.hash, diagnostics: currentCheck.diagnostics },
+        ...(source.historicalReview ? { historicalReview: source.historicalReview } : {}),
+        instruction: "这是同一架构的历史未通过草稿，只复制了规划材料，没有代码、验收通过结果或旧会话。source.files是精确历史清单；read_plan_file({path,source:'previous',offset?,limit?})按原文分页读取。需要还原同名文件时主动调用restore_plan_file({path,expectedSourceHash:源fileHash,expectedHash:当前fileHash或仅目标不存在时null})，不必重写旧用例；恢复仍是未验收草稿。当前检查已重算；按实际文件局部修正并主动正式提交，仍须独立评审，不改需求或预期以求通过。" };
+    }
     const oldPlan = ctx.record.plan;
     const counter = ctx.record.planning;
-    const handle = await this.role(ctx, { kind: "planner", counter, limit: this.limits.reviewerTurns,
-      tools: [...await this.workspace.tools(ctx.record.agentId, ctx.record.id, { readOnly: true, signal: ctx.signal }),
+    let handle;
+    try {
+    handle = await this.role(ctx, { kind: "planner", counter, limit: this.limits.reviewerTurns,
+      scope: { previousPlanHash: oldPlan ? hashValue(oldPlan) : null },
+      tools: [...(ctx.record.architecture.design.schemaVersion >= 2
+        ? await this.artifacts.tools(ctx.record.agentId, ctx.record.id, { signal: ctx.signal,
+          casesSchema: (ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA).properties.cases,
+          planSchema: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA,
+          architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined, historicalDraft, freshWorkspace })
+        : await this.workspace.tools(ctx.record.agentId, ctx.record.id, { readOnly: true, signal: ctx.signal })),
         ...(this.services && ctx.record.architecture.design.schemaVersion === 3 ? [{ name: "resolve_service_dependencies", label: "核实服务依赖",
           description: "从受支持的官方包目录解析固定版本及完整依赖工件，不执行包代码。返回的URL与摘要用于服务清单，不能自己猜测。",
           parameters: { type: "object", properties: { packages: { type: "array", maxItems: 40, items: { type: "object", properties: {
@@ -264,12 +688,25 @@ export class DevelopmentController {
             const result = await this.services.resolveDockerImage({ image: value.image, signal: ctx.signal });
             this.guard(ctx); return toolResult(result);
           } }] : [])],
-      validate: (value) => validatePlan(value, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined }) });
-    try {
+      validate: (value) => validatePlan(value, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined, freshWorkspace }) });
       for (;;) {
-        const plan = await this.ask(ctx, handle, { ...this.base(ctx), previousPlan: ctx.record.plan,
+        const caseFacts = ctx.record.pendingPlan?.plan == null ? planningCaseFacts(ctx.record, ctx.signal) : undefined;
+        const plan = ctx.record.pendingPlan?.plan ?? await this.ask(ctx, handle, { ...this.base(ctx, caseFacts), previousPlan: ctx.record.plan,
+          ...(caseFacts ? { caseFacts } : {}),
+          ...(historicalPlanningDraft ? { historicalPlanningDraft } : {}),
+          ...(ctx.record.architecture.design.schemaVersion >= 2 ? { planningFiles: PLAN_ARTIFACT_GUIDE,
+            planSchema: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA } : {}),
           issues: ctx.record.feedback, completedTasks: ctx.record.tasks.filter((task) => task.status === "verified") });
+        if (isPlanningBlockerOutcome(plan)) return;
+        validatePlan(plan, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined, freshWorkspace });
         const planHash = hashValue(plan);
+        if (ctx.record.planningArtifact) {
+          const frozen = await this.artifacts.validateSnapshot(ctx.record.planningArtifact, ctx.record.agentId);
+          if (hashValue(frozen.plan) !== planHash) throw new InputError("规划提交与已封存材料不一致");
+        }
+        ctx.record.pendingPlan = { plan, planHash };
+        delete handle.reference.pendingResult;
+        await this.save(ctx);
         const review = await this.review(ctx, "plan", { plan, planHash });
         ctx.record.planAttempts.push({ plan, planHash, review });
         if (review.verdict === "pass") {
@@ -280,16 +717,17 @@ export class DevelopmentController {
               attempts: prior?.attempts ?? 0, repairs: prior?.repairs ?? 0, turns: prior?.turns ?? 0,
               summary: prior?.summary ?? "", nextAction: "implement" };
           });
-          Object.assign(ctx.record, { plan, planHash, feedback: null, needsReplan: false });
+          Object.assign(ctx.record, { plan, planHash, feedback: null, needsReplan: false, pendingPlan: null });
           await this.save(ctx); return;
         }
         ctx.record.feedback = { review, rejectedPlan: plan };
+        ctx.record.pendingPlan = null;
         await this.save(ctx);
         if (review.verdict === "blocked" || review.issues.some((item) => item.blocking && ["architecture", "environment"].includes(item.kind)))
           throw new Stop(review.summary);
         await this.correction(ctx, "plan");
       }
-    } finally { this.dispose(ctx, handle); }
+    } finally { this.dispose(ctx, handle); delete ctx.planningWorkspace; }
   }
 
   async verify(ctx, task, snapshot) {
@@ -297,18 +735,24 @@ export class DevelopmentController {
     const selected = new Set(ctx.record.tasks.filter((item) => item.status === "verified").map((item) => item.id));
     if (task) selected.add(task.id);
     const cases = !task || task.integration ? ctx.record.plan.cases : ctx.record.plan.cases.filter((item) => selected.has(item.taskId));
-    const report = await this.verifyExecution(ctx, { snapshot, entrypoint: ctx.record.plan.entrypoint, cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, validateResources: !task || Boolean(task.integration),
-      stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
-    this.guard(ctx);
-    if (report.codeHash !== snapshot.hash) throw new Stop("测试证据对应的代码版本不一致", "failed");
-    const evidence = { ...report, id: randomUUID(), mode: task ? "task" : "integration", taskId: task?.id ?? null,
-      planHash: ctx.record.planHash, architectureRef: ctx.record.architectureRef };
-    ctx.record.reports.push(evidence);
-    await this.save(ctx);
-    if (["not_run", "error"].includes(report.status)) throw new Stop(report.summary || "执行验证尚未完成，不能交付");
+    const pending = ctx.record.pendingReview;
+    let evidence = pending?.mode === (task ? "task" : "integration") && pending.codeHash === snapshot.hash
+      && pending.planHash === ctx.record.planHash ? ctx.record.reports.find((item) => item.id === pending.reportId
+        && item.taskId === (task?.id ?? null) && item.codeHash === snapshot.hash && item.planHash === ctx.record.planHash) : null;
+    if (!evidence) {
+      const report = await this.verifyExecution(ctx, { snapshot, entrypoint: ctx.record.plan.entrypoint, cases, runtime: ctx.record.plan.runtime, application: ctx.record.plan.application, validateResources: !task || Boolean(task.integration),
+        stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
+      this.guard(ctx);
+      if (report.codeHash !== snapshot.hash) throw new Stop("测试证据对应的代码版本不一致", "failed");
+      evidence = { ...report, id: randomUUID(), mode: task ? "task" : "integration", taskId: task?.id ?? null,
+        planHash: ctx.record.planHash, architectureRef: ctx.record.architectureRef };
+      ctx.record.reports.push(evidence);
+      await this.save(ctx);
+    }
+    if (["not_run", "error"].includes(evidence.status)) throw new Stop(evidence.summary || "执行验证尚未完成，不能交付");
     const review = await this.review(ctx, task ? "task" : "integration", { plan: ctx.record.plan, planHash: ctx.record.planHash,
       task: task ? clone(task) : null, report: evidence, codeHash: snapshot.hash }, snapshot);
-    return { passed: report.status === "passed" && review.verdict === "pass", report: evidence, review };
+    return { passed: evidence.status === "passed" && review.verdict === "pass", report: evidence, review };
   }
 
   verifyExecution(ctx, options) {
@@ -322,7 +766,11 @@ export class DevelopmentController {
   async task(ctx, task) {
     let handle;
     const create = async () => this.role(ctx, { kind: "developer", counter: task, limit: this.limits.developerTurns,
-      tools: [...await this.workspace.tools(ctx.record.agentId, ctx.record.id, { allowedFiles: task.files, signal: ctx.signal }),
+      scope: { taskId: task.id, taskHash: task.taskHash ?? hashValue({ id: task.id, title: task.title, files: task.files,
+        requirementIds: task.requirementIds, acceptanceIds: task.acceptanceIds, dependsOn: task.dependsOn }),
+      planHash: ctx.record.planHash, filesHash: hashValue(task.files) },
+      tools: [...await (ctx.record.architecture.design.schemaVersion >= 2 ? createDevelopmentFileTools(this.workspace, ctx.record.agentId, ctx.record.id,
+        { allowedFiles: task.files, signal: ctx.signal }) : this.workspace.tools(ctx.record.agentId, ctx.record.id, { allowedFiles: task.files, signal: ctx.signal })),
         { name: "run_development_checks", label: "运行开发自测", description: "在隔离环境运行已确认的验收用例，自测不代表独立验收通过。",
           parameters: { type: "object", properties: {}, required: [], additionalProperties: false }, executionMode: "sequential",
           execute: async () => {
@@ -334,7 +782,7 @@ export class DevelopmentController {
             ctx.record.reports.push(evidence); await this.save(ctx);
             handle.payload.selfTest = evidence;
             return toolResult({ status: evidence.status, ...compactDevelopmentContext({ summary: evidence.summary, selfTest: evidence }, 12_000) });
-          } }], validate: validateWork });
+          } }], validate: (value) => validateTaskWork(value, task) });
     try {
       task.status = "active"; ctx.record.currentTaskId = task.id;
       if (!task.attempts) { task.attempts = 1; task.nextAction = "implement"; }
@@ -344,14 +792,18 @@ export class DevelopmentController {
           await this.phase(ctx, "implementing", `正在${task.repairs ? "修复" : "开发"}「${task.title}」…`);
           if (!handle) handle = await create();
           const work = await this.ask(ctx, handle, { ...this.base(ctx), task, feedback: task.feedback ?? null,
-            cases: ctx.record.plan.cases, checkpoint: ctx.record.snapshot ? { hash: ctx.record.snapshot.hash, files: ctx.record.snapshot.files } : null });
+            cases: ctx.record.plan.cases,
+            ...(ctx.record.plan.activationCases ? { activationCases: ctx.record.plan.activationCases } : {}),
+            ...(ctx.record.plan.activationChecks ? { activationChecks: ctx.record.plan.activationChecks } : {}),
+            checkpoint: ctx.record.snapshot ? { hash: ctx.record.snapshot.hash, files: ctx.record.snapshot.files } : null });
           if (work.changedFiles.some((file) => !task.files.includes(file))) throw new Stop("开发结果声明了任务授权范围之外的改动，需要修订任务", "blocked");
           const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
           const handoff = { taskId: task.id, ...work, codeHash: snapshot.hash, files: snapshot.files };
           ctx.record.handoffs.push(handoff); ctx.record.snapshot = snapshot;
           task.summary = work.summary; task.nextAction = work.continue ? "implement" : "verify";
+          delete handle.reference.pendingResult;
           await this.save(ctx);
-          if (work.continue) { this.dispose(ctx, handle); handle = null; continue; }
+          if (work.continue) continue;
         }
         const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
         ctx.record.snapshot = snapshot;
@@ -369,8 +821,6 @@ export class DevelopmentController {
           return "replan";
         }
         await this.correction(ctx, "task", task, () => { task.attempts++; task.nextAction = "implement"; });
-        const usage = handle?.session.getContextUsage?.();
-        if (usage?.percent >= 65) { this.dispose(ctx, handle); handle = null; }
       }
     } finally { this.dispose(ctx, handle); }
   }
@@ -391,6 +841,11 @@ export class DevelopmentController {
     if (signal?.aborted) abort();
     try {
       const previous = await this.store.get(agentId);
+      if (samePlanningBlocker(previous, architecture, architecture.runtimeCapabilities ? ACCEPTANCE_ADAPTER_GUIDE : null)) {
+        ctx.record = previous;
+        await this.current(ctx);
+        return clone(previous);
+      }
       if (resume) {
         if (!previous || previous.architectureRef.version !== architecture.version || previous.architectureRef.candidateHash !== architecture.candidateHash)
           throw new InputError("没有与当前架构版本对应的可恢复研发记录");
@@ -405,9 +860,57 @@ export class DevelopmentController {
           budgets: { corrections: this.limits.corrections, planRevisions: this.limits.planRevisions, integrationRepairs: this.limits.integrationRepairs },
           planning: { turns: 0 }, tasks: [], plan: null, planHash: null, planAttempts: [], reviews: [], reports: [], handoffs: [],
           currentTaskId: null, snapshot: null, verifiedSnapshot: null, package: null, deliveries: [], feedback: null });
+        if (previous?.status === "failed" && unacceptedPlanning(previous) && architecture.design.schemaVersion >= 2
+          && planningDraftBinding(previous) === planningDraftBinding(ctx.record)) {
+          try {
+            let draft = previous.planningDraft;
+            if (!draft && previous.planDraftChecks?.at(-1)?.hash) {
+              const snapshot = await this.artifacts.captureDraft(previous.agentId, previous.id, previous.planningIndexPath ?? "index.json", {
+                expectedHash: previous.planDraftChecks.at(-1).hash, signal: ctx.signal });
+              if (snapshot) draft = { bindingHash: planningDraftBinding(previous), snapshot };
+            }
+            if (draft?.bindingHash === planningDraftBinding(ctx.record) && draft.snapshot.runId === previous.id) {
+              const restored = await this.artifacts.restoreDraft(draft.snapshot, agentId, ctx.record.id, { signal: ctx.signal });
+              ctx.record.planningIndexPath = restored.indexPath;
+              ctx.record.planningDraftSource = clone(draft);
+              let historicalReview = historicalPlanReview(previous);
+              const inherited = previous.planningDraftSource?.historicalReview;
+              if (!historicalReview && /^dev_[a-f0-9]{32}$/u.test(inherited?.sourceRunId ?? "") && this.store.getRun) {
+                const original = await this.store.getRun(inherited.sourceRunId);
+                this.guard(ctx);
+                if (original && planningDraftBinding(original) === planningDraftBinding(ctx.record))
+                  historicalReview = historicalPlanReview(original);
+              }
+              if (historicalReview) ctx.record.planningDraftSource.historicalReview = historicalReview;
+              await this.save(ctx);
+            }
+          } catch (error) {
+            this.guard(ctx);
+            if (!(error instanceof InputError) && !["ENOENT", "EACCES", "EPERM"].includes(error.code)) throw error;
+            ctx.record.planningDraftRecovery = { status: "skipped", reason: "draft_unavailable_or_changed", sourceRunId: previous.id };
+            await this.save(ctx);
+          }
+        }
       }
       await this.current(ctx);
       await this.phase(ctx, "intake");
+      if (architecture.design.schemaVersion === 3 && architecture.design.execution?.language === "none")
+        throw new Stop("已评审方案只使用现有工具，应返回架构层核对交付方式；当前代码和进度已保留。", "blocked",
+          { stage: "architecture", phase: "intake", reason: "development_not_required" });
+      if (resume && ctx.record.plan) {
+        validatePlan(ctx.record.plan, { architecture });
+        if (ctx.record.planHash !== hashValue(ctx.record.plan)) throw new InputError("研发计划与保存摘要不一致，不能恢复旧会话或验收状态");
+        for (const task of ctx.record.tasks.filter((item) => !item.integration)) {
+          const definition = ctx.record.plan.tasks.find((item) => item.id === task.id);
+          if (!definition || task.taskHash && task.taskHash !== hashValue(definition)
+            || Object.keys(definition).some((key) => !Object.hasOwn(task, key) || hashValue(task[key]) !== hashValue(definition[key])))
+            throw new InputError("研发任务与冻结计划不一致，不能恢复旧会话或验收状态");
+        }
+        if (ctx.record.planningArtifact && !ctx.record.needsReplan) {
+          const frozen = await this.artifacts.validateSnapshot(ctx.record.planningArtifact, ctx.record.agentId);
+          if (hashValue(frozen.plan) !== ctx.record.planHash) throw new InputError("研发规划材料与冻结计划不一致");
+        }
+      }
       await this.workspace.create(ctx.record.agentId, ctx.record.id);
       const execution = architecture.design.execution;
       if (execution && execution.hosting !== "builtin" && this.services) {
@@ -443,8 +946,9 @@ export class DevelopmentController {
       }
       for (;;) {
         if (!ctx.record.plan || ctx.record.needsReplan) await this.plan(ctx);
+        if (ctx.record.status === "blocked") return clone(ctx.record);
         const pending = ctx.record.tasks.filter((task) => task.status !== "verified");
-        const task = pending.find((task) => task.dependsOn.every((id) => ctx.record.tasks.some((item) => item.id === id && item.status === "verified")));
+        const task = nextReadyDevelopmentTask(ctx.record.tasks);
         if (pending.length && !task) throw new Stop("任务依赖尚未满足，不能继续开发");
         if (task) { await this.task(ctx, task); continue; }
         const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
@@ -459,12 +963,23 @@ export class DevelopmentController {
           }
           await this.integrationRepair(ctx, result); continue;
         }
+        if (ctx.record.architecture.design.acceptance.some((item) => item.verification)) {
+          ctx.record.acceptanceLedger = recordDevelopmentAcceptance(createAcceptanceLedger({ architecture: ctx.record.architecture,
+            plan: ctx.record.plan, codeHash: snapshot.hash }), { report: result.report, cases: ctx.record.plan.cases });
+          if (ctx.record.acceptanceLedger.items.some((item) => item.verification.adapterId === "delivery-review")) {
+            ctx.record.acceptanceLedger = recordIndependentAcceptance(ctx.record.acceptanceLedger, { plan: ctx.record.plan,
+              planReview: ctx.record.reviews.findLast((item) => item.mode === "plan" && item.planHash === ctx.record.planHash && item.verdict === "pass"),
+              integrationReview: ctx.record.reviews.findLast((item) => item.mode === "integration" && item.codeHash === snapshot.hash && item.verdict === "pass"), report: result.report });
+          }
+          assertAcceptanceComplete(ctx.record.acceptanceLedger, { architecture: ctx.record.architecture, plan: ctx.record.plan,
+            codeHash: snapshot.hash, stageScope: ["development"] });
+        }
         await this.phase(ctx, "packaging");
         ctx.record.package = { id: `pkg_${randomUUID()}`, buildId: ctx.record.id, architectureRef: ctx.record.architectureRef, codeHash: snapshot.hash,
           planHash: ctx.record.planHash, entrypoint: ctx.record.plan.entrypoint, runtime: ctx.record.plan.runtime, snapshot,
           ...(["node-action", "managed-service"].includes(ctx.record.plan.runtime) ? { protocolVersion: ctx.record.plan.application.protocolVersion,
             application: bindApplicationManifest(ctx.record.plan.application, snapshot, [result.report.id]) } : {}),
-          verificationId: result.report.id };
+          verificationId: result.report.id, ...(ctx.record.acceptanceLedger ? { acceptanceLedger: clone(ctx.record.acceptanceLedger) } : {}) };
         (ctx.record.deliveries ??= []).push({ package: clone(ctx.record.package), status: "verified" });
         await this.save(ctx);
         await this.current(ctx);
@@ -480,6 +995,11 @@ export class DevelopmentController {
           if (review.issues.some((issue) => issue.blocking && ["architecture", "environment"].includes(issue.kind))) throw new Stop(review.summary);
           await this.integrationRepair(ctx, { report, review }, "修复交付启动问题");
           continue;
+        }
+        if (delivery.acceptanceLedger) {
+          ctx.record.acceptanceLedger = clone(delivery.acceptanceLedger);
+          ctx.record.package.acceptanceLedger = clone(delivery.acceptanceLedger);
+          ctx.record.deliveries.at(-1).package.acceptanceLedger = clone(delivery.acceptanceLedger);
         }
         Object.assign(ctx.record, { status: "completed", delivery: delivery.delivery, diagnostic: null, summary: delivery.summary,
           runtimeCheck: delivery.runtimeCheck ?? null, currentTaskId: null });
@@ -500,6 +1020,16 @@ export class DevelopmentController {
         : error instanceof Stop && error.diagnostic ? error.diagnostic
           : { stage: error.name === "ServiceError" ? "runtime" : "development", phase: ctx.record.phase,
             reason: error instanceof InputError ? "invalid_result" : error.name === "ServiceError" ? error.reason : "execution_failed" };
+      const submission = !ctx.signal.aborted && lastSubmissionDiagnostic(ctx.record, ctx.record.diagnostic.role ?? ctx.lastRole);
+      if (submission) ctx.record.diagnostic.submission = submission;
+      if (!ctx.signal.aborted && unacceptedPlanning(ctx.record) && ctx.record.architecture.design.schemaVersion >= 2) {
+        try {
+          const snapshot = await this.artifacts.captureDraft(ctx.record.agentId, ctx.record.id, ctx.record.planningIndexPath ?? "index.json", { signal: ctx.signal });
+          if (snapshot) ctx.record.planningDraft = { bindingHash: planningDraftBinding(ctx.record), snapshot };
+        } catch (draftError) {
+          ctx.record.planningDraftCapture = { status: "skipped", reason: "draft_unavailable_or_changed" };
+        }
+      }
       await this.save(ctx);
       return clone(ctx.record);
     } finally {

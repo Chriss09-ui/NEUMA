@@ -23,6 +23,12 @@ function modelFactory(records, onPrompt) {
     const record = { role, options, tools, prompts: [], disposed: false, aborted: false, usagePercent: 10 };
     let listener;
     const submit = async (value) => {
+      if (role === "planner" && tools[submissionNames[role]].parameters.properties.indexPath) {
+        const { cases, ...index } = value;
+        await tools.write.execute("fixture-cases", { path: "cases.json", content: JSON.stringify(cases) });
+        await tools.write.execute("fixture-index", { path: "index.json", content: JSON.stringify({ ...index, caseFiles: ["cases.json"] }) });
+        value = { indexPath: "index.json" };
+      }
       const result = await tools[submissionNames[role]].execute("fixture-submit", value);
       record.lastSubmission = result;
       return result;
@@ -34,7 +40,7 @@ function modelFactory(records, onPrompt) {
         const payload = JSON.parse(message); record.payload = payload; record.prompts.push(payload);
         session.messages.push({ role: "user", content: message });
         const write = async () => {
-          for (const path of payload.task.files) await tools.write_code_file.execute("fixture-write", {
+          for (const path of payload.task.files) await (tools.write ?? tools.write_code_file).execute("fixture-write", {
             path, content: `// simulated model task ${payload.task.id}, prompt ${record.prompts.length}\nconsole.log(JSON.stringify({ok:true}));\n`,
           });
         };
@@ -154,7 +160,7 @@ test("纯页面研发保留私有 Node 检查与空动作清单，按现有评�
             actions: [], stateVersion: 1, evidenceIds: [] } });
       }
       if (record.role === "developer") {
-        for (const [path, content] of Object.entries(files)) await record.tools.write_code_file.execute("page-write", { path, content });
+        for (const [path, content] of Object.entries(files)) await record.tools.write.execute("page-write", { path, content });
         return submit(developmentWork(payload.task));
       }
       await respond();
@@ -198,6 +204,41 @@ test("研发规划、开发与独立评审接收同一冻结平台事实，评�
   assert.equal(result.architecture.platformHash, architecture.platformHash);
 });
 
+test("所有研发角色和分页上下文保留版本绑定的完整待验证义务，不将后移事项当作验收通过", async (t) => {
+  const snapshot = createPlatformSnapshot(), architecture = bindPlatform(developmentArchitecture(), snapshot);
+  const issues = Array.from({ length: 10 }, (_, index) => ({ id: `pending_${index}`, requirementId: `verification_${index}`,
+    requirementIds: ["task"], owner: "system", stage: ["development", "activation", "runtime"][index % 3], blocking: false,
+    question: `核对第 ${index} 项实际交付能力`, impact: "待实际验证，不能以模拟结果代替。".repeat(150),
+    checks: ["platform.deliveryRoutes.managedService"],
+    stageDecision: { reason: "当前只核实平台存在受控交付通道，实际功能仍须在指定阶段验证", assessmentId: "pre_frozen" },
+    verification: [{ id: `pending_${index}`, status: "verified", message: "仅核实平台通道", evidence: [
+      { source: "platform", reference: "platform.deliveryRoutes.managedService", detail: "已提供受控运行通道，不证明本智能体已交付" },
+    ] }],
+  }));
+  const deferred = { assessmentId: "pre_frozen", requirementHash: "d".repeat(64), platformHash: architecture.platformHash,
+    hash: hashValue(issues), issues };
+  architecture.deferredVerifications = deferred;
+  const roles = new Set();
+  const { controller } = await fixture(t, { architecture, onPrompt: async ({ record, payload, respond }) => {
+    roles.add(record.role);
+    assert.equal(payload.contextTruncated, true, "长待验收记录必须使用分页入口，不能挤占完整上下文预算");
+    assert.ok(payload.contextSections.some((section) => section.section === "deferredVerifications"));
+    assert.deepEqual(await contextField(record, payload, "deferredVerifications"), deferred);
+    assert.match(record.options.systemPrompt, /不能当作已验证证据/);
+    assert.match(record.options.systemPrompt, /未知硬件、缺少平台通道或第三方契约不能靠后移阶段放行/);
+    if (record.role === "planner") {
+      payload.requirements = await contextField(record, payload, "requirements");
+      delete payload.design; payload.design = await contextField(record, payload, "design");
+    }
+    if (record.role === "developer") { delete payload.task; payload.task = await contextField(record, payload, "task"); }
+    await respond();
+  } });
+  const result = await controller.run(architecture);
+  assert.equal(result.status, "completed", result.summary);
+  assert.deepEqual([...roles].sort(), ["developer", "planner", "reviewer"]);
+  assert.deepEqual(result.architecture.deferredVerifications, deferred);
+});
+
 test("研发不接受与已评估摘要不一致的平台事实，启动模型前阻止篡改快照", async (t) => {
   const architecture = bindPlatform(developmentArchitecture(), createPlatformSnapshot());
   architecture.platformSnapshot.network.allowNetwork = false;
@@ -237,6 +278,7 @@ test("两个任务使用独立会话，交接保留结果，评审均为全新�
   assert.equal(result.status, "completed"); assert.equal(result.delivery, "needs_development");
   assert.deepEqual(sessions.map((item) => item.role), ["planner", "reviewer", "developer", "reviewer", "developer", "reviewer", "reviewer"]);
   assert.ok(sessions.every((item) => item.options.maxOutputTokens === { planner: 8192, developer: 16384, reviewer: 4096 }[item.role]));
+  assert.ok(sessions.every((item) => item.options.reasoningMode === (item.role === "reviewer" ? "off" : "auto")));
   assert.ok(sessions.every((item) => item.lastSubmission?.terminate === true && item.autoCompactionEnabled === false));
   assert.ok(sessions.every((session) => session.options.dataDir === join(dataRoot, "agents", architecture.agentId)));
   assert.ok(sessions.every((session) => session.options.cwd === join(dataRoot, "agents", architecture.agentId, "development", "workspaces", result.id, "code")));
@@ -261,13 +303,29 @@ test("两个任务使用独立会话，交接保留结果，评审均为全新�
   assert.deepEqual(result.tasks.map((item) => item.status), ["verified", "verified"]);
 });
 
-test("当前MiMo研发的规划、开发和评审统一使用完整输出额度", async (t) => {
+test("思考模型研发按角色选择公共策略，保留原输出额度和调用次数规则", async (t) => {
   const { controller, architecture, sessions } = await fixture(t);
   controller.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     model: "mimo-v2.6-pro", apiKey: "fixture-only" };
   assert.equal((await controller.run(architecture)).status, "completed");
-  assert.ok(sessions.length > 0);
-  assert.ok(sessions.every((item) => item.options.maxOutputTokens === 131072));
+  assert.deepEqual(new Set(sessions.map((item) => item.role)), new Set(["planner", "developer", "reviewer"]));
+  for (const item of sessions) {
+    assert.equal(item.options.maxOutputTokens, { planner: 32768, developer: 65536, reviewer: 16384 }[item.role]);
+    assert.equal(item.options.reasoningMode, item.role === "reviewer" ? "off" : "auto");
+  }
+});
+
+test("独立研发评审请求关闭可选思考后，长度不足仍不能接受阶段结果", async (t) => {
+  const { controller, architecture, sessions, executor } = await fixture(t, { onPrompt: async ({ record, respond }) => {
+    if (record.role === "reviewer") { record.stopReason = "length"; return; }
+    await respond();
+  } });
+  const result = await controller.run(architecture);
+  assert.equal(result.status, "failed"); assert.equal(result.diagnostic.reason, "output_limit");
+  assert.equal(result.diagnostic.role, "reviewer"); assert.equal(result.plan, null); assert.equal(result.package, null);
+  assert.deepEqual(sessions.map((item) => item.options.reasoningMode), ["auto", "off"]);
+  assert.equal(sessions[1].options.maxOutputTokens, 4096); assert.equal(sessions[1].prompts.length, 1);
+  assert.equal(executor.calls.verify.length, 0);
 });
 
 test("研发模型重试、截断和半截流保存各自原因，不再统称连接失败", async (t) => {
@@ -289,6 +347,29 @@ test("研发模型重试、截断和半截流保存各自原因，不再统称�
       assert.doesNotMatch(JSON.stringify(result), /private-key-fixture/);
       assert.deepEqual((await controller.get(architecture.agentId)).diagnostic, result.diagnostic);
     });
+});
+
+test("规划、开发与评审均记录执行前拒绝，并且不保存SDK回执中的原始内容", async (t) => {
+  for (const role of ["planner", "developer", "reviewer"]) await t.test(role, async (child) => {
+    const { controller, architecture } = await fixture(child, { onPrompt: async ({ record, emit, respond }) => {
+      if (record.role === role) {
+        const toolName = submissionNames[role];
+        emit({ type: "tool_execution_start", toolName, toolCallId: "sdk-rejected", args: { summary: "PRIVATE_ARGUMENT_VALUE" } });
+        emit({ type: "tool_execution_end", toolName, toolCallId: "sdk-rejected", isError: true,
+          result: { content: [{ type: "text", text: 'Validation failed\nReceived arguments: PRIVATE_ARGUMENT_VALUE' }] } });
+      }
+      await respond();
+    } });
+    const result = await controller.run(architecture);
+    assert.equal(result.status, "completed", result.summary);
+    assert.ok(result.submissionCounts[role].rejected > 0);
+    assert.ok(result.submissionCounts[role].accepted > 0);
+    assert.ok(result.submissionAttempts.some((item) => item.role === role && item.stage === "sdk"));
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ARGUMENT_VALUE|Received arguments/);
+    const stored = await controller.store.getRun(result.id);
+    assert.deepEqual(stored.submissionCounts, result.submissionCounts);
+    assert.doesNotMatch(JSON.stringify(stored), /PRIVATE_ARGUMENT_VALUE|Received arguments/);
+  });
 });
 
 test("同一任务失败修复保留开发会话，原始测试证据完整进入修复输入", async (t) => {
@@ -363,7 +444,7 @@ test("交付启动失败把原始证据交给新修复会话，扣一次预算�
   assert.equal(result.runtimeCheck.codeHash, result.package.codeHash);
 });
 
-test("主动续接更换会话并保留当前任务和累计回合，不提前验收", async (t) => {
+test("阶段性保存继续原会话并保留当前任务和累计回合，不提前验收", async (t) => {
   let continued = false;
   const { controller, sessions, architecture, executor } = await fixture(t, {
     onPrompt: async ({ record, payload, submit, write, respond }) => {
@@ -377,16 +458,16 @@ test("主动续接更换会话并保留当前任务和累计回合，不提前�
   const result = await controller.run(architecture);
   assert.equal(result.status, "completed");
   const developers = sessions.filter((item) => item.role === "developer");
-  assert.equal(developers.length, 3);
-  assert.equal(developers[0].payload.task.id, developers[1].payload.task.id);
-  assert.notEqual(developers[0].session, developers[1].session);
-  assert.equal(developers[1].payload.handoffs[0].continue, true);
-  assert.equal(developers[1].payload.task.turns, 2);
+  assert.equal(developers.length, 2);
+  assert.equal(developers[0].prompts[0].task.id, developers[0].prompts[1].task.id);
+  assert.equal(developers[0].prompts.length, 2);
+  assert.equal(developers[0].prompts[1].handoffs[0].continue, true);
+  assert.equal(developers[0].prompts[1].task.turns, 1, "输入显示提交本轮之前的累计次数，实际调用在请求前记账");
   assert.equal(result.tasks[0].turns, 2); assert.equal(result.budgets.corrections, 6);
   assert.equal(executor.calls.verify.length, 3);
 });
 
-test("上下文接近上限时修复使用新会话，失败证据和预算保持连续", async (t) => {
+test("上下文接近上限时仍使用原会话，失败证据和预算保持连续", async (t) => {
   const { controller, sessions, architecture } = await fixture(t, {
     onVerify: (_options, report, number) => number === 1 ? failReport(report, "context-repair") : report,
     onPrompt: async ({ record, respond }) => {
@@ -397,10 +478,10 @@ test("上下文接近上限时修复使用新会话，失败证据和预算保�
   const result = await controller.run(architecture);
   assert.equal(result.status, "completed");
   const developers = sessions.filter((item) => item.role === "developer");
-  assert.equal(developers.length, 3); assert.notEqual(developers[0].session, developers[1].session);
-  assert.equal(developers[1].payload.task.id, "core");
-  assert.equal(developers[1].payload.task.turns, 2); assert.equal(developers[1].payload.remaining.corrections, 5);
-  assert.deepEqual(developers[1].payload.feedback.report, result.reports[0]);
+  assert.equal(developers.length, 2); assert.equal(developers[0].prompts.length, 2);
+  assert.equal(developers[0].payload.task.id, "core");
+  assert.equal(developers[0].payload.task.turns, 1); assert.equal(developers[0].payload.remaining.corrections, 5);
+  assert.deepEqual(developers[0].payload.feedback.report, result.reports[0]);
   assert.equal(developers[0].disposed, true);
 });
 
@@ -499,7 +580,9 @@ test("重启恢复已经扣减的修复预算和任务回合，不重做规划�
   const { controller, sessions, architecture, config, dataDir, controllers } = await fixture(t, {
     onVerify: (_options, report, number) => number === 1 ? failReport(report) : report,
     onPrompt: async ({ record, respond }) => {
-      if (record.role === "developer" && record.prompts.length === 2) return;
+      if (record.role === "developer" && record.prompts.length === 2) {
+        record.stopReason = "error"; record.errorMessage = "固定模拟进程在修复回合中断"; return;
+      }
       await respond();
     },
   });
@@ -520,6 +603,51 @@ test("重启恢复已经扣减的修复预算和任务回合，不重做规划�
   assert.equal(resumedSessions[0].role, "developer"); assert.equal(resumedSessions[0].payload.remaining.corrections, 5);
   assert.equal(resumedSessions[0].payload.task.id, "core");
   assert.notEqual(resumedSessions[0].session, sessions.find((item) => item.role === "developer").session);
+});
+
+test("旧版本留下的无代码矛盾计划在中断恢复时受阻，不能跳过计划校验后激活", async (t) => {
+  const { controller, architecture, sessions, executor } = await fixture(t);
+  const completed = await controller.run(architecture);
+  assert.equal(completed.status, "completed");
+  Object.assign(architecture.design, { schemaVersion: 3, execution: { language: "none", hosting: "builtin", reason: "现有工具足够" } });
+  architecture.contractVersion = 3; architecture.candidateHash = hashValue(architecture.design);
+  architecture.review.candidateHash = architecture.candidateHash;
+  const stored = await controller.store.getRun(completed.id);
+  Object.assign(stored, { status: "interrupted", phase: "packaging", delivery: "blocked", architecture: structuredClone(architecture),
+    architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash }, package: null });
+  Object.assign(stored.plan, { schemaVersion: 3, runtime: "node-action" });
+  const schema = { type: "object", properties: {}, required: [], additionalProperties: false };
+  stored.plan.application = { protocolVersion: 2, runtime: "node-action", entrypoint: stored.plan.entrypoint, page: null,
+    actions: [{ id: "legacy_action", title: "旧操作", inputSchema: schema, outputSchema: schema, connectionIds: [] }], stateVersion: 1, evidenceIds: [] };
+  for (const item of stored.plan.cases) Object.assign(item, { actionId: "legacy_action", input: "{}", mocks: [] });
+  stored.planHash = hashValue(stored.plan);
+  await controller.store.save(stored);
+  const budgets = structuredClone(stored.budgets), sessionCount = sessions.length, probes = executor.calls.probe.length,
+    checks = executor.calls.verify.length; let activations = 0;
+  const result = await controller.run(architecture, { resume: true, activate: async () => {
+    activations++; return { delivery: "ready", summary: "不应发生的激活" };
+  } });
+  assert.equal(result.status, "blocked"); assert.equal(result.delivery, "blocked");
+  assert.equal(result.diagnostic.reason, "development_not_required");
+  assert.equal(activations, 0); assert.equal(sessions.length, sessionCount);
+  assert.equal(executor.calls.probe.length, probes); assert.equal(executor.calls.verify.length, checks);
+  assert.deepEqual(result.budgets, budgets); assert.deepEqual(result.plan, stored.plan);
+  assert.equal(await readFile(join(result.snapshot.path, stored.plan.entrypoint), "utf8"),
+    await readFile(join(completed.snapshot.path, completed.plan.entrypoint), "utf8"));
+});
+
+test("恢复时重新检查已有计划的入口，不能用旧检查点绕过当前契约", async (t) => {
+  const { controller, architecture, sessions, executor } = await fixture(t);
+  const completed = await controller.run(architecture), stored = await controller.store.getRun(completed.id);
+  Object.assign(stored, { status: "interrupted", delivery: "blocked", package: null });
+  stored.plan.entrypoint = "undeclared.mjs"; stored.planHash = hashValue(stored.plan);
+  await controller.store.save(stored);
+  const sessionCount = sessions.length, probes = executor.calls.probe.length; let activations = 0;
+  const result = await controller.run(architecture, { resume: true, activate: async () => { activations++; return { delivery: "ready" }; } });
+  assert.equal(result.status, "failed"); assert.equal(result.diagnostic.reason, "invalid_result");
+  assert.match(result.summary, /运行入口必须匹配/);
+  assert.equal(sessions.length, sessionCount); assert.equal(executor.calls.probe.length, probes); assert.equal(activations, 0);
+  assert.equal(result.plan.entrypoint, "undeclared.mjs", "保留原检查点供核实，不静默改写旧计划");
 });
 
 test("缺少已验证隔离环境时阻塞且不调用任何模型", async (t) => {

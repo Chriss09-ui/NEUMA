@@ -10,6 +10,7 @@ import { processTurn } from "../src/requirements/core.mjs";
 import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { fidelityResult } from "./helpers/fidelity.mjs";
 
 const supported = process.platform === "darwin" && process.arch === "arm64";
 const object = (properties) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
@@ -43,6 +44,12 @@ function candidate(requirements) {
     selectionBasis: { capacity: "测试使用固定小型文字输入", process: "执行已验收操作，输入缺失和边界情况明确返回",
       quality: "实际输出与冻结断言一致", requirementIds: requirements.map((item) => item.id), assumptions: [] },
     capabilities: [{ id: "conversation", status: "available", reason: "展示结果" }, { id: "normalize_service", status: "needs_development", reason: "需要编写并验收专属操作" }],
+    acceptance: [
+      { id: "valid", kind: "success", requirementIds: requirements.map((item) => item.id), input: "abc", expected: "实际动作返回ok、ABC和当前代码版本" },
+      { id: "empty", kind: "missing_input", requirementIds: ["inputSource"], input: "空文字", expected: "实际动作返回missing_input和空文字，不编造规范化内容" },
+      { id: "boundary", kind: "boundary", requirementIds: ["externalAction"], input: "SEND", expected: "实际动作返回not_sent和空文字，不执行发送" },
+      { id: "tool_failure", kind: "tool_failure", requirementIds: ["deliverable"], input: "READ且文件读取失败", expected: "实际动作返回missing_file和空文字，不声称读取成功" },
+    ],
   });
 }
 function plan(requirements, design, edition, invalid, dataVersion = 1) {
@@ -80,18 +87,38 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
       const body = JSON.parse(Buffer.concat(chunks)), payload = JSON.parse(textOf(body.messages.find((item) => item.role === "user").content));
       const names = (body.tools || []).map((item) => item.function.name), calls = body.messages.flatMap((item) => item.tool_calls || []);
       let name, args;
-      if (names.includes("submit_architecture")) { name = "submit_architecture"; args = candidate(payload.requirements); }
+      if (names.includes("submit_development_plan") && payload.contextTruncated) {
+        const pages = body.messages.filter((item) => item.role === "tool").flatMap((item) => {
+          try { const page = JSON.parse(textOf(item.content)); return typeof page.section === "string" && typeof page.text === "string" ? [page] : []; }
+          catch { return []; }
+        });
+        for (const section of ["requirements", "design"]) {
+          const selected = [...new Map(pages.filter((page) => page.section === section).map((page) => [page.offset, page])).values()].sort((a, b) => a.offset - b.offset);
+          const last = selected.at(-1);
+          if (!last || last.nextOffset !== null) { name = "read_development_context"; args = { section, offset: last?.nextOffset ?? 0, limit: 8000 }; break; }
+          payload[section] = JSON.parse(selected.map((page) => page.text).join(""));
+        }
+      }
+      if (name) { /* The fixed model reads the same paged contract as a real planner. */ }
+      else if (names.includes("submit_architecture")) { name = "submit_architecture"; args = candidate(payload.requirements); }
       else if (names.includes("submit_architecture_review")) {
-        name = "submit_architecture_review"; args = passingReview(payload.candidateHash);
-        args.checks.push(...["requirement_sufficiency", "acceptance_quality"].map((id) => ({ id, passed: true, evidence: "固定模拟任务的要求与验收断言已明确" })));
+        name = "submit_architecture_review"; args = passingReview(payload.candidateHash, payload.design);
+      } else if (names.includes("submit_requirement_fidelity")) {
+        assert.deepEqual(names, ["submit_requirement_fidelity"], "范围复核保持独立只读会话");
+        name = "submit_requirement_fidelity"; args = fidelityResult(payload, "preserved");
       } else if (names.includes("submit_development_plan")) {
         if (!invalid || !calls.some((call) => call.function.name === "submit_development_plan")) {
-          name = "submit_development_plan"; args = plan(payload.requirements, payload.design, edition, invalid, dataVersion);
+          const { cases, ...index } = plan(payload.requirements, payload.design, edition, invalid, dataVersion);
+          const files = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
+          const written = new Set(calls.filter((call) => call.function.name === "write").map((call) => JSON.parse(call.function.arguments).path));
+          const path = Object.keys(files).find((path) => !written.has(path));
+          if (path) { name = "write"; args = { path, content: JSON.stringify(files[path], null, 2) }; }
+          else { name = "submit_development_plan"; args = { indexPath: "index.json" }; }
         }
       } else if (names.includes("submit_development_review")) {
         name = "submit_development_review"; args = { subjectHash: payload.subjectHash, verdict: "pass", issues: [], summary: "模型替身仅检查协议，真实执行结果由控制器独立核实" };
       } else if (names.includes("submit_development_work")) {
-        if (!calls.some((call) => call.function.name === "write_code_file")) { name = "write_code_file"; args = { path: "actions.mjs", content: source(edition, dataVersion) }; }
+        if (!calls.some((call) => call.function.name === "write")) { name = "write"; args = { path: "actions.mjs", content: source(edition, dataVersion) }; }
         else { name = "submit_development_work"; args = { summary: "固定源码已写入，请执行真实验收", changedFiles: ["actions.mjs"], knownIssues: [], nextAction: "", continue: false }; }
       } else throw new Error("unexpected_role");
       requests.push({ name, edition }); response.writeHead(200, { "content-type": "text/event-stream" });
@@ -131,6 +158,8 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
   assert.equal(first.development.status, "completed", JSON.stringify(first.development)); assert.equal(first.development.delivery, "ready");
   assert.equal(first.agent.execution.kind, "managed-service");
   const firstRecord = await agents.development.store.getRun(first.agent.developmentRef.id);
+  assert.equal(firstRecord.planningArtifact.indexPath, "index.json");
+  assert.deepEqual((await agents.development.artifacts.validateSnapshot(firstRecord.planningArtifact, "managed")).plan, firstRecord.plan);
   assert.equal(firstRecord.package.runtime, "managed-service"); assert.equal(firstRecord.package.application.service.language, "javascript");
   assert.equal(await readFile(join(firstRecord.package.snapshot.path, "actions.mjs"), "utf8"), source(1));
   assert.ok(firstRecord.reports.every((report) => report.status === "passed"));

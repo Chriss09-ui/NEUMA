@@ -4,6 +4,8 @@ import { validateApplicationManifest, validateActionInput, validateActionOutput 
 import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
+import { resolveTestJson, resolveCaseValues, inputContractRejection, inputContractMeasurement } from "./development-fixtures.mjs";
+import { INPUT_REJECTION_RESULT, INPUT_REJECTION_REPORT_METADATA } from "../verification/input-rejection-contract.mjs";
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -336,15 +338,17 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
       if (!snapshot || (await inspectDevelopmentCode(snapshot.path)).hash !== snapshot.hash)
         return { ...report, status: "error", summary: "代码快照已改变或版本无效" };
     } catch { return { ...report, status: "error", summary: "代码快照无法校验" }; }
-    const ids = new Set();
+    const ids = new Set(), resolvedCases = new Map(), fixtureBudget = { bytes: 0 };
     for (const item of cases) {
-      if (!item || typeof item.id !== "string" || !item.id || ids.has(item.id) || typeof item.input !== "string"
+      if (!item || typeof item.id !== "string" || !item.id || ids.has(item.id)
+        || (runtime !== "node-action" || item.kind === "node-check") && typeof item.input !== "string"
         || !Array.isArray(item.assertions) || item.assertions.length === 0 || item.assertions.length > 100
-        || item.assertions.some((assertion) => !assertion || typeof assertion.path !== "string" || typeof assertion.expectedJson !== "string"))
+        || item.assertions.some((assertion) => !assertion || typeof assertion.path !== "string"
+          || (runtime !== "node-action" || item.kind === "node-check") && typeof assertion.expectedJson !== "string"))
         return { ...report, status: "error", summary: "验收用例必须有唯一标识和具体值断言" };
       ids.add(item.id);
       if (runtime === "node-action") {
-        if (item.kind !== undefined && !["action", "node-check"].includes(item.kind)) return { ...report, status: "error", summary: "验收用例类型无效" };
+        if (item.kind !== undefined && !["action", "node-check", "input-rejection"].includes(item.kind)) return { ...report, status: "error", summary: "验收用例类型无效" };
         if (item.kind === "node-check") {
           try { validateCodePath(item.entrypoint); }
           catch { return { ...report, status: "error", summary: "Node 检查入口无效" }; }
@@ -354,7 +358,11 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
             || !snapshot.files.some((file) => file.path === item.entrypoint)) return { ...report, status: "error", summary: "Node 检查必须使用独立且未公开的快照入口" };
         } else if (Object.hasOwn(item, "entrypoint")) return { ...report, status: "error", summary: "动作验收不能指定其他入口" };
       }
-      try { for (const assertion of item.assertions) JSON.parse(assertion.expectedJson); }
+      try {
+        const resolved = runtime === "node-action" && item.kind !== "node-check" ? resolveCaseValues(item, { signal, fixtureBudget })
+          : { assertions: item.assertions.map(({ path, expectedJson }) => ({ path, value: resolveTestJson(expectedJson, { signal }).value })) };
+        resolvedCases.set(item.id, resolved);
+      }
       catch { return { ...report, status: "error", summary: "验收断言包含无效 JSON" }; }
     }
     const availability = await this.probe({ signal });
@@ -366,36 +374,48 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
       // Their frozen order is significant; user workspaces are never reused.
       if (stateful) verificationWorkspace = await realpath(await mkdtemp(join(this.temporaryDir, "neuma-verification-state-")));
       for (const item of cases) {
-        let run, mockCalls;
+        let run, mockCalls, rejectionEvidence;
+        const resolved = resolvedCases.get(item.id);
         if (runtime === "node-action" && item.kind === "node-check") {
           run = await this.run({ codeDir: snapshot.path, entrypoint: item.entrypoint, input: item.input, signal });
         } else if (runtime === "node-action") {
           const action = application.actions.find((entry) => entry.id === item.actionId);
+          if (!action || !Array.isArray(item.mocks)) return { ...report, status: "error", summary: "动作验收缺少动作或显式测试替身清单" };
+          if (item.kind === "input-rejection") {
+            if (item.mocks.length || item.workflowInputs?.length) return { ...report, status: "error", summary: "输入拒绝验收不能调用动作或能力" };
+            const observed = inputContractRejection(action, resolved.input, { target: item.inputTarget });
+            const output = observed.rejected ? structuredClone(INPUT_REJECTION_RESULT) : observed;
+            run = { status: output.rejected ? "passed" : "failed", output, exitCode: null, stdout: "", stderr: "", reason: output.rejected ? "" : "input_was_accepted" };
+            rejectionEvidence = { ...INPUT_REJECTION_REPORT_METADATA, actionId: item.actionId,
+              admission: inputContractMeasurement(action, resolved.input, { target: item.inputTarget }) };
+          } else {
           let input;
-          try { input = validateActionInput(action, JSON.parse(item.input)); }
+          try { input = validateActionInput(action, resolved.input); }
           catch { return { ...report, status: "error", summary: "动作或输入与验收契约不匹配" }; }
-          if (!Array.isArray(item.mocks)) return { ...report, status: "error", summary: "动作验收缺少显式测试替身清单" };
           let unexpectedCapability = false;
-          const remaining = [...item.mocks]; mockCalls = [];
+          const remaining = [...resolved.mocks]; mockCalls = [];
           run = await this.runAction({ codeDir: snapshot.path, entrypoint, actionId: action.id, input, signal,
             onCapability: async ({ capability, args }) => {
-              const index = remaining.findIndex((mock) => mock.capability === capability && isDeepStrictEqual(JSON.parse(mock.argsJson), args));
+              const index = remaining.findIndex((mock) => mock.capability === capability && isDeepStrictEqual(mock.args, args));
               if (index < 0) { unexpectedCapability = true; throw new Error("unconfigured_test_capability"); }
               const [mock] = remaining.splice(index, 1); mockCalls.push({ capability, mocked: true });
-              return JSON.parse(mock.resultJson);
+              return structuredClone(mock.value);
             } });
           if (run.status === "passed") {
             try { validateActionOutput(action, run.output); }
             catch { run = { ...run, status: "failed", reason: "action_output_schema_mismatch" }; }
             if (remaining.length || unexpectedCapability) run = { ...run, status: "failed", reason: unexpectedCapability ? "unconfigured_test_capability" : "unused_capability_mocks" };
           }
+          }
         } else run = await this.run({ codeDir: snapshot.path, entrypoint, input: item.input, signal,
           ...(verificationWorkspace ? { workspaceDir: verificationWorkspace } : {}) });
         const result = { caseId: item.id, ...(mockCalls ? { evidenceMode: "mock_capabilities", mockCalls, actionId: item.actionId } : {}), ...(item.taskId === undefined ? {} : { taskId: item.taskId }),
           ...(item.kind === "node-check" ? { kind: "node-check", entrypoint: item.entrypoint, evidenceMode: "node_check", browserVerified: false } : {}),
+          ...rejectionEvidence, ...(!rejectionEvidence && item.kind !== "node-check" && run.status === "passed" ? { actionExecuted: true } : {}),
+          ...(resolved.fixtures ? { fixtures: resolved.fixtures } : {}),
           ...(item.acceptanceId === undefined ? {} : { acceptanceId: item.acceptanceId }), status: run.status,
           input: item.input, exitCode: run.exitCode, stdout: run.stdout, stderr: run.stderr, reason: run.reason ?? "",
-          expected: item.assertions.map(({ path, expectedJson }) => ({ path, value: JSON.parse(expectedJson) })) };
+          expected: resolved.assertions };
         if (run.status === "passed") {
           result.actual = run.output;
           const failures = result.expected.filter(({ path, value }) => {
