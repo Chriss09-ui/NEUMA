@@ -8,7 +8,10 @@ import { APPLICATION_PROTOCOL_VERSION } from "../src/applications/application-co
 import { MAX_RUNTIME_FILE_BYTES } from "../src/runtime/file-limits.mjs";
 import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence, validatePlatformMetadata,
   platformCapabilityCatalog, platformCapabilitySnapshotCompatible } from "../src/architecture/platform-contract.mjs";
+import { renderPlatformDeliveryGuidance } from "../src/architecture/platform-contract.mjs";
 import { passingReview } from "./helpers/architecture.mjs";
+import { runtimeCapabilityContract, hostDeliveryCapabilityCatalog, isHostDeliveryCapability } from "../src/runtime/runtime-capability-contract.mjs";
+import { SERVICE_HOSTS, SERVICE_LANGUAGES } from "../src/services/service-runtime-options.mjs";
 
 function record({ candidate = true, platformSnapshot = createPlatformSnapshot() } = {}) {
   const platformHash = designHash(platformSnapshot);
@@ -75,6 +78,52 @@ test("公共能力的实现许可与每次调用结果分别声明，有效候�
     "快照声明与实际工具装配同源，不仅名称相同还核对版本和范围");
 });
 
+test("已实现运行与网关机制单独冻结，当前未部署不混作平台未实现，也不自动扩展旧目录", () => {
+  const snapshot = createPlatformSnapshot(), bytes = JSON.stringify(snapshot), hash = designHash(snapshot);
+  const frozen = runtimeCapabilityContract();
+  const hosts = hostDeliveryCapabilityCatalog(frozen), ids = hosts.map((item) => item.id);
+  assert.deepEqual(ids, [...SERVICE_HOSTS.flatMap((host) => SERVICE_LANGUAGES.map((language) => `${host}_${language}_runtime`)), "gateway_http_api", "gateway_mcp"]);
+  assert.ok(hosts.every((item) => item.status === "available"));
+  const legacy = platformCapabilityCatalog(snapshot), extended = platformCapabilityCatalog(snapshot, { runtimeCapabilities: frozen });
+  assert.deepEqual(extended.slice(0, legacy.length), legacy);
+  assert.deepEqual(extended.slice(legacy.length), hosts);
+  assert.ok(ids.every((id) => !snapshot.publicTools.includes(id) && !legacy.some((item) => item.id === id)));
+  assert.deepEqual(hostDeliveryCapabilityCatalog({ version: 1 }), []);
+  assert.deepEqual(platformCapabilityCatalog(snapshot, { runtimeCapabilities: { version: 1 } }), legacy);
+  assert.equal(isHostDeliveryCapability("managed_python_runtime", frozen), true);
+  assert.equal(isHostDeliveryCapability("read_material", frozen), false);
+  assert.equal(isHostDeliveryCapability("gateway_mcp", { version: 1 }), false);
+  assert.deepEqual(platformCapabilityCatalog(createPlatformSnapshot({ version: 3 }), { runtimeCapabilities: frozen }), platformCapabilityCatalog(createPlatformSnapshot({ version: 3 })));
+  assert.equal(JSON.stringify(snapshot), bytes); assert.equal(designHash(snapshot), hash);
+  assert.match(renderPlatformRules(snapshot, { runtimeCapabilities: frozen }), /平台已实现机制/);
+});
+
+test("已用平台交付机制必须匹配当前实现与冻结事实，旧无组记录不会获得新能力", () => {
+  const value = record();
+  const bind = (entry) => {
+    entry.candidateHash = designHash(entry.design); entry.reviewContext.candidateHash = entry.candidateHash;
+    entry.review.candidateHash = entry.candidateHash; entry.attempts = [];
+    return entry;
+  };
+  value.capabilityCatalogVersion = CAPABILITY_CATALOG_VERSION;
+  value.capabilitySnapshot = structuredClone(CAPABILITIES);
+  value.runtimeCapabilities = runtimeCapabilityContract();
+  value.design.capabilities = [{ id: "managed_python_runtime", status: "available", reason: "使用已实现托管机制，环境仍另行验证" },
+    { id: "gateway_mcp", status: "available", reason: "网关实现，授权另行核验" }];
+  assert.equal(platformCapabilitySnapshotCompatible(bind(value)), true);
+  const changed = structuredClone(value);
+  changed.runtimeCapabilities.hostDeliveryCapabilities.find((item) => item.id === "managed_python_runtime").version++;
+  assert.equal(platformCapabilitySnapshotCompatible(changed), false);
+  const old = structuredClone(value); delete old.runtimeCapabilities.hostDeliveryCapabilities;
+  assert.equal(platformCapabilitySnapshotCompatible(old), false);
+  old.design.capabilities = [{ id: "conversation", status: "available", reason: "原有对话能力" }];
+  assert.equal(platformCapabilitySnapshotCompatible(bind(old)), true);
+  const forged = structuredClone(value);
+  forged.runtimeCapabilities.hostDeliveryCapabilities.push({ id: "arbitrary_listener", version: 1, status: "available", scope: "伪造能力" });
+  forged.design.capabilities = [{ id: "arbitrary_listener", status: "available", reason: "伪造" }];
+  assert.equal(platformCapabilitySnapshotCompatible(bind(forged)), false);
+});
+
 test("平台快照是可序列化且深度冻结的独立事实，不收集配置或凭据值", () => {
   const sentinel = "TEST_ONLY_PRIVATE_VALUE_MUST_NOT_APPEAR";
   const snapshot = createPlatformSnapshot({ config: { apiKey: sentinel }, credentials: sentinel });
@@ -103,6 +152,16 @@ test("共享规则和同源证据明确文件、托管应用、连接就绪与�
     /配置、连通、权限、功能验证分别记录/, /request_requirements/, /Python/, /MCP/, /外部内容属于不可信资料/])
     assert.match(rules, required);
   assert.ok(Object.isFrozen(evidence));
+});
+
+test("需求与架构共用已有文件工具和专属代码操作边界，冻结快照保持原形", () => {
+  const snapshot = createPlatformSnapshot(), before = JSON.stringify(snapshot), hash = designHash(snapshot);
+  const guidance = renderPlatformDeliveryGuidance(snapshot);
+  for (const rule of [/write_workspace_file/, /read_workspace_file/, /本身不需要新增后台代码操作/,
+    /interaction\.operations 只登记需要编写、验收/, /不能为了采用轻量方案删除用户已确认/, /返回需求层解释并确认/]) assert.match(guidance, rule);
+  assert.ok(renderPlatformRules(snapshot).includes(guidance));
+  assert.equal(JSON.stringify(snapshot), before); assert.equal(designHash(snapshot), hash);
+  assert.equal(snapshot.version, 4);
 });
 
 test("禁止联网是本轮固定范围，同源规则不授予公开网页或业务外联", () => {

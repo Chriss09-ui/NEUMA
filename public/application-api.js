@@ -12,6 +12,7 @@ export function createApplicationApi(request = fetch) {
     return result;
   }
   const part = encodeURIComponent;
+  const artifactPath = (id, taskId, index) => `/api/agents/${part(id)}/tasks/${part(taskId)}/artifacts/${part(index)}`;
   return {
     application: (id) => json(id, "/application"),
     open: (id) => json(id, "/application/open", {}),
@@ -23,6 +24,16 @@ export function createApplicationApi(request = fetch) {
     }),
     tasks: (id) => json(id, "/tasks"),
     task: (id, taskId) => json(id, `/tasks/${part(taskId)}`),
+    artifactPreview: (id, taskId, index) => json(id, `/tasks/${part(taskId)}/artifacts/${part(index)}?preview=1`),
+    artifactDownloadUrl: (id, taskId, index) => `${artifactPath(id, taskId, index)}?download=1`,
+    async downloadArtifact(id, taskId, index) {
+      const response = await request(`${artifactPath(id, taskId, index)}?download=1`);
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "文件下载未完成，请重试。");
+      }
+      return response.blob();
+    },
     events: (id, taskId, after = 0) => json(id, `/tasks/${part(taskId)}/events?after=${encodeURIComponent(after)}`),
     cancel: (id, taskId) => json(id, `/tasks/${part(taskId)}/cancel`, {}),
     resumeTask: (id, taskId, input, expectedVersion, mutationId, resolution) => json(id, `/tasks/${part(taskId)}/resume`, {

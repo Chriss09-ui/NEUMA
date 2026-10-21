@@ -1,6 +1,9 @@
 import { InputError } from "../requirements/core.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { validateServiceManifest } from "../services/service-contract.mjs";
+import { VALUE_SCHEMA_RULES } from "./value-schema-rules.mjs";
+import { APPLICATION_ACTION_VALUE_BYTES } from "../runtime/runtime-capability-contract.mjs";
+export { VALUE_SCHEMA_RULES, VALUE_SCHEMA_DESCRIPTION } from "./value-schema-rules.mjs";
 
 export const APPLICATION_PROTOCOL_VERSION = 2;
 const id = /^[A-Za-z][A-Za-z0-9_-]{0,79}$/;
@@ -17,29 +20,28 @@ const safePath = (path) => {
 };
 const unique = (items, label) => { if (new Set(items).size !== items.length) fail(`${label} 重复`); };
 
-const schemaKeys = new Set(["type", "description", "properties", "required", "additionalProperties", "items", "enum", "minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"]);
+const schemaKeys = new Set(VALUE_SCHEMA_RULES.keywords), schemaPropertyId = new RegExp(VALUE_SCHEMA_RULES.propertyNamePattern);
 export function validateValueSchema(schema, depth = 0) {
-  if (depth > 12 || !plain(schema) || Object.keys(schema).some((key) => !schemaKeys.has(key))
-    || !["object", "array", "string", "number", "integer", "boolean", "null"].includes(schema.type)) fail("输入输出 schema 无效或含不支持的规则");
-  if (schema.description !== undefined && (typeof schema.description !== "string" || schema.description.length > 2000)) fail("schema 描述无效");
-  const applicable = { object: ["properties", "required", "additionalProperties"], array: ["items", "minItems", "maxItems"],
-    string: ["minLength", "maxLength"], number: ["minimum", "maximum"], integer: ["minimum", "maximum"], boolean: [], null: [] };
-  const allowed = new Set(["type", "description", "enum", ...applicable[schema.type]]);
+  if (depth > 0 && depth <= VALUE_SCHEMA_RULES.limits.depth && plain(schema) && Reflect.ownKeys(schema).length === 0) return schema;
+  if (depth > VALUE_SCHEMA_RULES.limits.depth || !plain(schema) || Object.keys(schema).some((key) => !schemaKeys.has(key))
+    || !VALUE_SCHEMA_RULES.types.includes(schema.type)) fail("输入输出 schema 无效或含不支持的规则");
+  if (schema.description !== undefined && (typeof schema.description !== "string" || schema.description.length > VALUE_SCHEMA_RULES.limits.descriptionLength)) fail("schema 描述无效");
+  const allowed = new Set([...VALUE_SCHEMA_RULES.commonKeywords, ...VALUE_SCHEMA_RULES.applicable[schema.type]]);
   if (Object.keys(schema).some((key) => !allowed.has(key))) fail("schema 规则与数据类型不匹配");
   if (schema.type === "object") {
-    if (!plain(schema.properties) || Object.keys(schema.properties).length > 100 || !Array.isArray(schema.required)
+    if (!plain(schema.properties) || Object.keys(schema.properties).length > VALUE_SCHEMA_RULES.limits.properties || !Array.isArray(schema.required)
       || schema.required.some((key) => typeof key !== "string" || !Object.hasOwn(schema.properties, key)) || schema.additionalProperties !== false) fail("对象 schema 必须明确字段、required 及 additionalProperties=false");
     unique(schema.required, "required");
     for (const [key, child] of Object.entries(schema.properties)) {
-      if (!id.test(key) || ["__proto__", "prototype", "constructor"].includes(key)) fail("schema 属性名称无效");
+      if (!schemaPropertyId.test(key) || VALUE_SCHEMA_RULES.forbiddenPropertyNames.includes(key)) fail("schema 属性名称无效");
       validateValueSchema(child, depth + 1);
     }
   } else if (schema.type === "array") validateValueSchema(schema.items, depth + 1);
-  for (const key of ["minLength", "maxLength", "minItems", "maxItems"]) if (schema[key] !== undefined && (!Number.isSafeInteger(schema[key]) || schema[key] < 0 || schema[key] > 1_000_000)) fail("schema 上下限无效");
-  for (const key of ["minimum", "maximum"]) if (schema[key] !== undefined && (typeof schema[key] !== "number" || !Number.isFinite(schema[key]))) fail("schema 数值边界无效");
-  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || !schema.enum.length || schema.enum.length > 100
+  for (const key of VALUE_SCHEMA_RULES.lengthKeywords) if (schema[key] !== undefined && (!Number.isSafeInteger(schema[key]) || schema[key] < 0 || schema[key] > VALUE_SCHEMA_RULES.limits.lengthOrCount)) fail("schema 上下限无效");
+  for (const key of VALUE_SCHEMA_RULES.numericKeywords) if (schema[key] !== undefined && (typeof schema[key] !== "number" || !Number.isFinite(schema[key]))) fail("schema 数值边界无效");
+  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || !schema.enum.length || schema.enum.length > VALUE_SCHEMA_RULES.limits.enumItems
     || schema.enum.some((value) => value !== null && !["string", "number", "boolean"].includes(typeof value)))) fail("schema enum 无效");
-  for (const [minimum, maximum] of [["minLength", "maxLength"], ["minItems", "maxItems"], ["minimum", "maximum"]]) {
+  for (const [minimum, maximum] of VALUE_SCHEMA_RULES.intervals) {
     if (schema[minimum] !== undefined && schema[maximum] !== undefined && schema[minimum] > schema[maximum]) fail("schema 最小值不能大于最大值");
   }
   if (schema.enum && schema.enum.some((value) => schema.type === "null" ? value !== null : schema.type === "integer" ? !Number.isSafeInteger(value)
@@ -48,23 +50,59 @@ export function validateValueSchema(schema, depth = 0) {
 }
 
 export function validateActionValue(value, schema, path = "input") {
-  validateValueSchema(schema);
+  const root = path === "output" ? "output" : "input";
+  try { validateValueSchema(schema); }
+  catch (error) {
+    if (root === "output" && error instanceof InputError) Object.assign(error, {
+      reason: "output_contract_failed", statusCode: 500, validationIssue: { path: root, reason: "invalid_schema" },
+    });
+    throw error;
+  }
+  const reject = (location, reason, message) => {
+    throw Object.assign(new InputError(`应用契约无效：${location} ${message}`), {
+      reason: root === "output" ? "output_contract_failed" : "input_contract_rejected",
+      statusCode: root === "output" ? 500 : 400, validationIssue: { path: location, reason },
+    });
+  };
+  let jsonNodes = 0;
+  function checkJson(item, location, depth = 0) {
+    if (++jsonNodes > VALUE_SCHEMA_RULES.jsonValue.nodes || depth > VALUE_SCHEMA_RULES.jsonValue.depth) reject(location, "json_limit", "JSON数据超过深度或节点限制");
+    if (item === null || typeof item === "string" || typeof item === "boolean" || typeof item === "number" && Number.isFinite(item)) return;
+    if (!item || typeof item !== "object" || !(Array.isArray(item) ? Object.getPrototypeOf(item) === Array.prototype : plain(item))) reject(location, "invalid_type", "必须是普通JSON数据");
+    const descriptors = Object.getOwnPropertyDescriptors(item), array = Array.isArray(item), keys = Reflect.ownKeys(descriptors);
+    if (keys.length > VALUE_SCHEMA_RULES.jsonValue.nodes - jsonNodes || keys.some((key) => typeof key !== "string")
+      || array && keys.length !== item.length + 1) reject(location, "invalid_structure", "JSON数据结构无效");
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (array && key === "length") continue;
+      if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value") || array && !/^(0|[1-9][0-9]*)$/.test(key)) reject(location, "invalid_structure", "JSON数据不能包含访问器或隐藏字段");
+      checkJson(descriptor.value, array ? `${location}[${key}]` : `${location}[JSON]`, depth + 1);
+    }
+  }
   function check(item, definition, location) {
+    if (Reflect.ownKeys(definition).length === 0) return checkJson(item, location);
     const type = definition.type;
     if (type === "object") {
-      if (!plain(item) || definition.required.some((key) => !Object.hasOwn(item, key)) || Object.keys(item).some((key) => !Object.hasOwn(definition.properties, key))) fail(`${location} 对象字段不符合契约`);
+      if (!plain(item)) reject(location, "invalid_type", "必须为对象");
+      const missing = definition.required.find((key) => !Object.hasOwn(item, key));
+      if (missing !== undefined) reject(`${location}.${missing}`, "required_field", "缺少必填字段");
+      if (Object.keys(item).some((key) => !Object.hasOwn(definition.properties, key))) reject(location, "unknown_field", "对象字段不符合契约");
       for (const [key, child] of Object.entries(item)) check(child, definition.properties[key], `${location}.${key}`);
     } else if (type === "array") {
-      if (!Array.isArray(item) || item.length < (definition.minItems ?? 0) || item.length > (definition.maxItems ?? 10000)) fail(`${location} 数组无效`);
+      if (!Array.isArray(item)) reject(location, "invalid_type", "必须为数组");
+      if (item.length < (definition.minItems ?? 0) || item.length > (definition.maxItems ?? 10000)) reject(location, "size_limit", "数组长度无效");
       item.forEach((child, index) => check(child, definition.items, `${location}.${index}`));
-    } else if (type === "null") { if (item !== null) fail(`${location} 必须为 null`); }
-    else if (type === "integer" ? !Number.isSafeInteger(item) : typeof item !== type) fail(`${location} 类型无效`);
-    if (typeof item === "string" && (item.includes("\0") || item.length < (definition.minLength ?? 0) || item.length > (definition.maxLength ?? 1_000_000))) fail(`${location} 文本长度无效`);
-    if (typeof item === "number" && (!Number.isFinite(item) || item < (definition.minimum ?? -Infinity) || item > (definition.maximum ?? Infinity))) fail(`${location} 数值无效`);
-    if (definition.enum && !definition.enum.includes(item)) fail(`${location} 取值无效`);
+    } else if (type === "null") { if (item !== null) reject(location, "invalid_type", "必须为 null"); }
+    else if (type === "integer" ? !Number.isSafeInteger(item) : typeof item !== type) reject(location, "invalid_type", "类型无效");
+    if (typeof item === "string") {
+      let characters = 0;
+      for (const character of item) { characters++; if (characters > (definition.maxLength ?? 1_000_000)) reject(location, "size_limit", "文本长度无效"); }
+      if (characters < (definition.minLength ?? 0)) reject(location, "size_limit", "文本长度无效");
+    }
+    if (typeof item === "number" && (!Number.isFinite(item) || item < (definition.minimum ?? -Infinity) || item > (definition.maximum ?? Infinity))) reject(location, "invalid_value", "数值无效");
+    if (definition.enum && !definition.enum.includes(item)) reject(location, "invalid_value", "取值无效");
   }
-  check(value, schema, path);
-  if (Buffer.byteLength(JSON.stringify(value)) > 1024 * 1024) fail(`${path} 超过通道限制，请通过文件引用传递`);
+  check(value, schema, root);
+  if (Buffer.byteLength(JSON.stringify(value)) > APPLICATION_ACTION_VALUE_BYTES) reject(root, "channel_limit", "超过通道限制，请通过文件引用传递");
   return structuredClone(value);
 }
 export const validateActionInput = (action, value) => validateActionValue(value, action.inputSchema, "input");

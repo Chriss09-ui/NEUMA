@@ -18,14 +18,20 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
   let currentId = null, current = null, mode = "application", assistant = false, settingsOpen = false, instance = null, frame = null;
   let detachBridge = null, generation = 0, opening = false, materialSelection = null;
   const floatingAssistant = createApplicationAssistant({ document, window, root, storage });
+  const taskPanel = byId("agent-application-task-list").parentElement;
+  const fileTaskHost = byId("agent-file-list").parentElement;
   const settings = () => document.dispatchEvent(new CustomEvent("neuma:agent-connections-open"));
-  const artifacts = () => byId("agent-artifacts-open").click();
+  const artifacts = (detail) => detail?.taskId
+    ? document.dispatchEvent(new CustomEvent("neuma:agent-task-artifact-open", { detail })) : byId("agent-artifacts-open").click();
   const tasks = createApplicationTasks({ document, api, list: byId("agent-application-task-list"), status: byId("agent-application-task-status"), onArtifacts: artifacts,
     onChanged: (task) => detachBridge?.notifyTask?.(applicationTaskEvent(currentId, task)),
     onCompleted: (agentId) => document.dispatchEvent(new CustomEvent("neuma:agent-artifacts-changed", { detail: { agentId } })) });
   function render() {
     const available = Boolean(current?.pageReady && current.manifest?.page);
     const appMode = available && mode === "application";
+    const taskHost = appMode ? panel : fileTaskHost;
+    if (taskPanel && taskHost && taskPanel.parentElement !== taskHost) taskHost.append(taskPanel);
+    if (currentId && current?.actions?.length) tasks.start(currentId); else tasks.stop();
     const assistantAllowed = current?.assistant?.enabled !== false;
     const assistantVisible = appMode && assistantAllowed && assistant && !settingsOpen;
     floatingAssistant.show(assistantVisible);
@@ -149,7 +155,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
     floatingAssistant.expand(); render();
   });
   document.addEventListener("neuma:agent-turn-finished", (event) => {
-    if (event.detail?.agentId === currentId && instance) void tasks.refresh();
+    if (event.detail?.agentId === currentId && current?.actions?.length) void tasks.refresh();
   });
   document.addEventListener("neuma:agent-settings-view", (event) => {
     if (!currentId || event.detail?.agentId !== currentId) return;
@@ -175,7 +181,7 @@ export function createApplicationWorkspace({ document, window, api, storage }) {
       if (id !== currentId) return;
       if (!current && application) { mode = applicationMode(storage, id, application.defaultEntry); assistant = application.assistant?.enabled === true; }
       else if (current?.assistant?.enabled !== application?.assistant?.enabled) assistant = application?.assistant?.enabled === true;
-      if (current?.deliveryVersion !== application?.deliveryVersion || !application?.pageReady) closeResource();
+      if (current?.deliveryVersion !== application?.deliveryVersion || (instance || opening) && !application?.pageReady) closeResource();
       current = application; render();
       if (mode === "application") void openResource();
     },

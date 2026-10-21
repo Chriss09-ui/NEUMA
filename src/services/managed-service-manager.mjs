@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { managedRunMessage } from "../applications/input-framing.mjs";
+import { MANAGED_SERVICE_MESSAGE_BYTES } from "../runtime/runtime-capability-contract.mjs";
 import { chmod, cp, lstat, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,12 +82,12 @@ class ServiceWorker {
   send(message) {
     if (this.stopped || this.child.stdin.destroyed) throw new ServiceError("service_stopped");
     const line = JSON.stringify(message) + "\n";
-    if (Buffer.byteLength(line) > 2 * 1024 * 1024) throw new ServiceError("service_message_limit");
+    if (Buffer.byteLength(line) > MANAGED_SERVICE_MESSAGE_BYTES) throw new ServiceError("service_message_limit");
     this.child.stdin.write(line);
   }
   receive(bytes) {
     this.lines += this.decoder.write(bytes);
-    if (Buffer.byteLength(this.lines) > 2 * 1024 * 1024) { this.stop("service_message_limit"); return; }
+    if (Buffer.byteLength(this.lines) > MANAGED_SERVICE_MESSAGE_BYTES) { this.stop("service_message_limit"); return; }
     if (this.active) { this.active.outputBytes += bytes.length; if (this.active.outputBytes > this.record.manifest.resources.logBytes + 4 * 1024 * 1024) { this.stop("service_output_limit"); return; } }
     for (let newline; (newline = this.lines.indexOf("\n")) >= 0;) {
       const line = this.lines.slice(0, newline); this.lines = this.lines.slice(newline + 1);
@@ -143,7 +145,7 @@ class ServiceWorker {
         active.timer = setTimeout(() => this.stop("service_timeout"), this.record.manifest.resources.timeoutMs);
         signal?.addEventListener("abort", active.abort, { once: true });
         if (signal?.aborted) active.abort();
-        else try { this.send({ type: "run", protocolVersion: 1, requestId: active.id, actionId, input }); } catch { this.stop("service_channel_failed"); }
+        else try { this.send(managedRunMessage({ requestId: active.id, actionId, input })); } catch { this.stop("service_channel_failed"); }
       });
     };
     const result = this.tail.catch(() => {}).then(perform); this.tail = result; return result;

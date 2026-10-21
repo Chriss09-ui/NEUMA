@@ -1,14 +1,19 @@
 import { randomUUID, createHash } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { agentId } from "../agents/agent-storage.mjs";
+import { APPLICATION_STATE_VALUE_BYTES, APPLICATION_STATE_RECORD_BYTES, APPLICATION_TASK_INPUT_BYTES } from "../runtime/runtime-capability-contract.mjs";
+import { MAX_RUNTIME_FILE_BYTES } from "../runtime/file-limits.mjs";
+import { removeTaskArtifact } from "./task-artifacts.mjs";
+import { validateApplicationTaskEnvelope } from "./task-input-contract.mjs";
+export { validateApplicationTaskEnvelope } from "./task-input-contract.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const MAX_BYTES = 16 * 1024 * 1024;
-const MAX_STATE_BYTES = 1024 * 1024;
+const MAX_STATE_BYTES = APPLICATION_STATE_RECORD_BYTES;
 const now = () => new Date().toISOString();
 export const taskFinished = (task) => TERMINAL.has(task.status);
 export const applicationConflict = (message) => Object.assign(new InputError(message), { reason: "application_conflict" });
-function json(value, limit = 128 * 1024, space) {
+function json(value, limit = APPLICATION_TASK_INPUT_BYTES, space) {
   let source;
   try { source = JSON.stringify(value, null, space); } catch { throw new InputError("应用数据必须是 JSON"); }
   if (!source || Buffer.byteLength(source) > limit) throw new InputError("应用数据超过大小限制");
@@ -47,7 +52,8 @@ export class ApplicationTaskStore {
     await this.storage.writeJson(id, "application/tasks.json", record);
   }
   event(task, type, value = {}) {
-    const event = { ...json(value), type, seq: ++task.sequence, at: now(), taskId: task.id };
+    // Events carry the same result patch accepted by update, not a new task input.
+    const event = { ...json(value, 1024 * 1024), type, seq: ++task.sequence, at: now(), taskId: task.id };
     task.events.push(event); task.updatedAt = event.at;
   }
   interruptedRecord(record) {
@@ -80,7 +86,7 @@ export class ApplicationTaskStore {
         if (taskRequestHash(existing) !== requestHash) throw applicationConflict("这个幂等标识已用于其他任务，请使用新的标识");
         return { task: this.view(existing), created: false };
       }
-      const task = { ...json(input), id: randomUUID(), agentId: id, status: "queued", sequence: 0,
+      const task = { ...validateApplicationTaskEnvelope(input), id: randomUUID(), agentId: id, status: "queued", sequence: 0,
         requestHash, createdAt: now(), updatedAt: now(), progress: null, result: null, artifacts: [], events: [] };
       this.event(task, "queued"); record.tasks.push(task); await this.save(id, record);
       return { task: this.view(task), created: true };
@@ -132,13 +138,21 @@ export class ApplicationTaskStore {
     await this.ready;
     const clean = json(artifact);
     if (typeof clean.path !== "string" || !clean.path) throw new InputError("应用产物路径无效");
+    if (clean.snapshotId !== undefined && (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(clean.snapshotId)
+      || typeof clean.name !== "string" || !clean.name || !Number.isSafeInteger(clean.size) || clean.size < 0 || clean.size > MAX_RUNTIME_FILE_BYTES
+      || !/^[a-f0-9]{64}$/.test(clean.sha256 ?? ""))) throw new InputError("应用产物快照信息无效");
     return this.serial(id, async () => {
       const record = await this.record(id), task = record.tasks.find((task) => task.id === taskId);
       if (!task) throw new InputError("应用任务不存在");
       if (taskFinished(task)) return this.view(task);
+      const replaced = task.artifacts.find((file) => file.path === clean.path);
       task.artifacts = [...task.artifacts.filter((file) => file.path !== clean.path), clean];
       this.event(task, "artifact", { artifacts: task.artifacts });
-      await this.save(id, record); return this.view(task);
+      await this.save(id, record);
+      // Keep the new reference committed even if obsolete-file cleanup fails.
+      if (replaced?.snapshotId && replaced.snapshotId !== clean.snapshotId)
+        await removeTaskArtifact({ storage: this.storage, id, taskId, artifact: replaced }).catch(() => {});
+      return this.view(task);
     });
   }
   async events(id, taskId, after = 0) {
@@ -161,7 +175,7 @@ export class ApplicationTaskStore {
     return value;
   }
   async setState(id, { state, expectedVersion }, options = {}) {
-    await this.ready; const clean = json(state, 900 * 1024);
+    await this.ready; const clean = json(state, APPLICATION_STATE_VALUE_BYTES);
     return this.serial(id, async () => {
       const previous = await this.getState(id, options);
       if (!Number.isSafeInteger(expectedVersion) || expectedVersion !== previous.version) throw applicationConflict("应用状态已被其他窗口更新，请重新读取后保存");

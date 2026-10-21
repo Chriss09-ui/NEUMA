@@ -4,6 +4,7 @@ import { WorkflowController } from "../services/workflow-controller.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { ApplicationTaskStore, taskFinished } from "./task-store.mjs";
 import { ApplicationResources } from "./application-resources.mjs";
+import { applicationTaskInput } from "./input-framing.mjs";
 import { validateApplicationManifest, validateActionInput, validateActionOutput, validateActionValue } from "./application-contract.mjs";
 import { normalizeApplicationContext, applicationContextBinding, applicationInteraction, applicationActionCatalog,
   applicationConversationContext } from "./application-context.mjs";
@@ -128,10 +129,8 @@ export class ApplicationService {
       await this.agents.connections.assertActive(connectionSnapshot, connectionId);
       this.assertOpen(submission.epoch);
     }
-    const { task, created } = await this.store.create(id, { actionId: action.id, input: body.input, mutationId: body.mutationId,
-      source: taskSource, deliveryVersion: descriptor.deliveryVersion, revision: descriptor.agent.revision,
-      configVersion: connectionSnapshot.version, connectionProfile: connectionSnapshot.profile,
-      connectionVersions: connectionSnapshot.connections, allowNetwork });
+    const { task, created } = await this.store.create(id, applicationTaskInput({ actionId: action.id, input: body.input, mutationId: body.mutationId,
+      source: taskSource, deliveryVersion: descriptor.deliveryVersion, revision: descriptor.agent.revision, connectionSnapshot, allowNetwork }));
     submission.task = task;
     this.assertOpen(submission.epoch);
     if (created) {

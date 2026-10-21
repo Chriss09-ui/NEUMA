@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { LEGACY_CAPABILITIES, PUBLIC_CAPABILITIES } from "../architecture/architecture-contract.mjs";
 import { PUBLIC_WEB_CAPABILITIES, networkAllowed } from "../runtime/web-capabilities.mjs";
 import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
+import { isHostDeliveryCapability } from "../runtime/runtime-capability-contract.mjs";
 
 const clean = (value, limit = 1000) => safeDiagnosticText(value).slice(0, limit);
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
@@ -95,7 +96,7 @@ export function groupCapabilityFacts({ agent, agentId = agent?.id, architecture,
   }
   // A declared dependency absent from the real group tool set cannot become callable through a public description.
   for (const item of architecture?.design?.capabilities ?? []) {
-    if (seen.has(item.id) || materialIds[item.id] || item.id === "conversation") continue;
+    if (seen.has(item.id) || materialIds[item.id] || item.id === "conversation" || isHostDeliveryCapability(item.id, architecture.runtimeCapabilities)) continue;
     add(item.id, clean(item.reason), { availability: "unavailable", reason: "当前群执行路径未装配该能力，设计声明不能替代实际工具" });
   }
   const hardBoundaries = [
