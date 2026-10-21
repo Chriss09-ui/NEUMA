@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPiSession, classifyModelFailure } from "./runtime/pi-runtime.mjs";
+import { withModelIdleTimeout } from "./runtime/model-idle-timeout.mjs";
 
 const OVERRIDE_FIELDS = new Set(["chatUrl", "model", "apiKey"]);
 const JEV_OVERRIDE_FIELDS = new Set(["jevModel", "jevApiKey", "clear"]);
@@ -93,7 +94,7 @@ function httpFailure(status, stage) {
 function requestFailure(error, timedOut, stage) {
   const label = stage === "jev" ? "Jev " : "模型";
   const timeoutMessage = stage === "jev" ? "Jev 连通性测试超时，请稍后重试"
-    : "模型连通性测试超时，请检查接口地址或稍后重试";
+    : "模型连续未返回响应数据，已停止本次测试，请检查接口地址或稍后重试";
   if (timedOut || error?.name === "TimeoutError") {
     return probeError(timeoutMessage, "timeout", {}, stage);
   }
@@ -172,14 +173,14 @@ export async function testModelConnection(config = {}, body = {}, { fetchImpl = 
 
 export async function testAgentModelConnection(config = {}, body = {},
   { sessionFactory = createPiSession, signal: externalSignal, timeoutMs = 30_000 } = {}) {
-  const effective = probeConfig(config, body);
+  const effective = { ...probeConfig(config, body), llmIdleTimeoutMs: timeoutMs };
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000)
-    throw new InputError("构建能力测试时限应为 1 到 30000 毫秒之间的整数");
+    throw new InputError("构建能力测试无响应等待时间应为 1 到 30000 毫秒之间的整数");
   externalSignal?.throwIfAborted();
   const controller = new AbortController(), { signal } = controller;
   const receipt = randomUUID(), started = performance.now();
   let session, finished = false, unsubscribe = () => {}, turns = 0, toolsCalled = 0, retryWithdrawn = false;
-  let timedOut = false, turnLimit = false, invalidTool = false, streaming = false, finalError = "";
+  let turnLimit = false, invalidTool = false, streaming = false, finalError = "";
   const stopSession = (value) => {
     try { void Promise.resolve(value?.abort()).catch(() => {}); } catch {}
   };
@@ -195,7 +196,6 @@ export async function testAgentModelConnection(config = {}, body = {},
     rejectAbort(new DOMException("操作已取消", "AbortError"));
   };
   signal.addEventListener("abort", onAbort, { once: true });
-  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const tool = { name: "check_agent_connection", label: "检查构建连接", description: "无副作用的连接测试，返回测试回执。",
     parameters: { type: "object", properties: { challenge: { type: "string", enum: ["neuma-agent-probe"] } },
       required: ["challenge"], additionalProperties: false }, executionMode: "sequential",
@@ -238,6 +238,7 @@ export async function testAgentModelConnection(config = {}, body = {},
     const last = session.messages?.findLast((message) => message.role === "assistant");
     if (["error", "aborted"].includes(last?.stopReason) || finalError) {
       const mapped = classifyModelFailure(last?.errorMessage || finalError);
+      if (mapped.reason === "api_idle_timeout") throw requestFailure({ name: "TimeoutError" }, false, "llm");
       throw probeError(mapped.message, mapped.reason);
     }
     if (last?.stopReason === "length") throw probeError("构建能力测试的模型输出被截断", "output_limit");
@@ -248,14 +249,13 @@ export async function testAgentModelConnection(config = {}, body = {},
       toolsCalled, streaming: true, toolRoundTrip: true };
   } catch (error) {
     if (externalSignal?.aborted) throw new DOMException("操作已取消", "AbortError");
-    if (timedOut) throw probeError("构建能力测试超时，模型未在时限内完成工具往返", "timeout");
     if (turnLimit) throw probeError("构建能力测试达到模型轮次上限", "turn_limit");
     if (error instanceof ProbeError) throw error;
     const mapped = classifyModelFailure(error?.message);
+    if (mapped.reason === "api_idle_timeout") throw requestFailure({ name: "TimeoutError" }, false, "llm");
     throw probeError(mapped.message, mapped.reason);
   } finally {
     finished = true;
-    clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", cancel);
     signal.removeEventListener("abort", onAbort);
     unsubscribe();
@@ -287,7 +287,8 @@ async function probeConnection({ url, model, apiKey, request, stage, validReply,
   const controller = new AbortController();
   const { signal } = controller;
   let timedOut = false;
-  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const timeout = stage === "jev" ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs) : null;
+  const requestFetch = stage === "llm" ? withModelIdleTimeout(fetchImpl, { idleTimeoutMs: timeoutMs }) : fetchImpl;
   const cancel = () => controller.abort();
   externalSignal?.addEventListener("abort", cancel, { once: true });
   let rejectAbort;
@@ -296,7 +297,7 @@ async function probeConnection({ url, model, apiKey, request, stage, validReply,
   signal.addEventListener("abort", onAbort, { once: true });
   const started = performance.now();
   try {
-    const response = await Promise.race([fetchImpl(url, {
+    const response = await Promise.race([requestFetch(url, {
       method: "POST", redirect: "error",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(request), signal,

@@ -97,10 +97,14 @@ export function registerConnectionProbeTests({ label, testConnection, config, ap
     });
     const controller = new AbortController();
     let requestSignal;
+    let requestStarted;
+    const started = new Promise(resolve => { requestStarted = resolve; });
     const pending = probe({ signal: controller.signal, fetchImpl: async (_url, init) => {
       requestSignal = init.signal;
+      requestStarted();
       return new Promise(() => {});
     } });
+    await started;
     controller.abort(new Error(apiKey));
     await assert.rejects(pending, { name: "AbortError" });
     assert.equal(requestSignal.aborted, true);

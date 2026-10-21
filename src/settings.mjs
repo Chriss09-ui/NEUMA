@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { InputError } from "./requirements/core.mjs";
+import { checkedModelProfile, resolvedModelProfile, modelProfileHash } from "./runtime/model-profile.mjs";
 
 const FIELDS = {
   chatUrl: "NEUMA_LLM_CHAT_URL",
@@ -12,7 +13,7 @@ const FIELDS = {
   jevModel: "TYPESAFE_MODEL",
 };
 const SECRET_FIELDS = new Set(["apiKey", "jevApiKey"]);
-const CLEARABLE = new Set(["apiKey", "jevApiKey"]);
+const CLEARABLE = new Set(["apiKey", "jevApiKey", "modelProfile"]);
 const fileWrites = new Map();
 
 function secretHint(value) {
@@ -29,6 +30,9 @@ export function settingsView(config) {
     jevApiKey: secretHint(config.jevApiKey),
     llmConfigured: Boolean(config.llmConfigured),
     jevConfigured: Boolean(config.jevConfigured),
+    modelProfile: config.modelProfile ?? null,
+    effectiveModelProfile: resolvedModelProfile(config),
+    modelProfileHash: modelProfileHash(resolvedModelProfile(config)),
   };
 }
 
@@ -38,6 +42,7 @@ export function configEnv(config) {
     NEUMA_LLM_MODEL: config.model || "",
     NEUMA_LLM_API_KEY: config.apiKey || "",
     NEUMA_LLM_TIMEOUT_MS: config.llmTimeoutMs ? String(config.llmTimeoutMs) : "",
+    NEUMA_LLM_MODEL_PROFILE: config.modelProfile ? JSON.stringify(checkedModelProfile(config.modelProfile)) : "",
     TYPESAFE_API_KEY: config.jevApiKey || "",
     TYPESAFE_MODEL: config.jevModel || "",
   };
@@ -56,6 +61,7 @@ function checkChatUrl(value) {
 // Values are written unquoted into .env, so anything that changes dotenv parsing is rejected.
 export function settingsUpdates(body) {
   const updates = {};
+  if (body.modelProfile !== undefined) updates.NEUMA_LLM_MODEL_PROFILE = body.modelProfile === null ? "" : JSON.stringify(checkedModelProfile(body.modelProfile));
   for (const [field, name] of Object.entries(FIELDS)) {
     if (body[field] === undefined || body[field] === null) continue;
     if (typeof body[field] !== "string") throw new InputError("配置项必须是文字");
@@ -73,7 +79,7 @@ export function settingsUpdates(body) {
     if (!Array.isArray(body.clear) || body.clear.some((item) => !CLEARABLE.has(item))) {
       throw new InputError("无法识别要清除的配置项");
     }
-    for (const field of body.clear) updates[FIELDS[field]] = "";
+    for (const field of body.clear) updates[field === "modelProfile" ? "NEUMA_LLM_MODEL_PROFILE" : FIELDS[field]] = "";
   }
   if (!Object.keys(updates).length) throw new InputError("没有需要保存的修改");
   return updates;
