@@ -414,7 +414,7 @@ test("主 Agent 先核对需求再真正送出回复片段，最后追加规则�
   const draft = emptyDraft();
   let checked = false;
   const handler = createRequestHandler({ config: {}, providers: {
-    generateDraft: async () => ({ draft, proposedGap: "invalid", question: "不能显示的模型候选问题" }),
+    generateDraft: async () => ({ draft, proposedGap: "invalid", answeredPoint: "goal", question: "不能显示的模型候选问题" }),
     judgeJev: async () => { checked = true; throw new Error("暂时不可用"); },
     async streamReply({ summary, onDelta }) {
       assert.equal(checked, true);
@@ -478,7 +478,7 @@ test("主 Agent 在提取、核对、输出期间断开都取消上游且不发�
     const handler = createRequestHandler({ config: {}, providers: {
       async generateDraft({ signal }) {
         if (phase === "draft") await pendingUntilAbort(signal);
-        return { draft: emptyDraft(), proposedGap: "goal", question: "你最想做什么？" };
+        return { draft: emptyDraft(), proposedGap: "goal", answeredPoint: "goal", question: "你最想做什么？" };
       },
       async judgeJev({ signal }) {
         if (phase === "judge") await pendingUntilAbort(signal);

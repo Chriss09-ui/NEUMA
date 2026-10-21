@@ -191,6 +191,9 @@ test("小米 MiMo 使用 JSON 模式并关闭需求提取时的深度思考", as
   assert.match(body.messages[0].content, /scenario/);
   assert.match(body.messages[0].content, /routingCondition/);
   assert.match(body.messages[0].content, /左侧独立入口.*默认通过 NEUMA 对话使用/);
+  assert.match(body.messages[0].content, /NEUMA（纽玛）是用户正在使用的本地工作台/);
+  assert.match(body.messages[0].content, /浏览器自动操作页面/);
+  assert.match(body.messages[0].content, /不要向用户追问模型名称/);
   assert.match(body.messages[0].content, /interaction.*defaultEntry/);
   assert.match(body.messages[0].content, /联网搜索和公开网页读取是默认能力/);
   assert.match(body.messages[0].content, /首期交付目标是完成用户已确认的基本任务/);
@@ -224,7 +227,7 @@ test("需求模型与 Jev 都以用户原话和上一问题核对草稿", async 
   const userMessages = ["帮我读懂论文", "最难的是方法"];
   const lastQuestion = "先要简短要点还是详细解释？";
   await generateDraft({ message: "简短要点", previousDraft: {}, lastQuestion, userMessages });
-  await judgeJev({ message: "简短要点", draft: {}, lastQuestion, userMessages });
+  await judgeJev({ message: "简短要点", draft: {}, lastQuestion, userMessages, answeredPoint: "deliverable" });
   assert.equal(bodies.length, 2);
   const modelContext = JSON.parse(bodies[0].messages[1].content);
   assert.equal(modelContext.latestUserMessage, "简短要点");
@@ -233,9 +236,45 @@ test("需求模型与 Jev 都以用户原话和上一问题核对草稿", async 
   assert.equal(bodies[1].state.latest_message, "简短要点");
   assert.deepEqual(bodies[1].state.user_messages, userMessages);
   assert.equal(bodies[1].state.last_question, lastQuestion);
+  assert.equal(bodies[1].state.matched_point, "deliverable");
+  assert.equal("current_draft" in bodies[1].state, false);
 });
 
-test("Jev 每轮只发一个含场景与任务判断的结构化请求", async () => {
+test("没有 TypeSafe API Key 时不创建 Jev 判断，也不发请求", async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; throw new Error("不应请求 Jev"); };
+  for (const jevApiKey of ["", "   ", undefined]) {
+    const providers = makeProviders({ ...config, jevApiKey, jevConfigured: true }, fetchImpl);
+    assert.equal(providers.judgeJev, null);
+  }
+  assert.equal(calls, 0);
+});
+
+test("低于通过线时草稿整理收到分数、置信度和通过线", async () => {
+  let seen;
+  const fetchImpl = async (_url, init) => {
+    seen = JSON.parse(init.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"reask":false,"question":""}' } }] }), { status: 200 });
+  };
+  const { decideReask } = makeProviders(config, fetchImpl);
+  const decision = await decideReask({
+    message: "会议记录我发你", lastQuestion: "资料从哪来？", userMessages: ["做会议纪要"],
+    answeredPoint: "source", score: 0.4, confidence: 0.9,
+    probabilities: { "0": 0.7, "1": 0.2, "2": 0.1 },
+    passLine: { score: 1.5, confidence: 0.6 },
+  });
+  assert.equal(decision.reask, false);
+  const context = JSON.parse(seen.messages[1].content);
+  assert.equal(context.matchedPoint, "source");
+  assert.equal(context.score, 0.4);
+  assert.equal(context.confidence, 0.9);
+  assert.deepEqual(context.passLine, { score: 1.5, confidence: 0.6 });
+  assert.match(context.requirement, /量级/);
+  assert.match(seen.messages[0].content, /低于通过线/);
+  assert.equal(seen.messages[0].content.includes("重写需求"), true);
+});
+
+test("Jev 只对已匹配的点打一次分，没有匹配点时不发请求", async () => {
   let seen, calls = 0;
   const fetchImpl = async (url, init) => {
     calls++;
@@ -245,15 +284,19 @@ test("Jev 每轮只发一个含场景与任务判断的结构化请求", async (
     });
   };
   const { judgeJev } = makeProviders(config, fetchImpl);
-  await judgeJev({ message: "创建周报助手", draft: {} });
+  assert.equal(await judgeJev({ message: "创建周报助手", draft: {} }), null);
+  assert.equal(calls, 0);
+  await judgeJev({ message: "创建周报助手", draft: {}, answeredPoint: "source" });
   assert.equal(calls, 1);
   assert.equal(seen.url, "https://api.typesafe.ai/v1/systemone");
   assert.equal(seen.body.model, "jev-1.14.0");
-  assert.equal(Object.keys(seen.body.questions).length, 10);
-  assert.equal(seen.body.questions.scenario_clear.type, "noul");
-  assert.equal(seen.body.questions.task_clear.type, "noul");
-  assert.equal(seen.body.questions.boundary_clear.type, "noul");
-  assert.equal(seen.body.questions.next_gap.type, "choice");
+  assert.deepEqual(Object.keys(seen.body.questions), ["point_sufficiency"]);
+  const question = seen.body.questions.point_sufficiency;
+  assert.equal(question.type, "score");
+  assert.equal(question.criteria.length, 3);
+  assert.equal(question.criteria.some((item) => /^\d+$/.test(item)), false);
+  assert.match(seen.body.state.matched_requirement, /magnitude/);
+  assert.match(question.instructions, /user's own words/);
   assert.equal(seen.authorization, "Bearer test-jev-key");
 });
 
@@ -487,7 +530,7 @@ test("需求提取和 Jev 传递取消信号，取消不重试也不冒充超时
           ready();
         });
       });
-    const result = provider[name]({ message: "资料整理", previousDraft: {}, draft: {}, signal: controller.signal });
+    const result = provider[name]({ message: "资料整理", previousDraft: {}, draft: {}, answeredPoint: "source", signal: controller.signal });
     const rejected = assert.rejects(result, (error) => error.name === "AbortError" && !/超时|private/.test(error.message));
     await requested;
     controller.abort();
@@ -824,7 +867,7 @@ test("需求 JSON、短流及 Jev 持续收到字节时，累计处理超过空�
     });
     const provider = makeProviders({ ...config, llmTimeoutMs: 5, llmIdleTimeoutMs: 50 }, async () => { calls++; return response; });
     const started = Date.now();
-    const result = provider[name]({ ...turnInput, draft: {} });
+    const result = provider[name]({ ...turnInput, draft: {}, answeredPoint: "source" });
     await settle();
     for (let index = 0; index < parts.length; index++) {
       if (index) t.mock.timers.tick(interval);
@@ -888,7 +931,7 @@ test("空闲计时前的用户取消优先，不泄露原因或自动重试", as
     const controller = new AbortController();
     let calls = 0;
     const provider = makeProviders({ ...config, llmIdleTimeoutMs: 40 }, async () => { calls++; return new Promise(() => {}); });
-    const result = assert.rejects(provider[name]({ ...turnInput, draft: {}, signal: controller.signal }),
+    const result = assert.rejects(provider[name]({ ...turnInput, draft: {}, answeredPoint: "source", signal: controller.signal }),
       (error) => error.name === "AbortError" && !/连续|private/.test(error.message));
     await settle();
     t.mock.timers.tick(39);
