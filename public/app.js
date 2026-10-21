@@ -199,14 +199,22 @@ function renderDraft() {
 function renderJev() {
   if (!session.jev) {
     jevEl.textContent = "Jev 尚未参与判断";
+  } else if (session.jev.used && session.jev.reason === "sufficient") {
+    jevEl.textContent = "Jev 已达到通过线";
+  } else if (session.jev.used && session.jev.reason === "reask") {
+    jevEl.textContent = "Jev 低于通过线 · 需求整理决定再问这一点";
+  } else if (session.jev.used && session.jev.reason === "waived") {
+    jevEl.textContent = "Jev 低于通过线 · 需求整理决定不再追问";
   } else if (session.jev.used) {
-    jevEl.textContent = `Jev 已参与 · 本轮缺口：${session.jev.appliedGap === "none" ? "无" : session.jev.appliedGap}`;
+    jevEl.textContent = "Jev 已参与判断";
   } else if (session.jev.reason === "not_needed") {
     jevEl.textContent = "本轮处理确认或纠正方向，未再次调用 Jev";
+  } else if (session.jev.reason === "not_configured") {
+    jevEl.textContent = "未提供 Jev API · 已跳过判断，本轮由需求整理和规则继续";
+  } else if (session.jev.reason === "no_matched_point") {
+    jevEl.textContent = "本轮没有需要对上的回答，未调用 Jev";
   } else {
-    jevEl.textContent = session.jev.reason === "not_configured"
-      ? "Jev 未配置 · 本轮由需求 Agent 与规则判断"
-      : "Jev 暂不可用 · 已自动按需求草稿继续";
+    jevEl.textContent = "Jev 暂不可用 · 已自动按需求草稿继续";
   }
 }
 

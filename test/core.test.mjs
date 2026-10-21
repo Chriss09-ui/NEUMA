@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { CONFIRMATION_QUESTION, decideNext, emptyDraft, normalizeDraft, processTurn, ProviderError } from "../src/requirements/core.mjs";
 import { REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS } from "../src/requirements/requirement-limits.mjs";
+import { emptyTaskSpec } from "../src/requirements/task-spec.mjs";
+import { withPreflight } from "./helpers/consultation.mjs";
 
 function completeDraft() {
   const draft = emptyDraft();
@@ -15,22 +17,18 @@ function completeDraft() {
   return draft;
 }
 
-function jevAnswers(overrides = {}) {
-  const noul = (value) => ({ type: "noul", noul: value });
+function jevAnswers({ score = 2, confidence = 1, probabilities = { "0": 0, "1": 0, "2": 1 } } = {}) {
   return {
-    model: "jev-1.13.0",
+    model: "jev-1.14.0",
     answers: {
-      goal_clear: noul(0.95),
-      scenario_clear: noul(0.95),
-      source_clear: noul(0.95),
-      task_clear: noul(0.95),
-      deliverable_clear: noul(0.95),
-      boundary_clear: noul(0.95),
-      has_blocking_conflict: noul(0.05),
-      has_external_action: noul(0.05),
-      external_boundary_clear: noul(0.95),
-      next_gap: { type: "choice", choice: "none", confidence: 0.95 },
-      ...overrides,
+      point_sufficiency: {
+        type: "score", score, confidence, probabilities,
+        legend: {
+          "0": "The user's words miss the matched requirement, or a part that requirement names is absent.",
+          "1": "The user's words touch the matched requirement, but something still vague or missing would change what the agent does.",
+          "2": "The user's own words settle the matched requirement, including every part that requirement names.",
+        },
+      },
     },
   };
 }
@@ -110,19 +108,21 @@ test("缺少页面或用途的助手选择不能交接，模型不能用字符�
 
 test("完整会议需求直接可交接，不安排例行追问", async () => {
   const result = await processTurn({ message: "我提供会议转写，请提取结论和待办，输出结论和待办列表，方便会后追踪责任人", draft: null }, {
-    generateDraft: async () => ({ draft: completeDraft(), proposedGap: "none", question: "" }),
+    generateDraft: async () => ({ draft: completeDraft(), proposedGap: "none", question: "", answeredPoint: "deliverable" }),
     judgeJev: async () => jevAnswers(),
   });
   assert.equal(result.status, "ready");
   assert.equal(result.question, null);
   assert.equal(result.confirmationQuestion, CONFIRMATION_QUESTION);
   assert.equal(result.jev.used, true);
+  assert.equal(result.jev.reason, "sufficient");
   assert.match(result.summary, /会议转写/);
   assert.match(result.summary, /建议的调用场景/);
   assert.deepEqual(result.diagnostic.decision.gaps, []);
   assert.equal(result.diagnostic.decision.questionSource, "none");
   assert.equal(result.diagnostic.model.proposedGap, "none");
-  assert.equal(result.diagnostic.jev.answers.next_gap.choice, "none");
+  assert.equal(result.diagnostic.model.answeredPoint, "deliverable");
+  assert.equal(result.diagnostic.jev.answers.point_sufficiency.score, 2);
 });
 
 test("场景和核心工作不清楚时不能提前确认", () => {
@@ -152,10 +152,27 @@ test("建议调用场景可从已明确的场景和任务生成", async () => {
   assert.match(result.draft.routingCondition.value, /会议结束后/);
 });
 
-test("Jev 高确定性认为关键规则不清楚时必须追问", () => {
-  const jev = jevAnswers({ boundary_clear: { type: "noul", noul: 0.1 },
-    next_gap: { type: "choice", choice: "boundary", confidence: 0.9 } });
-  assert.equal(decideNext(completeDraft(), {}, jev).selectedGap, "boundary");
+test("低于通过线时由草稿整理决定再问，而且只问匹配到的点", async () => {
+  const draft = completeDraft();
+  draft.inputSource = { value: "", source: "unknown" };
+  draft.deliverable = { value: "", source: "unknown" };
+  let seen;
+  const result = await processTurn({ message: "资料我发你" }, {
+    generateDraft: async () => ({ draft, proposedGap: "deliverable", question: "要什么样的结果？", answeredPoint: "source" }),
+    judgeJev: async () => jevAnswers({ score: 0.2, confidence: 0.95, probabilities: { "0": 0.8, "1": 0.2, "2": 0 } }),
+    decideReask: async (input) => {
+      seen = input;
+      return { reask: true, question: "这些资料大概有多少？" };
+    },
+  });
+  assert.equal(seen.answeredPoint, "source");
+  assert.equal(seen.score, 0.2);
+  assert.equal(seen.passLine.score, 1.5);
+  assert.equal(seen.passLine.confidence, 0.6);
+  assert.equal(result.diagnostic.decision.selectedBy, "reask");
+  assert.equal(result.diagnostic.decision.selectedGap, "source");
+  assert.equal(result.question, "这些资料大概有多少？");
+  assert.equal(result.jev.reason, "reask");
 });
 
 test("只说周报助手时追问资料来源，而且只问一个问题", () => {
@@ -203,34 +220,67 @@ test("定时执行未给具体时间时追问触发条件", () => {
   assert.equal(decision.selectedGap, "trigger");
 });
 
-test("Jev 高确定性结果可在多个缺口中选择下一问", () => {
+test("草稿整理认为低于通过线仍可接受时，不改问另一项", async () => {
   const draft = completeDraft();
   draft.inputSource = { value: "", source: "unknown" };
   draft.deliverable = { value: "", source: "unknown" };
-  const jev = jevAnswers({
-    source_clear: { type: "noul", noul: 0.1 },
-    deliverable_clear: { type: "noul", noul: 0.1 },
-    next_gap: { type: "choice", choice: "deliverable", confidence: 0.91 },
+  const result = await processTurn({ message: "资料我发你" }, {
+    generateDraft: async () => ({ draft, proposedGap: "deliverable", question: "要什么样的结果？", answeredPoint: "source" }),
+    judgeJev: async () => jevAnswers({ score: 1.2, confidence: 0.9, probabilities: { "0": 0, "1": 0.8, "2": 0.2 } }),
+    decideReask: async () => ({ reask: false, question: "" }),
   });
-  assert.equal(decideNext(draft, {}, jev).selectedGap, "deliverable");
-  jev.answers.next_gap.confidence = 0.3;
-  assert.equal(decideNext(draft, {}, jev).selectedGap, "source");
+  assert.equal(result.question, "要什么样的结果？");
+  assert.equal(result.diagnostic.decision.selectedGap, "deliverable");
+  assert.equal(result.jev.reason, "waived");
 });
 
-test("Jev 认为已填字段仍不清楚时会阻止提前交接", () => {
-  const jev = jevAnswers({ source_clear: { type: "noul", noul: 0.1 } });
-  const decision = decideNext(completeDraft(), {}, jev);
-  assert.equal(decision.selectedGap, "source");
-  assert.deepEqual(decision.ruleGaps, []);
-  assert.deepEqual(decision.jevAddedGaps, ["source"]);
-  assert.equal(decision.questionSource, "fallback");
+test("已填字段低于通过线且草稿整理决定再问时，阻止提前交接", async () => {
+  const result = await processTurn({ message: "会议记录我发你" }, {
+    generateDraft: async () => ({ draft: completeDraft(), proposedGap: "none", question: "", answeredPoint: "source" }),
+    judgeJev: async () => jevAnswers({ score: 0.4, confidence: 0.9, probabilities: { "0": 0.7, "1": 0.2, "2": 0.1 } }),
+    decideReask: async () => ({ reask: true, question: "你希望以什么形式交这些资料，通常大概有多少？" }),
+  });
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.confirmationQuestion, null);
+  assert.equal(result.diagnostic.decision.selectedBy, "reask");
+  assert.deepEqual(result.diagnostic.decision.ruleGaps, []);
+  assert.deepEqual(result.diagnostic.decision.jevAddedGaps, ["source"]);
+  assert.match(result.question, /形式/);
+  assert.match(result.question, /多少/);
+});
+
+test("达到通过线时直接放行，不再交给草稿整理", async () => {
+  let reviews = 0;
+  const result = await processTurn({ message: "我每次在对话里粘贴，大概三五页" }, {
+    generateDraft: async () => ({ draft: completeDraft(), proposedGap: "none", question: "", answeredPoint: "source" }),
+    judgeJev: async () => jevAnswers(),
+    decideReask: async () => { reviews += 1; return { reask: true, question: "不该再问" }; },
+  });
+  assert.equal(reviews, 0);
+  assert.equal(result.status, "ready");
+  assert.equal(result.question, null);
+  assert.equal(result.jev.reason, "sufficient");
+});
+
+test("低于置信度线时交给草稿整理，它也可以决定不再问", async () => {
+  const result = await processTurn({ message: "结论和待办列表" }, {
+    generateDraft: async () => ({ draft: completeDraft(), proposedGap: "none", question: "", answeredPoint: "deliverable" }),
+    judgeJev: async () => jevAnswers({ score: 1.6, confidence: 0.4, probabilities: { "0": 0, "1": 0.4, "2": 0.6 } }),
+    decideReask: async (input) => {
+      assert.equal(input.confidence, 0.4);
+      return { reask: false, question: "" };
+    },
+  });
+  assert.equal(result.status, "ready");
+  assert.equal(result.jev.reason, "waived");
+  assert.equal(result.diagnostic.review.used, true);
 });
 
 test("Jev 故障时按草稿缺口继续", async () => {
   const draft = completeDraft();
   draft.inputSource = { value: "", source: "unknown" };
   const result = await processTurn({ message: "做周报助手" }, {
-    generateDraft: async () => ({ draft, proposedGap: "source", question: "资料从哪里来？" }),
+    generateDraft: async () => ({ draft, proposedGap: "source", question: "资料从哪里来？", answeredPoint: "source" }),
     judgeJev: async () => { throw new Error("timeout"); },
   });
   assert.equal(result.status, "needs_input");
@@ -319,7 +369,7 @@ test("快速读懂论文的愿望加系统推测不能直接进入确认，Jev �
   draft.deliverable = { value: "八个章节的论文解读报告", source: "inferred" };
   draft.successCriteria = { value: "无需再读原文", source: "inferred" };
   const result = await processTurn({ message: "帮我从0到1分析一篇论文，让我能快速读懂", draft: null }, {
-    generateDraft: async () => ({ draft, proposedGap: "task",
+    generateDraft: async () => ({ draft, proposedGap: "task", answeredPoint: "goal",
       question: "读论文时最困扰你的是术语、方法、论证过程，还是抓重点？" }),
     judgeJev: async () => jevAnswers(),
   });
@@ -394,34 +444,91 @@ test("模型和 Jev 收到当前用户原话，下一份请求不会继承前一
   const providers = {
     generateDraft: async ({ message, userMessages, lastQuestion }) => {
       seen.push({ message, userMessages, lastQuestion });
-      return { draft: completeDraft(), proposedGap: "none", question: "" };
+      return { draft: completeDraft(), proposedGap: "none", question: "", answeredPoint: "deliverable" };
     },
-    judgeJev: async ({ message, userMessages, lastQuestion }) => {
-      seen.push({ message, userMessages, lastQuestion });
+    judgeJev: async ({ message, userMessages, lastQuestion, answeredPoint }) => {
+      seen.push({ message, userMessages, lastQuestion, answeredPoint });
       return jevAnswers();
     },
   };
   const current = { message: "简短要点", userMessages: ["我提供会议转写", "提取结论和待办"], lastQuestion: "先要简短要点还是详细解释？" };
   await processTurn(current, providers);
   await processTurn({ message: "全新任务" }, providers);
-  assert.deepEqual(seen, [current, current,
+  assert.deepEqual(seen, [current, { ...current, answeredPoint: "deliverable" },
     { message: "全新任务", userMessages: [], lastQuestion: "" },
-    { message: "全新任务", userMessages: [], lastQuestion: "" }]);
+    { message: "全新任务", userMessages: [], lastQuestion: "", answeredPoint: "deliverable" }]);
 });
 
 test("用户暂时说不出额外标准时不重复追问同一个边界问题", async () => {
-  const jev = jevAnswers({ boundary_clear: { type: "noul", noul: 0.1 },
-    next_gap: { type: "choice", choice: "boundary", confidence: 0.9 } });
+  const jev = jevAnswers({ score: 0.2, confidence: 1, probabilities: { "0": 0.8, "1": 0.2, "2": 0 } });
   const result = await processTurn({ message: "我不太说得好", draft: completeDraft(),
     lastQuestion: "这件事做到什么程度才算合格？有没有必须遵守或绝对不能做的事？" }, {
     generateDraft: async () => ({ draft: completeDraft(), proposedGap: "boundary",
-      question: "还有什么额外标准？" }),
+      answeredPoint: "boundary", question: "还有什么额外标准？" }),
     judgeJev: async () => jev,
+    decideReask: async () => { throw new Error("用户已放弃额外标准，不应再复核"); },
   });
   assert.equal(result.status, "ready");
   assert.equal(result.question, null);
   assert.equal(result.confirmationQuestion, CONFIRMATION_QUESTION);
+  assert.equal(result.jev.used, true);
+  assert.equal(result.jev.reason, "sufficient");
   assert.equal(result.diagnostic.decision.skipOptionalBoundary, true);
+});
+
+test("未提供 Jev API 时跳过打分，草稿里的问题照常提出", async () => {
+  const phases = [];
+  const draft = completeDraft();
+  draft.inputSource = { value: "", source: "unknown" };
+  const result = await processTurn({ message: "做周报助手" }, {
+    generateDraft: async () => ({ draft, proposedGap: "source", question: "资料从哪里来？", answeredPoint: "source" }),
+    judgeJev: null,
+  }, { onProgress: (event) => phases.push(event.phase) });
+  assert.equal(result.jev.used, false);
+  assert.equal(result.jev.reason, "not_configured");
+  assert.equal(result.diagnostic.jev.failure, null);
+  assert.equal(result.diagnostic.jev.answers, null);
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.question, "资料从哪里来？");
+  assert.equal(phases.includes("checking"), false);
+});
+
+test("没有匹配到回答点时不调用 Jev", async () => {
+  let calls = 0;
+  const result = await processTurn({ message: "做周报助手" }, {
+    generateDraft: async () => ({ draft: completeDraft(), proposedGap: "none", question: "", answeredPoint: "none" }),
+    judgeJev: async () => { calls += 1; throw new Error("should not call"); },
+  });
+  assert.equal(calls, 0);
+  assert.equal(result.jev.reason, "no_matched_point");
+  assert.equal(result.status, "ready");
+});
+
+test("Jev 分数格式无效时按草稿继续", async () => {
+  const draft = completeDraft();
+  draft.inputSource = { value: "", source: "unknown" };
+  const result = await processTurn({ message: "做周报助手" }, {
+    generateDraft: async () => ({ draft, proposedGap: "source", question: "资料从哪里来？", answeredPoint: "source" }),
+    judgeJev: async () => ({ answers: { point_sufficiency: { type: "noul", noul: 1 } } }),
+  });
+  assert.equal(result.question, "资料从哪里来？");
+  assert.equal(result.jev.reason, "unavailable");
+  assert.equal(result.diagnostic.jev.failure.reason, "invalid_response");
+});
+
+test("预评估已通过时，Jev 低分仍重问匹配到的点", async () => {
+  const draft = completeDraft();
+  draft.taskSpec = emptyTaskSpec();
+  const result = await processTurn({ message: "会议转写", draft, lastQuestion: "资料从哪来？" }, withPreflight({
+    generateDraft: async () => ({ draft: structuredClone(draft), proposedGap: "none", question: "", answeredPoint: "source" }),
+    judgeJev: async () => jevAnswers({ score: 0.4, confidence: 0.9, probabilities: { "0": 0.7, "1": 0.2, "2": 0.1 } }),
+    decideReask: async () => ({ reask: true, question: "你希望以什么形式交这些资料，通常大概有多少？" }),
+  }), { enforceConsultation: true, platform: { version: 1 }, requestId: "jev_reask" });
+  assert.equal(result.diagnostic.decision.selectedBy, "reask");
+  assert.equal(result.status, "needs_input");
+  assert.equal(result.confirmationQuestion, null);
+  assert.match(result.question, /形式/);
+  assert.match(result.question, /多少/);
 });
 
 test("确认阶段含糊回复不会原样重复整份需求", async () => {

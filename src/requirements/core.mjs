@@ -16,6 +16,10 @@ const CONFIRMATION_CLARIFICATION_QUESTION = "你说的“没有”，是没有�
 const CONFIRMATION_OPTIONS_QUESTION = "请回复“确认”，或直接说要修改哪一部分。";
 const REVISION_QUESTION = "我们先找出偏差：1）目标理解错了；2）处理方式不合适；3）结果的形式或深度不合适；4）我还说不清。你只需选一个，我再接着问。";
 const BOUNDARY_QUESTION = "这件事做到什么程度才算合格？有没有必须遵守或绝对不能做的事？";
+// Score levels are 0, 1 and 2. 1.5 sits nearer “settled” than “still vague”.
+// Confidence is how concentrated that distribution is, not a second copy of the score.
+export const POINT_ACCEPT_SCORE = 1.5;
+export const POINT_ACCEPT_CONFIDENCE = 0.6;
 
 export class InputError extends Error {}
 export class ProviderError extends Error {
@@ -207,25 +211,27 @@ function addGap(gaps, gap) {
   if (!gaps.includes(gap)) gaps.push(gap);
 }
 
-function validJevAnswers(result) {
-  const answers = result?.answers;
-  if (!answers || typeof answers !== "object") return false;
-  for (const key of [
-    "goal_clear", "scenario_clear", "source_clear", "task_clear", "deliverable_clear",
-    "boundary_clear", "has_blocking_conflict",
-    "has_external_action", "external_boundary_clear",
-  ]) {
-    const answer = answers[key];
-    if (answer?.type !== "noul" || typeof answer.noul !== "number"
-        || answer.noul < 0 || answer.noul > 1) return false;
-  }
-  const next = answers.next_gap;
-  return next?.type === "choice" && GAP_SET.has(next.choice)
-    && typeof next.confidence === "number" && next.confidence >= 0
-    && next.confidence <= 1;
+export function matchedAnswerPoint(value) {
+  return GAP_SET.has(value) ? value : "none";
 }
 
-export function decideNext(draft, modelSuggestion = {}, jevResult = null,
+export function validJevAnswers(result) {
+  const answer = result?.answers?.point_sufficiency;
+  const probabilities = answer?.probabilities;
+  if (answer?.type !== "score" || typeof answer.score !== "number" || !Number.isFinite(answer.score)
+    || answer.score < 0 || answer.score > 2
+    || typeof answer.confidence !== "number" || !Number.isFinite(answer.confidence)
+    || answer.confidence < 0 || answer.confidence > 1 || !probabilities) return false;
+  return ["0", "1", "2"].every((level) => typeof probabilities[level] === "number"
+    && probabilities[level] >= 0 && probabilities[level] <= 1)
+    && Math.abs(probabilities["0"] + probabilities["1"] + probabilities["2"] - 1) <= 0.02;
+}
+
+export function pointScoreBelowLine(answer) {
+  return answer.score < POINT_ACCEPT_SCORE || answer.confidence < POINT_ACCEPT_CONFIDENCE;
+}
+
+export function decideNext(draft, modelSuggestion = {}, _jevResult = null,
   { skipOptionalBoundary = false } = {}) {
   const gaps = [];
   if (!hasGroundedFact(draft.goal)) addGap(gaps, "goal");
@@ -263,42 +269,15 @@ export function decideNext(draft, modelSuggestion = {}, jevResult = null,
     addGap(gaps, "trigger");
   }
   const ruleGaps = GAP_ORDER.filter((gap) => gaps.includes(gap));
-
-  if (jevResult && validJevAnswers(jevResult)) {
-    const a = jevResult.answers;
-    if (a.goal_clear.noul <= 0.2) addGap(gaps, "goal");
-    if (a.scenario_clear.noul <= 0.2) addGap(gaps, "scenario");
-    if (a.source_clear.noul <= 0.2) addGap(gaps, "source");
-    if (a.task_clear.noul <= 0.2) addGap(gaps, "task");
-    if (a.deliverable_clear.noul <= 0.2) addGap(gaps, "deliverable");
-    if (!skipOptionalBoundary && a.boundary_clear.noul <= 0.2) addGap(gaps, "boundary");
-    if (a.has_blocking_conflict.noul >= 0.8) addGap(gaps, "conflict");
-    if (a.has_external_action.noul >= 0.8 && action.mode === "none") {
-      addGap(gaps, "external_boundary");
-    }
-    if ((action.mode !== "none" || a.has_external_action.noul >= 0.8)
-        && a.external_boundary_clear.noul <= 0.2) {
-      addGap(gaps, "external_boundary");
-    }
-    if (a.next_gap.confidence >= 0.8 && a.next_gap.choice !== "none"
-        && !(skipOptionalBoundary && a.next_gap.choice === "boundary")) {
-      addGap(gaps, a.next_gap.choice);
-    }
-  }
-
   const ordered = GAP_ORDER.filter((gap) => gaps.includes(gap));
   const jevAddedGaps = ordered.filter((gap) => !ruleGaps.includes(gap));
-  const next = jevResult?.answers?.next_gap;
-  const selectedBy = next?.confidence >= 0.8 && ordered.includes(next.choice)
-    ? "jev" : ordered.includes(modelSuggestion.proposedGap) ? "model" : "gap_order";
-  const selectedGap = selectedBy === "jev" ? next.choice
-    : selectedBy === "model" ? modelSuggestion.proposedGap : ordered[0] ?? "none";
+  const selectedBy = ordered.includes(modelSuggestion.proposedGap) ? "model" : "gap_order";
+  const selectedGap = selectedBy === "model" ? modelSuggestion.proposedGap : ordered[0] ?? "none";
   const suggestedQuestion = cleanText(modelSuggestion.question, 500);
   const questionSource = selectedGap === "none" ? "none"
     : modelSuggestion.proposedGap === selectedGap && suggestedQuestion ? "model" : "fallback";
   const question = selectedGap === "none" ? null
-    : questionSource === "model"
-      ? suggestedQuestion : questionForGap(selectedGap, draft);
+    : questionSource === "model" ? suggestedQuestion : questionForGap(selectedGap, draft);
   return { status: selectedGap === "none" ? "ready" : "needs_input", question, selectedGap,
     gaps: ordered, ruleGaps, jevAddedGaps, selectedBy, questionSource };
 }
@@ -307,7 +286,7 @@ function questionForGap(gap, draft) {
   switch (gap) {
     case "goal": return "你最希望这个 Agent 先帮你完成哪一件具体的事？";
     case "scenario": return "你通常在什么情况下会用到它？能说说最近一次类似任务吗？";
-    case "source": return "它要依据什么资料工作？资料由你提供，还是从指定地方读取？";
+    case "source": return "它要依据什么资料工作？你希望以什么形式把这些资料交给它，例如在对话里粘贴、上传文件、发链接，或从某处读取？这些资料通常大概有多少？";
     case "task": return "做这件事时，你最容易卡在哪一步？可以只说一个困难；还没想好也可以，我会给你几个选择。";
     case "deliverable": return draft.deliverable.value
       ? `我暂时建议交付“${cleanText(draft.deliverable.value, 180)}”。你希望按这个建议，还是换一种内容或形式？可以只说“按建议”或一个要调整的点。`
@@ -388,7 +367,24 @@ function canResumeSystemAssessment(message, draft, consultation, previousConsult
     .some((issue) => issue.owner === "user" && issue.blocking && issue.status !== "resolved" && issue.current !== false);
 }
 
-export async function processTurn(request, { generateDraft, judgeJev, preflight, getPlatform, research: providerResearch, verifySystemIssues },
+export function normalizeReaskDecision(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.reask === true) {
+    const question = cleanText(value.question, 500);
+    return question ? { reask: true, question } : null;
+  }
+  return value.reask === false ? { reask: false, question: null } : null;
+}
+
+function applyModelReask(decision, gap, question) {
+  const gaps = decision.gaps.includes(gap) ? decision.gaps : [...decision.gaps, gap];
+  const ordered = GAP_ORDER.filter((item) => gaps.includes(item));
+  const jevAddedGaps = decision.ruleGaps.includes(gap) ? decision.jevAddedGaps : [...decision.jevAddedGaps, gap];
+  return { ...decision, status: "needs_input", question, selectedGap: gap, gaps: ordered,
+    jevAddedGaps, selectedBy: "reask", questionSource: "model" };
+}
+
+export async function processTurn(request, { generateDraft, judgeJev, decideReask, preflight, getPlatform, research: providerResearch, verifySystemIssues },
   { signal, onProgress, enforceConsultation = request?.draft?.taskSpec !== undefined, platform, requestId, research, verificationContext } = {}) {
   signal?.throwIfAborted();
   if (!textWithinLimit(request?.message, REQUIREMENT_MESSAGE_MAX_CHARACTERS)) {
@@ -435,7 +431,7 @@ export async function processTurn(request, { generateDraft, judgeJev, preflight,
         platform: actualPlatform, requestId, displayedHash: request.consultation?.displayedHash });
     }
     if (gate.allowed && !result.confirmed && decideNext(result.draft).status === "ready"
-      && result.diagnostic?.decision?.selectedBy !== "confirmation") {
+      && !["confirmation", "reask"].includes(result.diagnostic?.decision?.selectedBy)) {
       result.status = "ready"; result.question = null; result.confirmationQuestion = CONFIRMATION_QUESTION;
       result.summary = summaryFor(result.draft, "ready");
     }
@@ -484,23 +480,25 @@ export async function processTurn(request, { generateDraft, judgeJev, preflight,
     draft.routingCondition = field(`当用户在${draft.scenario.value}需要${draft.task.value}时`, "inferred");
   }
 
+  const skipOptionalBoundary = declinesExtraBoundary(message, lastQuestion);
+  const answeredPoint = matchedAnswerPoint(modelResult?.answeredPoint);
   let jevResult = null;
   let jevFailure = null;
   let jevMs = null;
-  let jev = { used: false, reason: "not_configured", selectedGap: null, model: null };
-  if (judgeJev) {
+  let review = { used: false, reask: false, question: null, failure: null };
+  let jev = { used: false, reason: judgeJev ? "no_matched_point" : "not_configured", selectedGap: null, model: null };
+  if (judgeJev && answeredPoint !== "none") {
     onProgress?.({ type: "status", phase: "checking", label: "正在核对需求…" });
     const jevStartedAt = Date.now();
     try {
-      const result = await judgeJev({ message, draft, lastQuestion, userMessages, signal });
+      const result = await judgeJev({ message, draft, lastQuestion, userMessages, answeredPoint, signal });
       signal?.throwIfAborted();
       if (!validJevAnswers(result)) {
         throw new ProviderError("Jev 返回的判断格式无效",
           { stage: "jev", reason: "invalid_response" });
       }
       jevResult = result;
-      jev = { used: true, reason: null, selectedGap: result.answers.next_gap.choice,
-        model: cleanText(result.model, 80) || null };
+      jev = { used: true, reason: "sufficient", selectedGap: null, model: cleanText(result.model, 80) || null };
     } catch (error) {
       signal?.throwIfAborted();
       jev = { used: false, reason: "unavailable", selectedGap: null, model: null };
@@ -509,9 +507,35 @@ export async function processTurn(request, { generateDraft, judgeJev, preflight,
     }
     jevMs = Date.now() - jevStartedAt;
   }
+  const sufficiency = jevResult?.answers?.point_sufficiency;
+  const belowLine = Boolean(sufficiency && pointScoreBelowLine(sufficiency)
+    && !(skipOptionalBoundary && answeredPoint === "boundary"));
+  if (belowLine) {
+    if (!decideReask) jev.reason = "review_unavailable";
+    else {
+      try {
+        const raw = await decideReask({ message, lastQuestion, userMessages, answeredPoint,
+          score: sufficiency.score, confidence: sufficiency.confidence,
+          probabilities: sufficiency.probabilities,
+          passLine: { score: POINT_ACCEPT_SCORE, confidence: POINT_ACCEPT_CONFIDENCE }, signal });
+        signal?.throwIfAborted();
+        const followUp = normalizeReaskDecision(raw);
+        if (!followUp) throw new ProviderError("草稿整理未返回是否再问的判断",
+          { stage: "llm", reason: "invalid_reask" });
+        review = { used: true, reask: followUp.reask, question: followUp.question, failure: null };
+        jev.reason = followUp.reask ? "reask" : "waived";
+        jev.selectedGap = followUp.reask ? answeredPoint : null;
+      } catch (error) {
+        signal?.throwIfAborted();
+        jev.reason = "review_unavailable";
+        review = { used: false, reask: false, question: null,
+          failure: error instanceof ProviderError ? error.diagnostic : { stage: "llm", reason: "unknown" } };
+      }
+    }
+  }
   signal?.throwIfAborted();
-  const skipOptionalBoundary = declinesExtraBoundary(message, lastQuestion);
-  const decision = decideNext(draft, modelResult, jevResult, { skipOptionalBoundary });
+  const baseDecision = decideNext(draft, modelResult, null, { skipOptionalBoundary });
+  const decision = review.reask ? applyModelReask(baseDecision, answeredPoint, review.question) : baseDecision;
   const draftChanged = JSON.stringify(draft) !== JSON.stringify(previousDraft);
   const confirmed = decision.status === "ready" && awaitingConfirmation && !draftChanged
     && modelResult?.confirmed === true;
@@ -530,9 +554,10 @@ export async function processTurn(request, { generateDraft, judgeJev, preflight,
     diagnostic: {
       model: { proposedGap: cleanText(modelResult?.proposedGap, 80) || null,
         question: cleanText(modelResult?.question, 500) || null,
-        confirmed: modelResult?.confirmed === true, durationMs: modelMs },
+        answeredPoint, confirmed: modelResult?.confirmed === true, durationMs: modelMs },
       jev: { used: jev.used, durationMs: jevMs,
         answers: jevResult?.answers ?? null, failure: jevFailure },
+      review,
       decision: { gaps: decision.gaps, ruleGaps: decision.ruleGaps,
         jevAddedGaps: decision.jevAddedGaps, selectedGap: decision.selectedGap,
         selectedBy: decision.selectedBy, questionSource: decision.questionSource,
