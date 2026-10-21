@@ -9,6 +9,51 @@ import { createRequestHandler } from "../src/server.mjs";
 import { getProviderConfig } from "../src/requirements/providers.mjs";
 import { settingsUpdates, writeEnvFile } from "../src/settings.mjs";
 
+const profileTarget = { chatUrl: "https://gateway.example.test/v1/chat/completions", model: "alias-model" };
+const profile = { schemaVersion: 1, target: profileTarget, api: "openai-completions", contextWindow: 65536,
+  maxOutputTokens: 12000, reasoning: true, input: ["text"], compat: { thinkingFormat: "zai", maxTokensField: "max_tokens" } };
+
+test("能力配置经设置接口保存重载，保留旧无响应时限且不暴露密钥", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "neuma-model-profile-settings-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envPath = join(dir, "fixture-config.txt");
+  const config = getProviderConfig({ NEUMA_LLM_CHAT_URL: profileTarget.chatUrl, NEUMA_LLM_MODEL: profileTarget.model,
+    NEUMA_LLM_TIMEOUT_MS: "120000", NEUMA_LLM_API_KEY: "fixture-secret-key" });
+  let disposed = 0;
+  const handler = createRequestHandler({ config, envPath, projects: {}, projectAgent: { dispose: async () => { disposed++; } }, prototypeAgents: { close: async () => {} } });
+  const saved = await invoke(handler, "POST", "/api/settings", { modelProfile: profile });
+  assert.equal(saved.status, 200); assert.equal(disposed, 1);
+  assert.equal(saved.body.effectiveModelProfile.source.kind, "explicit");
+  assert.equal(saved.body.effectiveModelProfile.contextWindow, 65536); assert.match(saved.body.modelProfileHash, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(JSON.stringify(saved.body), /fixture-secret-key/);
+  assert.equal(config.llmTimeoutMs, 120000);
+  assert.deepEqual(getProviderConfig(parseEnv(await readFile(envPath, "utf8"))).modelProfile, config.modelProfile);
+  const updated = await invoke(handler, "POST", "/api/settings", { jevModel: "jev-next" });
+  assert.equal(updated.status, 200); assert.deepEqual(config.modelProfile, saved.body.modelProfile);
+  assert.equal(config.llmTimeoutMs, 120000); assert.equal(updated.body.modelProfileHash, saved.body.modelProfileHash);
+  const changed = await invoke(handler, "POST", "/api/settings", { model: "new-alias" });
+  assert.equal(changed.body.effectiveModelProfile.source.reason, "explicit_target_mismatch");
+  const cleared = await invoke(handler, "POST", "/api/settings", { clear: ["modelProfile"] });
+  assert.equal(cleared.status, 200); assert.equal(config.modelProfile, null); assert.equal(cleared.body.modelProfile, null);
+  assert.equal(parseEnv(await readFile(envPath, "utf8")).NEUMA_LLM_MODEL_PROFILE, "");
+});
+
+test("能力配置拒绝未经支持的协议、任意参数和秘密字段，失败不写文件或切换会话", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "neuma-model-profile-invalid-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envPath = join(dir, "fixture-config.txt");
+  await writeFile(envPath, "NEUMA_LLM_MODEL=old\n");
+  const config = getProviderConfig({}); let disposed = 0;
+  const handler = createRequestHandler({ config, envPath, projects: {}, projectAgent: { dispose: async () => { disposed++; } }, prototypeAgents: { close: async () => {} } });
+  for (const modelProfile of [{ ...profile, api: "openai-responses" }, { ...profile, apiKey: "secret-fixture" },
+    { ...profile, samplingParams: { model: "override" } }, { ...profile, contextWindow: "65536" }]) {
+    const result = await invoke(handler, "POST", "/api/settings", { modelProfile });
+    assert.equal(result.status, 400); assert.doesNotMatch(JSON.stringify(result.body), /secret-fixture/);
+  }
+  assert.equal(await readFile(envPath, "utf8"), "NEUMA_LLM_MODEL=old\n"); assert.equal(disposed, 0);
+  assert.throws(() => getProviderConfig({ NEUMA_LLM_MODEL_PROFILE: "not-json" }), /模型能力配置无效/);
+});
+
 async function invoke(handler, method, url, body) {
   const input = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
   Object.assign(input, { method, url, headers: body === undefined ? {} : { "content-type": "application/json" } });

@@ -2,10 +2,13 @@ import { join, relative } from "node:path";
 import { createRequire, findPackageJSON } from "node:module";
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
+import { chmodSync, existsSync } from "node:fs";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createProjectReader, projectScriptFile, validateProjectPlan } from "../projects/project-inspection.mjs";
 import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
-import { knownModelLimits, modelOutputBudget } from "./model-limits.mjs";
+import { resolvedModelProfile, modelProfileHash, modelOutputBudget } from "./model-limits.mjs";
+import { piSessionManager, piSessionPolicy } from "./pi-session-state.mjs";
+import { modelIdleTimeoutMs, withModelIdleTimeout } from "./model-idle-timeout.mjs";
 
 const SYSTEM_PROMPT = `你是 NEUMA，当前处于“我的项目”工作区。NEUMA 的核心功能是自然语言创建 Agent；这个工作区帮助用户管理已有本地小项目。
 用户提供路径并要求添加时，调用 add_project；需要选择或查询时先调用 list_projects；用户要求打开、启动或停止时调用对应工具。
@@ -51,6 +54,10 @@ function retryProgress(event, state, onProgress) {
 
 export function classifyModelFailure(value = "") {
   const text = String(value);
+  if (/\bNEUMA_MODEL_CALL_BLOCKED\b/u.test(text))
+    return { reason: "request_blocked", message: "本地运行控制已停止后续模型请求，该请求没有发出；请检查任务停止原因" };
+  if (/NEUMA_MODEL_IDLE_TIMEOUT|UND_ERR_(?:HEADERS|BODY)_TIMEOUT|连续.{0,30}未(?:收到|返回).{0,20}响应/i.test(text))
+    return { reason: "api_idle_timeout", message: "模型连续未返回响应数据，已停止等待；已有进度保留" };
   if (/^(?:HTTP\s*)?(?:401|403)\b|unauthorized|authentication|invalid api.?key|forbidden/i.test(text))
     return { reason: "api_authentication", message: "模型接口认证失败，请检查 API Key 和访问权限" };
   if (/^(?:HTTP\s*)?429\b|rate.?limit|too many requests/i.test(text))
@@ -62,7 +69,7 @@ export function classifyModelFailure(value = "") {
   if (/context.{0,40}(length|window|overflow)|maximum.{0,15}context|too many tokens|prompt.{0,20}too long/i.test(text))
     return { reason: "api_context", message: "模型接口无法接收当前上下文，请检查模型的上下文配置" };
   if (/truncated response|output.{0,20}(limit|tokens)|max(?:imum)?.{0,15}(?:completion|output).{0,15}tokens/i.test(text))
-    return { reason: "api_output_limit", message: "模型输出达到上限，完整方案尚未生成，请重试或使用支持更长输出的模型" };
+    return { reason: "api_output_limit", message: "本轮模型输出额度已用完，完整结果尚未提交；请先检查思考设置、材料规模和请求额度" };
   if (/finish_reason:\s*content_filter/i.test(text))
     return { reason: "api_rejected", message: "模型服务未返回可用结果，请检查该模型的内容限制或更换模型后重试" };
   if (/Stream ended without finish_reason|stream ended before|terminated/i.test(text))
@@ -73,6 +80,26 @@ export function classifyModelFailure(value = "") {
   if (/connection|ECONN|ENOTFOUND|fetch failed|network|socket|terminated|timed?\s*out/i.test(text))
     return { reason: "api_connection", message: "模型接口连接失败或中断，请检查网络和接口地址" };
   return { reason: "api_error", message: "模型接口请求未完成，请重试，并确认模型支持工具调用" };
+}
+
+function modelRequestRejection(error, { purpose, retryAttempt }) {
+  const field = (value, key) => {
+    try { return Object.getOwnPropertyDescriptor(value, key)?.value; } catch { return undefined; }
+  };
+  const admission = field(error, "requestAdmission"), diagnostic = field(error, "diagnostic");
+  const reason = field(admission, "reason") ?? field(diagnostic, "reason") ?? field(error, "reason");
+  const reasons = new Set(["request_limit", "output_reservation_limit", "repeated_tool_error", "phase_complete",
+    "turn_limit", "model_call_limit", "module_output_limit", "module_failed", "cancelled", "review_repair_stalled"]);
+  const result = { reason: "request_blocked", requestSent: false,
+    source: field(admission, "source") === "real_test_guard" ? "real_test_guard" : "model_call_policy",
+    causeReason: reasons.has(reason) ? reason : "policy_blocked",
+    purpose: purpose === "compaction" ? "compaction" : "agent",
+    retryAttempt: Number.isSafeInteger(retryAttempt) && retryAttempt >= 0 && retryAttempt <= 5 ? retryAttempt : 0 };
+  for (const key of ["used", "limit"]) {
+    const value = field(admission, key);
+    if (Number.isSafeInteger(value) && value >= 0) result[key] = value;
+  }
+  return result;
 }
 
 function connectionFailure(retry) {
@@ -170,9 +197,9 @@ export function modelBaseUrl(chatUrl) {
   } catch { throw new InputError("Pi 接入需要以 /chat/completions 结尾的模型接口地址"); }
 }
 
-function controlledResources(sdk, systemPrompt) {
+function controlledResources(extensions, systemPrompt) {
   return {
-    getExtensions: () => ({ extensions: [], errors: [], runtime: sdk.createExtensionRuntime() }),
+    getExtensions: () => extensions,
     getSkills: () => ({ skills: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getThemes: () => ({ themes: [], diagnostics: [] }),
@@ -185,27 +212,37 @@ function controlledResources(sdk, systemPrompt) {
   };
 }
 
-export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT, maxOutputTokens = modelOutputBudget(config), beforeModelRequest }) {
-  const knownLimits = knownModelLimits(config);
-  const outputLimit = knownLimits?.maxOutputTokens ?? 16_384;
+export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT,
+  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, reasoningMode = "off" }) {
+  if (!["off", "auto"].includes(reasoningMode)) throw new InputError("模型思考配置无效");
+  if (transformContext !== undefined && typeof transformContext !== "function") throw new InputError("模型上下文投影配置无效");
+  const profile = resolvedModelProfile(config), known = profile.source.kind !== "fallback";
+  if (profile.contextWindow < 8192)
+    throw new InputError("当前模型上下文不足以容纳 Pi 的安全余量，请使用至少 8192 上下文的模型");
+  const reasoningEnabled = reasoningMode === "auto" && profile.reasoning;
+  const outputLimit = profile.maxOutputTokens;
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens > outputLimit)
     throw new InputError(`模型输出预算应为 256 到 ${outputLimit} 之间的整数`);
+  const idleTimeoutMs = modelIdleTimeoutMs(config);
   const sdk = await import("@earendil-works/pi-coding-agent");
   // Resolve the adapter and transport shipped with this pinned SDK, rather than another version.
   const sdkUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
+  const { DEFAULT_THINKING_LEVEL } = await import(new URL("./core/defaults.js", sdkUrl).href);
   const fromPi = createRequire(sdkUrl);
   const aiManifestPath = findPackageJSON("@earendil-works/pi-ai", sdkUrl);
   const aiManifest = JSON.parse(await readFile(aiManifestPath, "utf8"));
   const adapterPath = aiManifest.exports["./api/*"].import.replace("*", "openai-completions");
   const { streamSimple } = await import(new URL(adapterPath, pathToFileURL(aiManifestPath)).href);
+  const lazyPath = aiManifest.exports["./api/*"].import.replace("*", "lazy");
+  const { lazyStream } = await import(new URL(lazyPath, pathToFileURL(aiManifestPath)).href);
+  const { loadExtensionFromFactory } = await import(new URL("./core/extensions/loader.js", sdkUrl).href);
   const { fetch: transportFetch, EnvHttpProxyAgent } = fromPi("undici");
   const baseUrl = modelBaseUrl(config.chatUrl);
-  const hostname = new URL(config.chatUrl).hostname;
-  const mimo = /(^|\.)xiaomimimo\.com$/.test(hostname);
-  const contextWindow = knownLimits?.contextWindow ?? 32_768;
-  const reserveTokens = knownLimits ? Math.max(16_384, maxOutputTokens + 4096) : Math.min(16_384, maxOutputTokens + 4096);
+  const contextWindow = profile.contextWindow;
+  const reserveTokens = Math.min(known ? Math.max(16_384, maxOutputTokens + 4096) : Math.min(16_384, maxOutputTokens + 4096),
+    Math.max(0, contextWindow - maxOutputTokens - 2048));
   // The SDK's 20k recent-history default exceeds the 16k threshold of an unknown 32k model.
-  const keepRecentTokens = knownLimits ? 20_000 : Math.max(0, Math.min(20_000,
+  const keepRecentTokens = Math.max(0, Math.min(20_000,
     Math.floor((contextWindow - reserveTokens) / 2), contextWindow - reserveTokens - maxOutputTokens - 2048));
   const credentials = new Map();
   const modelRuntime = await sdk.ModelRuntime.create({
@@ -219,42 +256,109 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   });
   const transport = new EnvHttpProxyAgent({ headersTimeout: 0, bodyTimeout: 0, allowH2: false, proxyTunnel: true });
   const anonymousModel = config.modelAuthType === "none";
-  let connectionFailed = false;
+  let connectionFailed = false, session, runtimeError, lastRequestRejection, purpose = "agent", retryAttempt = 0;
+  const secureHistory = () => {
+    if (sessionStorage && session?.sessionFile && existsSync(session.sessionFile)) chmodSync(session.sessionFile, 0o600);
+  };
+  const halt = (error) => {
+    runtimeError ??= error;
+    session?.settingsManager.setRetryEnabled(false);
+    session?.setAutoCompactionEnabled(false);
+    void session?.abort().catch(() => {});
+  };
+  const fetchWithIdleTimeout = withModelIdleTimeout((input, options) => transportFetch(input, { ...options, dispatcher: transport }), {
+    idleTimeoutMs,
+    onDiagnostic: (diagnostic) => halt(new ProviderError("模型连续未返回响应数据，已停止等待；已有进度保留", {
+      stage: "llm", reason: "api_idle_timeout", ...diagnostic,
+    })),
+  });
+  const policy = piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, halt });
   const fetchModel = async (input, options) => {
     options?.signal?.throwIfAborted();
     if (connectionFailed) throw new Error("Model connection retries exhausted");
     // Runs on every HTTP attempt, including SDK retries and tool continuations.
     await beforeModelRequest?.({ signal: options?.signal });
     options?.signal?.throwIfAborted();
+    secureHistory();
     const headers = anonymousModel ? new Headers(options?.headers ?? input?.headers) : undefined;
     headers?.delete("authorization");
-    return transportFetch(input, { ...options, ...(headers ? { headers } : {}), dispatcher: transport });
+    return fetchWithIdleTimeout(input, { ...options, ...(headers ? { headers } : {}) });
   };
   try {
+  const persisted = await piSessionManager(sdk, { cwd, storage: sessionStorage });
+  if (persisted.bindingHash) {
+    const profileHash = modelProfileHash(profile), customType = "neuma.model-profile.v1";
+    const previous = persisted.manager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === customType);
+    // Capability changes are auditable without changing task identity or replenishing its budget.
+    if (previous?.data?.bindingHash !== persisted.bindingHash || previous.data.profileHash !== profileHash)
+      persisted.manager.appendCustomEntry(customType, { version: 1, bindingHash: persisted.bindingHash, profileHash,
+        source: profile.source.kind, contextWindow: profile.contextWindow, maxOutputTokens: profile.maxOutputTokens,
+        reasoning: profile.reasoning, input: [...profile.input] });
+  }
+  const extensionRuntime = sdk.createExtensionRuntime();
+  const extension = await loadExtensionFromFactory(policy.factory, cwd, sdk.createEventBus(), extensionRuntime, "<inline:neuma-runtime>");
   modelRuntime.registerProvider("neuma", {
     baseUrl, api: "openai-completions", authHeader: true,
-    streamSimple: (model, context, options) => streamSimple(model, context, { ...options,
-      maxTokens: maxOutputTokens, fetch: fetchModel, maxRetries: 0 }),
-    // Permit the user's chosen model to receive images; its actual vision support is the user's configuration responsibility.
-    models: [{ id: config.model, name: config.model, reasoning: false, input: ["text", "image"],
+    streamSimple: (model, context, options) => lazyStream(model, async () => {
+      if (runtimeError) {
+        lastRequestRejection = modelRequestRejection(runtimeError, { purpose, retryAttempt });
+        throw new Error("NEUMA_MODEL_CALL_BLOCKED");
+      }
+      options?.signal?.throwIfAborted();
+      try { await onModelCall?.({ signal: options?.signal, purpose, retryAttempt }); }
+      catch (error) {
+        lastRequestRejection = modelRequestRejection(error, { purpose, retryAttempt });
+        halt(error); throw new Error("NEUMA_MODEL_CALL_BLOCKED");
+      }
+      options?.signal?.throwIfAborted();
+      policy.startRequest();
+      return streamSimple(model, context, { ...options, maxTokens: maxOutputTokens, fetch: fetchModel, maxRetries: 0 });
+    }),
+    models: [{ id: config.model, name: config.model, reasoning: profile.reasoning, input: [...profile.input],
       // Pi requires cost metadata. These placeholders do not represent the provider's actual prices.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow, maxTokens: maxOutputTokens,
-      compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens", ...knownLimits?.compat },
-      ...(mimo
-        ? { samplingParams: { thinking: { type: "disabled" } } } : {}) }],
+      compat: profile.compat,
+      ...(profile.thinkingLevelMap ? { thinkingLevelMap: profile.thinkingLevelMap } : {}),
+      ...(profile.inputLimits ? { inputLimits: profile.inputLimits } : {}) }],
   });
   // Pi requires a nonempty key even for an anonymous endpoint; the transport strips the synthetic header.
   await modelRuntime.setRuntimeApiKey("neuma", anonymousModel ? "neuma-anonymous-placeholder" : config.apiKey);
-  const { session } = await sdk.createAgentSession({
+  ({ session } = await sdk.createAgentSession({
     cwd, agentDir: join(dataDir, "pi"), modelRuntime, model: modelRuntime.getModel("neuma", config.model),
-    thinkingLevel: "off", resourceLoader: controlledResources(sdk, systemPrompt),
+    resourceLoader: controlledResources({ extensions: [extension], errors: [], runtime: extensionRuntime }, systemPrompt),
     tools: customTools.map((item) => item.name), customTools,
-    sessionManager: sdk.SessionManager.inMemory(cwd),
+    sessionManager: persisted.manager,
     settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens, keepRecentTokens }, httpIdleTimeoutMs: 0,
       retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000, maxAgentDelayMs: 8000, provider: { maxRetries: 0 } },
       cacheWarming: "off", enableAnalytics: false, enableInstallTelemetry: false }),
-  });
+  }));
+  // Apply the pinned SDK policy even when a restored NEUMA session saved an older level.
+  session.setThinkingLevel(reasoningEnabled ? DEFAULT_THINKING_LEVEL : "off");
+  secureHistory();
+  session.modelCallAccounting = typeof onModelCall === "function";
+  Object.defineProperty(session, "modelRequestRejection", { get: () => lastRequestRejection && structuredClone(lastRequestRejection) });
+  session.modelProfile = profile;
+  session.modelProfileHash = modelProfileHash(profile);
+  if (persisted.bindingHash) session.sessionBindingHash = persisted.bindingHash;
+  for (const operation of ["prompt", "compact"]) {
+    const invoke = session[operation].bind(session);
+    session[operation] = async (...args) => {
+      if (runtimeError) throw runtimeError;
+      if (operation === "prompt" && args[1]?.images?.length && !profile.input.includes("image"))
+        throw new InputError("当前模型未声明支持图片，请选择支持图片的模型或配置其已确认能力");
+      try { return await invoke(...args); }
+      finally { secureHistory(); if (runtimeError) throw runtimeError; }
+    };
+  }
   session.subscribe((event) => {
+    if (event.type === "compaction_start") purpose = "compaction";
+    if (event.type === "compaction_end") { purpose = "agent"; retryAttempt = 0; }
+    if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") retryAttempt = event.attempt;
+    if (event.type === "summarization_retry_finished") retryAttempt = 0;
+    if (event.type === "auto_retry_end" && event.success) retryAttempt = 0;
+    if (event.type === "entry_appended" && persisted.directory && session.sessionFile && existsSync(session.sessionFile)) {
+      try { chmodSync(session.sessionFile, 0o600); } catch (error) { halt(error); }
+    }
     if (event.type === "auto_retry_end" && !event.success) {
       connectionFailed = true;
       // Do not let automatic compaction issue a fresh request after the retry budget is exhausted.

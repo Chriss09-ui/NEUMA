@@ -4,7 +4,9 @@ import { registerConnectionProbeTests } from "./helpers/connection-probe.mjs";
 import { testAgentModelConnection, testModelConnection } from "../src/model-connection.mjs";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
+import { createPiSession } from "../src/runtime/pi-runtime.mjs";
 
 const config = Object.freeze({
   chatUrl: "https://example.test/v1/chat/completions", model: "example-model", apiKey: "synthetic-test-key",
@@ -136,6 +138,27 @@ test("HTTP 成功但无有效模型回复不能报告连接成功", async () => 
 
 registerConnectionProbeTests({ label: "模型", testConnection: testModelConnection, config, apiKey: config.apiKey, assertSafe });
 
+test("普通模型探针持续收到正文时可超过原总时限，仍只发送一次请求", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
+  let body, calls = 0, settled = false;
+  const pending = testModelConnection(config, {}, { timeoutMs: 10, fetchImpl: async () => {
+    calls++;
+    return new Response(new ReadableStream({ start(controller) { body = controller; } }));
+  } });
+  void pending.then(() => { settled = true; });
+  await new Promise((done) => setImmediate(done));
+  const chunks = ['{"choices":[', '{"message":', '{"content":"OK"}}]}'];
+  for (const chunk of chunks) {
+    t.mock.timers.tick(9);
+    body.enqueue(new TextEncoder().encode(chunk));
+    await new Promise((done) => setImmediate(done));
+    assert.equal(settled, false);
+  }
+  body.close();
+  assert.equal((await pending).ok, true);
+  assert.equal(calls, 1);
+});
+
 function agentProbeSession(script) {
   const state = { aborted: 0, disposed: 0, compaction: [], options: null, emit: () => {} };
   state.factory = async (options) => {
@@ -173,6 +196,7 @@ test("构建能力探针禁用压缩、仅装配无副作用工具，验证流�
   assert.deepEqual(state.options.customTools.map((tool) => tool.name), ["check_agent_connection"]);
   assert.equal(state.options.config.apiKey, config.apiKey);
   assert.equal(state.options.config.model, "draft-model");
+  assert.equal(state.options.config.llmIdleTimeoutMs, 30_000);
   assert.equal(state.disposed, 1);
   assert.equal(state.aborted, 0);
   assert.deepEqual(config, before);
@@ -245,15 +269,40 @@ test("同一失败轮的重复重试事件只能撤回一次预算，超过四�
   assert.equal(state.aborted, 1); assert.equal(state.disposed, 1);
 });
 
-test("构建能力探针超时与主动取消都会停止并清理，不等待不响应的模型", async () => {
-  for (const mode of ["timeout", "cancel"]) {
+test("构建能力探针沿用运行层无响应诊断，主动取消仍停止并清理", async () => {
+  for (const mode of ["idle", "cancel"]) {
     const controller = new AbortController();
-    const state = agentProbeSession(async () => { if (mode === "cancel") controller.abort(); await new Promise(() => {}); });
+    const state = agentProbeSession(async ({ options, session }) => {
+      assert.equal(options.config.llmIdleTimeoutMs, 15);
+      if (mode === "idle") session.messages.push({ role: "assistant", stopReason: "error",
+        errorMessage: "NEUMA_MODEL_IDLE_TIMEOUT: 连续未收到模型响应数据" });
+      else { controller.abort(); await new Promise(() => {}); }
+    });
     await assert.rejects(testAgentModelConnection(config, {}, { sessionFactory: state.factory, signal: controller.signal, timeoutMs: 15 }),
-      (error) => mode === "timeout" ? assertSafe(error, "timeout") : error.name === "AbortError");
-    assert.equal(state.aborted, 1);
+      (error) => mode === "idle" ? assertSafe(error, "timeout") && /连续未返回响应数据/.test(error.message) : error.name === "AbortError");
+    assert.equal(state.aborted, mode === "idle" ? 0 : 1);
     assert.equal(state.disposed, 1);
   }
+});
+
+test("构建能力探针不再用整轮计时器中断有响应的工具往返", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 2_000_000_000_000 });
+  const state = agentProbeSession(async ({ options, session, emit }) => {
+    assert.equal(options.config.llmIdleTimeoutMs, 10);
+    emit({ type: "turn_start" });
+    for (let index = 0; index < 4; index++) {
+      t.mock.timers.tick(9);
+      emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", delta: "{}" } });
+    }
+    const result = await options.customTools[0].execute("probe", { challenge: "neuma-agent-probe" });
+    emit({ type: "turn_start" });
+    t.mock.timers.tick(9);
+    session.text = `OK ${JSON.parse(result.content[0].text).receipt}`;
+    emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: session.text } });
+    session.messages.push({ role: "assistant", stopReason: "stop" });
+  });
+  assert.equal((await testAgentModelConnection(config, {}, { sessionFactory: state.factory, timeoutMs: 10 })).ok, true);
+  assert.equal(state.aborted, 0); assert.equal(state.disposed, 1);
 });
 
 test("创建中的构建测试取消后，迟到会话也会停止并清理", async () => {
@@ -283,12 +332,17 @@ test("构建能力探针沿用输入配置校验，无效或已取消输入不�
   assert.equal(calls, 0);
 });
 
-test("真实 Pi SDK 构建能力探针完成流式工具调用与第二轮工具结果回传", async (t) => {
+test("真实 Pi SDK 构建能力探针持续收到数据时超过旧总时限仍完成两轮工具往返", async (t) => {
   const requests = [], model = createServer(async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const payload = JSON.parse(Buffer.concat(chunks).toString()); requests.push(payload);
       response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+      for (let index = 0; index < 4; index++) {
+        response.write(": model-response-active\n\n");
+        await delay(30);
+      }
       const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "agent-probe", object: "chat.completion.chunk", created: 1,
         model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
       if (requests.length === 1) {
@@ -304,10 +358,28 @@ test("真实 Pi SDK 构建能力探针完成流式工具调用与第二轮工具
   });
   model.listen(0, "127.0.0.1"); await once(model, "listening");
   t.after(async () => { model.closeAllConnections(); await new Promise((done) => model.close(done)); });
-  const result = await testAgentModelConnection({ ...config, chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions` }, {});
+  const result = await testAgentModelConnection({ ...config, chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions` }, {}, { timeoutMs: 100 });
   assert.equal(result.streaming, true); assert.equal(result.toolRoundTrip, true); assert.equal(result.toolsCalled, 1);
   assert.equal(requests.length, 2);
   assert.ok(requests.every((request) => request.stream === true && request.max_tokens === 512));
   assert.deepEqual(requests[0].tools.map((tool) => tool.function.name), ["check_agent_connection"]);
   assert.equal(requests[1].messages.findLast((message) => message.role === "tool").tool_call_id, "probe-call");
+});
+
+test("真实 Pi SDK 构建能力探针连续无响应会停止，且不泄漏正文", async (t) => {
+  let requests = 0;
+  const model = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Consume the local mock request. */ }
+    requests++;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.flushHeaders();
+  });
+  model.listen(0, "127.0.0.1"); await once(model, "listening");
+  t.after(async () => { model.closeAllConnections(); await new Promise((done) => model.close(done)); });
+  await assert.rejects(testAgentModelConnection({ ...config, chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions` }, {}, {
+    timeoutMs: 30, sessionFactory: async (options) => {
+      const session = await createPiSession(options); session.setAutoRetryEnabled(false); return session;
+    },
+  }), (error) => assertSafe(error, "timeout") && /连续未返回响应数据/.test(error.message));
+  assert.equal(requests, 1);
 });

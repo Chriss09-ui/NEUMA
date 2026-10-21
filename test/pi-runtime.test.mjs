@@ -1,15 +1,42 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiProjectAgent, createProjectTools, createProjectAnalyzer, createPiSession, classifyModelFailure } from "../src/runtime/pi-runtime.mjs";
 import { ProjectManager } from "../src/projects/projects.mjs";
-import { modelOutputBudget, knownModelLimits } from "../src/runtime/model-limits.mjs";
+import { modelOutputBudget, knownModelLimits, developmentModelOutputBudget, architectureModelOutputBudget, resolvedModelProfile, modelProfileHash } from "../src/runtime/model-limits.mjs";
+import { readPiStructuredSubmission } from "../src/runtime/pi-submission-contract.mjs";
 
 const mimoConfig = Object.freeze({ chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
   model: "mimo-v2.6-pro", apiKey: "fixture-only" });
+const flashConfig = Object.freeze({ ...mimoConfig, model: "mimo-v2.6-flash" });
+const { DEFAULT_THINKING_LEVEL } = await import(new URL("./core/defaults.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
+
+async function capturePiPayload(session) {
+  const payloads = [], stream = session.agent.streamFunction;
+  session.settingsManager.setRetryEnabled(false); session.setAutoCompactionEnabled(false);
+  session.agent.streamFunction = (model, context, options) => stream(model, context, { ...options, onPayload: (payload) => {
+    payloads.push({ model: payload.model, thinking: payload.thinking, reasoningEffort: payload.reasoning_effort,
+      maxTokens: payload.max_tokens ?? payload.max_completion_tokens, thinkingBudget: payload.thinking_token_budget });
+    throw new Error("OFFLINE_PAYLOAD_CAPTURE");
+  } });
+  await session.prompt("固定的离线参数检查");
+  assert.equal(payloads.length, 1);
+  return payloads[0];
+}
+
+test("研发按职责选择工作输出预算，模型最大能力不冒充每轮预算", () => {
+  const known = { planner: 32768, developer: 65536, reviewer: 16384 }, fallback = { planner: 8192, developer: 16384, reviewer: 4096 };
+  for (const config of [mimoConfig, flashConfig]) for (const role of Object.keys(known)) {
+    assert.equal(developmentModelOutputBudget(config, role), known[role]);
+    assert.ok(developmentModelOutputBudget(config, role) < knownModelLimits(config).maxOutputTokens);
+    assert.equal(developmentModelOutputBudget({ ...config, model: "unknown" }, role), fallback[role]);
+  }
+  assert.equal(modelOutputBudget(mimoConfig), 4096);
+  assert.throws(() => developmentModelOutputBudget(mimoConfig, "__proto__"));
+});
 
 test("模型错误分类区分连接、流协议、上下文和输出上限且不回传原始响应", () => {
   for (const [raw, reason] of [
@@ -18,6 +45,8 @@ test("模型错误分类区分连接、流协议、上下文和输出上限且�
     ["404 model_not_found private-key-fixture", "api_not_found"],
     ["503 Service unavailable private-key-fixture", "api_unavailable"],
     ["fetch failed private-key-fixture", "api_connection"],
+    ["NEUMA_MODEL_IDLE_TIMEOUT private-key-fixture", "api_idle_timeout"],
+    ["模型连续未返回响应数据，已停止等待；已有进度保留", "api_idle_timeout"],
     ["Provider finish_reason: network_error private-key-fixture", "api_connection"],
     ["Context overflow recovery failed private-key-fixture", "api_context"],
     ["Truncated response recovery failed private-key-fixture", "api_output_limit"],
@@ -36,15 +65,27 @@ test("运行时拒绝无效输出预算，避免把预算错误发送到模型�
   for (const maxOutputTokens of [0, 255, 16_385, 4096.5, "8192"]) {
     await assert.rejects(createPiSession({ customTools: [], maxOutputTokens }), /输出预算应为/);
   }
-  for (const maxOutputTokens of [131_073, 131_072.5, "131072"])
-    await assert.rejects(createPiSession({ config: mimoConfig, customTools: [], maxOutputTokens }), /输出预算应为 256 到 131072/);
+  for (const config of [mimoConfig, flashConfig]) for (const maxOutputTokens of [131_073, 131_072.5, "131072"])
+    await assert.rejects(createPiSession({ config, customTools: [], maxOutputTokens }), /输出预算应为 256 到 131072/);
 });
 
-test("共享输出预算只对已核实的接口与型号调满，其余保留调用方预算", () => {
-  assert.equal(modelOutputBudget(mimoConfig), 131_072);
-  assert.equal(modelOutputBudget(mimoConfig, 8192), 131_072);
-  assert.equal(knownModelLimits(mimoConfig).contextWindow, 1_048_576);
+test("共享输出预算使用调用方任务预算并受模型能力上限约束", () => {
+  for (const config of [mimoConfig, flashConfig]) {
+    assert.equal(modelOutputBudget(config), 4096);
+    assert.equal(modelOutputBudget(config, 8192), 8192);
+    assert.equal(modelOutputBudget(config, 999_999), 131_072);
+    assert.equal(architectureModelOutputBudget(config, "designer"), 32768);
+    assert.equal(architectureModelOutputBudget(config, "reviewer"), 16384);
+    assert.equal(knownModelLimits(config).contextWindow, 1_048_576);
+    assert.equal(knownModelLimits(config).reasoning, true);
+  }
+  assert.notEqual(modelProfileHash(knownModelLimits(flashConfig)), modelProfileHash(knownModelLimits(mimoConfig)));
   for (const config of [{ ...mimoConfig, model: "mimo-v2.6" },
+    { ...flashConfig, model: "mimo-v2.6-flash-extra" },
+    { ...flashConfig, model: "MIMO-V2.6-FLASH" },
+    { ...flashConfig, model: "mimo-v2.6-pro-nonexistent" },
+    { ...flashConfig, chatUrl: "https://other.xiaomimimo.com/v1/chat/completions" },
+    { ...flashConfig, chatUrl: "https://api.xiaomimimo.com.other.test/v1/chat/completions" },
     { ...mimoConfig, chatUrl: "https://api.xiaomimimo.com.other.test/v1/chat/completions" },
     { ...mimoConfig, chatUrl: "https://proxy.example.test/v1/chat/completions" },
     { ...mimoConfig, chatUrl: "invalid" }, {}, undefined]) {
@@ -54,38 +95,150 @@ test("共享输出预算只对已核实的接口与型号调满，其余保留�
   }
 });
 
-test("MiMo 默认输出调满实际发送 131072，显式短探针仍发送 512", async (t) => {
+test("MiMo 默认发送任务预算 4096，显式短探针仍发送 512且能力上限独立保存", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-pi-max-output-"));
   const requests = [];
   const model = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks)));
+    const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1,
-      model: "mimo-v2.6-pro", choices: [{ index: 0, delta: { role: "assistant", content: "完成" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+      model: body.model, choices: [{ index: 0, delta: { role: "assistant", content: "完成" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
   });
   await new Promise((done) => model.listen(0, "127.0.0.1", done));
   t.after(async () => { await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
-  for (const maxOutputTokens of [undefined, 512]) {
-    const session = await createPiSession({ config: mimoConfig, cwd: root, dataDir: join(root, "data"),
+  for (const config of [mimoConfig, flashConfig]) for (const maxOutputTokens of [undefined, 512]) {
+    const session = await createPiSession({ config, cwd: root, dataDir: join(root, "data"),
       customTools: [], systemPrompt: "fixture", ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }) });
     try {
-      const expected = maxOutputTokens ?? 131_072;
+      const expected = maxOutputTokens ?? 4096;
       assert.equal(session.model.maxTokens, expected);
+      assert.equal(session.modelProfile.maxOutputTokens, 131_072);
+      assert.equal(session.modelProfileHash, modelProfileHash(resolvedModelProfile(config)));
       assert.equal(session.settingsManager.getCompactionSettings(session.model).reserveTokens,
-        maxOutputTokens === undefined ? 135_168 : 16_384);
+        16_384);
       // Exercise the real SDK request with the registered MiMo profile against this local fixture.
       await session.setModel({ ...session.model, baseUrl: `http://127.0.0.1:${model.address().port}/v1` });
       await session.prompt("生成方案");
       const body = requests.at(-1);
-      assert.equal(body.model, "mimo-v2.6-pro");
+      assert.equal(body.model, config.model);
       assert.equal(body.max_completion_tokens, expected);
       assert.equal(body.max_tokens, undefined);
       assert.deepEqual(body.thinking, { type: "disabled" });
       assert.equal(session.getLastAssistantText(), "完成");
     } finally { session.dispose(); }
   }
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 4);
+});
+
+for (const reasoningConfig of [mimoConfig, flashConfig]) test(`${reasoningConfig.model}思考模式复用Pi原生工具循环及私有持久会话，未知模型不猜测协议`, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-reasoning-")), requests = [], diagnostics = [];
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
+    const first = requests.length === 1;
+    const delta = first ? { role: "assistant", reasoning_content: "fixture-only-private-reasoning", tool_calls: [{ index: 0, id: "fixture_call", type: "function",
+      function: { name: "inspect_fixture", arguments: "{}" } }] } : { role: "assistant", content: "完成" };
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "fixture", choices: [{ index: 0, delta, finish_reason: first ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  t.after(async () => { model.closeAllConnections(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  const storage = { directory: join(root, "sessions"), binding: { task: "fixed-reasoning-recovery", version: 1 } };
+  const session = await createPiSession({ config: reasoningConfig, cwd: root, dataDir: root, systemPrompt: "fixture", reasoningMode: "auto", maxOutputTokens: 512,
+    sessionStorage: storage,
+    onToolDiagnostic: (entry) => diagnostics.push(entry), customTools: [{ name: "inspect_fixture", label: "读取固定数据", description: "读取固定数据",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+      execute: async () => ({ content: [{ type: "text", text: '{"ok":true}' }], details: {} }) }] });
+  try {
+    assert.equal(session.model.reasoning, true);
+    await session.setModel({ ...session.model, baseUrl: `http://127.0.0.1:${model.address().port}/v1` });
+    await session.prompt("读取固定数据");
+    assert.equal(requests.length, 2);
+    for (const body of requests) {
+      assert.equal(body.model, reasoningConfig.model);
+      assert.deepEqual(body.thinking, { type: "enabled" }); assert.equal(body.reasoning_effort, "medium");
+      assert.equal(body.max_completion_tokens, 512);
+    }
+    assert.equal(requests[1].messages.find((entry) => entry.role === "assistant").reasoning_content, "fixture-only-private-reasoning");
+    assert.equal(session.getLastAssistantText(), "完成"); assert.doesNotMatch(JSON.stringify(diagnostics), /fixture-only-private-reasoning/u);
+  } finally { session.dispose(); }
+  const savedFile = session.sessionFile;
+  assert.equal((await stat(savedFile)).mode & 0o777, 0o600);
+  for (const reasoningMode of ["auto", "off"]) {
+    const before = requests.length;
+    const resumed = await createPiSession({ config: reasoningConfig, cwd: root, dataDir: root, systemPrompt: "fixture", reasoningMode, maxOutputTokens: 512,
+      sessionStorage: { ...storage, file: savedFile }, customTools: [] });
+    try {
+      assert.equal(resumed.sessionFile, savedFile);
+      await resumed.setModel({ ...resumed.model, baseUrl: `http://127.0.0.1:${model.address().port}/v1` });
+      await resumed.prompt("继续原任务");
+      assert.equal(requests.length, before + 1);
+      assert.equal(requests.at(-1).model, reasoningConfig.model);
+      assert.deepEqual(requests.at(-1).thinking, { type: reasoningMode === "auto" ? "enabled" : "disabled" });
+      assert.equal(requests.at(-1).messages.find((entry) => entry.role === "assistant").reasoning_content, "fixture-only-private-reasoning");
+      assert.equal(resumed.getLastAssistantText(), "完成");
+    } finally { resumed.dispose(); }
+  }
+  const unknown = await createPiSession({ config: { ...reasoningConfig, model: "unknown-fixture" }, cwd: root, dataDir: root,
+    customTools: [], systemPrompt: "fixture", reasoningMode: "auto", maxOutputTokens: 512 });
+  try { assert.equal(unknown.model.reasoning, false); } finally { unknown.dispose(); }
+  await assert.rejects(createPiSession({ config: reasoningConfig, reasoningMode: "unsupported" }), /思考配置/u);
+});
+
+test("auto采用锁定Pi默认档位，官方与显式网关的原生payload不强制high且输出额度不变", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-default-effort-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = { chatUrl: "https://gateway.example.test/v1/chat/completions", model: "reasoning-alias" };
+  const gateway = { ...target, apiKey: "fixture-only", modelProfile: { schemaVersion: 1, target, api: "openai-completions",
+    contextWindow: 1_048_576, maxOutputTokens: 131_072, reasoning: true, input: ["text"],
+    compat: { thinkingFormat: "deepseek", supportsReasoningEffort: true, maxTokensField: "max_completion_tokens" } } };
+  let networkCalls = 0;
+  for (const config of [mimoConfig, gateway]) for (const reasoningMode of ["auto", "off"]) {
+    const session = await createPiSession({ config, cwd: root, dataDir: root, customTools: [], systemPrompt: "fixture",
+      reasoningMode, maxOutputTokens: 16384, beforeModelRequest: () => { networkCalls++; throw new Error("NETWORK_FORBIDDEN"); } });
+    try {
+      assert.equal(session.thinkingLevel, reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : "off");
+      const payload = await capturePiPayload(session);
+      assert.equal(payload.model, config.model); assert.equal(payload.maxTokens, 16384);
+      assert.deepEqual(payload.thinking, { type: reasoningMode === "auto" ? "enabled" : "disabled" });
+      assert.equal(payload.reasoningEffort, reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : undefined);
+      assert.equal(payload.thinkingBudget, undefined, "未声明独立思考额度时不能假造正文预留");
+    } finally { session.dispose(); }
+  }
+  assert.equal(networkCalls, 0);
+});
+
+test("旧持久会话high和off按新auto策略追加原生档位，消息绑定与已有预算metadata不重置", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-old-effort-")), directory = join(root, "sessions"), binding = { task: "same-task", version: 1 };
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let networkCalls = 0;
+  const options = { config: mimoConfig, cwd: root, dataDir: root, customTools: [], systemPrompt: "fixture", maxOutputTokens: 16384,
+    beforeModelRequest: () => { networkCalls++; throw new Error("NETWORK_FORBIDDEN"); } };
+  const original = await createPiSession({ ...options, reasoningMode: "auto", sessionStorage: { directory, binding } });
+  original.setThinkingLevel("high");
+  original.sessionManager.appendCustomEntry("fixture-existing-budget", { used: 7, limit: 12 });
+  original.sessionManager.appendMessage({ role: "user", content: "已有任务材料", timestamp: 1 });
+  const file = original.sessionFile, bindingHash = original.sessionBindingHash;
+  original.dispose();
+  for (const reasoningMode of ["auto", "off", "auto"]) {
+    const before = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const restored = await createPiSession({ ...options, reasoningMode, sessionStorage: { directory, binding, file } });
+    try {
+      const expected = reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : "off";
+      assert.equal(restored.sessionFile, file); assert.equal(restored.sessionBindingHash, bindingHash);
+      assert.equal(restored.thinkingLevel, expected);
+      const after = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      assert.deepEqual(after.slice(0, before.length), before, "旧历史只能追加，不能改写或删除");
+      assert.equal(after.findLast((entry) => entry.type === "thinking_level_change").thinkingLevel, expected);
+      assert.deepEqual(after.find((entry) => entry.customType === "fixture-existing-budget").data, { used: 7, limit: 12 });
+      assert.ok(restored.messages.some((message) => message.role === "user" && message.content === "已有任务材料"));
+      const payload = await capturePiPayload(restored);
+      assert.equal(payload.reasoningEffort, reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : undefined);
+      assert.equal(payload.maxTokens, 16384); assert.equal((await stat(file)).mode & 0o777, 0o600);
+    } finally { restored.dispose(); }
+  }
+  assert.equal(networkCalls, 0);
 });
 
 test("真实 SDK 将直接图片和工具页图传给当前模型，不被 text-only 登记省略", async (t) => {
@@ -103,7 +256,11 @@ test("真实 SDK 将直接图片和工具页图传给当前模型，不被 text-
   });
   await new Promise((done) => model.listen(0, "127.0.0.1", done));
   t.after(async () => { await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
-  const config = { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" };
+  const chatUrl = `http://127.0.0.1:${model.address().port}/v1/chat/completions`;
+  const config = { chatUrl, model: "fixture-model", apiKey: "fixture-only", modelProfile: {
+    schemaVersion: 1, target: { chatUrl, model: "fixture-model" }, api: "openai-completions", contextWindow: 32768,
+    maxOutputTokens: 16384, reasoning: false, input: ["text", "image"], compat: { maxTokensField: "max_tokens" },
+  } };
   const direct = await createPiSession({ config, cwd: root, dataDir: join(root, "direct"), customTools: [], systemPrompt: "fixture" });
   try {
     assert.deepEqual(direct.model.input, ["text", "image"]);
@@ -132,6 +289,9 @@ test("运行层只对已核实的 MiMo 型号使用真实上下文和接口参�
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const [chatUrl, model, known] of [
     ["https://api.xiaomimimo.com/v1/chat/completions", "mimo-v2.6-pro", true],
+    ["https://api.xiaomimimo.com/v1/chat/completions", "mimo-v2.6-flash", true],
+    ["https://other.xiaomimimo.com/v1/chat/completions", "mimo-v2.6-flash", false],
+    ["http://127.0.0.1:1/v1/chat/completions", "mimo-v2.6-flash", false],
     ["https://api.xiaomimimo.com/v1/chat/completions", "unknown-fixture", false],
     ["http://127.0.0.1:1/v1/chat/completions", "mimo-v2.6-pro", false],
   ]) {
@@ -140,7 +300,7 @@ test("运行层只对已核实的 MiMo 型号使用真实上下文和接口参�
     try {
       assert.equal(session.model.contextWindow, known ? 1_048_576 : 32_768);
       assert.equal(session.model.maxTokens, 8192);
-      assert.equal(session.model.compat.maxTokensField, known ? "max_completion_tokens" : "max_tokens");
+      assert.equal(session.model.compat.maxTokensField, known ? undefined : "max_tokens");
       assert.equal(session.model.compat.requiresReasoningContentOnAssistantMessages, known ? true : undefined);
       assert.equal(session.model.compat.thinkingFormat, known ? "deepseek" : undefined);
       const compaction = session.settingsManager.getCompactionSettings(session.model);
@@ -148,6 +308,10 @@ test("运行层只对已核实的 MiMo 型号使用真实上下文和接口参�
       assert.equal(compaction.keepRecentTokens, known ? 20_000 : 10_240);
       assert.ok(compaction.keepRecentTokens + session.model.maxTokens < session.model.contextWindow - compaction.reserveTokens);
       assert.equal(session.settingsManager.getHttpIdleTimeoutMs(), 0);
+      if (!known) {
+        assert.deepEqual(session.model.input, ["text"]);
+        await assert.rejects(session.prompt("图片", { images: [{ type: "image", data: "", mimeType: "image/png" }] }), /未声明支持图片/);
+      }
     } finally { session.dispose(); }
   }
 });
@@ -174,6 +338,77 @@ test("32k 未知模型的 18k 输入不会被旧压缩阈值提前摘要或挤�
   assert.ok(requests[0].messages.some((entry) => entry.role === "user"
     && (typeof entry.content === "string" ? entry.content : entry.content.map((block) => block.text || "").join("")) === message));
   assert.equal(session.getLastAssistantText(), "完成");
+});
+
+test("DeepSeek、GLM 和网关别名共用原生能力参数，保留不支持关闭思考的声明", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-generic-profile-")), requests = [];
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "fixture", choices: [{ index: 0, delta: { content: "完成" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  t.after(async () => { model.closeAllConnections(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  const local = `http://127.0.0.1:${model.address().port}/v1`;
+  const aliasTarget = { chatUrl: local + "/chat/completions", model: "gateway-alias" };
+  for (const config of [
+    { chatUrl: "https://api.deepseek.com/chat/completions", model: "deepseek-v4-pro" },
+    { chatUrl: "https://api.z.ai/api/coding/paas/v4/chat/completions", model: "glm-5.3" },
+    { ...aliasTarget, modelProfile: { schemaVersion: 1, target: aliasTarget, api: "openai-completions", contextWindow: 65536,
+      maxOutputTokens: 9000, reasoning: true, input: ["text"], compat: { maxTokensField: "max_tokens", thinkingFormat: "zai", supportsReasoningEffort: false } } },
+  ]) for (const reasoningMode of ["auto", "off"]) {
+    const session = await createPiSession({ config: { ...config, apiKey: "fixture-only" }, cwd: root, dataDir: root,
+      customTools: [], systemPrompt: "fixture", maxOutputTokens: 512, reasoningMode });
+    try {
+      assert.equal(session.model.reasoning, true); assert.deepEqual(session.model.input, ["text"]);
+      await session.setModel({ ...session.model, baseUrl: local });
+      await session.prompt("固定本地请求");
+      const body = requests.at(-1);
+      assert.equal(body.max_tokens, 512); assert.equal(body.max_completion_tokens, undefined);
+      const forcedThinking = config.model === "glm-5.3";
+      assert.equal(body.thinking.type, reasoningMode === "auto" || forcedThinking ? "enabled" : "disabled");
+      if (forcedThinking) {
+        assert.equal(session.modelProfile.thinkingLevelMap.off, null);
+        assert.equal(session.modelProfile.thinkingLevelMap[DEFAULT_THINKING_LEVEL], null);
+        assert.equal(session.thinkingLevel, reasoningMode === "auto" ? "high" : "low");
+        assert.equal(body.reasoning_effort, session.thinkingLevel);
+      }
+      assert.equal(session.getLastAssistantText(), "完成");
+    } finally { session.dispose(); }
+  }
+  assert.equal(requests.length, 6);
+});
+
+test("能力配置不能绕过完整结束标志，完整JSON正文缺finish_reason仍不能提交", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-profile-finish-reason-"));
+  let calls = 0, submissions = 0;
+  const model = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Consume the fixed request. */ }
+    calls++;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ id: "fixture", choices: [{ index: 0,
+      delta: { content: '{"value":true}' }, finish_reason: null }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise((done) => model.listen(0, "127.0.0.1", done));
+  t.after(async () => { model.closeAllConnections(); await new Promise((done) => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  const target = { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model" };
+  const tool = { name: "submit_result", label: "提交", description: "提交", parameters: {
+    type: "object", properties: { value: { type: "boolean" } }, required: ["value"], additionalProperties: false },
+  execute: async () => { submissions++; return { content: [], details: {}, terminate: true }; } };
+  const config = { ...target, apiKey: "fixture-only", modelProfile: { schemaVersion: 1, target, api: "openai-completions",
+    contextWindow: 32768, maxOutputTokens: 8192, reasoning: false, input: ["text"], compat: { supportsFinishReason: true } } };
+  const session = await createPiSession({ config, cwd: root, dataDir: root, customTools: [tool], systemPrompt: "fixture" });
+  try {
+    session.settingsManager.setRetryEnabled(false);
+    assert.equal(session.model.compat.supportsFinishReason, true);
+    assert.equal(session.modelProfile.platformRequirements.completeResponseFinishReason, true);
+    await session.prompt("固定提交");
+    const last = session.messages.findLast((message) => message.role === "assistant");
+    assert.equal(last.stopReason, "error");
+    assert.equal(readPiStructuredSubmission(last, { tools: [tool] }), null);
+    assert.equal(calls, 1); assert.equal(submissions, 0);
+  } finally { session.dispose(); }
 });
 
 test("真实 SDK 遇到半截响应会重试当前模型轮，完整提交只执行一次并直接结束", async (t) => {
@@ -232,6 +467,25 @@ test("真实 SDK 对 429 暂时限流重试，对认证错误直接结束，均�
       assert.equal(session.messages.at(-1).stopReason, status === 429 ? "stop" : "error");
     } finally { session.dispose(); await new Promise((done) => model.close(done)); }
   }
+});
+
+test("真实SDK读取停滞的错误正文时按无响应停止，不重复付费请求", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-idle-error-"));
+  let requests = 0;
+  const model = createServer(async (request, response) => {
+    for await (const _chunk of request) {} requests++;
+    response.writeHead(401, { "content-type": "application/json" }); response.flushHeaders();
+  });
+  await new Promise(done => model.listen(0, "127.0.0.1", done));
+  t.after(async () => { model.closeAllConnections(); await new Promise(done => model.close(done)); await rm(root, { recursive: true, force: true }); });
+  const session = await createPiSession({ config: { chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`,
+    model: "fixture-model", apiKey: "fixture-only", llmIdleTimeoutMs: 100 },
+    cwd: root, dataDir: root, customTools: [], systemPrompt: "fixture" });
+  const events = []; session.subscribe(event => events.push(event.type));
+  try {
+    await assert.rejects(session.prompt("fixture"), error => error.diagnostic?.reason === "api_idle_timeout");
+    assert.equal(requests, 1); assert.equal(events.filter(type => type === "auto_retry_start").length, 0);
+  } finally { session.dispose(); }
 });
 
 test("真实 Pi SDK 接通兼容模型流、调用登记工具并连续查询", async (t) => {
