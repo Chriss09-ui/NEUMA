@@ -306,7 +306,7 @@ test("同一合法历史基底的新角色使用不同nonce，旧会话编号不
   assert.equal(f.requests.length, 3);
 });
 
-test("宿主基底取消或耗尽原12轮后不能继续，不自动接受基底或重置原预算", { timeout: 15000 }, async (t) => {
+test("宿主基底取消或耗尽原5轮后不能继续，不自动接受基底或重置原预算", { timeout: 15000 }, async (t) => {
   const draft = validDraft(), requirements = requirementItems(draft), original = validDesign(requirements), before = structuredClone(original);
   const controller = new AbortController(); let reference;
   const cancelled = await actualPi(t, (body) => {
@@ -323,9 +323,9 @@ test("宿主基底取消或耗尽原12轮后不能继续，不自动接受基底
     updates: [{ path: "/steps/0/componentId", value: `missing_${turn}` }],
   } }));
   await assert.rejects(designerRole(exhausted.designer, draft, requirements, editableOptions(draft, requirements, original)),
-    (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 12 && error.diagnostic.localRevisions === 12
+    (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 5 && error.diagnostic.localRevisions === 5
       && error.diagnostic.editableSubmission === undefined && Boolean(error.diagnostic.rejectedSubmission));
-  assert.equal(exhausted.requests.length, 12); assert.deepEqual(original, before);
+  assert.equal(exhausted.requests.length, 5); assert.deepEqual(original, before);
 });
 
 test("真实Pi正常架构修订循环可只传局部字段，仍独立评审确切新候选并保留原两轮上限", { timeout: 15000 }, async (t) => {
@@ -495,13 +495,13 @@ test("真实Pi取消后同一修订工具不能继续，已捕获稿不成为接
   assert.equal(f.requests.length, 2);
 });
 
-test("真实Pi连续局部修订仍共用原12轮模型预算，不以草稿或CAS重置次数", { timeout: 15000 }, async (t) => {
+test("真实Pi连续局部修订仍共用原5轮模型预算，不以草稿或CAS重置次数", { timeout: 15000 }, async (t) => {
   const draft = validDraft(), requirements = requirementItems(draft), bad = validDesign(requirements);
   bad.steps[0].componentId = "missing";
   const f = await actualPi(t, (body, turn) => turn === 1 ? { name: "submit_architecture", args: bad }
     : { name: "revise_architecture_submission", args: { submissionHash: rejectedHash(feedbackText(body)),
       updates: [{ path: "/rationale", value: `修订${turn}仍未修复引用` }] } });
   await assert.rejects(designerRole(f.designer, draft, requirements), (error) => error.diagnostic.reason === "turn_limit"
-    && error.diagnostic.modelCalls === 12 && error.diagnostic.localRevisions === 11);
-  assert.equal(f.requests.length, 12);
+    && error.diagnostic.modelCalls === 5 && error.diagnostic.localRevisions === 4);
+  assert.equal(f.requests.length, 5);
 });

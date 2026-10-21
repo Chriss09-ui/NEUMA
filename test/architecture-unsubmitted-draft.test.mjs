@@ -150,7 +150,7 @@ test("真实Pi评审合法JSON正文单次执行同一正式校验，不再追�
   const good = passingReview(candidateHash); let validations = 0, diagnostic;
   const f = await actualPi(t, (body, turn) => {
     assert.equal(body.tool_choice, undefined); assert.equal(turn, 1); assert.equal(validations, 0);
-    assert.deepEqual(lastUser(body).modelBudget, { limit: 12, used: 0, remaining: 12 });
+    assert.deepEqual(lastUser(body).modelBudget, { limit: 5, used: 0, remaining: 5 });
     return { kind: "text", text: JSON.stringify(good) };
   });
   const output = await role(f.designer, "reviewer", { systemPrompt: REVIEW_PROMPT,
@@ -181,7 +181,7 @@ test("真实Pi评审正文含checks额外字段时收到精确schema提示，第
     assert.equal(issue.path, "submission.checks[0]"); assert.equal(issue.reason, "unknown_field");
     assert.deepEqual(issue.allowedFields, ["id", "passed", "evidence"]); assert.deepEqual(issue.requiredFields, ["id", "passed", "evidence"]);
     assert.doesNotMatch(JSON.stringify(reminder), /PRIVATE_/u);
-    assert.deepEqual(reminder.modelBudget, { limit: 12, used: 1, remaining: 11 });
+    assert.deepEqual(reminder.modelBudget, { limit: 5, used: 1, remaining: 4 });
     return { kind: "tool", name: "submit_architecture_review", args: good };
   });
   const output = await role(f.designer, "reviewer", { payload: { draft, requirements, design: candidate, candidateHash }, parameters,
@@ -202,7 +202,7 @@ for (const roleName of Object.keys(roleNames)) for (const wrapped of [false, tru
     assert.ok(body.tools.some((tool) => tool.function.name === "submit_architecture_draft"));
     assert.equal(body.tool_choice, undefined);
     assert.equal(turn, 1); assert.equal(validated, 0);
-    assert.deepEqual(lastUser(body).modelBudget, { limit: 12, used: 0, remaining: 12 });
+    assert.deepEqual(lastUser(body).modelBudget, { limit: 5, used: 0, remaining: 5 });
     const args = { answer: "完整结构化提交" };
     return { kind: "text", text: JSON.stringify(wrapped ? { submission: { name: roleNames[roleName], arguments: args } } : args) };
   });
@@ -236,7 +236,7 @@ test("真实Pi结构化提交仍拒绝业务语义错误，下一user反馈带�
   const f = await actualPi(t, (body, turn) => {
     if (turn === 1) return { kind: "text", text: JSON.stringify(candidate) };
     assert.equal(turn, 2); const reminder = lastUser(body), feedback = reminder.structuredSubmissionFeedback;
-    assert.match(feedback, /componentId/u); assert.deepEqual(reminder.modelBudget, { limit: 12, used: 1, remaining: 11 });
+    assert.match(feedback, /componentId/u); assert.deepEqual(reminder.modelBudget, { limit: 5, used: 1, remaining: 4 });
     assert.equal(reminder.unsubmittedDraft, undefined);
     stagedHash = null;
     const hash = reminder.rejectedSubmission.submissionHash; assert.match(hash, /^[a-f0-9]{64}$/u); assert.notEqual(hash, stagedHash);
@@ -303,7 +303,7 @@ test("真实Pi首次坏正文给安全解析原因，末轮完整结构化JSON�
     assert.equal(turn, 2); const reminder = lastUser(body);
     assert.equal(reminder.type, "submission_required"); assert.equal(reminder.unsubmittedDraft, undefined);
     assert.equal(reminder.unsubmittedDraftDiagnostic.reason, "invalid_json");
-    assert.deepEqual(reminder.modelBudget, { limit: 12, used: 1, remaining: 11 });
+    assert.deepEqual(reminder.modelBudget, { limit: 5, used: 1, remaining: 4 });
     assert.doesNotMatch(JSON.stringify(reminder), /PRIVATE_|Unexpected/u);
     return { kind: "text", text: final };
   });

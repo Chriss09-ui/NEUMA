@@ -166,12 +166,12 @@ test("任一冻结材料、schema、原生绑定或耗尽计数改变即停止�
     (record) => { record.mainReviewCheckpoint.reviewHash = "e".repeat(64); },
     (record) => { record.requirementFidelityProgress.state.schemaHash = "e".repeat(64); },
     (record) => { record.requirementFidelityProgress.state.sessionBindingHash = "e".repeat(64); },
-    (record) => { record.requirementFidelityProgress.parentModelCalls = 11; }]) {
+    (record) => { record.requirementFidelityProgress.parentModelCalls = 4; }]) {
     const record = structuredClone(f.record); change(record); assert.equal(await f.read(record), null);
   }
   const lower = structuredClone(f.record);
-  lower.mainReviewCheckpoint = createMainReviewCheckpoint(lower, f.record.mainReviewCheckpoint.review, 11);
-  lower.requirementFidelityProgress = createArchitectureFidelityProgress(lower, f.state, 11);
+  lower.mainReviewCheckpoint = createMainReviewCheckpoint(lower, f.record.mainReviewCheckpoint.review, 4);
+  lower.requirementFidelityProgress = createArchitectureFidelityProgress(lower, f.state, 4);
   assert.equal(await f.read(lower), null);
   const changed = structuredClone(f.evidenceContext); changed.contextManifest.requirements.characters++;
   assert.equal(await f.read(f.record, changed), null);

@@ -78,7 +78,7 @@ for (const roleName of Object.keys(names)) {
       if (turn === 1) return { kind: "text", text };
       assert.equal(turn, 2);
       const reminder = lastUser(body); assert.equal(reminder.type, "submission_required"); assert.equal(reminder.submitName, names[roleName]);
-      assert.deepEqual(reminder.modelBudget, { limit: 12, used: 1, remaining: 11 });
+      assert.deepEqual(reminder.modelBudget, { limit: 5, used: 1, remaining: 4 });
       assert.ok(body.messages.some((entry) => entry.role === "assistant" && messageText(entry.content) === text));
       return { kind: "tool", name: names[roleName], args: { answer: "已正式提交" } };
     });
@@ -97,13 +97,13 @@ test("真实Pi再次纯文字结束时以提交未完成失败，不能将正常
   assert.equal(f.requests.length, 2); assert.equal(f.sessions.length, 1);
 });
 
-test("真实Pi原12轮已耗尽的自然结束不再追加提醒或重置预算", { timeout: 15000 }, async (t) => {
-  const f = await actualPi(t, (_body, turn) => turn < 12 ? { kind: "tool", name: "inspect_current", args: {} }
+test("真实Pi原5轮已耗尽的自然结束不再追加提醒或重置预算", { timeout: 15000 }, async (t) => {
+  const f = await actualPi(t, (_body, turn) => turn < 5 ? { kind: "tool", name: "inspect_current", args: {} }
     : { kind: "text", text: "预算末轮仍未提交" });
   await assert.rejects(role(f.designer, "designer", { tools: [{ name: "inspect_current", label: "读取既有事实", description: "仅返回固定测试事实",
     parameters: { type: "object", properties: {}, additionalProperties: false }, execute: async () => ({ content: [{ type: "text", text: "固定事实" }] }) }] }),
-  (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 12 && error.diagnostic.submissionContinuations === 0);
-  assert.equal(f.requests.length, 12); assert.equal(f.sessions.length, 1);
+  (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 5 && error.diagnostic.submissionContinuations === 0);
+  assert.equal(f.requests.length, 5); assert.equal(f.sessions.length, 1);
 });
 
 for (const fault of ["length", "error", "cancelled"]) {
@@ -131,7 +131,7 @@ test("真实Pi被拒稿后自然结束的提醒保留原CAS，可局部修正且
     }
     assert.equal(turn, 3);
     const reminder = lastUser(body); assert.deepEqual(reminder.rejectedSubmission, { submissionHash });
-    assert.deepEqual(reminder.modelBudget, { limit: 12, used: 2, remaining: 10 });
+    assert.deepEqual(reminder.modelBudget, { limit: 5, used: 2, remaining: 3 });
     assert.equal(reminder.submitName, "submit_architecture"); assert.equal(reminder.design, undefined);
     return { kind: "tool", name: "revise_architecture_submission", args: { submissionHash,
       updates: [{ path: "/steps/0/componentId", value: "summarize" }] } };

@@ -35,9 +35,9 @@ function platformCheck(reference, snapshot) {
   if (fact === undefined) return { status: "unavailable", evidence: evidence("platform", reference,
     `当前冻结的平台版本 v${snapshot.version} 未声明该交付能力，不能引用新版实现替旧版承诺。`) };
   const scope = reference === "platform.deliveryRoutes.managedService" && fact.externalEntry === "opt_in_loopback_gateway"
-    ? "本机专属 HTTP API 与 MCP 由 NEUMA 宿主网关提供，共用已验收动作和任务调度，支持提交任务、查询任务与结果、取消任务。默认不开放，须选择动作和客户端令牌，绑定交付版本；不要求生成代码监听端口。可研发多个获批动作，经 ctx.files/state 保存分段及临时索引、检查完整性，再输出最终结果；这不是现成原生文件上传接口，也不证明某个容量、智能体交付、网关启用或业务验收已通过。任务记录和文件读写另有限制，须实际设计及验收；需求阶段不执行尚未生成的程序。"
+    ? "本机专属 HTTP API 与 MCP 由工作台宿主网关提供，共用已验收动作和任务调度，支持提交任务、查询任务与结果、取消任务。默认不开放，须选择动作和客户端令牌，绑定交付版本；不要求生成代码监听端口。可研发多个获批动作，经 ctx.files/state 保存分段及临时索引、检查完整性，再输出最终结果；这不是现成原生文件上传接口，也不证明某个容量、智能体交付、网关启用或业务验收已通过。任务记录和文件读写另有限制，须实际设计及验收；需求阶段不执行尚未生成的程序。"
     : reference === "platform.runtime"
-      ? `这里的 listenPorts/directNetwork/subprocess 等限制针对生成代码执行环境，不是 NEUMA 宿主自身。生成进程不能监听端口或自行取得网络及凭据；需要外部接口时使用平台允许的宿主网关，需要连接时走已声明能力桥，不放宽进程隔离。actionInputBytes 是单调用上限，不是整个多动作任务的容量；经已批准动作及 files/state 可设计分段接收和完整性核对，不保证任意字节量或最大记录数已通过。${snapshot.version === 4
+      ? `这里的 listenPorts/directNetwork/subprocess 等限制针对生成代码执行环境，不是工作台宿主自身。生成进程不能监听端口或自行取得网络及凭据；需要外部接口时使用平台允许的宿主网关，需要连接时走已声明能力桥，不放宽进程隔离。actionInputBytes 是单调用上限，不是整个多动作任务的容量；经已批准动作及 files/state 可设计分段接收和完整性核对，不保证任意字节量或最大记录数已通过。${snapshot.version === 4
         ? "当前实现限额：API/MCP请求体256KiB；任务入口的完整任务封装128KiB；动作值1MiB；受管进程单条IPC消息2MiB。ctx.files.write单次120000字符且替换，read分页24000字符，普通下载读取最多120000字符；文件工具没有追加或删除动作，读取经过文本脱敏。ctx.state.set业务状态上限900KiB，含元数据存储1MiB。任务记录总计16MiB，事件单条128KiB，现有任务记录不自动清理；结束接收不代表已删除任务审计中的原始输入。JSON整数字段及汇总需符合宿主安全整数限制。不得仅凭记录数承诺任意路径长度、总字节量、完整单文件导出或任意大整数；确有缺口时保留阻断。若总字节、字段长度、数值及输出结构已有明确边界，应按实际结构推导保守上界并逐层比较；落在单次入口内无需分段。可检查的容量推导可以支持进入研发，实际程序与最大边界仍待研发验收；未执行待生成代码本身不证明当前平台不可承载。"
         : "文件、状态、任务记录、通信及数值精度限制仍须按对应交付版本独立核实。"}`
       : reference === "platform.managedRuntime"

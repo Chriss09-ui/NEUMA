@@ -4,7 +4,8 @@ import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs
 import { architectureModelOutputBudget } from "../runtime/model-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
-import { ARCHITECTURE_VERSION, CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
+import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
+  architectureTurnBudgetSpent, CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
   requirementItems, validateDesign, validateReview, checkDesign, designHash, requiresDevelopment } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, renderArchitectureReviewPrompt, SPECIALIST_PROMPT, PLATFORM_CLAIMS_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
@@ -358,7 +359,7 @@ async function rejectedFidelityArchitectureRevisionSeed(previous, records, defin
     || reference && Object.hasOwn(reference, "rejectedFidelitySource");
   if (marked && interrupted && (previous.candidateHash === null || previous.candidateHash === reference.candidateHash
     || previous.diagnostic?.role === "designer")
-    && (repair?.reason !== "rejected_fidelity_submission" || repair.modelCalls !== 12
+    && (repair?.reason !== "rejected_fidelity_submission" || !architectureTurnBudgetSpent(repair.modelCalls)
       || repair.candidateHash !== reference.candidateHash || !Number.isSafeInteger(reference.version) || reference.version >= previous.version))
     throw new InputError("被拒复核的修订来源标记不完整，不能改用新评审预算");
   const continued = repair?.reason === "rejected_fidelity_submission"
@@ -373,7 +374,7 @@ async function rejectedFidelityArchitectureRevisionSeed(previous, records, defin
     return null;
   }
   let feedback;
-  if (original?.mainReviewCheckpoint?.fidelityStatus === "pending" && original.mainReviewCheckpoint.modelCalls === 12) {
+  if (original?.mainReviewCheckpoint?.fidelityStatus === "pending" && architectureTurnBudgetSpent(original.mainReviewCheckpoint.modelCalls)) {
     try {
       feedback = await readArchitectureRejectedFidelityReference(original, materials.evidenceContext, {
         cwd, directory: await storage.directory(definition.id, "architecture/fidelity"), signal });
@@ -457,13 +458,13 @@ function interruptedArchitectureRevisionSeed(previous, records, definition, cont
   const saved = [...records], reference = previous.revisionSource, repair = reference?.reviewRepair;
   if (diagnostic.role === "designer" && previous.design === null && previous.candidateHash === null
     && Number.isSafeInteger(reference?.version) && reference.version < previous.version
-    && repair?.modelCalls === 12 && repair.reason === "native_planning_rejection" && repair.candidateHash === reference.candidateHash) {
+    && architectureTurnBudgetSpent(repair?.modelCalls) && repair.reason === "native_planning_rejection" && repair.candidateHash === reference.candidateHash) {
     const original = saved.find((record) => record.agentId === definition.id && record.version === reference.version);
     const materials = original && ["failed", "cancelled"].includes(original.status) && original.review === null
       && original.candidateHash === reference.candidateHash ? architectureMaterialSeed(original, definition, context) : null;
     const used = materials ? Math.max(readMainReviewCheckpoint(original)?.modelCalls ?? 0,
       (readReviewProgressCheckpoint(original) ?? readLegacyReviewProgressCheckpoint(original))?.modelCalls ?? 0) : 0;
-    if (materials && used === 12 && ["platformHash", "requirementHash", "confirmedContextHash", "deferredContextHash"]
+    if (materials && used === repair.modelCalls && ["platformHash", "requirementHash", "confirmedContextHash", "deferredContextHash"]
       .every((key) => reference[key] === materials.source[key])) {
       const { evidenceContext, ...seed } = materials;
       return { ...seed, issues: [], source: { ...seed.source, interruptedVersion: previous.version,
@@ -536,7 +537,7 @@ function feedbackRepairSeed(previous, records, definition, context) {
   if (!repair || Object.keys(repair).sort().join(",") !== "bindingHash,candidateHash,modelCalls,version"
     || !Number.isSafeInteger(repair.version) || repair.version < 1 || repair.version >= previous.version
     || !/^[a-f0-9]{64}$/u.test(repair.candidateHash ?? "") || !/^[a-f0-9]{64}$/u.test(repair.bindingHash ?? "")
-    || !Number.isSafeInteger(repair.modelCalls) || repair.modelCalls < 0 || repair.modelCalls > 12
+    || !Number.isSafeInteger(repair.modelCalls) || repair.modelCalls < 0 || repair.modelCalls > ARCHITECTURE_STORED_TURN_LIMIT
     || !architectureRevisionBindingsMatch(previous, definition, context, { allowUnsubmitted: true }))
     throw feedbackRepairError("原版本、候选、完整业务绑定或已用次数不一致。");
   const original = [...records].find((record) => record.agentId === definition.id && record.version === repair.version);
@@ -714,12 +715,12 @@ export class ArchitectureDesigner {
       candidateHash: payload.candidateHash, context: reviewEvidenceContext, priorFindings: payload.priorFindings,
       initial: resumeReviewProgress?.parts, resolve: (value) => evidenceReader.resolveSubmission(value), signal,
       ...(typeof onReviewProgress === "function" && payload.requireAcceptanceVerification && !resumeReviewProgress?.review && !resumeMainReview
-        ? { remainingModelCalls: () => Math.max(0, 12 - turns) } : {}),
+        ? { remainingModelCalls: () => Math.max(0, ARCHITECTURE_ROLE_TURN_LIMIT - turns) } : {}),
       onSave: async (parts) => {
         if (resumeReviewProgress && resumeReviewProgress.modelCalls !== initialModelCalls) throw new InputError("评审分项与当前累计预算不一致");
         signal?.throwIfAborted(); await onReviewProgress?.({ parts, modelCalls: turns }); signal?.throwIfAborted();
       } }) : null;
-    const modelBudget = () => ({ limit: 12, used: turns, remaining: Math.max(0, 12 - turns) });
+    const modelBudget = () => ({ limit: ARCHITECTURE_ROLE_TURN_LIMIT, used: turns, remaining: Math.max(0, ARCHITECTURE_ROLE_TURN_LIMIT - turns) });
     const withBudget = (output) => ({ ...output, content: [...output.content, { type: "text", text: JSON.stringify({ hostModelBudget: modelBudget(),
       ...(reviewParts ? { reviewParts: reviewParts.reference() } : {}),
       ...(evidenceReader ? { reviewReadProgress: { ...readProgress } } : {}) }) }] });
@@ -760,7 +761,7 @@ export class ArchitectureDesigner {
       if (role === "reviewer" && truncated) throw failure("output_limit", details());
       if (event.retryAttempt > 0) return;
       if (stalled()) throw failure("review_repair_stalled", details());
-      if (turns >= 12) {
+      if (turns >= ARCHITECTURE_ROLE_TURN_LIMIT) {
         turnLimit = true; abort();
         throw Object.assign(failure("turn_limit", details()), { reason: "turn_limit" });
       }
@@ -768,7 +769,7 @@ export class ArchitectureDesigner {
     };
     const checkFidelity = async () => {
       if (!fidelityDecision) {
-        if (turns >= 12 && !resumeFidelityProgress) { turnLimit = true; throw failure("turn_limit", details()); }
+        if (turns >= ARCHITECTURE_ROLE_TURN_LIMIT && !resumeFidelityProgress) { turnLimit = true; throw failure("turn_limit", details()); }
         try {
           const evidenceGuide = reviewEvidenceContext && Object.hasOwn(reviewEvidenceContext, "acceptanceAdapterGuide");
           const payloadGuide = Object.hasOwn(payload, "acceptanceAdapterGuide");
@@ -800,7 +801,7 @@ export class ArchitectureDesigner {
           await onFidelity?.(fidelityDecision);
         } catch (error) {
           if (error?.fidelityDiagnostic) scopeFailure = error;
-          if (error.reason === "scope_evaluation_incomplete" && turns >= 12) turnLimit = true;
+          if (error.reason === "scope_evaluation_incomplete" && turns >= ARCHITECTURE_ROLE_TURN_LIMIT) turnLimit = true;
           if (error.reason === "scope_evaluation_incomplete") { scopeFailure = error; abort(); }
           throw error;
         }
@@ -824,7 +825,7 @@ export class ArchitectureDesigner {
       lastHandoffDiagnostic = { contextHash: decision.contextHash, modelCalls: decision.modelCalls,
         decisions: decision.decisions.map(({ issueId, classification }) => ({ issueId, classification })) };
       if (decision.decisions.some((item) => item.classification !== "user_choice"))
-        throw new InputError("返需必要性复核未认定为用户的新业务选择，请在当前会话修正候选、引用或阶段归属：" + JSON.stringify(decision.decisions));
+        throw new InputError("返需必要性复核未认定需求本身不清楚。技术问题必须留在当前会话修正，不能返回给用户：" + JSON.stringify(decision.decisions));
       return proposals.map((item) => ({ ...structuredClone(item), owner: "user", blocking: true,
         necessity: { contextHash: decision.contextHash, ...decision.decisions.find((entry) => entry.issueId === item.id) } }));
     };
@@ -890,8 +891,8 @@ export class ArchitectureDesigner {
         session?.setAutoCompactionEnabled?.(false);
         return { ...toolResult({ submitted: true }), terminate: true };
       } };
-    const requestRequirements = { name: "request_requirements", label: "返回关键选择", parameters: handoffSchema,
-      description: "仅当缺少会改变交付承诺、必须由用户决定的关键选择时返回需求层。技术核实和未来输入检查不使用此工具。",
+    const requestRequirements = { name: "request_requirements", label: "返回不清楚的需求", parameters: handoffSchema,
+      description: "仅当架构设计或评估时需求本身仍不清楚、且该空白会改变交付承诺时返回需求层。问题只能是非技术的业务内容。技术问题、实现选型和未来具体输入禁止使用此工具。",
       executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
         unsubmittedDraft.clear();
@@ -939,7 +940,7 @@ export class ArchitectureDesigner {
         if (truncated || failed || ["length", "error", "aborted"].includes(currentPromptAssistant?.stopReason))
           throw new InputError("当前模型响应未完整结束，不能新增评审分项；更早已保存成果保留。");
         if (reviewParts.reference().batch?.stage === "final-only")
-          throw new InputError("剩余额度只适合完整正式提交，不能再单独保存分批成果；可用submit_architecture_review_parts同时提交真实剩余行和正式结论，或原完整评审工具。复核仍按原12轮实际扣减。");
+          throw new InputError(`剩余额度只适合完整正式提交，不能再单独保存分批成果；可用submit_architecture_review_parts同时提交真实剩余行和正式结论，或原完整评审工具。复核仍按原${ARCHITECTURE_ROLE_TURN_LIMIT}轮实际扣减。`);
         const saved = await reviewParts.save(value);
         if (saved.changed) savedPartChanges++;
         return toolResult(saved);
@@ -1019,13 +1020,13 @@ export class ArchitectureDesigner {
     };
     try {
       signal?.throwIfAborted();
-      if (!Number.isSafeInteger(initialModelCalls) || initialModelCalls < 0 || initialModelCalls > 12)
+      if (!Number.isSafeInteger(initialModelCalls) || initialModelCalls < 0 || initialModelCalls > ARCHITECTURE_STORED_TURN_LIMIT)
         throw new InputError("主评审检查点预算无效");
       if (resumeReviewProgress?.parts && (!reviewParts || resumeReviewProgress.modelCalls !== initialModelCalls))
         throw new InputError("评审分项与当前角色或累计预算不一致");
       if (resumeMainReview) {
         if (role !== "reviewer" || submitName !== "submit_architecture_review" || !payload.requireAcceptanceVerification
-          || !Number.isSafeInteger(resumeMainReview.modelCalls) || resumeMainReview.modelCalls < 1 || resumeMainReview.modelCalls > 12)
+          || !Number.isSafeInteger(resumeMainReview.modelCalls) || resumeMainReview.modelCalls < 1 || resumeMainReview.modelCalls > ARCHITECTURE_STORED_TURN_LIMIT)
           throw new InputError("主评审检查点不适用于本阶段");
         const checked = validate(resumeMainReview.review);
         if (checked?.verdict !== "pass") throw new InputError("主评审检查点不是已验证的通过意见");
@@ -1059,7 +1060,7 @@ export class ArchitectureDesigner {
           if (!(error instanceof InputError) || error.validationIssue?.reason !== "size_limit") throw error;
         }
       }
-      if (reviewParts?.reference().batch && turns >= 12) throw failure("turn_limit", details());
+      if (reviewParts?.reference().batch && turns >= ARCHITECTURE_ROLE_TURN_LIMIT) throw failure("turn_limit", details());
       signal?.addEventListener("abort", abort, { once: true });
       session = await this.sessionFactory({ config: this.config, cwd: this.cwd,
         reasoningMode: role === "reviewer" || role === "designer" && editableDesign
@@ -1157,7 +1158,7 @@ export class ArchitectureDesigner {
           continue;
         }
         const staged = !structured && last?.stopReason === "stop" ? unsubmittedDraft.captureAssistant(last,
-          { signal, retain: turns < 12 && submissionContinuations < 1 || Boolean(onReviewProgress) }) : null;
+          { signal, retain: turns < ARCHITECTURE_ROLE_TURN_LIMIT && submissionContinuations < 1 || Boolean(onReviewProgress) }) : null;
         const draftDiagnostic = !structured && last?.stopReason === "stop" ? unsubmittedDraft.diagnostic() : null;
         const reviewDraft = role === "reviewer" ? unsubmittedDraft.snapshot() : null;
         if (reviewDraft) {
@@ -1168,7 +1169,7 @@ export class ArchitectureDesigner {
           unsubmittedDraftDiagnostics.push(draftDiagnostic);
           if (unsubmittedDraftDiagnostics.length > 2) unsubmittedDraftDiagnostics.shift();
         }
-        if (turns >= 12) throw failure("turn_limit", details());
+        if (turns >= ARCHITECTURE_ROLE_TURN_LIMIT) throw failure("turn_limit", details());
         if (last?.stopReason !== "stop" || submissionContinuations >= 1) throw failure("submission_incomplete", details());
         submissionContinuations++;
         if (staged) stagedDrafts++;
@@ -1256,15 +1257,16 @@ export class ArchitectureDesigner {
       source: { ...revisionSeed.source, kind: "development-failure", developmentRunId: developmentSeed.source.developmentRunId,
         developmentRecordHash: developmentSeed.source.developmentRecordHash, developmentArchitectureRef: developmentSeed.source.developmentArchitectureRef } };
     if (feedbackSeed && !revisionSeed) throw feedbackRepairError("已标记的修订候选不可恢复，不能建立替代评审。");
+    const spentReviewCalls = Math.max(revisionSeed?.reviewProgressCheckpoint?.modelCalls ?? 0, revisionSeed?.mainReviewCheckpoint?.modelCalls ?? 0);
     if (revisionSeed?.reviewPending
-      && Math.max(revisionSeed.reviewProgressCheckpoint?.modelCalls ?? 0, revisionSeed.mainReviewCheckpoint?.modelCalls ?? 0) >= 12
+      && architectureTurnBudgetSpent(spentReviewCalls)
       && !(revisionSeed.mainReviewCheckpoint?.fidelityStatus === "pending"
         && revisionSeed.requirementFidelityProgress?.state?.diagnostic?.resultAvailable === true)
       && developmentSeed?.developmentRevision?.planningToolFailures?.status === "available") {
       // Only the freshly read, bound native rejection permits work on a new candidate.
       // It never grants additional review calls for the exhausted candidate.
       revisionSeed = { ...revisionSeed, reviewPending: false, source: { ...revisionSeed.source,
-        reviewRepair: { candidateHash: designHash(revisionSeed.design), modelCalls: 12, reason: "native_planning_rejection" } } };
+        reviewRepair: { candidateHash: designHash(revisionSeed.design), modelCalls: spentReviewCalls, reason: "native_planning_rejection" } } };
     }
     const platformRules = renderPlatformRules(platformSnapshot, { runtimeCapabilities });
     const researchRules = platformSnapshot.network.allowNetwork ? WEB_RUNTIME_PROMPT
@@ -1335,16 +1337,16 @@ export class ArchitectureDesigner {
     const moduleSummary = () => record.modules.map(({ assignment, result }, index) => ({ index,
       question: assignment.question, proposal: result.proposal.slice(0, 240), unknownCount: result.unknowns.length }));
     const delegateTool = { name: "delegate_module", label: "检查局部方案",
-      description: "仅当独立模块有明确难点和收益时委派，一次可并行处理1-2项，本次设计最多2项；子任务不能递归委派。",
-      parameters: object({ modules: { type: "array", minItems: 1, maxItems: 2, items: moduleSchema } }),
+      description: `仅当独立模块有明确难点和收益时委派，一次可并行处理1-${ARCHITECTURE_MODULE_LIMIT}项，本次设计最多${ARCHITECTURE_MODULE_LIMIT}项；子任务不能递归委派。`,
+      parameters: object({ modules: { type: "array", minItems: 1, maxItems: ARCHITECTURE_MODULE_LIMIT, items: moduleSchema } }),
       executionMode: "sequential", execute: async (_id, params) => {
         const modules = params?.modules;
-        if (!Array.isArray(modules) || !modules.length || modules.length > 2
+        if (!Array.isArray(modules) || !modules.length || modules.length > ARCHITECTURE_MODULE_LIMIT
           || modules.some((item) => ["question", "boundary", "benefit"].some((key) => !textWithinLimit(item?.[key], moduleSchema.properties[key].maxLength) || !item[key].trim())))
-          throw Object.assign(new InputError("delegate_module.modules：请按公开结构填写1至2项局部问题、边界和委派收益"), {
+          throw Object.assign(new InputError(`delegate_module.modules：请按公开结构填写1至${ARCHITECTURE_MODULE_LIMIT}项局部问题、边界和委派收益`), {
             validationIssue: { path: "delegate_module.modules", reason: "invalid_contract" },
           });
-        const remaining = Math.max(0, 2 - delegates);
+        const remaining = Math.max(0, ARCHITECTURE_MODULE_LIMIT - delegates);
         if (modules.length > remaining) return toolResult({ status: remaining ? "quota_exceeded" : "quota_exhausted",
           reason: "module_quota_exhausted", remaining, storedModules: moduleSummary(),
           next: remaining ? "仅能使用剩余模块额度；也可以复用已有模块结果继续提交方案。" : "模块额度已用完，请复用已有模块结果继续修订并提交方案，不再委派。" });
@@ -1404,7 +1406,7 @@ export class ArchitectureDesigner {
           ? "module_output_limit" : "module_failed", { delegation: { status: "incomplete", failures,
           completedModuleIds: settled.flatMap((entry, index) => entry.status === "fulfilled" ? [moduleId(index)] : []), savedModuleCount: record.modules.length,
           retryAllowed: false, next: "diagnose_before_retry" } });
-        return toolResult({ modules: results, remaining: Math.max(0, 2 - delegates), storedModules: moduleSummary() });
+        return toolResult({ modules: results, remaining: Math.max(0, ARCHITECTURE_MODULE_LIMIT - delegates), storedModules: moduleSummary() });
       } };
     try {
       validateArchitectureFeedbackCoverage(record.feedbackLedger);
@@ -1422,12 +1424,12 @@ export class ArchitectureDesigner {
           ...(revisionSeed?.fidelityRevision ? { requirementFidelityFeedback: { ...revisionSeed.fidelityRevision,
             scope: "原候选的正式范围否定仅作技术修改依据，不是新需求、用户授权或当前评审。保留原承诺；可用真实平台事实修正说明或提供反证，新候选仍须全部原门禁，旧结论不改写。" } } : {}),
           ...(revisionSeed?.rejectedFidelityReference ? { rejectedRequirementFidelitySubmission: { ...revisionSeed.rejectedFidelityReference,
-            scope: "原复核提交实际被拒，结论和引文均未接受，不能当作用户要求或有效评审。仅用于检查当前技术候选及平台事实是否确有缺陷；不得为刷新预算制造无关改动。原候选12轮已用完，同一候选不能重新评审；真实修改后的候选仍须全部原门禁。" } } : {}),
+            scope: "原复核提交实际被拒，结论和引文均未接受，不能当作用户要求或有效评审。仅用于检查当前技术候选及平台事实是否确有缺陷；不得为刷新预算制造无关改动。原候选的角色轮次已用完，同一候选不能重新评审；真实修改后的候选仍须全部原门禁。" } } : {}),
           ...(record.developmentRevision ? { developmentRevision: developmentRevisionContext(record.developmentRevision) } : {}),
           ...(record.feedbackLedger ? { revisionFeedback: architectureFeedbackContext(record.feedbackLedger) } : {}),
           ...(record.confirmedRequirementContext ? { confirmedRequirementContext: record.confirmedRequirementContext } : {}),
           ...(record.deferredVerifications ? { deferredVerifications: record.deferredVerifications } : {}), ...platformContext });
-        const remainingModules = Math.max(0, 2 - delegates);
+        const remainingModules = Math.max(0, ARCHITECTURE_MODULE_LIMIT - delegates);
         const availableDelegate = remainingModules ? { ...delegateTool,
           description: `${delegateTool.description} 当前本次构建剩余${remainingModules}项；修订不重置额度，优先复用已有结果。`,
           parameters: { ...delegateTool.parameters, properties: { ...delegateTool.parameters.properties,
@@ -1438,7 +1440,7 @@ export class ArchitectureDesigner {
           payload: { requirement: { name: definition.name, draft: definition.draft }, ...context(),
             previousDesign, issues: record.design ? record.issues : revisionSeed?.issues ?? record.issues, modules: record.modules,
             researchGaps: record.researchGaps, remaining: { revisions: 1 - attempt,
-              searches: platformSnapshot.network.allowNetwork ? 3 - searches : 0, modules: 2 - delegates } },
+              searches: platformSnapshot.network.allowNetwork ? 3 - searches : 0, modules: ARCHITECTURE_MODULE_LIMIT - delegates } },
           submitName: "submit_architecture", parameters: candidateSchema,
           validate: (value) => validateDesign(value, context()),
           tools: [...(record.developmentRevision ? [developmentRevisionReadTool(record.developmentRevision)] : []), ...(platformSnapshot.network.allowNetwork ? [researchTool] : []), ...(availableDelegate ? [availableDelegate] : []), ...(platformSnapshot.network.allowNetwork ? webTools : [])],
@@ -1488,7 +1490,7 @@ export class ArchitectureDesigner {
         }
         record.review = null; record.issues = checks.issues;
         record.status = "evaluating"; record.summary = "正在独立检查方案";
-        if (record.revisionSource?.reviewRepair?.candidateHash === record.candidateHash || feedbackModelCalls >= 12) {
+        if (record.revisionSource?.reviewRepair?.candidateHash === record.candidateHash || architectureTurnBudgetSpent(feedbackModelCalls)) {
           const repair = record.revisionSource.reviewRepair?.candidateHash === record.candidateHash
             ? record.revisionSource.reviewRepair : { reason: "feedback_revision", modelCalls: feedbackModelCalls };
           record.reviewProgressCheckpoint = createReviewProgressCheckpoint(record, null, repair.modelCalls);

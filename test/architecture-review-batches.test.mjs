@@ -138,29 +138,29 @@ test("真实Pi本地循环：多批工具及严格正文保存复用同会话，
   const f = await fixture(t, { native: true });
   const result = await f.run();
   assert.equal(f.state.serverError, undefined); assert.equal(result.verdict, "pass");
-  assert.equal(f.state.sessions, 1); assert.equal(f.requests.length, 6); assert.equal(f.state.fidelity, 1); assert.equal(f.state.validates, 1);
+  assert.equal(f.state.sessions, 1); assert.equal(f.requests.length, 3); assert.equal(f.state.fidelity, 1); assert.equal(f.state.validates, 1);
   assert.equal(result.acceptanceScopeChecks.length, 22); assert.equal(result.checks.length, 8); assert.equal(result.priorFindingDecisions.length, 1);
   const first = { reviewParts: latestReference(f.requests[0]) };
-  assert.equal(first.reviewParts.batch.stage, "save"); assert.equal(first.reviewParts.batch.acceptanceScopeChecks.length, 6);
+  assert.equal(first.reviewParts.batch.stage, "save"); assert.equal(first.reviewParts.batch.acceptanceScopeChecks.length, 11);
   assert.deepEqual(first.reviewParts.batch.checks, []);
-  assert.equal(f.state.diagnostic.submissionContinuations, 0); assert.equal(f.state.diagnostic.modelCalls, 7);
-  assert.equal(f.state.diagnostic.structuredSubmissions, 3);
+  assert.equal(f.state.diagnostic.submissionContinuations, 0); assert.equal(f.state.diagnostic.modelCalls, 4);
+  assert.equal(f.state.diagnostic.structuredSubmissions, 1);
   assert.ok(f.budgets.every((used, index) => index === 0 || used >= f.budgets[index - 1]));
 });
 
-test("仅余三轮时末批携带真实分项与结论，正式提交和两次范围复核共用原12轮", async (t) => {
-  const f = await fixture(t, { initialModelCalls: 9, fidelityAttempts: 2, onPrompt: ({ f, payload, session }) => {
+test("仅余三轮时末批携带真实分项与结论，正式提交和两次范围复核共用原5轮", async (t) => {
+  const f = await fixture(t, { initialModelCalls: 2, fidelityAttempts: 2, onPrompt: ({ f, payload, session }) => {
     assert.equal(payload.reviewParts.batch.stage, "submit-with-parts");
     assert.equal(payload.reviewParts.batch.remainingModelCalls, 3);
     textReply(session, { submission: { name: "submit_architecture_review_parts", arguments: { candidateHash: f.candidateHash,
       progressHash: payload.reviewParts.progressHash, ...rows(f, payload.reviewParts), verdict: "pass", summary: "完整本地夹具" } } });
   } });
   assert.equal((await f.run()).verdict, "pass"); assert.equal(f.state.fidelity, 2);
-  assert.equal(f.prompts.length, 1); assert.equal(f.state.diagnostic.modelCalls, 12); assert.equal(f.budgets.at(-1), 12);
+  assert.equal(f.prompts.length, 1); assert.equal(f.state.diagnostic.modelCalls, 5); assert.equal(f.budgets.at(-1), 5);
 });
 
 test("预留只限制新分批，余下一两轮仍能走原完整正式负评通道", async (t) => {
-  for (const used of [10, 11]) await t.test(String(used), async (t) => {
+  for (const used of [3, 4]) await t.test(String(used), async (t) => {
     const f = await fixture(t, { initialModelCalls: used, onPrompt: async ({ f, payload, tools }) => {
       assert.equal(payload.reviewParts.batch.stage, "final-only");
       await assert.rejects(tools.save_architecture_review_parts.execute("partial", { candidateHash: f.candidateHash,
@@ -171,30 +171,30 @@ test("预留只限制新分批，余下一两轮仍能走原完整正式负评�
     assert.equal(f.state.sessions, 1); assert.equal(f.state.fidelity, 0); assert.equal(f.state.diagnostic.modelCalls, used + 1);
     assert.equal(f.state.parts, null);
   });
-  const full = await fixture(t, { initialModelCalls: 12, onPrompt: () => { throw new Error("must not request"); } });
-  await assert.rejects(full.run(), (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 12);
+  const full = await fixture(t, { initialModelCalls: 5, onPrompt: () => { throw new Error("must not request"); } });
+  await assert.rejects(full.run(), (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 5);
   assert.equal(full.state.sessions, 0);
 });
 
 test("最后两轮仍可用末批正式提交加一次真实复核，只有实际耗尽才停止", async (t) => {
-  for (const used of [10, 11]) await t.test(String(used), async (t) => {
+  for (const used of [3, 4]) await t.test(String(used), async (t) => {
     const f = await fixture(t, { initialModelCalls: used, onPrompt: ({ f, payload, tools }) =>
       tools.submit_architecture_review_parts.execute("final", { candidateHash: f.candidateHash, progressHash: payload.reviewParts.progressHash,
         ...rows(f, payload.reviewParts), verdict: "pass", summary: "完整本地夹具" }) });
-    if (used === 10) assert.equal((await f.run()).verdict, "pass");
+    if (used === 3) assert.equal((await f.run()).verdict, "pass");
     else await assert.rejects(f.run(), (error) => error.diagnostic.reason === "turn_limit");
-    assert.equal(f.state.mainReview.used, used + 1); assert.equal(f.state.diagnostic.modelCalls, 12);
-    assert.equal(f.state.fidelity, used === 10 ? 1 : 0);
+    assert.equal(f.state.mainReview.used, used + 1); assert.equal(f.state.diagnostic.modelCalls, 5);
+    assert.equal(f.state.fidelity, used === 3 ? 1 : 0);
   });
 });
 
 test("旧v3无需范围复核及已保存完整revise草稿不改成新批次门槛", async (t) => {
   for (const mode of ["legacy", "complete-draft"]) await t.test(mode, async (t) => {
-    const f = await fixture(t, { initialModelCalls: 11, requireAcceptanceVerification: mode !== "legacy",
-      ...(mode === "complete-draft" ? { resumeReviewProgress: (f) => ({ modelCalls: 11, review: negativeReview(f), origin: "semantic-rejected" }) } : {}),
+    const f = await fixture(t, { initialModelCalls: 4, requireAcceptanceVerification: mode !== "legacy",
+      ...(mode === "complete-draft" ? { resumeReviewProgress: (f) => ({ modelCalls: 4, review: negativeReview(f), origin: "semantic-rejected" }) } : {}),
       onPrompt: ({ f, payload, tools }) => { assert.equal(payload.reviewParts.batch, undefined);
         return tools.submit_architecture_review.execute("legacy", negativeReview(f)); } });
-    assert.equal((await f.run()).verdict, "revise"); assert.equal(f.state.diagnostic.modelCalls, 12); assert.equal(f.state.fidelity, 0);
+    assert.equal((await f.run()).verdict, "revise"); assert.equal(f.state.diagnostic.modelCalls, 5); assert.equal(f.state.fidelity, 0);
   });
 });
 
@@ -210,7 +210,7 @@ test("正文保存必须有实质进展；相同分项不无限续批，普通�
 });
 
 test("末批真实保存后完整语义不自洽仍拒绝，不能把保存当作评审通过", async (t) => {
-  const f = await fixture(t, { initialModelCalls: 9, onPrompt: ({ f, payload, session }) => {
+  const f = await fixture(t, { initialModelCalls: 2, onPrompt: ({ f, payload, session }) => {
     const parts = rows(f, payload.reviewParts); parts.checks[0].passed = false;
     textReply(session, { candidateHash: f.candidateHash, progressHash: payload.reviewParts.progressHash, ...parts,
       verdict: "pass", summary: "错误的自洽结论应拒绝" });
@@ -234,7 +234,7 @@ test("真实Pi截断或错误响应即使含完整tool参数也不能新增分�
     const f = await fixture(t, { native: true, nativeStop });
     await assert.rejects(f.run());
     assert.equal(f.state.serverError, undefined); assert.equal(f.requests.length, 2);
-    assert.equal(f.state.parts.acceptanceScopeChecks.length, 6); assert.equal(f.state.parts.checks.length, 0);
+    assert.equal(f.state.parts.acceptanceScopeChecks.length, 11); assert.equal(f.state.parts.checks.length, 0);
     assert.equal(f.state.fidelity, 0); assert.equal(f.state.validates, 0);
     assert.equal(f.progress.filter((entry) => entry.parts).length, 1);
   });

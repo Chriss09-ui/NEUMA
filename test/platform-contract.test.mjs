@@ -145,7 +145,9 @@ test("共享规则和同源证据明确文件、托管应用、连接就绪与�
   const rules = renderPlatformRules(snapshot);
   const evidence = platformEvidence(snapshot);
   assert.equal(evidence.id, `neuma-runtime-v${snapshot.version}`);
+  assert.equal(evidence.title, "本轮平台事实与交付边界");
   assert.match(evidence.versionScope, new RegExp(`platform v${snapshot.version}.*schema 3.*public capability v1.*catalog v2`));
+  assert.doesNotMatch(`${rules}\n${evidence.title}\n${evidence.versionScope}`, /NEUMA/);
   assert.equal(evidence.excerpt, rules.slice(0, 6000));
   assert.ok(evidence.excerpt.length <= 6000);
   for (const required of [/先证明方案足以/, /schemaVersion:3/, /导出HTML\/SVG不自动等于托管应用/, /managed/, /node-check只能证明资源与逻辑/,

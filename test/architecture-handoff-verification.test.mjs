@@ -18,6 +18,8 @@ for (const wrapped of [false, true]) test(`返需复核完整JSON${wrapped ? "�
   const sessionFactory = async (options) => {
     assert.deepEqual(options.customTools.map((tool) => tool.name), ["submit_handoff_necessity"]);
     assert.match(options.systemPrompt, /role=handoff-verifier，submitName=submit_handoff_necessity/u);
+    assert.match(options.systemPrompt, /技术问题一律不得判user_choice/);
+    assert.match(options.systemPrompt, /需求原文仍未写明用户要的业务结果/);
     assert.match(options.systemPrompt, /结构化结果也是本阶段正式提交通道/u);
     assert.equal(options.reasoningMode, "auto");
     const session = { messages: [], modelCallAccounting: true, dispose() {}, async prompt(text) {
@@ -81,14 +83,14 @@ for (const classification of ["already_answered", "system_verification", "runtim
   assert.deepEqual(await f.run(), { done: true });
 });
 
-test("检查器与主会话共享12轮，重试不重扣；耗尽保留turn_limit而非needs_input", async (t) => {
+test("检查器与主会话共享5轮，重试不重扣；耗尽保留turn_limit而非needs_input", async (t) => {
   const f = await fixture(t, async ({ tools, options }) => {
-    for (let index = 0; index < 10; index++) await options.onModelCall();
+    for (let index = 0; index < 3; index++) await options.onModelCall();
     for (let index = 0; index < 20; index++) await options.onModelCall({ retryAttempt: 1 });
     await assert.rejects(tools.request_requirements.execute("handoff", { issues: [proposal()] }), /candidate_design_issue/);
     await options.onModelCall();
   });
-  await assert.rejects(f.run(), (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 12);
+  await assert.rejects(f.run(), (error) => error.diagnostic.reason === "turn_limit" && error.diagnostic.modelCalls === 5);
   assert.equal(f.main[0].aborted, true);
 });
 
