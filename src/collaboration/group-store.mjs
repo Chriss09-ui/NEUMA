@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { mkdir, lstat, realpath, open, readdir, rename, rm } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { InputError } from "../requirements/core.mjs";
+import { textWithinLimit } from "../runtime/text-length.mjs";
 
 export const GROUP_LIMITS = Object.freeze({ concurrentMembers: 2, negotiationRounds: 2, executionTurns: 48, turnLimit: 12,
   publicReplyDepth: 2, publicReplyCount: 4, publicReplyTurns: 3, recordBytes: 32 * 1024 * 1024 });
@@ -14,7 +15,7 @@ export function id(value, label = "标识") {
 }
 export function text(value, label = "内容", limit = 12000, optional = false) {
   if (optional && (value === undefined || value === null)) return "";
-  if (typeof value !== "string" || (!optional && !value.trim()) || value.length > limit || value.includes("\0")) throw new InputError(`${label}需为${optional ? "不超过" : "1～"}${limit}字的文本`);
+  if (!textWithinLimit(value, limit) || (!optional && !value.trim()) || value.includes("\0")) throw new InputError(`${label}需为${optional ? "不超过" : "1～"}${limit}字的文本`);
   return value.trim();
 }
 export function conflict(message) { const error = new InputError(message); error.reason = "collaboration_conflict"; return error; }

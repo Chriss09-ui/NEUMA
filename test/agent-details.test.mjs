@@ -5,6 +5,7 @@ import vm from "node:vm";
 import { agentDisplayDescription, agentDisplayName } from "../public/state.js";
 import * as view from "../public/agent-details-view.js";
 import * as avatar from "../public/agent-avatar.js";
+import { saveFileDownload } from "../public/artifact-download.js";
 
 const source = (await readFile(new URL("../public/agent-details.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 const settle = () => new Promise(setImmediate);
@@ -16,7 +17,7 @@ const agents = {
 const runtimeFor = (id, overrides = {}) => ({ agentId: id, agent: agents[id], definition: { ...agents[id], revision: 1 },
   status: "ready", ready: true, busy: false, error: "", ...overrides });
 
-async function setup({ files, file, memory, saveMemory, saveProfile, initial = "one", stored = new Map(), initialRuntime = {}, reduceMotion = false, panelMotion = false } = {}) {
+async function setup({ files, file, memory, saveMemory, saveProfile, artifactPreview, downloadArtifact, downloadFile, initial = "one", stored = new Map(), initialRuntime = {}, reduceMotion = false, panelMotion = false } = {}) {
   class Events {
     listeners = new Map();
     addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
@@ -113,7 +114,7 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
     requests.push({ method, args });
     return Promise.resolve(callback?.(...args) ?? fallback);
   };
-  const context = vm.createContext({ ...view, ...avatar, agentDisplayName, agentDisplayDescription, document, Event, CustomEvent: Event, Blob,
+  const context = vm.createContext({ ...view, ...avatar, agentDisplayName, agentDisplayDescription, document, Event, CustomEvent: Event, Blob, saveFileDownload,
     renderAgentAvatar: (target, agent, options) => avatar.renderAgentAvatar(target, agent, { ...options, document, motion: false }),
     window: { matchMedia: () => motion, localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },
       ...(panelMotion ? { getComputedStyle: () => ({ transitionDuration: motion.matches ? "0s" : "0.42s" }) } : {}) },
@@ -121,14 +122,21 @@ async function setup({ files, file, memory, saveMemory, saveProfile, initial = "
     URL: { createObjectURL: (blob) => { urls.push(blob); return `blob:${urls.length}`; }, revokeObjectURL: (url) => urls.push(url) },
     setTimeout: (callback, duration) => { timerDurations.push(duration); return timers.push(callback); },
     clearTimeout: (id) => clearedTimers.add(id),
+    createApplicationApi: () => ({
+      artifactPreview: (id, taskId, index) => call("artifactPreview", [id, taskId, index], artifactPreview,
+        { path: "result.csv", content: "任务快照预览", truncated: false }),
+      downloadArtifact: (id, taskId, index) => call("downloadArtifact", [id, taskId, index], downloadArtifact, new Blob(["完整任务原始字节"])),
+    }),
     createAgentRuntime: () => ({
       listFiles: (id) => call("listFiles", [id], files, { files: [] }),
       readFile: (id, path) => call("readFile", [id, path], file, { path, content: `${id}的文件内容`, truncated: false }),
+      downloadFile: (id, path) => call("downloadFile", [id, path], downloadFile, new Blob(["完整工作目录原文件"])),
       getMemory: (id) => call("getMemory", [id], memory, { memory: `${id}的记忆` }),
       saveMemory: (id, value) => call("saveMemory", [id, value], saveMemory, { memory: value }),
       saveProfile: (id, value) => call("saveProfile", [id, value], saveProfile, { profile: value }),
     }),
   });
+  document.defaultView = { URL: context.URL, setTimeout: context.setTimeout };
   vm.runInContext(source, context);
   const route = (id) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route(initial); await settle();
@@ -164,6 +172,18 @@ test("研发快捷入口沿用当前Agent归属，待连接交付可以重新检
   await ui.broadcast("one", { ready: false, status: "needs_connection", developmentAction: "重新检查交付" });
   assert.equal(ui.get("agent-build-shortcut").textContent, "重新检查交付");
   await ui.broadcast("one", { ready: false, busy: true, status: "developing", developmentAction: null });
+  assert.equal(ui.get("agent-build-shortcut").hidden, true);
+});
+
+test("内部已就绪的接口配置快捷入口打开当前服务设置，不发送研发续接", async () => {
+  const ui = await setup({ initialRuntime: { one: { ready: true, status: "ready", configurationAction: "配置本机接口", developmentAction: null } } });
+  assert.equal(ui.get("agent-build-shortcut").hidden, false);
+  assert.equal(ui.get("agent-build-shortcut").textContent, "配置本机接口");
+  await ui.click("agent-build-shortcut");
+  assert.equal(ui.emitted.findLast((event) => event.type === "neuma:agent-services-open").detail.agentId, "one");
+  assert.equal(ui.emitted.some((event) => event.type === "neuma:agent-develop"), false);
+  assert.equal(ui.get("agent-details-services-tab").attributes.get("aria-pressed"), "true");
+  await ui.broadcast("one", { ready: true, configurationAction: null });
   assert.equal(ui.get("agent-build-shortcut").hidden, true);
 });
 
@@ -628,7 +648,7 @@ test("文件与列表迟到响应不覆盖新选择或其他 Agent 的预览", a
   assert.equal(ui.get("agent-file-name").textContent, "two.md");
 });
 
-test("选中文件消失时清空预览并拒绝迟到文件，截断内容不能下载", async () => {
+test("选中文件消失时清空预览并拒绝迟到文件，截断预览仍可下载目录中的完整原文件", async () => {
   const pendingFile = deferred(); let available = true;
   const ui = await setup({ files: () => ({ files: available ? [{ path: "removed.txt", size: 20 }] : [] }), file: () => pendingFile.promise });
   await ui.openArtifacts();
@@ -641,24 +661,80 @@ test("选中文件消失时清空预览并拒绝迟到文件，截断内容不�
     file: () => ({ path: "large.html", content: "部分内容", truncated: true }) });
   await truncated.openArtifacts();
   assert.equal(truncated.get("agent-file-content").children[0].tag, "pre");
-  assert.equal(truncated.get("agent-file-download").hidden, true);
+  assert.equal(truncated.get("agent-file-download").hidden, false);
+  assert.equal(truncated.get("agent-file-download").textContent, "下载当前文件");
   await truncated.click("agent-file-download");
-  assert.equal(truncated.downloads.length, 0);
+  assert.equal(truncated.downloads.length, 1); assert.equal(await truncated.urls[0].text(), "完整工作目录原文件");
+  assert.deepEqual(truncated.requests.find((item) => item.method === "downloadFile").args, ["one", "large.html"]);
 });
 
-test("完整网页使用隔离预览，下载文件后释放 URL", async () => {
+test("工作目录网页使用隔离预览，下载当前原文件而非脱敏预览并释放URL", async () => {
   const ui = await setup({ files: () => ({ files: [{ path: "报告/page.html", size: 50 }] }),
-    file: () => ({ path: "报告/page.html", content: "<p>成果</p>", truncated: false }) });
+    file: () => ({ path: "报告/page.html", content: "<p>成果</p>", truncated: false }),
+    downloadFile: () => new Blob(["<p>完整原文件</p>"]) });
   await ui.openArtifacts();
   const frame = ui.get("agent-file-content").children[0];
   assert.equal(frame.tag, "iframe");
   assert.equal(frame.attributes.get("sandbox"), "");
   assert.equal(frame.attributes.get("referrerpolicy"), "no-referrer");
+  assert.equal(ui.get("agent-file-download").hidden, false);
+  assert.match(ui.get("agent-file-info").textContent, /工作目录预览.*可能已脱敏/);
   await ui.click("agent-file-download");
-  assert.equal(ui.downloads[0].download, "page.html");
-  assert.equal(ui.downloads[0].parent, ui.get("agent-file-dialog"));
-  ui.timers[0]();
-  assert.equal(ui.urls.at(-1), "blob:1");
+  assert.equal(ui.downloads[0].download, "page.html"); assert.equal(ui.downloads[0].parent, ui.get("agent-file-dialog"));
+  assert.equal(await ui.urls[0].text(), "<p>完整原文件</p>");
+  ui.timers.at(-1)(); assert.equal(ui.urls.at(-1), "blob:1");
+});
+
+test("任务快照预览截断仍能下载完整原字节，工作目录同名刷新不改变任务绑定", async () => {
+  const pending = deferred(), original = "原始字节😀\r\n".repeat(10_000);
+  const ui = await setup({ files: () => ({ files: [{ path: "reports/result.csv", size: 10 }] }),
+    artifactPreview: () => pending.promise, downloadArtifact: () => new Blob([original]) });
+  await ui.emit("neuma:agent-task-artifact-open", { agentId: "one", taskId: "task_old", index: 1, artifact: { path: "reports/result.csv" } });
+  assert.equal(ui.get("agent-file-dialog").open, true);
+  assert.match(ui.get("agent-file-info").textContent, /正在读取任务产物预览/);
+  assert.equal(ui.get("agent-file-content").attributes.get("aria-busy"), "true");
+  assert.equal(ui.get("agent-file-download").hidden, false);
+  pending.resolve({ path: "reports/result.csv", content: "已脱敏的截断预览", truncated: true }); await settle();
+  assert.match(ui.get("agent-file-info").textContent, /任务快照预览.*仅展示部分.*下载获取本次任务的完整/);
+  await ui.emit("neuma:agent-artifacts-changed", { agentId: "one" }); await settle();
+  assert.equal(ui.requests.filter((item) => item.method === "readFile").length, 0);
+  assert.equal(ui.get("agent-file-content").children[0].textContent, "已脱敏的截断预览");
+  await ui.click("agent-file-download");
+  assert.equal(await ui.urls[0].text(), original);
+  assert.equal(ui.downloads[0].download, "result.csv"); assert.equal(ui.downloads[0].parent, ui.get("agent-file-dialog"));
+  assert.deepEqual(ui.requests.find((item) => item.method === "downloadArtifact").args, ["one", "task_old", 1]);
+  ui.timers.at(-1)(); assert.equal(ui.urls.at(-1), "blob:1");
+});
+
+test("任务产物预览和下载失败可重试，下载期间阻止重复并恢复键盘焦点", async () => {
+  const download = deferred(); let attempts = 0;
+  const ui = await setup({ artifactPreview: () => Promise.reject(new Error("不能进行文本预览，请下载原文件")),
+    downloadArtifact: () => ++attempts === 1 ? download.promise : new Blob(["原始二进制"]) });
+  const trigger = ui.document.createElement("button"); trigger.focus();
+  await ui.emit("neuma:agent-task-artifact-open", { agentId: "one", taskId: "task_binary", index: 0, artifact: { path: "result.bin" } }); await settle();
+  assert.match(ui.get("agent-file-info").textContent, /不能进行文本预览/);
+  assert.equal(ui.get("agent-file-download").hidden, false);
+  const first = ui.get("agent-file-download").click(); await settle();
+  assert.equal(ui.get("agent-file-download").disabled, true);
+  assert.equal(ui.get("agent-file-download").attributes.get("aria-busy"), "true");
+  await ui.get("agent-file-download").click(); assert.equal(attempts, 1);
+  download.reject(new Error("任务产物暂时不可读")); await first;
+  assert.match(ui.get("agent-file-info").textContent, /任务产物暂时不可读/);
+  assert.equal(ui.get("agent-file-download").disabled, false);
+  await ui.click("agent-file-download"); assert.equal(ui.downloads.length, 1);
+  await ui.click("agent-file-close"); assert.equal(ui.document.activeElement, trigger);
+});
+
+test("关闭产物预览或切换智能体后，迟到任务预览和下载不能弹出旧文件", async () => {
+  const preview = deferred(), download = deferred();
+  const ui = await setup({ artifactPreview: () => preview.promise, downloadArtifact: () => download.promise });
+  await ui.emit("neuma:agent-task-artifact-open", { agentId: "one", taskId: "task_old", index: 0, artifact: { path: "old.csv" } });
+  const pending = ui.get("agent-file-download").click();
+  await ui.route("two");
+  preview.resolve({ path: "old.csv", content: "迟到预览", truncated: false }); download.resolve(new Blob(["迟到文件"]));
+  await pending; await settle();
+  assert.equal(ui.downloads.length, 0); assert.equal(ui.get("agent-file-dialog").open, false);
+  await ui.openArtifacts(); assert.notEqual(ui.get("agent-file-name").textContent, "old.csv");
 });
 
 test("产物先展开设置侧栏再打开文件库，默认预览最新文件并保留各 Agent 的选择", async () => {

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "./agent-storage.mjs";
+import { textWithinLimit } from "../runtime/text-length.mjs";
+import { assertRequirementDraftSize, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS, REQUIREMENT_RECORD_MAX_BYTES } from "../requirements/requirement-limits.mjs";
 
 export const CONVERSATION_BYTES = 8 * 1024 * 1024;
 export const CONVERSATION_SCHEMA_VERSION = 4;
@@ -49,11 +51,14 @@ function conversationSize(value) {
 
 function requirement(id, value) {
   agentId(id);
-  if (!value || typeof value.name !== "string" || !value.name.trim() || value.name.length > 120
+  if (!value || typeof value.name !== "string" || !value.name.trim() || !textWithinLimit(value.name, REQUIREMENT_NAME_MAX_CHARACTERS)
     || !value.draft || typeof value.draft !== "object" || Array.isArray(value.draft)
     || typeof value.draft.goal?.value !== "string" || !value.draft.goal.value.trim()
-    || JSON.stringify(value.draft).length > 60000 || (value.importOnly !== undefined && typeof value.importOnly !== "boolean"))
+    || (value.importOnly !== undefined && typeof value.importOnly !== "boolean"))
     throw new InputError("请提供有效的 Agent 名称与需求");
+  try { assertRequirementDraftSize(value.draft); }
+  catch (error) { throw Object.assign(new InputError(error.reason ? error.message : "需求格式无效"),
+    error.reason ? { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes } : {}); }
   if (value.updatedAt !== undefined && !Number.isFinite(Date.parse(value.updatedAt))) throw new InputError("需求保存时间无效");
   return { id, name: value.name.trim(), draft: structuredClone(value.draft), updatedAt: value.updatedAt ?? new Date().toISOString() };
 }
@@ -65,7 +70,7 @@ function conversation(value, legacy = true) {
   const messages = value.messages.map((item) => {
     const attachments = normalizeAttachmentRefs(item?.attachments);
     if (!item || !["user", "assistant"].includes(item.role) || typeof item.content !== "string"
-      || (item.role === "user" ? item.content.length > 4000 : legacy && item.content.length > 32000)
+      || (item.role === "user" ? !textWithinLimit(item.content, REQUIREMENT_MESSAGE_MAX_CHARACTERS) : legacy && !textWithinLimit(item.content, 32000))
       || (item.role === "user" && !item.content.trim() && !attachments.length)
       || (attachments.length && (item.role !== "user" || value.schemaVersion !== CONVERSATION_SCHEMA_VERSION)))
       throw new InputError("保存对话内容无效");
@@ -160,7 +165,9 @@ export class AgentLibrary {
       const consultation = metadata.consultation ?? preserved.consultation;
       const saved = { ...value, ...(confirmationReceipt ? { confirmationReceipt: structuredClone(confirmationReceipt) } : {}),
         ...(consultation ? { consultation: structuredClone(consultation) } : {}) };
-      if (Buffer.byteLength(JSON.stringify(saved)) > 2 * 1024 * 1024) throw new InputError("需求协商记录超过保存上限");
+      const bytes = Buffer.byteLength(JSON.stringify(saved, null, 2), "utf8");
+      if (bytes > REQUIREMENT_RECORD_MAX_BYTES) throw Object.assign(new InputError("需求与协商记录超过 8 MiB 保存上限；原记录保留，请整理历史协商后继续"),
+        { reason: "requirement_record_too_large", bytes, limitBytes: REQUIREMENT_RECORD_MAX_BYTES });
       await this.storage.writeJson(id, "requirements.json", saved);
       return { requirement: structuredClone(value) };
     });

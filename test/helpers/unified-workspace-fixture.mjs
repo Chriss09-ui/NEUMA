@@ -89,7 +89,11 @@ export async function startUnifiedWorkspaceFixture({ port = 4372 } = {}) {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: JSON.stringify(result) }, finish_reason: "stop" }] })); return;
       }
-      if (names.includes("submit_architecture")) {
+      if (names.includes("submit_requirement_route")) {
+        role = "requirement-routing"; name = "submit_requirement_route";
+        args = { route: "continue", quote: "" };
+        assert.deepEqual(names, ["submit_requirement_route"], "需求寻址不暴露业务工具");
+      } else if (names.includes("submit_architecture")) {
         role = "designer"; name = "submit_architecture";
         args = validDesign(payload.requirements, { capabilities: fileCapabilities,
           schemaVersion: 3,

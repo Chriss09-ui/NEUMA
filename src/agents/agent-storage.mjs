@@ -4,6 +4,8 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm } from "node:f
 import { dirname, join, resolve } from "node:path";
 import { InputError } from "../requirements/core.mjs";
 import { hashValue } from "../development/development-contract.mjs";
+import { assertRequirementDraftSize } from "../requirements/requirement-limits.mjs";
+import { textWithinLimit } from "../runtime/text-length.mjs";
 
 const migrations = new Map();
 const MARKER = "agents-layout.json";
@@ -35,19 +37,39 @@ async function ensureDirectory(path) {
   }
 }
 
+async function checkAtomicReplacement(path, previous, attempt, maxBytes) {
+  const replacement = await lstat(path);
+  if (!replacement.isFile() || replacement.isSymbolicLink() || replacement.nlink !== 1
+    || replacement.dev !== previous.dev || replacement.ino === previous.ino)
+    throw new InputError("Agent 数据只允许普通文件，不允许链接");
+  if (replacement.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+  if (attempt >= 2) throw new InputError("Agent 数据读取期间连续更新，请稍后重试");
+}
+
 async function readFile(path, maxBytes = Infinity) {
-  const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new InputError("Agent 数据只允许普通文件，不允许链接");
-  if (info.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const current = await handle.stat();
-    if (!current.isFile() || current.nlink !== 1) throw new InputError("Agent 数据只允许普通文件");
-    if (current.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
-    const content = await handle.readFile();
-    if (content.length > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
-    return content;
-  } finally { await handle.close(); }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const info = await lstat(path);
+    // A path stat can also finish against an inode unlinked by atomic rename.
+    if (info.isFile() && !info.isSymbolicLink() && info.nlink === 0) {
+      await checkAtomicReplacement(path, info, attempt, maxBytes); continue;
+    }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new InputError("Agent 数据只允许普通文件，不允许链接");
+    if (info.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const current = await handle.stat();
+      // An atomic JSON replacement can unlink the already-open old inode. Reopen
+      // only when the path now names a distinct, ordinary, singly-linked file.
+      if (current.isFile() && current.nlink === 0) {
+        await checkAtomicReplacement(path, current, attempt, maxBytes); continue;
+      }
+      if (!current.isFile() || current.nlink !== 1) throw new InputError("Agent 数据只允许普通文件");
+      if (current.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+      const content = await handle.readFile();
+      if (content.length > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+      return content;
+    } finally { await handle.close(); }
+  }
 }
 
 async function readJson(path, maxBytes) {
@@ -158,18 +180,20 @@ async function migrate(dataDir, legacyDataDir = dataDir) {
   };
   for (const agent of definitions?.agents ?? []) {
     const item = recordFor(agent?.id);
-    if (item.definition || typeof agent.name !== "string" || !agent.name.trim() || agent.name.length > 120
+    if (item.definition || typeof agent.name !== "string" || !agent.name.trim() || !textWithinLimit(agent.name, 120)
       || typeof agent.draft?.goal?.value !== "string" || !agent.draft.goal.value.trim()
-      || typeof agent.instructions !== "string" || !agent.instructions.trim() || agent.instructions.length > 12000
+      || typeof agent.instructions !== "string" || !agent.instructions.trim() || !textWithinLimit(agent.instructions, 12000)
       || !Number.isSafeInteger(agent.revision) || agent.revision < 1
-      || !agent.draft || Array.isArray(agent.draft) || JSON.stringify(agent.draft).length > 60000
-      || (agent.memory !== undefined && (typeof agent.memory !== "string" || agent.memory.length > 12000 || agent.memory.includes("\0"))))
+      || !agent.draft || Array.isArray(agent.draft)
+      || (agent.memory !== undefined && (typeof agent.memory !== "string" || !textWithinLimit(agent.memory, 12000) || agent.memory.includes("\0"))))
       throw new InputError("旧 Agent 定义格式无效，原文件保留");
+    try { assertRequirementDraftSize(agent.draft); }
+    catch (error) { throw Object.assign(new InputError(error.message), { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes }); }
     const profile = agent.profile;
     if (profile !== undefined && (!profile || typeof profile !== "object" || Array.isArray(profile)
-      || typeof profile.name !== "string" || !profile.name.trim() || profile.name.length > 120 || profile.name.includes("\0")
-      || typeof profile.description !== "string" || profile.description.length > 240 || profile.description.includes("\0")
-      || typeof profile.icon !== "string" || profile.icon.length > 16 || profile.icon.includes("\0")))
+      || typeof profile.name !== "string" || !profile.name.trim() || !textWithinLimit(profile.name, 120) || profile.name.includes("\0")
+      || typeof profile.description !== "string" || !textWithinLimit(profile.description, 240) || profile.description.includes("\0")
+      || typeof profile.icon !== "string" || !textWithinLimit(profile.icon, 16) || profile.icon.includes("\0")))
       throw new InputError("旧 Agent 展示资料格式无效，原文件保留");
     item.definition = agent;
   }

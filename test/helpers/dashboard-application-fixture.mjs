@@ -129,12 +129,19 @@ export async function startDashboardApplicationModel() {
         const calls = body.messages.flatMap(message => message.tool_calls ?? []);
         if (names.includes("submit_architecture")) { name = "submit_architecture"; args = dashboardApplicationDesign(payload.requirements); }
         else if (names.includes("submit_architecture_review")) { name = "submit_architecture_review"; args = passingReview(payload.candidateHash); }
-        else if (names.includes("submit_development_plan")) { name = "submit_development_plan"; args = dashboardApplicationPlan(payload.requirements, payload.design); }
+        else if (names.includes("submit_development_plan")) {
+          const { cases, ...index } = dashboardApplicationPlan(payload.requirements, payload.design);
+          const files = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
+          const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
+          const path = Object.keys(files).find(path => !written.has(path));
+          if (path) { name = "write"; args = { path, content: JSON.stringify(files[path], null, 2) }; }
+          else { name = "submit_development_plan"; args = { indexPath: "index.json" }; }
+        }
         else if (names.includes("submit_development_review")) { name = "submit_development_review"; args = { subjectHash: payload.subjectHash, verdict: "pass", issues: [], summary: "固定看板验收的本机模拟评审，实际隔离用例已执行" }; }
         else if (names.includes("submit_development_work")) {
-          const written = new Set(calls.filter(call => call.function.name === "write_code_file").map(call => JSON.parse(call.function.arguments).path));
+          const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
           const path = Object.keys(DASHBOARD_APPLICATION_FILES).find(path => !written.has(path));
-          if (path) { name = "write_code_file"; args = { path, content: DASHBOARD_APPLICATION_FILES[path] }; }
+          if (path) { name = "write"; args = { path, content: DASHBOARD_APPLICATION_FILES[path] }; }
           else { name = "submit_development_work"; args = { summary: "看板与动作已实现，提交隔离验收", changedFiles: Object.keys(DASHBOARD_APPLICATION_FILES), knownIssues: [], nextAction: "", continue: false }; }
         } else throw new Error("unsupported_dashboard_fixture_role");
       }

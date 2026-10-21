@@ -7,6 +7,7 @@ import { avatarColors, avatarIcon, installAvatarMotion, renderAgentAvatar, resol
 import { conversationDate } from "../public/group-view.js";
 import { createSidebarHistory } from "../public/sidebar-history.js";
 import { activateApplicationContext, setApplicationContext, releaseApplicationContext, getApplicationContext } from "../public/application-context.js";
+import { activeApplicationResult } from "./helpers/active-application.mjs";
 
 const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-details-view.js", "agent-build-view.js", "agent-conversations.js", "agent-attachments.js", "agents.js"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")))).map((text) =>
@@ -426,6 +427,20 @@ const developmentResult = (record, overrides = {}) => ({ agent: null, architectu
   development: record, ...overrides });
 const treeText = (node) => [node.textContent, ...node.children.map(treeText)].join(" ");
 const developmentButton = (ui) => ui.get("agent-making-content").children[0]?.children.at(-1).children.at(-1);
+
+test("规划耗尽不在刷新时自动补额度，明确点击新一轮才请求新批次", async () => {
+  const saved = developmentRecord({ status: "failed", phase: "planning", tasks: [], currentTaskId: null, package: null,
+    continuation: { mode: "fresh", sourceRunId: "dev-one" } });
+  const next = { ...saved, id: "dev-two", continuation: { mode: "fresh", sourceRunId: "dev-two" } };
+  const ui = await setup({ inspect: () => Response.json(developmentResult(saved)),
+    develop: (body) => { assert.equal(body.resume, false); return Response.json(developmentResult(next)); } });
+  assert.equal(developmentButton(ui).textContent, "新一轮研发");
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/development/stream")), false);
+  await developmentButton(ui).click();
+  assert.equal(ui.requests.filter((request) => request.path.endsWith("/development/stream")).length, 1);
+  assert.equal(ui.runtime().development.id, "dev-two");
+  assert.equal(developmentButton(ui).textContent, "新一轮研发");
+});
 const avatarTargets = (ui) => [ui.sidebar("one").icon,
   ui.get("agent-messages").children[0].children[0], ui.get("agent-icon")];
 const treeNodes = (node) => [node, ...node.children.flatMap(treeNodes)];
@@ -940,7 +955,8 @@ test("构建返回待补充或需要研发时保留旧定义、展示原因并�
     assert.equal(ui.get("agent-send").disabled, true);
     assert.equal(ui.get("agent-error").hidden, true);
     assert.match(ui.get("agent-runtime-status").textContent, label);
-    assert.match(ui.get("agent-runtime-status").textContent, /缺少资料来源依据.*请补充来源/);
+    assert.doesNotMatch(ui.get("agent-runtime-status").textContent, /缺少资料来源依据|请补充来源/);
+    assert.deepEqual(ui.runtime().architecture.issues, result.architecture.issues);
     assert.equal(ui.runtimeEvents.at(-1).ready, false);
     const refreshed = await setup({ inspect: () => Response.json(result) });
     assert.equal(refreshed.runtime().status, expected);
@@ -1783,6 +1799,22 @@ test("升级失败保留已激活对话入口，可查看最新失败进度再�
   assert.equal(ui.get("agent-conversation").hidden, false);
   assert.equal(ui.get("agent-message").value, "旧版下一条任务");
   assert.equal(ui.get("agent-send").disabled, false);
+});
+
+test("无页面活动应用仅接口待配时直接聊天，配置入口打开服务设置且不重启研发", async () => {
+  const result = activeApplicationResult(requirements[0]);
+  const ui = await setup({ inspect: () => Response.json(result) });
+  assert.equal(ui.runtime().status, "ready"); assert.equal(ui.get("agent-making-panel").hidden, true);
+  assert.equal(ui.get("agent-conversation").hidden, false); assert.equal(ui.get("agent-send").disabled, false);
+  assert.equal(ui.runtimeEvents.at(-1).configurationAction, "配置本机接口");
+  assert.equal(ui.runtimeEvents.at(-1).developmentAction, null);
+  const opened = [];
+  ui.document.addEventListener("neuma:agent-services-open", (event) => opened.push(event.detail.agentId));
+  await ui.emit("neuma:agent-develop", { id: "one" });
+  assert.deepEqual(opened, ["one"]);
+  assert.equal(ui.requests.some((request) => request.path.endsWith("/development/stream")), false);
+  await ui.submit("处理当前材料");
+  assert.equal(ui.requests.some((request) => request.path === "/api/agents/turn"), true);
 });
 
 test("已有版本的后台升级保留入口，但在构建锁期间暂停新提交", async () => {
