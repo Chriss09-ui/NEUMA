@@ -1,0 +1,53 @@
+{
+  "provenance": {
+    "kind": "deidentified-public-record-excerpts",
+    "recordedAt": "2026-10-21",
+    "scope": "从已保存的公开方案和工具提交抽取最小文字片段；不是完整模型请求，不包含思考、凭据或缺失的最终评审。",
+    "sourceArtifacts": ["01_离线首包与反馈核对.json", "05_历史错误建议与评审证据.json"]
+  },
+  "latestFailure": {
+    "plan": null,
+    "reviews": [],
+    "reports": [],
+    "feedback": { "reason": "工作区与最近检查点不同，已保留实际改动，必须重新验证" }
+  },
+  "historicalOpinions": [
+    {
+      "runVersion": 21,
+      "id": "mock_placeholder_unsupported",
+      "blocking": true,
+      "descriptionExcerpt": "能力替身按 capability 与展开后 args 严格深相等匹配，argsJson 仅支持 <computed-result-json>、<computed-result-json-sha256>、<computed-csv-content>、<computed-csv-content-sha256> 四个受支持占位符，其余普通字符串按字面值匹配，不支持 <computed-...> 通配或任意自造占位。",
+      "remedyExcerpt": "将所有 files.write mock 的 argsJson 统一改为受支持占位符"
+    },
+    {
+      "runVersion": 22,
+      "id": "mock_placeholder_not_supported_for_files_write",
+      "blocking": true,
+      "descriptionExcerpt": "平台能力替身按 capability 与展开后 args 严格深相等匹配，不支持 `<computed-...>`、通配符或动态内容占位；`<json>`/`<csv>` 只能按字面值匹配。",
+      "remedyExcerpt": "把上述 8 个用例的 files.write mock 一律改为受支持的占位符"
+    }
+  ],
+  "unchangedDecision": {
+    "oldId": "D8_placeholder_mock_integrity",
+    "newId": "D9_placeholder_mock_integrity",
+    "problem": "研发用例 files.write 替身参数与回执必须严格深相等匹配，且需证明产物完整性核对分支被执行。",
+    "choice": "result.json 写入 mock argsJson 的 content 用占位符 <computed-result-json>、result.csv 用 <computed-csv-content>；回执 integrity.sha256 分别用 <computed-result-json-sha256>/<computed-csv-content-sha256>，integrity 键形状保留 sha256/bytes/utf16Units；harness 按公开夹具展开后与生成代码实际写入文本深相等比较，研发报告记录实测 bytes/utf16Units。",
+    "reason": "受支持占位符由 harness 深相等比较真实写入内容，既符合严格匹配规则，又可在研发报告留下实测完整性数据。"
+  },
+  "executionSamples": [
+    {
+      "id": "normal",
+      "input": { "records": [{ "approved": true, "amountCents": 1234 }, { "approved": false, "amountCents": 5678 }] },
+      "result": { "approvedCount": 1, "approvedAmountCents": 1234, "unapprovedCount": 1 },
+      "jsonContent": "{\"approvedCount\":1,\"approvedAmountCents\":1234,\"unapprovedCount\":1}",
+      "csvContent": "approvedCount,approvedAmountCents,unapprovedCount\n1,1234,1\n"
+    },
+    {
+      "id": "changed_input",
+      "input": { "records": [{ "approved": true, "amountCents": 99 }, { "approved": true, "amountCents": 301 }] },
+      "result": { "approvedCount": 2, "approvedAmountCents": 400, "unapprovedCount": 0 },
+      "jsonContent": "{\"approvedCount\":2,\"approvedAmountCents\":400,\"unapprovedCount\":0}",
+      "csvContent": "approvedCount,approvedAmountCents,unapprovedCount\n2,400,0\n"
+    }
+  ]
+}

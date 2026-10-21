@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import Ajv from "ajv";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -8,8 +9,11 @@ import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
 import { createPiSession } from "../src/runtime/pi-runtime.mjs";
 import { CAPABILITY_CATALOG_VERSION, CAPABILITIES, capabilitySnapshotCompatible, designHash } from "../src/architecture/architecture-contract.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
-import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
+import { validDraft, validDesign, passingReview, withPriorFindingDecisions } from "./helpers/architecture.mjs";
 import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
+import { ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contract.mjs";
+import { fidelityChecker } from "./helpers/fidelity.mjs";
+import { architectureReviewEvidenceContext } from "../src/architecture/architecture-review-evidence.mjs";
 
 const definition = (id = "weekly") => ({ id, name: "周报助手", draft: validDraft(), fingerprint: "requirements-v1" });
 const submissionNames = { designer: "submit_architecture", reviewer: "submit_architecture_review", specialist: "submit_module_design" };
@@ -26,10 +30,14 @@ function factory(records, onPrompt) {
       messages: [],
       subscribe(fn) { listener = fn; return () => { listener = null; }; },
       async prompt(message) {
+        const firstPrompt = record.payload === undefined;
         record.payload = JSON.parse(message);
+        if (firstPrompt) assert.equal(options.reasoningMode,
+          role === "reviewer" || role === "designer" && record.payload.editableSubmission
+            || role === "specialist" && records.findLast((item) => item.role === "designer")?.options.reasoningMode === "off" ? "off" : "auto");
         if (onPrompt) return onPrompt({ record, session, submit, emit: (event) => listener?.(event) });
         if (role === "designer") return submit(validDesign(record.payload.requirements));
-        if (role === "reviewer") return submit(passingReview(record.payload.candidateHash));
+        if (role === "reviewer") return submit(passingReview(record.payload.candidateHash, record.payload.design));
         throw new Error("测试未请求局部专员");
       },
       async abort() { record.aborted = true; record.release?.(); },
@@ -45,6 +53,7 @@ async function fixture(t, options = {}) {
   const researchCalls = [];
   const config = { config: { llmConfigured: true }, cwd: root, dataDir: join(root, "data"),
     sessionFactory: factory(sessions, options.onPrompt),
+    fidelitySessionFactory: fidelityChecker(),
     research: { async search(...args) { researchCalls.push(args); return { sources: [], gaps: [] }; } },
     ...options };
   delete config.onPrompt;
@@ -59,6 +68,30 @@ function deferred() {
   return { promise, resolve };
 }
 
+function currentDesign(requirements) {
+  return validDesign(requirements, { schemaVersion: 3, connections: [],
+    interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "工作记录", results: "完整周报", persistentData: "无跨任务持久数据" },
+    execution: { language: "none", hosting: "builtin", reason: "使用已有文本能力" },
+    selectionBasis: { capacity: "当前明确文本输入", process: "按已确认规则整理", quality: "覆盖全部进展且不编造",
+      requirementIds: requirements.map((item) => item.id), assumptions: [] } });
+}
+
+function currentReview(candidateHash, revise = false, candidate, prior) {
+  const value = passingReview(candidateHash, candidate);
+  value.checks.push(...["requirement_sufficiency", "acceptance_quality"].filter((id) => !value.checks.some((item) => item.id === id)).map((id) => ({ id, passed: true, evidence: "逐项核对当前需求和验收" })));
+  if (revise) {
+    value.verdict = "revise";
+    value.checks.find((item) => item.id === "verification").passed = false;
+    value.issues = [{ id: "acceptance_precision", blocking: true, description: "验收仍需明确边界", remedy: "补充当前方案的边界预期",
+      checkId: "verification", kind: "design", candidatePaths: ["/acceptance/2/expected"],
+      references: [{ source: "candidate", path: "/acceptance/2/expected", quote: "尚未发送" }], factClaims: [] }];
+  }
+  return withPriorFindingDecisions(value, prior);
+}
+
+const historicalModule = (evidenceIds) => ({ assignment: { question: "核对边界", boundary: "仅本模块", benefit: "避免遗漏" },
+  result: { proposal: "按已确认字段核对", interfaces: "固定输入输出", tradeoffs: "采用当前最小方式", evidenceIds, unknowns: [] } });
+
 test("默认只创建两个隔离角色，不搜索或委派；评估通过仍需真实执行定义交付", async (t) => {
   const { designer, sessions, researchCalls, config } = await fixture(t);
   const result = await designer.design(definition());
@@ -68,10 +101,15 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   assert.deepEqual(result.capabilitySnapshot, CAPABILITIES);
   assert.equal(capabilitySnapshotCompatible(result), true);
   assert.deepEqual(sessions.map((item) => item.role), ["designer", "reviewer"]);
+  assert.deepEqual(sessions.map((item) => item.options.reasoningMode), ["auto", "off"]);
+  assert.doesNotMatch(sessions[1].options.systemPrompt, /当前批保存义务/u);
   assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [8192, 4096]);
   assert.notEqual(sessions[0].session, sessions[1].session);
-  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture"]);
-  assert.deepEqual(Object.keys(sessions[1].tools), ["request_requirements", "submit_architecture_review"]);
+  assert.deepEqual(sessions[0].payload.candidateSchema, sessions[0].tools.submit_architecture.parameters);
+  assert.deepEqual(sessions[1].payload.candidateSchema, sessions[0].tools.submit_architecture.parameters);
+  for (const session of sessions) assert.deepEqual(session.payload.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
+  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
+  assert.deepEqual(Object.keys(sessions[1].tools), ["request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.deepEqual(researchCalls, []); assert.deepEqual(result.modules, []);
   assert.ok(sessions.every((item) => item.disposed));
   const ready = await designer.markReady(result);
@@ -88,7 +126,7 @@ test("独立评估拒绝时只允许一次带问题的局部修订，耗尽不�
       candidate.instructions += ` 修订编号 ${designs++}`;
       return submit(candidate);
     }
-    const review = passingReview(record.payload.candidateHash);
+    const review = passingReview(record.payload.candidateHash, record.payload.design);
     review.verdict = "revise";
     review.checks.find((item) => item.id === "verification").passed = false;
     review.issues = [{ id: "acceptance_precision", blocking: true, description: "验收条件还不够明确", remedy: "只补充验收中的具体预期" }];
@@ -103,16 +141,393 @@ test("独立评估拒绝时只允许一次带问题的局部修订，耗尽不�
   assert.deepEqual(sessions[2].payload.previousDesign, result.attempts[0].design);
   assert.ok(sessions[2].payload.issues.some((item) => item.id === "acceptance_precision"));
   assert.equal(sessions[2].payload.remaining.revisions, 0);
+  assert.equal(sessions[0].tools.submit_architecture.parameters, sessions[2].tools.submit_architecture.parameters,
+    "同次build的修订复用同一个提交schema对象");
+  assert.deepEqual(sessions[3].payload.candidateSchema, sessions[2].tools.submit_architecture.parameters);
   assert.notEqual(result.attempts[0].candidateHash, result.attempts[1].candidateHash);
   assert.ok(result.attempts.every((item) => item.review.candidateHash === item.candidateHash));
   await assert.rejects(designer.markReady(result), InputError);
+});
+
+test("同绑定needs_changes再次构建续接候选与问题，新版本仍从空评审和新预算独立检查", async (t) => {
+  let build = 1, designs = 0, previous;
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "designer") {
+      if (build === 2) {
+        assert.deepEqual(record.payload.previousDesign, previous.design);
+        assert.deepEqual(record.payload.issues, previous.issues);
+        assert.equal(record.payload.revisionSource.version, previous.version);
+        assert.equal(record.payload.revisionSource.historicalOnly, true);
+        assert.match(record.payload.revisionSource.issueScope, /不是新业务要求或授权/);
+        assert.equal(record.payload.remaining.revisions, 1);
+        const current = await designer.get("weekly");
+        assert.equal(current.design, null); assert.equal(current.candidateHash, null); assert.equal(current.review, null);
+        assert.deepEqual(current.attempts, []); assert.deepEqual(current.issues, []);
+      }
+      const candidate = currentDesign(record.payload.requirements); candidate.instructions += ` 候选${++designs}`;
+      return submit(candidate);
+    }
+    if (build === 2) assert.equal(Object.hasOwn(record.payload, "previousReview"), false);
+    return submit(currentReview(record.payload.candidateHash, build === 1, record.payload.design, record.payload.priorFindings));
+  } });
+  previous = await designer.design(definition()); assert.equal(previous.status, "needs_changes"); assert.equal(previous.attempts.length, 2);
+  const withModule = await designer.getVersion("weekly", previous.version);
+  withModule.modules = [historicalModule([withModule.evidence[0].id])];
+  withModule.researchGaps = ["来源已保存，业务边界仍待验证"];
+  await designer.save(withModule);
+  const storedPrevious = await designer.getVersion("weekly", previous.version);
+  build = 2;
+  const result = await designer.design(definition());
+  assert.equal(result.status, "passed"); assert.equal(result.version, previous.version + 1); assert.equal(result.attempts.length, 1);
+  assert.equal(result.review.candidateHash, result.candidateHash); assert.notEqual(result.candidateHash, previous.candidateHash);
+  assert.deepEqual(sessions[4].payload.modules, storedPrevious.modules);
+  assert.deepEqual(sessions[4].payload.researchGaps, storedPrevious.researchGaps);
+  assert.equal(sessions[4].payload.revisionSource.moduleCount, 1);
+  assert.deepEqual(await designer.getVersion("weekly", previous.version), storedPrevious);
+  assert.deepEqual(sessions.map((item) => item.role), ["designer", "reviewer", "designer", "reviewer", "designer", "reviewer"]);
+});
+
+function resealReviewEvidence(metadata) {
+  const { hash: _hash, ...body } = metadata.snapshot;
+  metadata.snapshot.hash = designHash(body); metadata.snapshotHash = metadata.snapshot.hash;
+}
+
+function withEarlierGuide(record, { retainExecutionFacts = false } = {}) {
+  const guide = structuredClone(ACCEPTANCE_ADAPTER_GUIDE);
+  if (retainExecutionFacts) {
+    delete guide.adapters.action.executionFacts.dynamicPlaceholders;
+    delete guide.adapters.action.executionFacts.fixtureConstruction;
+    for (const field of ["resultContract", "admissionContract", "expectedEvidence"]) delete guide.adapters["input-contract"].executionFacts[field];
+  } else for (const adapter of Object.values(guide.adapters)) { delete adapter.executionFacts; delete adapter.executionRule; }
+  const context = architectureReviewEvidenceContext({ design: record.design, requirements: record.requirements,
+    runtimeCapabilities: record.runtimeCapabilities, evidence: record.evidence, acceptanceAdapterGuide: guide,
+    confirmedRequirementContext: record.confirmedRequirementContext ?? null, deferredVerifications: record.deferredVerifications ?? null });
+  record.reviewEvidence.snapshot = { version: 1, candidateHash: record.candidateHash, platformHash: record.platformHash,
+    acceptanceAdapterGuide: guide, contextManifest: context.contextManifest };
+  resealReviewEvidence(record.reviewEvidence);
+  const reference = { source: "acceptanceAdapterGuide", path: retainExecutionFacts ? "/adapters/action/executionFacts" : "/adapters/action",
+    quote: JSON.stringify(retainExecutionFacts ? guide.adapters.action.executionFacts : guide.adapters.action) };
+  record.review.issues[0].references.push(reference);
+  record.issues.find((entry) => entry.id === record.review.issues[0].id).references.push(structuredClone(reference));
+  if (retainExecutionFacts) {
+    const inputReference = { source: "acceptanceAdapterGuide", path: "/adapters/input-contract/executionFacts",
+      quote: JSON.stringify(guide.adapters["input-contract"].executionFacts) };
+    record.review.issues[0].references.push(inputReference);
+    record.issues.find((entry) => entry.id === record.review.issues[0].id).references.push(structuredClone(inputReference));
+  }
+  Object.assign(record.attempts.at(-1), { review: structuredClone(record.review), issues: structuredClone(record.issues),
+    reviewEvidence: structuredClone(record.reviewEvidence) });
+  return record;
+}
+
+test("评审前封存精确guide及来源摘要，新添说明字段不破坏历史整对象引文而新候选仍独立评审", async (t) => {
+  let first = true, previous;
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "designer") {
+      if (!first) { assert.deepEqual(record.payload.previousDesign, previous.design); assert.deepEqual(record.payload.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE); }
+      return submit(currentDesign(record.payload.requirements));
+    }
+    const saved = await designer.get("weekly"), metadata = saved.reviewEvidence;
+    assert.equal(metadata.version, 2); assert.equal(metadata.snapshot.candidateHash, record.payload.candidateHash);
+    assert.deepEqual(metadata.snapshot.acceptanceAdapterGuide, record.payload.acceptanceAdapterGuide);
+    assert.deepEqual(metadata.snapshot.contextManifest, record.payload.contextManifest);
+    assert.deepEqual(Object.keys(record.payload.reviewContext).sort(), ["candidateHash", "platformHash"]);
+    return submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings));
+  } });
+  await designer.design(definition()); previous = withEarlierGuide(await designer.get("weekly")); await designer.save(previous);
+  const stored = await designer.get("weekly"); previous = stored; first = false;
+  assert.notEqual(JSON.stringify(previous.reviewEvidence.snapshot.acceptanceAdapterGuide.adapters.action), JSON.stringify(ACCEPTANCE_ADAPTER_GUIDE.adapters.action));
+  const result = await designer.design(definition());
+  assert.equal(result.status, "passed"); assert.equal(result.revisionSource.version, previous.version);
+  assert.equal(result.revisionSource.historicalOnly, true); assert.equal(result.attempts.length, 1);
+  assert.deepEqual(result.reviewEvidence.snapshot.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
+  assert.deepEqual(result.attempts[0].reviewEvidence, result.reviewEvidence);
+  assert.deepEqual(await designer.getVersion("weekly", previous.version), stored);
+  assert.equal(sessions.filter((item) => item.role === "reviewer").length, 3);
+});
+
+test("新增入口输出和fixture事实仍能只读回放旧guide整对象引文，当前两角色收到新同源事实", async (t) => {
+  let first = true, previous;
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+    return submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings));
+  } });
+  await designer.design(definition());
+  previous = withEarlierGuide(await designer.get("weekly"), { retainExecutionFacts: true }); await designer.save(previous);
+  const stored = await designer.get("weekly"); first = false;
+  const result = await designer.design(definition());
+  assert.equal(result.status, "passed"); assert.equal(result.revisionSource.version, stored.version);
+  assert.equal(result.platformHash, stored.platformHash); assert.deepEqual(result.runtimeCapabilities, stored.runtimeCapabilities);
+  assert.deepEqual(await designer.getVersion("weekly", stored.version), stored);
+  const roles = sessions.slice(-2);
+  assert.deepEqual(roles.map((item) => item.role), ["designer", "reviewer"]);
+  assert.deepEqual(roles[0].payload.previousDesign, stored.design);
+  for (const role of roles) {
+    assert.deepEqual(role.payload.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
+    assert.equal(role.payload.acceptanceAdapterGuide.adapters.action.executionFacts.dynamicPlaceholders, false);
+    assert.deepEqual(role.payload.acceptanceAdapterGuide.adapters["input-contract"].executionFacts.resultContract.value,
+      { rejected: true, reason: "input_contract_rejected" });
+  }
+});
+
+test("历史guide快照的摘要、候选、平台、来源manifest或必需快照损坏均失败关闭", async (t) => {
+  for (const mutate of [
+    (metadata) => { metadata.snapshot.acceptanceAdapterGuide.adapters.action.proves += " 未经保存的新原文"; },
+    (metadata) => { metadata.snapshot.hash = "0".repeat(64); },
+    (metadata) => { metadata.snapshot.candidateHash = "0".repeat(64); resealReviewEvidence(metadata); },
+    (metadata) => { metadata.snapshot.platformHash = "0".repeat(64); resealReviewEvidence(metadata); },
+    (metadata) => { metadata.snapshot.contextManifest.acceptanceAdapterGuide.sha256 = "0".repeat(64); resealReviewEvidence(metadata); },
+    (metadata) => { metadata.snapshot.version = 2; resealReviewEvidence(metadata); },
+    (metadata) => { delete metadata.snapshot; },
+  ]) {
+    let first = true;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => record.role === "designer"
+      ? submit(currentDesign(record.payload.requirements)) : submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings)) });
+    await designer.design(definition()); const broken = await designer.get("weekly"); mutate(broken.reviewEvidence);
+    broken.attempts.at(-1).reviewEvidence = structuredClone(broken.reviewEvidence); await designer.save(broken);
+    const before = await designer.get("weekly"); first = false;
+    const result = await designer.design(definition()); assert.equal(result.status, "passed");
+    assert.equal(sessions.at(-2).payload.previousDesign, null); assert.equal(result.revisionSource, undefined);
+    assert.deepEqual(await designer.getVersion("weekly", broken.version), before);
+  }
+});
+
+test("旧记录缺快照仅在现有原文仍可核时兼容，不从旧引文逆造guide", async (t) => {
+  for (const changedGuide of [false, true]) {
+    let first = true;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => record.role === "designer"
+      ? submit(currentDesign(record.payload.requirements)) : submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings)) });
+    await designer.design(definition()); const old = await designer.get("weekly"); if (changedGuide) withEarlierGuide(old);
+    old.reviewEvidence = { version: 1, runtimeCapabilityHash: old.runtimeCapabilities.hash };
+    for (const attempt of old.attempts) attempt.reviewEvidence = structuredClone(old.reviewEvidence);
+    await designer.save(old); const before = await designer.get("weekly"); first = false;
+    const result = await designer.design(definition()); assert.equal(result.status, "passed");
+    assert.equal(Boolean(sessions.at(-2).payload.previousDesign), !changedGuide);
+    assert.deepEqual(await designer.getVersion("weekly", old.version), before);
+  }
+});
+
+test("跨构建续接条件任一不符均从空候选开始，旧记录不被修改或当作本轮通过", async (t) => {
+  const mutations = [
+    (value) => { value.status = "failed"; },
+    (value) => { value.sourceFingerprint = "other"; },
+    (value) => { value.draft.task.value += " 实际任务变更但伪装相同fingerprint"; },
+    (value) => { value.requirements[0].text += " 变更"; },
+    (value) => { value.platformHash = "0".repeat(64); },
+    (value) => { value.contractVersion = 2; },
+    (value) => { value.confirmedRequirementContext = { hash: "a".repeat(64), sourceQuotes: [] }; },
+    (value) => { value.deferredVerifications = { hash: "b".repeat(64), issues: [] }; },
+    (value) => { value.design.instructions += " 未重算摘要"; },
+    (value) => { value.review.candidateHash = "c".repeat(64); },
+    (value) => { value.issues[0].description += " 不对应最后评审"; },
+    (value) => { value.attempts = []; },
+    (value) => { value.modules = [historicalModule(["missing_source"])]; },
+    (value) => { value.modules = [historicalModule([value.evidence[0].id])]; value.modules[0].assignment.extra = "未登记字段"; },
+    (value) => { value.modules = [historicalModule([value.evidence[0].id])]; value.modules[0].result.unknowns = [""]; },
+    (value) => { value.researchGaps = [{ missing: "非字符串" }]; },
+    (value) => { value.evidence.push({ id: "unsafe_source", title: "不安全地址", url: "https://user:password@example.com/document",
+      versionScope: "历史资料", excerpt: "正文" }); },
+    (value) => { value.evidence[0].excerpt += " 被修改的平台来源"; },
+  ];
+  for (const mutate of mutations) {
+    let first = true;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+      if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+      return submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings));
+    } });
+    const previous = await designer.design(definition()); assert.equal(previous.status, "needs_changes");
+    const storedPrevious = await designer.getVersion("weekly", previous.version);
+    const candidate = structuredClone(previous); mutate(candidate);
+    const originalGet = designer.get.bind(designer);
+    designer.get = async () => structuredClone(candidate);
+    first = false;
+    const result = await designer.design(definition()); designer.get = originalGet;
+    const next = sessions[4].payload;
+    assert.equal(next.previousDesign, null); assert.deepEqual(next.issues, []); assert.equal(next.revisionSource, undefined);
+    assert.equal(result.revisionSource, undefined); assert.equal(result.attempts.length, 1);
+    assert.deepEqual(await designer.getVersion("weekly", previous.version), storedPrevious);
+  }
+});
+
+test("独立评审正常取消后只读复用当前完整候选，重新独立评审且不重置旧预算", async (t) => {
+  let phase = "historical", controller, prior, interrupted;
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "designer") {
+      assert.notEqual(phase, "resume", "完整当前候选无需重新设计");
+      const candidate = currentDesign(record.payload.requirements);
+      candidate.instructions += phase === "interrupted" ? " 未完成评审的不同草稿" : " 完整候选";
+      return submit(candidate);
+    }
+    if (phase === "interrupted") { controller.abort(); throw new InputError("测试取消独立评审"); }
+    if (phase === "resume") {
+      assert.deepEqual(record.payload.design, interrupted.design);
+      assert.equal(record.payload.revisionSource.version, interrupted.version);
+      assert.equal(record.payload.revisionSource.kind, "review-continuation");
+      assert.equal(record.payload.revisionSource.historicalOnly, true);
+      const previousCalls = interrupted.reviewProgressCheckpoint.modelCalls;
+      assert.deepEqual(record.payload.modelBudget, { limit: 12, used: previousCalls + 1, remaining: 11 - previousCalls });
+    }
+    return submit(currentReview(record.payload.candidateHash, phase === "historical", record.payload.design, record.payload.priorFindings));
+  } });
+  const earliest = await designer.design(definition()); assert.equal(earliest.status, "needs_changes");
+  prior = await designer.design(definition()); assert.equal(prior.status, "needs_changes");
+  controller = new AbortController(); phase = "interrupted";
+  await assert.rejects(designer.design(definition(), { signal: controller.signal }));
+  interrupted = await designer.get("weekly");
+  assert.equal(interrupted.status, "cancelled"); assert.equal(interrupted.review, null);
+  assert.equal(interrupted.diagnostic.role, "reviewer"); assert.equal(interrupted.diagnostic.reason, "cancelled");
+  const versions = [earliest.version, prior.version, interrupted.version];
+  const oldRecords = versions.map((version) => JSON.stringify(designer.records.get(`weekly:${version}`)));
+  phase = "resume";
+  const result = await designer.design(definition());
+  assert.equal(result.status, "passed"); assert.equal(result.version, interrupted.version + 1);
+  assert.equal(result.attempts.length, 1); assert.equal(result.review.candidateHash, result.candidateHash);
+  assert.deepEqual(versions.map((version) => JSON.stringify(designer.records.get(`weekly:${version}`))), oldRecords);
+  assert.deepEqual(sessions.map((entry) => entry.role), [...Array.from({ length: 5 }, () => ["designer", "reviewer"]).flat(), "reviewer"]);
+});
+
+test("中断来源仅限受控独立评审故障，绑定缺失、变化、损坏或已有评审均不回退历史", async (t) => {
+  const changes = [
+    (record) => { record.diagnostic.reason = "invalid_result"; record.diagnostic.modelCalls = 2; },
+    (record) => { record.diagnostic.role = "designer"; },
+    (record) => { record.diagnostic.phase = "designing"; },
+    (record) => { record.diagnostic.stage = "development"; },
+    (record) => { record.sourceFingerprint = "changed_requirement"; },
+    (record) => { record.runtimeCapabilities.hash = "0".repeat(64); },
+    (record) => { delete record.runtimeCapabilities; },
+    (record) => { record.design.instructions += " 破坏摘要"; },
+    (record) => { record.review = currentReview(record.candidateHash, true, record.design); },
+  ];
+  for (const change of changes) {
+    let phase = "historical", controller;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+      if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+      if (phase === "interrupted") { controller.abort(); throw new InputError("测试取消独立评审"); }
+      return submit(currentReview(record.payload.candidateHash, phase === "historical", record.payload.design, record.payload.priorFindings));
+    } });
+    await designer.design(definition()); controller = new AbortController(); phase = "interrupted";
+    await assert.rejects(designer.design(definition(), { signal: controller.signal }));
+    const interrupted = await designer.get("weekly"), changed = structuredClone(interrupted); change(changed);
+    const originalGet = designer.get.bind(designer); designer.get = async () => structuredClone(changed);
+    phase = "resume";
+    const result = await designer.design(definition()); designer.get = originalGet;
+    const payload = sessions.at(-2).payload;
+    assert.equal(payload.previousDesign, null); assert.equal(payload.revisionSource, undefined);
+    assert.equal(result.revisionSource, undefined); assert.equal(result.version, interrupted.version + 1);
+    assert.deepEqual(await designer.getVersion("weekly", interrupted.version), interrupted);
+  }
+});
+
+test("受控reviewer中断仅复用当前完整候选，旧版历史评审损坏不代表当前候选通过", async (t) => {
+  for (const [reason, corruptHistory] of [["turn_limit", false], ["scope_evaluation_incomplete", false], ["turn_limit", true]]) {
+    let phase = "historical", controller, prior;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+      if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+      if (phase === "interrupted") { controller.abort(); throw new InputError("测试中断"); }
+      return submit(currentReview(record.payload.candidateHash, phase === "historical", record.payload.design, record.payload.priorFindings));
+    } });
+    prior = await designer.design(definition()); phase = "interrupted"; controller = new AbortController();
+    await assert.rejects(designer.design(definition(), { signal: controller.signal }));
+    const interrupted = await designer.get("weekly"); interrupted.status = "failed"; interrupted.diagnostic.reason = reason;
+    await designer.save(interrupted);
+    if (corruptHistory) {
+      const broken = await designer.getVersion("weekly", prior.version); broken.review.summary += " 不匹配最后评审";
+      await designer.save(broken);
+    }
+    const before = [...designer.records.values()].map((record) => JSON.stringify(record));
+    phase = "resume"; const result = await designer.design(definition());
+    assert.equal(result.status, "passed"); assert.equal(result.version, interrupted.version + 1);
+    const source = sessions.at(-1).payload.revisionSource;
+    assert.equal(sessions.at(-1).role, "reviewer");
+    assert.equal(source.version, interrupted.version); assert.equal(source.interruptedVersion, interrupted.version);
+    assert.equal(source.kind, "review-continuation");
+    assert.deepEqual(result.design, interrupted.design); assert.notEqual(result.review, null);
+    assert.deepEqual([...designer.records.values()].filter((record) => record.version <= interrupted.version).map((record) => JSON.stringify(record)), before);
+  }
+});
+
+test("正常无提交技术中断只读续接同版最后完整评审attempt，不采用未评审草稿", async (t) => {
+  for (const [role, reason] of [["designer", "invalid_result"], ["reviewer", "invalid_result"], ["reviewer", "submission_incomplete"]]) {
+    let first = true;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+      if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+      return submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings));
+    } });
+    const previous = await designer.design(definition()), interrupted = structuredClone(previous);
+    interrupted.status = "failed"; interrupted.delivery = "blocked";
+    interrupted.diagnostic = { stage: "architecture", role, phase: role === "designer" ? "designing" : "evaluating",
+      reason, modelCalls: reason === "invalid_result" ? 1 : 2, submissionAttempts: 0 };
+    const complete = structuredClone(interrupted.attempts.at(-1));
+    interrupted.attempts.at(-1).modules = [historicalModule(["unreviewed_source"])];
+    if (role === "reviewer") {
+      interrupted.design.instructions += " 尚未获得评审的新草稿";
+      interrupted.candidateHash = designHash(interrupted.design);
+      interrupted.reviewContext = { candidateHash: interrupted.candidateHash, platformHash: interrupted.platformHash };
+      interrupted.review = null; interrupted.issues = [];
+    }
+    await designer.save(interrupted);
+    const before = JSON.stringify(designer.records.get(`weekly:${previous.version}`)); first = false;
+    const result = await designer.design(definition()), next = sessions.at(-2).payload;
+    assert.equal(result.status, "passed"); assert.equal(result.version, previous.version + 1);
+    assert.deepEqual(next.previousDesign, complete.design); assert.deepEqual(next.issues, complete.issues);
+    assert.equal(next.revisionSource.version, previous.version); assert.equal(next.revisionSource.interruptedVersion, previous.version);
+    assert.equal(next.revisionSource.attemptIndex, previous.attempts.length - 1);
+    assert.equal(next.revisionSource.candidateHash, complete.candidateHash);
+    assert.equal(JSON.stringify(designer.records.get(`weekly:${previous.version}`)), before);
+  }
+});
+
+test("新设计会话尚无候选就技术中断时，仅从更早完整needs_changes只读续接", async (t) => {
+  let first = true, prior;
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+    return submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings));
+  } });
+  prior = await designer.design(definition());
+  const interrupted = { ...structuredClone(prior), version: prior.version + 1, status: "failed", delivery: "blocked",
+    attempts: [], design: null, candidateHash: null, review: null, issues: [],
+    diagnostic: { stage: "architecture", role: "designer", phase: "designing", reason: "submission_incomplete", modelCalls: 2, submissionAttempts: 0 } };
+  delete interrupted.reviewContext;
+  await designer.save(interrupted);
+  const before = [...designer.records.values()].map((record) => JSON.stringify(record)); first = false;
+  const result = await designer.design(definition()), payload = sessions.at(-2).payload;
+  assert.equal(result.status, "passed"); assert.equal(result.version, interrupted.version + 1);
+  assert.deepEqual(payload.previousDesign, prior.design); assert.equal(payload.revisionSource.version, prior.version);
+  assert.equal(payload.revisionSource.interruptedVersion, interrupted.version);
+  assert.deepEqual([...designer.records.values()].filter((record) => record.version <= interrupted.version).map((record) => JSON.stringify(record)), before);
+});
+
+test("同版已完成attempt的引文或绑定损坏不续接，不借错误分类绕过材料重核", async (t) => {
+  for (const mutate of [
+    (record) => { record.diagnostic.phase = "evaluating"; },
+    (record) => { record.draft.task.value += " 已改变需求"; },
+    (record) => { record.attempts.at(-1).review.issues[0].references[0].quote = "不存在的引用";
+      record.review = structuredClone(record.attempts.at(-1).review); },
+    (record) => { record.attempts.at(-1).reviewContext.platformHash = "0".repeat(64); },
+  ]) {
+    let first = true;
+    const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+      if (record.role === "designer") return submit(currentDesign(record.payload.requirements));
+      return submit(currentReview(record.payload.candidateHash, first, record.payload.design, record.payload.priorFindings));
+    } });
+    await designer.design(definition());
+    const original = await designer.getVersion("weekly", 1), interrupted = structuredClone(original);
+    interrupted.status = "failed"; interrupted.diagnostic = { stage: "architecture", role: "designer", phase: "designing",
+      reason: "invalid_result", modelCalls: 1, submissionAttempts: 0 };
+    interrupted.attempts = [interrupted.attempts.at(-1)];
+    mutate(interrupted);
+    const get = designer.get.bind(designer); designer.get = async () => structuredClone(interrupted); first = false;
+    await designer.design(definition()); designer.get = get;
+    assert.equal(sessions.at(-2).payload.previousDesign, null); assert.equal(sessions.at(-2).payload.revisionSource, undefined);
+    assert.deepEqual(await designer.getVersion("weekly", original.version), original);
+  }
 });
 
 test("infeasible 和 insufficient 不会重试到通过", async (t) => {
   for (const verdict of ["infeasible", "insufficient"]) {
     const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
       if (record.role === "designer") return submit(validDesign(record.payload.requirements));
-      const review = passingReview(record.payload.candidateHash);
+      const review = passingReview(record.payload.candidateHash, record.payload.design);
       review.verdict = verdict;
       review.checks.find((item) => item.id === "feasibility").passed = false;
       review.summary = "能力证据不足，不能确认方案可行";
@@ -128,7 +543,7 @@ test("评估必须绑定本次候选 hash，空证据不能成为通过依据", 
   for (const invalid of ["hash", "evidence"]) {
     const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
       if (record.role === "designer") return submit(validDesign(record.payload.requirements));
-      const review = passingReview(record.payload.candidateHash);
+      const review = passingReview(record.payload.candidateHash, record.payload.design);
       if (invalid === "hash") review.candidateHash = "0".repeat(64);
       else review.checks[0].evidence = "  ";
       return submit(review);
@@ -154,7 +569,7 @@ test("技术搜索按需调用，真实来源进入设计、评估与持久化�
         candidate.decisions[0].evidenceIds = [source.id];
         return submit(candidate);
       }
-      return submit(passingReview(record.payload.candidateHash));
+      return submit(passingReview(record.payload.candidateHash, record.payload.design));
     },
   });
   const result = await designer.design(definition());
@@ -177,7 +592,7 @@ test("公共检索按需产生可引用证据，独立评审仍无联网工具",
       return submit(candidate);
     }
     assert.equal(record.tools.web_search, undefined);
-    return submit(passingReview(record.payload.candidateHash));
+    return submit(passingReview(record.payload.candidateHash, record.payload.design));
   } });
   const result = await designer.design(definition());
   assert.equal(calls, 1); assert.equal(result.status, "passed");
@@ -198,27 +613,118 @@ test("搜索为空时不能引用伪造证据；搜索预算最多三次", async
   assert.equal((await designer.get("weekly")).status, "failed");
 });
 
+test("允许联网时技术检索和网页工具仍共用三次预算，评审保持无联网工具", async (t) => {
+  const requests = [];
+  const web = { async search() { requests.push("web_search"); return { status: "ok", results: [] }; },
+    async fetch() { requests.push("web_fetch"); return { status: "ok", results: [] }; } };
+  const { designer } = await fixture(t, { web, research: { async search() { requests.push("technical"); return { sources: [], gaps: [] }; } },
+    onPrompt: async ({ record, submit }) => {
+      if (record.role === "reviewer") {
+        for (const id of ["search_technical_sources", "web_search", "web_fetch"]) assert.equal(record.tools[id], undefined);
+        return submit(passingReview(record.payload.candidateHash, record.payload.design));
+      }
+      assert.equal(record.payload.remaining.searches, 3);
+      await record.tools.search_technical_sources.execute("research", { query: "official API", topics: ["code"] });
+      await record.tools.web_search.execute("search", { query: "official API" });
+      await record.tools.web_fetch.execute("fetch", { url: "https://example.com/docs" });
+      await assert.rejects(record.tools.search_technical_sources.execute("fourth", { query: "official API", topics: ["code"] }), /预算/);
+      return submit(validDesign(record.payload.requirements));
+    } });
+  assert.equal((await designer.design(definition())).status, "passed");
+  assert.deepEqual(requests, ["technical", "web_search", "web_fetch"]);
+});
+
 test("仅按需委派最多两个局部模块，专员没有搜索或递归委派工具", async (t) => {
   const assignments = [{ question: "如何最小化状态", boundary: "只分析本次任务状态", benefit: "防止不必要持久化" },
     { question: "如何验证缺失输入", boundary: "只分析输入失败场景", benefit: "确保失败可解释" }];
   const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
     if (record.role === "specialist") {
-      assert.deepEqual(Object.keys(record.tools), ["submit_module_design"]);
+      assert.deepEqual(Object.keys(record.tools), ["submit_architecture_draft", "submit_module_design"]);
       return submit({ proposal: "只保留任务状态", interfaces: "文本输入和摘要输出", tradeoffs: "不保留跨任务状态",
         evidenceIds: [`neuma-runtime-v${record.payload.platformContractVersion}`], unknowns: [] });
     }
     if (record.role === "designer") {
       const response = await record.tools.delegate_module.execute("delegate", { modules: assignments });
-      assert.equal(JSON.parse(response.content[0].text).modules.length, 2);
-      await assert.rejects(record.tools.delegate_module.execute("third", { modules: [assignments[0]] }), /最多委派两个/);
+      const completed = JSON.parse(response.content[0].text);
+      assert.equal(completed.modules.length, 2); assert.equal(completed.remaining, 0); assert.equal(completed.storedModules.length, 2);
+      const exhausted = JSON.parse((await record.tools.delegate_module.execute("third", { modules: [assignments[0]] })).content[0].text);
+      assert.equal(exhausted.status, "quota_exhausted"); assert.equal(exhausted.remaining, 0); assert.equal(exhausted.storedModules.length, 2);
+      assert.match(exhausted.next, /复用已有模块结果/);
       return submit(validDesign(record.payload.requirements));
     }
-    return submit(passingReview(record.payload.candidateHash));
+    return submit(passingReview(record.payload.candidateHash, record.payload.design));
   } });
   const result = await designer.design(definition());
   assert.equal(result.status, "passed"); assert.equal(result.modules.length, 2);
   assert.equal(sessions.filter((item) => item.role === "specialist").length, 2);
+  for (const session of sessions) {
+    const prompt = session.options.systemPrompt, submitName = submissionNames[session.role], contract = prompt.slice(prompt.lastIndexOf("宿主提交契约："));
+    assert.match(prompt, /首次仍用本阶段公开的提交工具提交完整工具参数/u);
+    assert.doesNotMatch(prompt, /首次仍用submit_architecture提交完整工具参数/u);
+    assert.ok(contract.startsWith(`宿主提交契约：role=${session.role}，submitName=${submitName}；`));
+    assert.ok(contract.includes(`实际发起${submitName}的正式tool_call`));
+    assert.match(contract, /结构化结果也是本阶段正式提交通道/u);
+    if (session.role === "specialist") assert.doesNotMatch(contract, /revise_architecture_submission|request_requirements/u);
+    else { assert.match(contract, /revise_architecture_submission/u); assert.match(contract, /request_requirements/u); }
+  }
+  for (const specialist of sessions.filter((item) => item.role === "specialist")) {
+    assert.deepEqual(specialist.payload.candidateSchema, sessions.find((item) => item.role === "designer").tools.submit_architecture.parameters);
+    assert.deepEqual(specialist.payload.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
+  }
   assert.ok(sessions.every((item) => item.disposed));
+});
+
+test("修订不重置模块额度，额度用尽后不再提供委派工具", async (t) => {
+  let designs = 0, reviews = 0;
+  const assignment = { question: "核对局部边界", boundary: "仅已有需求", benefit: "避免重复实现" };
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "specialist") return submit({ proposal: "复用已核对规则", interfaces: "固定数据结构", tradeoffs: "不增加范围", evidenceIds: [], unknowns: [] });
+    if (record.role === "designer") {
+      if (designs++ === 0) {
+        assert.equal(record.payload.remaining.modules, 2);
+        await record.tools.delegate_module.execute("both", { modules: [assignment, assignment] });
+      } else {
+        assert.equal(record.payload.remaining.modules, 0); assert.equal(record.tools.delegate_module, undefined);
+        assert.equal(record.payload.modules.length, 2);
+      }
+      const candidate = currentDesign(record.payload.requirements); candidate.instructions += ` 修订${designs}`;
+      return submit(candidate);
+    }
+    return submit(currentReview(record.payload.candidateHash, reviews++ === 0, record.payload.design, record.payload.priorFindings));
+  } });
+  const result = await designer.design(definition());
+  assert.equal(result.status, "passed"); assert.equal(designs, 2); assert.equal(result.modules.length, 2);
+  assert.equal(sessions.filter((item) => item.role === "specialist").length, 2);
+});
+
+test("剩余一个模块时修订工具公开单项上限，专员引用错误返回准确安全编号", async (t) => {
+  let designs = 0, reviews = 0, corrected = 0;
+  const assignment = { question: "核对固定接口", boundary: "仅当前能力", benefit: "核实引用" };
+  const progress = [];
+  const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "specialist") {
+      const candidate = { proposal: "按已有接口实现", interfaces: "固定输入输出", tradeoffs: "不扩大功能", evidenceIds: ["unknown_source"], unknowns: [] };
+      await assert.rejects(submit(candidate), (error) => {
+        assert.equal(error.validationIssue.path, "module.evidenceIds"); assert.equal(error.validationIssue.reason, "invalid_reference");
+        assert.deepEqual(error.validationIssue.allowedReferences, record.payload.evidence.map((item) => item.id));
+        assert.doesNotMatch(error.message, /unknown_source/); return true;
+      });
+      corrected++; return submit({ ...candidate, evidenceIds: [] });
+    }
+    if (record.role === "designer") {
+      const remaining = designs++ === 0 ? 2 : 1;
+      assert.equal(record.payload.remaining.modules, remaining);
+      assert.equal(record.tools.delegate_module.parameters.properties.modules.maxItems, remaining);
+      await record.tools.delegate_module.execute("single", { modules: [assignment] });
+      const candidate = currentDesign(record.payload.requirements); candidate.instructions += ` 修订${designs}`;
+      return submit(candidate);
+    }
+    return submit(currentReview(record.payload.candidateHash, reviews++ === 0, record.payload.design, record.payload.priorFindings));
+  } });
+  assert.equal((await designer.design(definition(), { onProgress: (event) => progress.push(event) })).status, "passed");
+  assert.equal(corrected, 2);
+  assert.deepEqual(sessions.filter((item) => item.role === "specialist").map((item) => item.options.reasoningMode), ["auto", "off"]);
+  assert.ok(progress.some((event) => event.validationIssue?.path === "module.evidenceIds"));
 });
 
 test("专员伪造来源会中止本轮，不继续交付", async (t) => {
@@ -227,7 +733,10 @@ test("专员伪造来源会中止本轮，不继续交付", async (t) => {
       evidenceIds: ["made_up_source"], unknowns: [] });
     return record.tools.delegate_module.execute("delegate", { modules: [{ question: "接口是否支持", boundary: "只检查接口", benefit: "确认可行性" }] });
   } });
-  await assert.rejects(designer.design(definition()), /未核实的证据/);
+  await assert.rejects(designer.design(definition()), error => error.diagnostic.reason === "module_failed"
+    && error.diagnostic.delegation.failures[0].reason === "invalid_result"
+    && error.diagnostic.delegation.failures[0].submissionIssue.path === "module.evidenceIds"
+    && error.diagnostic.delegation.failures[0].submissionIssue.reason === "invalid_reference");
   assert.equal((await designer.get("weekly")).status, "failed");
   assert.ok(sessions.every((item) => item.disposed));
 });
@@ -280,7 +789,7 @@ test("workflow/custom 即使架构通过也不能伪装为当前执行器可运�
   for (const profile of ["workflow", "custom"]) {
     const { designer } = await fixture(t, { onPrompt: async ({ record, submit }) => {
       if (record.role === "designer") return submit({ ...validDesign(record.payload.requirements), profile });
-      return submit(passingReview(record.payload.candidateHash));
+      return submit(passingReview(record.payload.candidateHash, record.payload.design));
     } });
     const result = await designer.design(definition(profile));
     assert.equal(result.status, "passed"); assert.equal(result.buildable, false);
@@ -311,7 +820,7 @@ test("设计中的阻断未知项即使被独立评估忽略也不能交付", as
     if (record.role === "designer") return submit(validDesign(record.payload.requirements, {
       unknowns: [{ question: "关键输入尚未验证可解析", blocking: true, resolution: "补充代表性输入并验证解析" }],
     }));
-    return submit(passingReview(record.payload.candidateHash));
+    return submit(passingReview(record.payload.candidateHash, record.payload.design));
   } });
   const result = await designer.design(definition());
   assert.equal(result.status, "needs_changes"); assert.equal(result.delivery, "blocked");
@@ -331,12 +840,12 @@ test("模型与 provider 错误不泄露原始敏感载荷", async (t) => {
   }
 });
 
-test("当前MiMo架构的设计与评估角色统一使用完整输出额度", async (t) => {
+test("当前MiMo架构按角色分配思考输出预算，不自动用满模型上限", async (t) => {
   const { designer, sessions } = await fixture(t);
   designer.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     model: "mimo-v2.6-pro", apiKey: "fixture-only" };
   assert.equal((await designer.design(definition())).status, "passed");
-  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [131072, 131072]);
+  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [32768, 16384]);
 });
 
 test("架构失败保留安全的模型原因、失败阶段和重试数", async (t) => {
@@ -373,7 +882,7 @@ test("未完成的架构工具参数被截断时不会误报模型连接失败",
   await assert.rejects(designer.design(definition()), (error) => error instanceof ProviderError && error.diagnostic.reason === "output_limit");
   const saved = await designer.get("weekly");
   assert.equal(saved.diagnostic.phase, "designing");
-  assert.match(saved.summary, /输出达到上限/);
+  assert.match(saved.summary, /本轮模型输出额度已用完/);
   assert.doesNotMatch(saved.summary, /连接/);
 });
 
@@ -425,13 +934,255 @@ test("SDK预执行schema拒绝只保留白名单路径原因，忽略参数与�
   assert.doesNotMatch(JSON.stringify({ progress, saved: await designer.get("weekly") }), /PRIVATE_PAYLOAD_SENTINEL|Received arguments|Arguments:/);
 });
 
+test("引用错误返回准确字段和允许编号，同一角色可按回执修正且不保留候选正文", async (t) => {
+  const progress = [], secret = "PRIVATE_PAYLOAD_SENTINEL";
+  const { designer } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "reviewer") return submit(passingReview(record.payload.candidateHash, record.payload.design));
+    const candidate = validDesign(record.payload.requirements), invalid = structuredClone(candidate);
+    invalid.instructions = secret; invalid.coverage.push({ ...candidate.coverage[0], requirementId: secret });
+    await assert.rejects(submit(invalid), (error) => {
+      assert.match(error.message, /允许引用的编号：/); assert.doesNotMatch(error.message, new RegExp(secret)); return true;
+    });
+    await submit(candidate);
+  } });
+  const result = await designer.design(definition(), { onProgress: (event) => progress.push(event) });
+  assert.equal(result.status, "passed");
+  assert.deepEqual(progress.find((event) => event.validationIssue)?.validationIssue, {
+    path: `design.coverage.[${result.requirements.length}].requirementId`, reason: "invalid_reference", allowedReferences: result.requirements.map((item) => item.id),
+  });
+  assert.doesNotMatch(JSON.stringify({ progress, result }), new RegExp(secret));
+});
+
+test("同路径缺项集合改变时更新安全诊断，相同缺项不重复刷进度", async (t) => {
+  const progress = [];
+  const { designer } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "reviewer") return submit(passingReview(record.payload.candidateHash, record.payload.design));
+    const original = validDesign(record.payload.requirements);
+    for (const missing of [["task", "successCriteria"], ["task", "successCriteria"], ["successCriteria"]]) {
+      const value = structuredClone(original);
+      for (const item of value.acceptance) item.requirementIds = item.requirementIds.filter((id) => !missing.includes(id));
+      await assert.rejects(submit(value), (error) => missing.every((id) => error.message.includes(id)));
+    }
+    return submit(original);
+  } });
+  assert.equal((await designer.design(definition(), { onProgress: (event) => progress.push(event) })).status, "passed");
+  const issues = progress.flatMap((event) => event.validationIssue ? [event.validationIssue] : []);
+  assert.equal(issues.length, 2);
+  assert.ok(issues.every((issue) => issue.path === "design.acceptance" && issue.reason === "missing_coverage"));
+  assert.deepEqual(issues.map((issue) => issue.missingReferences), [["task", "successCriteria"], ["successCriteria"]]);
+});
+
+test("真实Pi SDK一次收到全部验收缺项后可一次修正，不靠逐项失败耗尽回合", { timeout: 15000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-architecture-coverage-sdk-")), requests = [], progress = [], secret = "PRIVATE_INVALID_CANDIDATE";
+  const draft = validDraft();
+  draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
+    critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
+  let missing;
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture", "submit_architecture_review"].includes(item.function.name));
+    const role = tool.function.name === "submit_architecture" ? "designer" : "reviewer";
+    const attempt = requests.filter((value) => value === role).length + 1; requests.push(role);
+    const content = body.messages.findLast((message) => message.role === "user").content;
+    const payload = JSON.parse(typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join(""));
+    let value;
+    if (role === "designer") {
+      value = validDesign(payload.requirements, { schemaVersion: 3, connections: [],
+        interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "记录", results: "完整汇总", persistentData: "无" },
+        execution: { language: "none", hosting: "builtin", reason: "已有工具即可" },
+        selectionBasis: { capacity: "固定测试记录", process: "完整核对", quality: "逐项对应",
+          requirementIds: payload.requirements.map((item) => item.id), assumptions: [] } });
+      missing = ["task", payload.requirements.find((item) => item.id.startsWith("spec_")).id];
+      if (attempt === 1) {
+        value.instructions = secret;
+        for (const item of value.acceptance) item.requirementIds = item.requirementIds.filter((id) => !missing.includes(id));
+      } else {
+        assert.equal(attempt, 2, "完整缺项回执应允许一次修正");
+        const feedback = body.messages.findLast((message) => message.role === "tool").content;
+        const text = typeof feedback === "string" ? feedback : JSON.stringify(feedback);
+        assert.ok(missing.every((id) => text.includes(id)), "工具错误应一次列出全部正式缺项");
+        assert.doesNotMatch(text, new RegExp(secret));
+      }
+    } else {
+      value = passingReview(payload.candidateHash, payload.design, payload.priorFindings);
+      value.checks.push(...["requirement_sufficiency", "acceptance_quality"].filter((id) => !value.checks.some((item) => item.id === id)).map((id) => ({ id, passed: true, evidence: "核对完整需求与验收" })));
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", model: "fixture-model", choices: [{ index: 0,
+      delta: { role: "assistant", tool_calls: [{ index: 0, id: `${role}_${attempt}`, type: "function", function: { name: tool.function.name, arguments: JSON.stringify(value) } }] },
+      finish_reason: "tool_calls" }] })}\n\n`);
+    response.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));
+  const designer = new ArchitectureDesigner({ config: { llmConfigured: true,
+    chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" }, cwd: root, dataDir: root,
+    fidelitySessionFactory: fidelityChecker(),
+    sessionFactory: async (options) => { const session = await createPiSession(options); session.setAutoCompactionEnabled(false); session.setAutoRetryEnabled(false); return session; } });
+  t.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
+  const result = await designer.design({ ...definition(), draft }, { onProgress: (event) => progress.push(event) });
+  assert.equal(result.status, "passed"); assert.deepEqual(requests, ["designer", "designer", "reviewer"]);
+  const issue = progress.find((event) => event.validationIssue)?.validationIssue;
+  assert.equal(issue.reason, "missing_coverage"); assert.deepEqual(issue.missingReferences, missing);
+  assert.ok(issue.missingReferences.every((id) => issue.allowedReferences.includes(id)));
+  assert.doesNotMatch(JSON.stringify({ progress, result }), new RegExp(secret));
+});
+
+test("真实Pi评审语义引用拒绝保留路径和修正说明，原会话修正后才进入修订", { timeout: 15000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-architecture-review-reference-sdk-")), requests = [], progress = [];
+  const feedbacks = [], sessions = [], invalidQuote = "PRIVATE_INVALID_REVIEW_QUOTE";
+  let designs = 0, firstCandidate;
+  const model = createServer(async (request, response) => {
+    try {
+      const chunks = []; for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture", "submit_architecture_review"].includes(item.function.name));
+      const role = tool.function.name === "submit_architecture" ? "designer" : "reviewer";
+      const content = body.messages.findLast((message) => message.role === "user").content;
+      const payload = JSON.parse(typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join(""));
+      requests.push(role);
+      let value;
+      if (role === "designer") {
+        value = currentDesign(payload.requirements);
+        value.instructions = ++designs === 1 ? "当前方案需进一步说明完整处理方式。" : "修订方案已说明完整处理方式与检查结果。";
+      } else if (designs === 1) {
+        firstCandidate ??= payload.candidateHash;
+        assert.equal(payload.candidateHash, firstCandidate, "格式修正必须保留同一评审对象");
+        const attempt = requests.filter((entry) => entry === "reviewer").length;
+        if (attempt > 1) {
+          const feedback = body.messages.findLast((message) => message.role === "tool").content;
+          feedbacks.push(typeof feedback === "string" ? feedback : JSON.stringify(feedback));
+        }
+        value = passingReview(payload.candidateHash, payload.design, payload.priorFindings);
+        value.verdict = "revise";
+        value.checks.find((item) => item.id === "verification").passed = false;
+        value.issues = [{ id: "clarify_execution", blocking: true, description: "完整处理方式还需补充", remedy: "在现有方案内补充完整处理说明",
+          checkId: "verification", kind: "design", candidatePaths: [attempt === 1 ? "/missing_candidate_path" : "/instructions"],
+          references: [{ source: "candidate", path: attempt === 2 ? "/missing_reference_path" : "/instructions",
+            quote: attempt === 3 ? invalidQuote : payload.design.instructions }], factClaims: [] }];
+      } else value = passingReview(payload.candidateHash, payload.design, payload.priorFindings);
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", model: "fixture-model", choices: [{ index: 0,
+        delta: { role: "assistant", tool_calls: [{ index: 0, id: `${role}_${requests.length}`, type: "function", function: { name: tool.function.name, arguments: JSON.stringify(value) } }] },
+        finish_reason: "tool_calls" }] })}\n\n`);
+      response.end("data: [DONE]\n\n");
+    } catch (error) { response.writeHead(500, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: error.message } })); }
+  });
+  await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));
+  const designer = new ArchitectureDesigner({ config: { llmConfigured: true,
+    chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" }, cwd: root, dataDir: join(root, "data"),
+    sessionFactory: async (options) => { const session = await createPiSession(options); sessions.push(options.customTools.at(-1).name);
+      session.setAutoCompactionEnabled(false); session.setAutoRetryEnabled(false); return session; } });
+  t.after(async () => { await designer.ready; await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
+  const result = await designer.design(definition(), { onProgress: (event) => progress.push(event) });
+  assert.equal(result.status, "passed"); assert.equal(result.attempts.length, 2);
+  assert.deepEqual(requests, ["designer", "reviewer", "reviewer", "reviewer", "reviewer", "designer", "reviewer"]);
+  assert.deepEqual(sessions, ["submit_architecture", "submit_architecture_review", "submit_architecture", "submit_architecture_review"], "引用修正不创建新评审会话");
+  assert.match(feedbacks[0], /review\.issues\[0\]\.candidatePaths.*候选路径不存在/u);
+  assert.match(feedbacks[1], /review\.issues\[0\]\.references\[0\].*引用路径不存在/u);
+  assert.match(feedbacks[2], /review\.issues\[0\]\.references\[0\].*逐字摘录不匹配/u);
+  assert.ok(feedbacks.every((text) => !text.includes(invalidQuote) && !text.includes('"valid":true')), "语义拒绝不能变成空的schema成功回执或回显提交内容");
+  assert.deepEqual(progress.flatMap((event) => event.validationIssue ? [event.validationIssue.reason] : []),
+    ["candidate_path_missing", "reference_path_missing", "reference_quote_mismatch"]);
+});
+
+test("无代码方案承诺后台操作即使模型评审通过也不能交给研发", async (t) => {
+  const { designer } = await fixture(t, { onPrompt: async ({ record, submit }) => {
+    if (record.role === "reviewer") {
+      const review = passingReview(record.payload.candidateHash, record.payload.design);
+      review.checks.push(...["requirement_sufficiency", "acceptance_quality"].filter((id) => !review.checks.some((item) => item.id === id)).map((id) => ({ id, passed: true, evidence: "固定测试评审" })));
+      return submit(review);
+    }
+    return submit(validDesign(record.payload.requirements, { schemaVersion: 3,
+      interaction: { defaultEntry: "conversation", page: false, operations: true, inputs: "输入", results: "输出", persistentData: "无" },
+      connections: [], execution: { language: "none", hosting: "builtin", reason: "声称不需要代码" },
+      selectionBasis: { capacity: "固定输入", process: "固定过程", quality: "可核对", requirementIds: record.payload.requirements.map((item) => item.id), assumptions: [] },
+    }));
+  } });
+  const result = await designer.design(definition());
+  assert.equal(result.status, "needs_changes"); assert.equal(result.delivery, "blocked");
+  assert.notEqual(result.buildable, true);
+  assert.ok(result.issues.some((item) => item.id === "execution_consistency" && item.blocking && item.source === "program"));
+  assert.equal(result.design.interaction.operations, true); assert.equal(result.design.execution.language, "none");
+});
+
+test("真实Pi提交工具可一次接收完整v3连接与动态schema，不以多轮修格式绕过", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-architecture-v3-sdk-")), requests = [];
+  let submittedSchema;
+  const draft = validDraft();
+  draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
+    critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
+  const model = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture", "submit_architecture_review"].includes(item.function.name));
+    const role = tool.function.name === "submit_architecture" ? "designer" : "reviewer";
+    requests.push(role);
+    const source = body.messages.findLast((message) => message.role === "user").content;
+    const payload = JSON.parse(typeof source === "string" ? source : source.filter((part) => part.type === "text").map((part) => part.text).join(""));
+    let value;
+    if (role === "designer") {
+      submittedSchema = structuredClone(tool.function.parameters);
+      assert.deepEqual(payload.candidateSchema, submittedSchema);
+      assert.ok(tool.function.parameters.required.includes("execution"));
+      assert.ok(tool.function.parameters.required.includes("selectionBasis"));
+      assert.deepEqual(tool.function.parameters.properties.schemaVersion.enum, [3]);
+      value = validDesign(payload.requirements, { schemaVersion: 3, profile: "custom",
+        interaction: { defaultEntry: "conversation", page: false, operations: true, inputs: "用户记录", results: "检索结果", persistentData: "无" },
+        execution: { language: "javascript", hosting: "managed", reason: "已确认的专属检索逻辑" },
+        selectionBasis: { capacity: "固定材料", process: "每条核对", quality: "逐条对应",
+          requirementIds: payload.requirements.map((item) => item.id), assumptions: [] },
+        connections: [{ id: "docs", purpose: "business", protocol: "http", required: false, description: "用户授权的检索接口",
+          operations: [{ id: "search", method: "POST", path: "/search", readOnly: true,
+            inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"], additionalProperties: false },
+            outputSchema: { type: "array", items: { type: "string" } }, request: { body: { query: "q" }, encoding: "json" } }] }],
+      });
+    } else {
+      assert.deepEqual(payload.candidateSchema, submittedSchema, "评估者看到与设计者实际工具声明完全相同的候选契约");
+      const system = body.messages.filter((message) => ["system", "developer"].includes(message.role))
+        .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
+      assert.match(system, /当前批保存义务/u);
+      assert.match(system, /最终完整提交义务/u);
+      assert.ok(payload.reviewParts.batch.acceptanceScopeChecks.length > 0, "正常构建首包使用宿主派发的真实范围编号");
+      const interactionSchema = payload.candidateSchema.properties.interaction;
+      assert.deepEqual(interactionSchema.required, ["defaultEntry", "page", "operations", "inputs", "results", "persistentData"]);
+      assert.equal(interactionSchema.properties.operations.type, "boolean");
+      assert.equal(interactionSchema.additionalProperties, false);
+      const valid = new Ajv({ strict: false }).compile(interactionSchema), interaction = payload.design.interaction;
+      assert.equal(valid(interaction), true);
+      assert.equal(valid({ ...interaction, operations: ["检索"] }), false);
+      assert.equal(valid({ ...interaction, operationsList: ["检索"] }), false);
+      const incomplete = { ...interaction }; delete incomplete.persistentData;
+      assert.equal(valid(incomplete), false);
+      value = passingReview(payload.candidateHash, payload.design, payload.priorFindings);
+      value.checks.push(...["requirement_sufficiency", "acceptance_quality"].filter((id) => !value.checks.some((item) => item.id === id)).map((id) => ({ id, passed: true, evidence: "核对正式需求与操作契约" })));
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", model: "fixture-model", choices: [{ index: 0,
+      delta: { role: "assistant", tool_calls: [{ index: 0, id: `submit_${role}`, type: "function", function: { name: tool.function.name, arguments: JSON.stringify(value) } }] },
+      finish_reason: "tool_calls" }] })}\n\n`);
+    response.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));
+  const designer = new ArchitectureDesigner({ config: { llmConfigured: true,
+    chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" }, cwd: root, dataDir: join(root, "data"),
+    fidelitySessionFactory: fidelityChecker(),
+    sessionFactory: async (options) => { const session = await createPiSession(options); session.setAutoCompactionEnabled(false); session.setAutoRetryEnabled(false); return session; } });
+  t.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
+  const result = await designer.design({ ...definition(), draft });
+  assert.equal(result.status, "passed"); assert.equal(result.delivery, "needs_development");
+  assert.deepEqual(requests, ["designer", "reviewer"]);
+  assert.equal(result.design.connections[0].operations[0].request.body.query, "q");
+});
+
 test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完整流", async (t) => {
-  for (const outcome of ["complete", "truncated", "protocol"]) await t.test(outcome, { timeout: 10_000 }, async (child) => {
+  for (const outcome of ["complete", "offline", "truncated", "protocol"]) await t.test(outcome, { timeout: 10_000 }, async (child) => {
     const root = await mkdtemp(join(tmpdir(), "neuma-architecture-sdk-"));
     const requests = [], counts = new Map();
     const model = createServer(async (request, response) => {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks));
+      if (outcome === "offline") {
+        const names = body.tools.map((tool) => tool.function.name);
+        for (const name of ["search_technical_sources", "web_search", "web_fetch"]) assert.equal(names.includes(name), false);
+      }
       const role = body.tools.some((tool) => tool.function.name === "submit_architecture") ? "designer" : "reviewer";
       const count = (counts.get(role) ?? 0) + 1; counts.set(role, count);
       requests.push({ role, maxTokens: body.max_tokens });
@@ -443,7 +1194,7 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
         const payload = JSON.parse(typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join(""));
         const value = role === "designer" ? validDesign(payload.requirements, {
           instructions: "依据用户本轮材料完成任务，缺少输入先询问，保留可核对结果。".repeat(180),
-        }) : passingReview(payload.candidateHash);
+        }) : passingReview(payload.candidateHash, payload.design, payload.priorFindings);
         const args = JSON.stringify(value);
         if (role === "designer") assert.ok(args.length > 4096, "完整多字段候选不能依赖短文本回复预算");
         chunk({ role: "assistant", tool_calls: [{ index: 0, id: `submit_${role}`, type: "function",
@@ -463,8 +1214,10 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
         return session;
       } });
     child.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
-    if (outcome === "complete") {
-      assert.equal((await designer.design(definition())).status, "passed");
+    if (outcome === "complete" || outcome === "offline") {
+      const input = definition();
+      if (outcome === "offline") input.draft.constraints = [{ text: "禁止联网", source: "user" }];
+      assert.equal((await designer.design(input)).status, "passed");
       assert.deepEqual([...counts.keys()], ["designer", "reviewer"]);
       assert.equal(requests.length, 2, "通过校验的阶段提交后无需额外模型回执");
     } else {
@@ -472,6 +1225,9 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
         && error.diagnostic.reason === (outcome === "truncated" ? "output_limit" : "api_stream_interrupted"));
       assert.equal((await designer.get("weekly")).diagnostic.phase, "designing");
     }
-    assert.ok(requests.every((request) => request.maxTokens === (request.role === "designer" ? 8192 : 4096)));
+    for (const role of new Set(requests.map((request) => request.role)))
+      assert.equal(requests.find((request) => request.role === role).maxTokens, role === "designer" ? 8192 : 4096);
+    assert.ok(requests.every((request) => Number.isSafeInteger(request.maxTokens) && request.maxTokens > 0
+      && request.maxTokens <= (request.role === "designer" ? 8192 : 4096)), JSON.stringify(requests));
   });
 });

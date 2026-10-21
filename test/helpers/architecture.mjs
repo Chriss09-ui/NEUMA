@@ -1,4 +1,7 @@
 import { emptyDraft } from "../../src/requirements/core.mjs";
+import { ACCEPTANCE_ADAPTER_GUIDE, validateAcceptanceVerification } from "../../src/verification/acceptance-contract.mjs";
+
+const reviewCandidates = new WeakMap();
 
 export function validDraft(goal = "整理周报") {
   const draft = emptyDraft();
@@ -9,7 +12,7 @@ export function validDraft(goal = "整理周报") {
 }
 
 export function validDesign(requirements, overrides = {}) {
-  return {
+  const design = {
     profile: "light", rationale: "输入和交付均为文本，现有执行器可完成。",
     instructions: "根据用户提供的材料整理周报。缺少信息时询问，不编造进展，不执行外部动作。",
     components: [{ id: "summarize", purpose: "整理工作记录", necessity: "提取进展并保留用户限制",
@@ -37,10 +40,46 @@ export function validDesign(requirements, overrides = {}) {
     ],
     unknowns: [], ...overrides,
   };
+  if (design.schemaVersion === 3) design.acceptance = design.acceptance.map((item) => ({
+    ...item, verification: item.verification ?? { stage: "development", owner: "generated-code", adapterId: "action" },
+  }));
+  return design;
 }
 
-export function passingReview(candidateHash) {
-  return { candidateHash, verdict: "pass", checks: ["requirements", "feasibility", "minimality", "interfaces", "failure_handling", "verification"]
+export function withPriorFindingDecisions(review, prior, candidate) {
+  candidate ??= reviewCandidates.get(review);
+  if (prior) review.priorFindingDecisions = prior.findings.map(({ findingId, issue, closureEvidenceRequired, kind }) => {
+    const checkId = review.checks.some((entry) => entry.id === issue.checkId) ? issue.checkId : "verification";
+    const stillOpen = review.issues.some((entry) => entry.blocking && entry.checkId === checkId);
+    const candidatePath = closureEvidenceRequired ? issue.candidatePaths?.[0] ?? "/instructions" : "/instructions";
+    if (candidate && closureEvidenceRequired && kind === "historical-review-opinion" && !stillOpen
+      && !review.issues.some((entry) => entry.id === findingId)) {
+      const value = candidatePath.slice(1).split("/").reduce((body, key) => body?.[key.replaceAll("~1", "/").replaceAll("~0", "~")], candidate);
+      review.issues.push({ id: findingId, blocking: false, checkId, kind: "design",
+        description: "受控夹具独立核对当前指令，历史泛化评语在本夹具中不成立。", remedy: "保留当前已明确的处理与失败约定。",
+        candidatePaths: [candidatePath], references: [{ source: "candidate", path: candidatePath,
+          quote: (typeof value === "string" ? value : JSON.stringify(value)).slice(0, 1000) }], factClaims: [] });
+    }
+    return { findingId, status: stillOpen ? "unresolved" : closureEvidenceRequired && kind === "historical-review-opinion"
+      ? "unsupported" : prior.sameReviewObject ? "unsupported" : "resolved",
+      reason: stillOpen ? "受控夹具本轮仍有相同检查项的具体阻断" : "受控夹具本轮已核对当前候选，旧意见不再构成阻断",
+      checkIds: [checkId], candidatePaths: [candidatePath] };
+  });
+  return review;
+}
+
+export function passingReview(candidateHash, candidate, prior) {
+  const review = { candidateHash, verdict: "pass", checks: ["requirements", "feasibility", "minimality", "interfaces", "failure_handling", "verification"]
     .map((id) => ({ id, passed: true, evidence: `已核对候选中的 ${id} 字段与需求映射` })),
     issues: [], summary: "方案覆盖需求，且在现有能力范围内可执行。" };
+  if (candidate) reviewCandidates.set(review, candidate);
+  if (candidate?.schemaVersion >= 3) {
+    review.checks.push(...["requirement_sufficiency", "acceptance_quality"].map((id) => ({ id, passed: true, evidence: "受控测试候选已核对" })));
+    review.acceptanceScopeChecks = candidate.acceptance.map((item) => {
+      const { adapterId } = validateAcceptanceVerification(item), guide = ACCEPTANCE_ADAPTER_GUIDE.adapters[adapterId];
+      return { acceptanceId: item.id, adapterId, scope: guide.scope, sufficient: true,
+        reason: "受控测试夹具确认当前验收及实际检查范围", criterionQuote: item.expected, adapterQuote: guide.proves };
+    });
+  }
+  return withPriorFindingDecisions(review, prior, candidate);
 }

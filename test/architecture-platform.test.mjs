@@ -54,7 +54,8 @@ test("三个架构角色共享固定平台规则，局部模型修改其输入�
   const { designer, sessions } = await fixture(t, async ({ record, submit }) => {
     if (record.role === "designer") {
       firstSnapshot = structuredClone(record.payload.platformSnapshot);
-      assert.deepEqual(record.payload.capabilities, platformCapabilityCatalog(firstSnapshot));
+      assert.deepEqual(record.payload.capabilities,
+        platformCapabilityCatalog(firstSnapshot, { runtimeCapabilities: record.payload.runtimeCapabilities }));
       record.payload.platformSnapshot.modelInventedAbility = "任意浏览器自动运行";
       record.payload.capabilities.find((item) => item.id === "web_fetch").status = "unverified";
       await record.tools.delegate_module.execute("module", { modules: [{ question: "文件交付是否需要页面研发",
@@ -75,11 +76,12 @@ test("三个架构角色共享固定平台规则，局部模型修改其输入�
   assert.equal(result.platformContractVersion, PLATFORM_CONTRACT_VERSION);
   assert.equal(result.platformHash, designHash(result.platformSnapshot));
   assert.deepEqual(result.platformSnapshot, firstSnapshot);
-  const sharedRules = renderPlatformRules(result.platformSnapshot);
+  const sharedRules = renderPlatformRules(result.platformSnapshot, { runtimeCapabilities: result.runtimeCapabilities });
   assert.ok(sharedRules.length > 0);
   for (const record of sessions) {
     assert.deepEqual(record.originalPayload.platformSnapshot, result.platformSnapshot);
-    assert.deepEqual(record.originalPayload.capabilities, platformCapabilityCatalog(result.platformSnapshot));
+    assert.deepEqual(record.originalPayload.capabilities,
+      platformCapabilityCatalog(result.platformSnapshot, { runtimeCapabilities: record.originalPayload.runtimeCapabilities }));
     assert.equal(record.originalPayload.platformContractVersion, result.platformContractVersion);
     assert.equal(record.originalPayload.platformHash, result.platformHash);
     assert.ok(record.options.systemPrompt.includes(sharedRules), `${record.role} 必须收到同一份完整平台规则`);
@@ -144,7 +146,8 @@ test("论文链接与 PDF 的 light 方案无需预读目标网址即可通过�
   let searches = 0;
   const web = new WebCapabilities({ fetchImpl: async () => { requests++; throw new Error("设计期不应执行业务论文读取"); } });
   const { designer, sessions, config } = await fixture(t, async ({ record, submit }) => {
-    assert.deepEqual(record.payload.capabilities, platformCapabilityCatalog(record.payload.platformSnapshot));
+    assert.deepEqual(record.payload.capabilities,
+      platformCapabilityCatalog(record.payload.platformSnapshot, { runtimeCapabilities: record.payload.runtimeCapabilities }));
     assert.equal(record.payload.capabilities.find((item) => item.id === "web_fetch").status, "available");
     if (record.role === "designer") {
       for (let index = 0; index < 3; index++) await record.tools.search_technical_sources.execute(`policy_${index}`,
@@ -202,7 +205,8 @@ test("论文候选误把已实现公共正文工具标为 unverified 时仍阻�
   assert.ok(result.attempts[0].issues.some((issue) => issue.id === "capability_web_fetch" && issue.blocking));
   assert.equal(result.design.capabilities.find((item) => item.id === "web_fetch").status, "available");
   for (const attempt of result.attempts) assert.equal(attempt.platformHash, result.platformHash);
-  for (const session of sessions) assert.deepEqual(session.originalPayload.capabilities, platformCapabilityCatalog(result.platformSnapshot));
+  for (const session of sessions) assert.deepEqual(session.originalPayload.capabilities,
+    platformCapabilityCatalog(result.platformSnapshot, { runtimeCapabilities: session.originalPayload.runtimeCapabilities }));
   assert.equal(result.design.unknowns[0].blocking, false);
 });
 
@@ -372,7 +376,7 @@ test("排除能力不能伪造降级覆盖用户明确要求的真实动态引�
   assert.equal(result.attempts.length, 1);
 });
 
-test("冻结平台政策遵守禁止联网，模型工具调用也不请求外部资料", async (t) => {
+test("冻结平台政策禁止联网时不暴露联网工具或检索预算，也不请求外部资料", async (t) => {
   let requests = 0;
   const draft = validDraft();
   draft.constraints = [{ text: "禁止联网", source: "user" }];
@@ -380,9 +384,12 @@ test("冻结平台政策遵守禁止联网，模型工具调用也不请求外�
   const { designer, sessions } = await fixture(t, async ({ record, submit }) => {
     if (record.role === "designer") {
       if (record.payload.requirement.draft.constraints.some((item) => item.text === "禁止联网")) {
-        await assert.rejects(record.tools.web_search.execute("search", { query: "formula" }), /不联网/);
-        await assert.rejects(record.tools.web_fetch.execute("fetch", { url: "https://example.com" }), /不联网/);
-        await assert.rejects(record.tools.search_technical_sources.execute("research", { query: "formula", topics: ["sdk"] }), /不联网/);
+        for (const name of ["web_search", "web_fetch", "search_technical_sources"]) assert.equal(record.tools[name], undefined);
+        assert.ok(record.tools.delegate_module); assert.equal(record.payload.remaining.searches, 0);
+        assert.match(record.options.systemPrompt, /检索预算为 0/);
+      } else {
+        for (const name of ["web_search", "web_fetch", "search_technical_sources"]) assert.ok(record.tools[name]);
+        assert.equal(record.payload.remaining.searches, 3);
       }
       return submit(validDesign(record.payload.requirements));
     }
@@ -408,8 +415,8 @@ test("外部调用方修改原始需求不能改变本轮需求、评测输入�
       input.draft.goal.value = "改为调用外部站点";
       input.draft.constraints = [];
       input.fingerprint = "mutated-requirements";
-      await assert.rejects(record.tools.web_search.execute("search", { query: "formula" }), /不联网/);
-      await assert.rejects(record.tools.search_technical_sources.execute("research", { query: "formula", topics: ["sdk"] }), /不联网/);
+      for (const name of ["web_search", "web_fetch", "search_technical_sources"]) assert.equal(record.tools[name], undefined);
+      assert.equal(record.payload.remaining.searches, 0);
       return submit(validDesign(record.payload.requirements));
     }
     assert.deepEqual(record.payload.requirement, original.draft);
