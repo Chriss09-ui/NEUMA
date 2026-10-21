@@ -9,6 +9,10 @@ import { createRequestHandler as createHandler } from "../src/server.mjs";
 import { emptyDraft, InputError, ProviderError, CONFIRMATION_QUESTION } from "../src/requirements/core.mjs";
 import { createProjectAddError } from "../src/projects/project-diagnostics.mjs";
 import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { validateActionInput, validateActionOutput } from "../src/applications/application-contract.mjs";
+import { validDraft } from "./helpers/architecture.mjs";
+import { REQUIREMENT_REQUEST_MAX_BYTES } from "../src/requirements/requirement-limits.mjs";
+import { contentHash } from "../src/requirements/task-spec.mjs";
 
 const fixtureRoots = [], fixtureHandlers = [];
 after(async () => {
@@ -42,6 +46,84 @@ async function invoke(handler, method, url, body) {
   await handler(request(method, url, body), response);
   return result;
 }
+
+test("需求对话、保存和构建入口共同接受超过旧HTTP上限的合法完整草稿，超总量不进入下游", async () => {
+  const draft = validDraft(), source = `可核对的原始材料：${"据".repeat(3600)}`, received = [];
+  const sessionId = "req_http_capacity", requestId = "request_http_capacity";
+  const messageId = `request_user_${contentHash({ sessionId, requestId }).slice(0, 32)}`;
+  draft.taskSpec = { version: 1, items: Array.from({ length: 60 }, (_, index) => ({ id: `http_${index}`,
+    dimension: "processing", content: `第${index + 1}条固定契约`, applicability: "applies", critical: true,
+    source: { kind: "user", evidence: [{ messageId, quote: source }] } })) };
+  const body = { id: "http-capacity", name: "容量测试", draft };
+  assert.ok(Buffer.byteLength(JSON.stringify(body)) > 512_000);
+  const handler = createRequestHandler({ config: {}, providers: { generateDraft: async ({ previousDraft: incoming }) => {
+    received.push(["turn", incoming]); return { draft: incoming, proposedGap: "none", question: "" };
+  } }, prototypeAgents: {
+    async saveRequirements(id, value) { received.push(["save", value.draft]); return { id }; },
+    async build(value) { received.push(["build", value.draft]); return { agent: { id: value.id } }; },
+  } });
+  const endpoints = ["/api/requirements/turn", "/api/agents/http-capacity/requirements", "/api/agents/build"];
+  for (const path of endpoints) {
+    const response = await invoke(handler, "POST", path, path.endsWith("/turn")
+      ? { draft, message: source, requirementSessionId: sessionId, requestId } : body);
+    assert.equal(response.status, 200, response.text);
+  }
+  assert.deepEqual(received.map(([stage]) => stage), ["turn", "save", "build"]);
+  for (const [, value] of received) assert.deepEqual(value, draft);
+  for (const path of endpoints) {
+    const response = await invoke(handler, "POST", path, { ...body, excessive: "x".repeat(REQUIREMENT_REQUEST_MAX_BYTES) });
+    assert.equal(response.status, 400); assert.match(JSON.parse(response.text).error, /请求内容过长/);
+  }
+  assert.equal(received.length, 3);
+});
+
+test("普通应用任务入口保留真实输入契约字段位置，拒绝时不创建任务或执行生成代码", async () => {
+  const object = (properties) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
+  const action = { inputSchema: object({ records: { type: "array", items: object({ bytes: { type: "integer" } }) } }),
+    outputSchema: object({ PRIVATE_OUTPUT_FIELD: { type: "integer" } }) };
+  let generatedCalls = 0; const tasks = [];
+  const handler = createRequestHandler({ config: { model: "server-fixture" }, prototypeAgents: { requireAgent: async () => ({ id: "alpha" }),
+    applications: { async submit(id, body) {
+      const input = validateActionInput(action, body.input); generatedCalls++;
+      validateActionOutput(action, { PRIVATE_OUTPUT_FIELD: "PRIVATE_GENERATED_OUTPUT" });
+      tasks.push({ id, input }); return { taskId: "unreachable" };
+    } } } });
+  const submit = (input) => invoke(handler, "POST", "/api/agents/alpha/tasks", { actionId: "analyze", input, mutationId: "admission_fixture", deliveryVersion: "delivery-one" });
+  const rejected = await submit({ records: [{ bytes: true }] }); assert.equal(rejected.status, 400);
+  const error = JSON.parse(rejected.text);
+  assert.equal(error.reason, "input_contract_rejected");
+  assert.deepEqual(error.validationIssue, { path: "input.records.0.bytes", reason: "invalid_type" });
+  assert.match(error.error, /input\.records\.0\.bytes.*字段类型无效/);
+  assert.deepEqual(error.diagnostic, { stage: "input", reason: "input_contract_rejected", providerModel: "server-fixture" });
+  assert.equal(generatedCalls, 0); assert.equal(tasks.length, 0);
+  const unknown = await submit({ records: [{ bytes: 1, PRIVATE_DYNAMIC_KEY: "PRIVATE_INPUT_VALUE" }] });
+  assert.equal(unknown.status, 400); assert.equal(JSON.parse(unknown.text).validationIssue.path, "input.records.0");
+  assert.doesNotMatch(unknown.text, /PRIVATE_/); assert.equal(generatedCalls, 0); assert.equal(tasks.length, 0);
+  const broken = await submit({ records: [{ bytes: 1 }] }); assert.equal(broken.status, 500);
+  assert.deepEqual(JSON.parse(broken.text), { error: "操作执行结果不符合交付契约，请检查或重新生成当前版本", reason: "output_contract_failed",
+    diagnostic: { stage: "application", reason: "output_contract_failed", providerModel: "server-fixture" } });
+  assert.doesNotMatch(broken.text, /PRIVATE_|output\./); assert.equal(generatedCalls, 1); assert.equal(tasks.length, 0);
+});
+
+test("普通任务入口遮蔽伪造契约错误及不安全typed路径，未知异常仍返回固定500", async () => {
+  let failure;
+  const handler = createRequestHandler({ config: {}, prototypeAgents: { requireAgent: async () => ({ id: "alpha" }), applications: { async submit() { throw failure; } } } });
+  const submit = () => invoke(handler, "POST", "/api/agents/alpha/tasks", { actionId: "analyze", input: {}, mutationId: "fixture" });
+  for (const value of [new Error("PRIVATE_ERROR_BODY"), Object.assign(new Error("PRIVATE_ERROR_BODY"), { reason: "input_contract_rejected",
+    validationIssue: { path: "input.safe", reason: "invalid_type" } }), { message: "PRIVATE_ERROR_BODY", reason: "input_contract_rejected", validationIssue: { path: "input.safe", reason: "invalid_type" } }]) {
+    failure = value; const result = await submit(); assert.equal(result.status, 500);
+    const body = JSON.parse(result.text); assert.equal(body.diagnostic.reason, "internal_error"); assert.equal(body.validationIssue, undefined);
+    assert.doesNotMatch(result.text, /PRIVATE_|input\.safe/);
+  }
+  for (const issue of [{ path: "input.value=PRIVATE_INPUT", reason: "invalid_type" }, { path: "input.safe", reason: "PRIVATE_REASON" },
+    { path: "input.safe", reason: "invalid_type", PRIVATE_FIELD: "PRIVATE_METADATA" }]) {
+    failure = Object.assign(new InputError("PRIVATE_RAW_CONTRACT_ERROR"), { reason: "input_contract_rejected", validationIssue: issue });
+    const result = await submit(); assert.equal(result.status, 400);
+    assert.deepEqual(JSON.parse(result.text), { error: "输入不符合操作契约", reason: "input_contract_rejected",
+      diagnostic: { stage: "input", reason: "input_contract_rejected", providerModel: null } });
+    assert.doesNotMatch(result.text, /PRIVATE_|input\.safe/);
+  }
+});
 
 test("非法请求地址返回安全的400，后续健康检查仍可使用", async () => {
   const handler = createRequestHandler({ config: {}, providers: {}, projects: {}, projectAgent: {}, prototypeAgents: {} });

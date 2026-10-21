@@ -3,8 +3,10 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { InputError } from "../requirements/core.mjs";
+import { textLength, textWithinLimit } from "../runtime/text-length.mjs";
+import { assertRequirementDraftSize, REQUIREMENT_CONVERSATION_MAX_BYTES, REQUIREMENT_HISTORY_MAX_CHARACTERS, REQUIREMENT_HISTORY_MAX_MESSAGES, REQUIREMENT_MESSAGE_MAX_CHARACTERS } from "../requirements/requirement-limits.mjs";
 
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = REQUIREMENT_CONVERSATION_MAX_BYTES;
 const STATES = new Set(["running", "complete", "failed", "cancelled", "interrupted"]);
 
 export function mainId(value, label = "对话") {
@@ -27,7 +29,7 @@ async function directory(path) {
 async function bytes(path) {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > MAX_BYTES)
-    throw new InputError("主 Agent 对话只允许 8 MB 以内的普通文件");
+    throw new InputError("主 Agent 对话只允许 32 MiB 以内的普通文件");
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const current = await handle.stat();
@@ -40,7 +42,7 @@ async function bytes(path) {
 
 function checked(value) {
   if (!value || value.schemaVersion !== 1 || !Number.isSafeInteger(value.version) || value.version < 1
-    || typeof value.title !== "string" || value.title.length > 200 || !Array.isArray(value.messages) || !Array.isArray(value.requests)
+    || !textWithinLimit(value.title, 200) || !Array.isArray(value.messages) || !Array.isArray(value.requests)
     || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt))) throw new InputError("主 Agent 对话记录格式无效");
   mainId(value.id);
   if (value.creationMutationId !== undefined) mainId(value.creationMutationId, "创建请求");
@@ -58,8 +60,13 @@ function checked(value) {
     if (requirementIds.has(requirement.agentId) || !["create", "edit"].includes(requirement.mode)
       || !["needs_input", "ready", "needs_build"].includes(requirement.status) || typeof requirement.confirmed !== "boolean"
       || !requirement.draft || typeof requirement.draft !== "object" || !Array.isArray(requirement.userMessages)
-      || requirement.userMessages.length > 12 || requirement.userMessages.some((message) => typeof message !== "string" || message.length > 4000)
+      || requirement.userMessages.length > REQUIREMENT_HISTORY_MAX_MESSAGES
+      || requirement.userMessages.some((message) => !textWithinLimit(message, REQUIREMENT_MESSAGE_MAX_CHARACTERS))
+      || requirement.userMessages.reduce((total, message) => total + textLength(message), 0) > REQUIREMENT_HISTORY_MAX_CHARACTERS
       || !Number.isSafeInteger(requirement.version) || requirement.version < 1) throw new InputError("主对话需求记录无效");
+    try { assertRequirementDraftSize(requirement.draft); }
+    catch (error) { throw Object.assign(new InputError(error.reason ? error.message : "主对话需求记录无效"),
+      error.reason ? { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes } : {}); }
     requirementIds.add(requirement.agentId);
     if (requirement.consultation !== undefined && (requirement.consultation.version !== 1
       || !Number.isSafeInteger(requirement.consultation.revision) || requirement.consultation.revision < 0
@@ -79,7 +86,7 @@ function checked(value) {
         || new Set(message.attachments.map((item) => item.id)).size !== message.attachments.length) throw new InputError("主 Agent 材料引用格式无效");
       for (const attachment of message.attachments) {
         mainId(attachment.id, "材料");
-        if (typeof attachment.name !== "string" || !attachment.name || attachment.name.length > 500) throw new InputError("主 Agent 材料名称无效");
+        if (typeof attachment.name !== "string" || !attachment.name || !textWithinLimit(attachment.name, 500)) throw new InputError("主 Agent 材料名称无效");
       }
     }
     ids.add(message.id);
@@ -91,7 +98,9 @@ function checked(value) {
       || !ids.has(request.userId) || !ids.has(request.assistantId)) throw new InputError("主 Agent 请求记录格式无效");
     mutations.add(request.mutationId);
   }
-  if (Buffer.byteLength(JSON.stringify(value, null, 2)) > MAX_BYTES) throw new InputError("主 Agent 对话已达 8 MB，请开始新对话；已有记录保留");
+  const bytes = Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
+  if (bytes > MAX_BYTES) throw Object.assign(new InputError("主 Agent 对话已达 32 MiB，请开始新对话；已有记录保留"),
+    { reason: "requirement_conversation_too_large", bytes, limitBytes: MAX_BYTES });
   return structuredClone(value);
 }
 
@@ -141,7 +150,7 @@ export class MainStore {
 
   create({ mutationId, title = "新对话" } = {}) {
     if (mutationId !== undefined) mainId(mutationId, "请求");
-    if (typeof title !== "string" || !title.trim() || title.length > 200) throw new InputError("对话标题不能超过 200 字");
+    if (typeof title !== "string" || !title.trim() || !textWithinLimit(title, 200)) throw new InputError("对话标题不能超过 200 字");
     return this.queue(async () => {
       const existing = mutationId && [...this.records.values()].find((item) => item.creationMutationId === mutationId);
       if (existing?.deletedAt) throw mainConversationFailure("conversation_deleted");

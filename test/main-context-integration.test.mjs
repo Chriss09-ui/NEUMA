@@ -40,13 +40,18 @@ async function sdkFixture(t) {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks)), payload = JSON.parse(textOf(body.messages.find((message) => message.role === "user").content));
       requests.push({ body, payload });
-      assert.ok(body.tools.some((tool) => tool.function.name === "open_agent_requirements"));
+      const routing = body.tools.some((tool) => tool.function.name === "submit_requirement_route");
+      if (routing) assert.deepEqual(body.tools.map((tool) => tool.function.name), ["submit_requirement_route"]);
+      else assert.ok(body.tools.some((tool) => tool.function.name === "open_agent_requirements"));
       const priorCalls = body.messages.filter((message) => message.role === "assistant").flatMap((message) => message.tool_calls ?? []);
       assert.equal(priorCalls.length, 0, "需求工具提交后必须终止主模型，不再请求模型写回执");
       response.writeHead(200, { "content-type": "text/event-stream" });
       const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: `fixture-${requests.length}`, object: "chat.completion.chunk",
         created: 1, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-      if (payload.currentUserMessage === "现在日常聊一句") {
+      if (routing) {
+        chunk({ role: "assistant", tool_calls: [{ index: 0, id: `route_${requests.length}`, type: "function",
+          function: { name: "submit_requirement_route", arguments: JSON.stringify({ route: "continue", quote: "" }) } }] }); chunk({}, "tool_calls");
+      } else if (payload.currentUserMessage === "现在日常聊一句") {
         chunk({ role: "assistant", content: "日常对话继续。" }); chunk({}, "stop");
       } else {
         const mode = payload.currentUserMessage === "帮我创建一个研究 Agent" || payload.currentUserMessage.includes("再创建另一个") ? "new" : "continue";
@@ -86,7 +91,8 @@ test("真实 Pi 需求路由终止后返回 processTurn 原文，同一主聊续
   const initial = await f.main.prompt({ conversationId: f.conversation.id, message: initialMessage, mutationId: "start-research" }, (event) => {
     progress.push(event); if (event.type === "text-start") streamed = ""; if (event.type === "text-delta") streamed += event.delta;
   });
-  const expected = await processTurn({ message: initialMessage, draft: emptyDraft() }, { generateDraft: async (input) => generate(input) });
+  const expected = await processTurn({ message: initialMessage, draft: emptyDraft() },
+    { generateDraft: async (input) => generate(input), preflight: sufficientPreflight }, { enforceConsultation: true });
   assert.equal(f.requests.length, 1); assert.equal(initial.reply, [expected.summary, expected.question ?? expected.confirmationQuestion].filter(Boolean).join("\n\n"));
   assert.equal(streamed, initial.reply); assert.doesNotMatch(initial.reply, new RegExp(rewrite));
   assert.equal(initial.context.type, "requirements"); assert.equal(initial.context.status, "needs_input");
@@ -95,6 +101,9 @@ test("真实 Pi 需求路由终止后返回 processTurn 原文，同一主聊续
   const ready = await f.main.prompt({ conversationId: f.conversation.id, message: "资料由我提供，输出中文研究报告", mutationId: "clarify-research" });
   assert.equal(ready.context.agentId, initial.context.agentId); assert.equal(ready.context.status, "ready"); assert.equal(ready.context.confirmed, false);
   assert.equal(f.providerCalls[1].previousDraft.goal.value, "整理研究资料");
+  assert.deepEqual(f.requests[1].body.tools.map((tool) => tool.function.name), ["submit_requirement_route"]);
+  assert.equal(f.requests[1].payload.currentUserMessage, "资料由我提供，输出中文研究报告");
+  assert.equal(f.requests[1].payload.currentRequirement.agentId, initial.context.agentId);
   const before = f.providerCalls.length, requestsBeforeConfirmation = f.requests.length;
   const confirmed = await f.main.prompt({ conversationId: f.conversation.id, message: "确认需求", mutationId: "approve-research" });
   assert.equal(f.providerCalls.length, before, "明确确认沿用已展示需求，不再次调用需求模型");

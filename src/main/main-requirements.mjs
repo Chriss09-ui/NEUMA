@@ -2,14 +2,17 @@ import { createHash } from "node:crypto";
 import { CONFIRMATION_QUESTION, InputError, decideNext, emptyDraft, normalizeDraft, processTurn } from "../requirements/core.mjs";
 import { claimRequirementHandoff, newConsultation } from "../requirements/consultation.mjs";
 import { substantiveRequirementHash } from "../requirements/task-spec.mjs";
+import { textLength } from "../runtime/text-length.mjs";
+import { REQUIREMENT_HISTORY_MAX_MESSAGES, REQUIREMENT_HISTORY_MAX_CHARACTERS } from "../requirements/requirement-limits.mjs";
 
 const stableId = (conversationId, mutationId) => `agent_${createHash("sha256").update(`${conversationId}:${mutationId}`).digest("hex").slice(0, 32)}`;
 export const isMainConfirmation = (message) => typeof message === "string" && /^(?:确认需求|确认)[\s。！!，,]*$/.test(message.trim());
 const recentMessages = (messages) => {
   const selected = []; let size = 0;
   for (const message of [...messages].reverse()) {
-    if (selected.length === 12 || size + message.length > 12_000) break;
-    selected.unshift(message); size += message.length;
+    const characters = textLength(message);
+    if (selected.length === REQUIREMENT_HISTORY_MAX_MESSAGES || size + characters > REQUIREMENT_HISTORY_MAX_CHARACTERS) break;
+    selected.unshift(message); size += characters;
   }
   return selected;
 };
@@ -77,7 +80,8 @@ export async function advanceRequirement(requirement, message, providers, { sign
   const userMessages = recentMessages([...(requirement.userMessages ?? []), message]);
   const result = await processTurn({ message, draft: requirement.draft, lastQuestion: requirement.lastQuestion, userMessages,
     consultation: requirement.consultation, evidenceMessages }, providers, { signal, onProgress, enforceConsultation: true,
-    requestId: requestId ?? `req_${requirement.agentId}_${requirement.version}`, platform, research });
+    requestId: requestId ?? `req_${requirement.agentId}_${requirement.version}`, platform, research,
+    verificationContext: { agentId: requirement.agentId } });
   signal?.throwIfAborted();
   const next = { ...structuredClone(requirement), draft: result.draft, status: result.confirmed ? "needs_build" : result.status,
     confirmed: result.confirmed, lastQuestion: result.question ?? result.confirmationQuestion ?? "", question: result.question,

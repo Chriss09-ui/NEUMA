@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { chmod, link, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -29,6 +31,24 @@ const definition = (id = "alpha", overrides = {}) => ({ id, name: "助手", draf
   instructions: "根据材料处理任务", revision: 1, fingerprint: "unchanged", memory: "记忆", createdAt: date, updatedAt: date, ...overrides });
 const record = (id = "dev_alpha", overrides = {}) => ({ id, agentId: "alpha", status: "completed", revision: 1,
   createdAt: date, updatedAt: date, budget: { remaining: 3 }, ...overrides });
+
+test("旧布局展示资料沿用现行Unicode字符边界，超限迁移仍保留原文件", async (t) => {
+  const profile = { name: "𠮷".repeat(120), description: "𠮷".repeat(240), icon: "😀".repeat(16) };
+  const dataDir = await fixture(t), source = join(dataDir, "agents.json");
+  const raw = JSON.stringify({ version: 1, agents: [definition("alpha", { profile })] });
+  await writeFile(source, raw);
+  const storage = new AgentStorage({ dataDir }); await storage.ready;
+  assert.deepEqual((await storage.readJson("alpha", "definition.json")).agent.profile, profile);
+  assert.equal(await readFile(source, "utf8"), raw);
+  for (const key of Object.keys(profile)) {
+    const rejectedDir = await fixture(t), path = join(rejectedDir, "agents.json");
+    const invalid = JSON.stringify({ version: 1, agents: [definition("alpha", { profile: { ...profile, [key]: profile[key] + "字" } })] });
+    await writeFile(path, invalid);
+    await assert.rejects(new AgentStorage({ dataDir: rejectedDir }).ready, InputError);
+    assert.equal(await readFile(path, "utf8"), invalid);
+    await assert.rejects(readFile(join(rejectedDir, "agents-layout.json")), { code: "ENOENT" });
+  }
+});
 
 test("legacy definitions, architecture, code, snapshots and files migrate together without changing sources", async (t) => {
   const dataDir = await fixture(t), definitions = { version: 1, agents: [definition(), definition("beta")] };
@@ -102,7 +122,7 @@ test("migration preserves business JSON that resembles snapshot references", asy
 
 test("invalid legacy metadata fails before publication and can be corrected and retried", async (t) => {
   for (const invalid of [{ memory: 42 }, { profile: { name: "", description: "", icon: "" } },
-    { draft: { goal: { value: "x" }, excess: "x".repeat(60000) } }]) {
+    { draft: { goal: { value: "x" }, excess: "x".repeat(2 * 1024 * 1024) } }]) {
     const dataDir = await fixture(t), path = join(dataDir, "agents.json");
     await writeFile(path, JSON.stringify({ version: 1, agents: [definition("alpha", invalid)] }));
     await assert.rejects(new AgentStorage({ dataDir }).ready, InputError);
@@ -149,6 +169,94 @@ test("Agent paths and metadata reject traversal, directory links and linked file
   await symlink(join(dataDir, "agents/alpha"), join(dataDir, "agents/beta"));
   await assert.rejects(storage.directory("beta"), InputError);
   await assert.rejects(storage.agentIds(), InputError);
+});
+
+test("原子替换已打开的 JSON 时重新读取最新文件，连续替换的重读严格有界", async (t) => {
+  for (const replacements of [1, 2, 3]) {
+    const dataDir = await fixture(t), storage = new AgentStorage({ dataDir }); await storage.ready;
+    await storage.writeJson("alpha", "application/tasks.json", { version: 0 });
+    const path = await storage.path("alpha", "application/tasks.json"), next = [];
+    for (let index = 0; index < replacements; index++) {
+      const replacement = join(dataDir, `replacement-${index}.json`);
+      await writeFile(replacement, JSON.stringify({ version: index + 1 })); next.push(replacement);
+    }
+    const probe = await open(path, "r"), prototype = Object.getPrototypeOf(probe), originalStat = prototype.stat;
+    await probe.close();
+    let inode = (await stat(path)).ino, swaps = 0;
+    const wrapped = t.mock.method(prototype, "stat", async function (...args) {
+      const info = await originalStat.apply(this, args);
+      if (info.ino === inode && swaps < replacements) {
+        await rename(next[swaps++], path); inode = (await stat(path)).ino;
+        return originalStat.apply(this, args);
+      }
+      return info;
+    });
+    try {
+      if (replacements < 3) assert.deepEqual(await storage.readJson("alpha", "application/tasks.json"), { version: replacements });
+      else await assert.rejects(storage.readJson("alpha", "application/tasks.json"), /连续更新/);
+      assert.equal(swaps, replacements);
+    } finally { wrapped.mock.restore(); }
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { version: replacements });
+  }
+});
+
+test("已打开文件被链接替换时仍拒绝，不把链接或超大新文件当正常并发更新", async (t) => {
+  for (const kind of ["symbolic", "hard", "oversized"]) {
+    const dataDir = await fixture(t), storage = new AgentStorage({ dataDir }); await storage.ready;
+    await storage.writeJson("alpha", "application/tasks.json", { version: 0 });
+    const path = await storage.path("alpha", "application/tasks.json"), original = join(dataDir, "original.json"), replacement = join(dataDir, "replacement.json");
+    await writeFile(original, JSON.stringify({ content: "x".repeat(100) }));
+    if (kind === "symbolic") await symlink(original, replacement);
+    else if (kind === "hard") await link(original, replacement);
+    else await writeFile(replacement, await readFile(original));
+    const probe = await open(path, "r"), prototype = Object.getPrototypeOf(probe), originalStat = prototype.stat;
+    const inode = (await probe.stat()).ino; await probe.close(); let swaps = 0;
+    const wrapped = t.mock.method(prototype, "stat", async function (...args) {
+      const info = await originalStat.apply(this, args);
+      if (info.ino === inode && swaps++ === 0) { await rename(replacement, path); return originalStat.apply(this, args); }
+      return info;
+    });
+    try {
+      await assert.rejects(storage.readJson("alpha", "application/tasks.json", { maxBytes: 50 }), kind === "oversized" ? /超过大小限制/ : /不允许链接/);
+    } finally { wrapped.mock.restore(); }
+  }
+});
+
+test("路径检查撞上原子替换时只重读真实新文件，连续更新和不安全替换仍被拒绝", async (t) => {
+  for (const kind of ["once", "twice", "continuous", "symbolic", "hard", "oversized"]) {
+    const dataDir = await fixture(t), storage = new AgentStorage({ dataDir }); await storage.ready;
+    await storage.writeJson("alpha", "application/tasks.json", { version: 0 });
+    const path = await storage.path("alpha", "application/tasks.json"), next = [];
+    const replacements = kind === "continuous" ? 3 : kind === "twice" ? 2 : 1;
+    const original = join(dataDir, "original.json"); await writeFile(original, JSON.stringify({ content: "x".repeat(100) }));
+    for (let index = 0; index < replacements; index++) {
+      const replacement = join(dataDir, `replacement-${index}.json`);
+      if (kind === "symbolic") await symlink(original, replacement);
+      else if (kind === "hard") await link(original, replacement);
+      else await writeFile(replacement, JSON.stringify(kind === "oversized" ? { content: "x".repeat(100) } : { version: index + 1 }));
+      next.push(replacement);
+    }
+    const originalLstat = fsPromises.lstat; let swaps = 0, replacementCheck = false;
+    const wrapped = t.mock.method(fsPromises, "lstat", async (...args) => {
+      const info = await originalLstat(...args);
+      if (args[0] !== path || swaps >= replacements) return info;
+      if (replacementCheck) { replacementCheck = false; return info; }
+      const handle = await open(path, "r");
+      try {
+        await rename(next[swaps++], path); replacementCheck = true;
+        // APFS can complete a path stat against the inode unlinked by rename.
+        const unlinked = await handle.stat(); assert.equal(unlinked.nlink, 0); return unlinked;
+      } finally { await handle.close(); }
+    });
+    syncBuiltinESMExports();
+    try {
+      if (["once", "twice"].includes(kind))
+        assert.deepEqual(await storage.readJson("alpha", "application/tasks.json", { maxBytes: 50 }), { version: replacements });
+      else await assert.rejects(storage.readJson("alpha", "application/tasks.json", { maxBytes: 50 }),
+        kind === "continuous" ? /连续更新/ : kind === "oversized" ? /超过大小限制/ : /不允许链接/);
+      assert.equal(swaps, replacements);
+    } finally { wrapped.mock.restore(); syncBuiltinESMExports(); }
+  }
 });
 
 test("conversation enumeration rejects non-files, linked records and unsafe names", async (t) => {

@@ -9,7 +9,7 @@ const architectureLabels = {
   designing: "正在设计架构，尚未生成可运行的智能体。",
   evaluating: "正在检查架构，尚未生成可运行的智能体。",
   needs_input: "需要补充影响交付的关键选择，请继续澄清需求。",
-  needs_changes: "架构需要调整，请根据下列问题修改需求或重新检查。",
+  needs_changes: "架构需要调整，可查看需求与方案后重新检查。",
   needs_evidence: "架构待补充依据，补齐后才能继续生成。",
   infeasible: "当前方案无法满足需求，请调整需求或所需能力。",
   failed: "架构处理失败，可以重新设计与检查。",
@@ -28,20 +28,46 @@ function matchingDevelopment(agent, architecture, development) {
     && development.architectureRef?.candidateHash === architecture.candidateHash);
 }
 
-export function agentDevelopmentState(agent, { architecture, development } = {}) {
+function activeApplicationAwaitingGateway(definition, active) {
+  const architecture = active?.architecture, record = active?.development, reference = definition?.developmentRef;
+  const execution = definition?.execution, delivered = record?.package;
+  return Boolean(definition?.mode === "designed" && definition.status === "ready" && !definition.dataRecoveryRequired
+    && ["node-action", "managed-service"].includes(execution?.kind)
+    && architecture?.agentId === definition.id && architecture.status === "passed" && architecture.delivery === "ready"
+    && !architecture.issues?.some((issue) => issue.blocking)
+    && /^[a-f0-9]{64}$/.test(architecture.sourceFingerprint ?? "")
+    && (definition.fingerprint === undefined || architecture.sourceFingerprint === definition.fingerprint)
+    && agentSourceKey(architecture) === agentSourceKey(definition)
+    && Number.isSafeInteger(architecture.version) && architecture.version > 0
+    && /^[a-f0-9]{64}$/.test(architecture.candidateHash ?? "")
+    && definition.architectureRef?.version === architecture.version && definition.architectureRef?.candidateHash === architecture.candidateHash
+    && record?.agentId === definition.id && record.status === "completed" && record.delivery === "needs_connection"
+    && record.architectureRef?.version === architecture.version && record.architectureRef?.candidateHash === architecture.candidateHash
+    && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(record.id ?? "") && reference?.id === record.id && execution.buildId === record.id
+    && /^[a-f0-9]{64}$/.test(reference.codeHash ?? "") && /^[a-f0-9]{64}$/.test(reference.planHash ?? "")
+    && delivered?.codeHash === reference.codeHash && execution.codeHash === reference.codeHash && delivered.planHash === reference.planHash
+    && active.application?.deliveryVersion === `${record.id}:${reference.codeHash}`
+    && active.application?.manifest?.runtime === execution.kind);
+}
+
+export function agentDevelopmentState(agent, { architecture, development, definition, activeRuntime, updateStatus } = {}) {
   const currentArchitecture = architecture?.agentId === agent.id && agentSourceKey(architecture) === agentSourceKey(agent);
   const record = currentArchitecture && matchingDevelopment(agent, architecture, development) ? development : null;
   const accepted = currentArchitecture && architecture.status === "passed";
   const active = record?.status === "running";
   const recheck = record?.status === "completed" && ["blocked", "needs_development", "needs_connection"].includes(record.delivery);
-  const canResume = Boolean(accepted && record && (["blocked", "failed", "cancelled", "interrupted"].includes(record.status) || recheck));
-  const canStart = Boolean(accepted && !record && ["needs_development", "needs_connection"].includes(architecture.delivery));
+  const canConfigure = !updateStatus && record?.id === activeRuntime?.development?.id && activeApplicationAwaitingGateway(definition, activeRuntime);
+  const canRestart = Boolean(!canConfigure && accepted && record?.status === "failed" && record.phase === "planning"
+    && !record.tasks?.length && !record.currentTaskId && !record.package
+    && record.continuation?.mode === "fresh" && record.continuation.sourceRunId === record.id);
+  const canResume = Boolean(!canConfigure && !canRestart && accepted && record && (["blocked", "failed", "cancelled", "interrupted"].includes(record.status) || recheck));
+  const canStart = Boolean(canRestart || accepted && !record && ["needs_development", "needs_connection"].includes(architecture.delivery));
   const statusLabel = record ? developmentLabels[record.status] || "研发状态待确认" : "准备研发";
   const deliveryLabel = record?.status === "completed" ? developmentDeliveries[record.delivery] || "运行状态待确认" : "";
-  return { visible: Boolean(record || canStart), record, active, canResume, canStart,
-    actionLabel: recheck ? "重新检查交付" : canResume ? "继续研发" : "开始研发",
+  return { visible: Boolean(record || canStart), record, active, canResume, canStart, canConfigure, canRestart,
+    actionLabel: canConfigure ? "配置本机接口" : canRestart ? "新一轮研发" : recheck ? "重新检查交付" : canResume ? "继续研发" : "开始研发",
     label: [statusLabel, deliveryLabel].filter(Boolean).join(" · "),
-    summary: typeof record?.summary === "string" && record.summary.trim() ? record.summary
+    summary: canRestart ? "本轮研发次数已用完，进度记录已保留。可以开启新一轮继续完善。" : typeof record?.summary === "string" && record.summary.trim() ? record.summary
       : record ? "研发进度已保存，下一步以实际检查结果为准。" : "方案已通过评估，开始后会按任务开发并检查验收。" };
 }
 
@@ -49,13 +75,15 @@ export function agentBuildState(agent, result = {}) {
   const latest = candidateBuildState(agent, result), active = result.activeRuntime;
   if (active && result.agent?.id === agent.id) {
     const running = candidateBuildState(result.agent, { agent: result.agent, architecture: active.architecture, development: active.development });
-    if (running.status === "ready") {
+    const gatewayPending = activeApplicationAwaitingGateway(result.agent, active);
+    if (running.status === "ready" || gatewayPending) {
       const updating = result.architecture?.version !== active.architecture.version || agentSourceKey(agent) !== agentSourceKey(result.agent);
-      return { ...running, activeRuntime: active, updateStatus: updating ? latest : null,
-        label: updating ? `当前继续使用已激活版本。更新状态：${latest.label}` : running.label };
+      const label = gatewayPending ? "内部功能已可用，本机接口待配置。" : running.label;
+      return { ...running, status: "ready", gatewayPending, activeRuntime: active, updateStatus: updating ? latest : null,
+        label: updating ? `当前继续使用已激活版本。更新状态：${latest.label}` : label };
     }
   }
-  return { ...latest, activeRuntime: null, updateStatus: null };
+  return { ...latest, gatewayPending: false, activeRuntime: null, updateStatus: null };
 }
 
 function candidateBuildState(agent, { agent: definition, architecture, development } = {}) {
@@ -65,9 +93,6 @@ function candidateBuildState(agent, { agent: definition, architecture, developme
     if (architecture.agentId !== agent.id || agentSourceKey(architecture) !== sourceKey) {
       return { status: definition ? "stale" : "missing", label: "需求已更新，请重新设计与检查。" };
     }
-    const details = [architecture.summary, ...(Array.isArray(architecture.issues) ? architecture.issues : [])
-      .flatMap((issue) => [issue?.description, issue?.remedy])]
-      .filter((text) => typeof text === "string" && text.trim());
     let status = architecture.status, label = Object.hasOwn(architectureLabels, status) ? architectureLabels[status] : null;
     if (status === "passed") {
       status = architecture.delivery === "needs_connection" ? "needs_connection"
@@ -100,7 +125,10 @@ function candidateBuildState(agent, { agent: definition, architecture, developme
       }
     }
     if (!label) { status = "blocked"; label = "架构状态尚未确认，请重新设计与检查。"; }
-    return { status, label: [label, ...new Set(details)].join(" "), ...(architecture.handoff ? { handoff: architecture.handoff } : {}) };
+    const summary = typeof architecture.summary === "string" ? architecture.summary.trim() : "";
+    if (["needs_input", "needs_changes", "needs_evidence", "infeasible", "failed", "cancelled"].includes(status)
+      && summary && summary.length <= 160 && !/[\r\n]/u.test(summary)) label += ` ${summary}`;
+    return { status, label, ...(architecture.handoff ? { handoff: architecture.handoff } : {}) };
   }
   if (!definition) return { status: "missing", label: "需求已确认，点击生成智能体开始设计与检查。" };
   return { status: "blocked", label: "旧原型已停用，请重新设计与检查后运行。" };
@@ -197,6 +225,15 @@ export function createAgentRuntime(request = fetch) {
     saveMemory: (id, memory, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, { memory }, options),
     listFiles: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/files`, undefined, options),
     readFile: (id, path, options) => json(`/api/agents/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`, undefined, options),
+    fileDownloadUrl: (id, path) => `/api/agents/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}&download=1`,
+    async downloadFile(id, path) {
+      const response = await request(`/api/agents/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}&download=1`);
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "文件下载未完成，请重试。");
+      }
+      return response.blob();
+    },
     getDevelopment: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/development`, undefined, options),
     develop: (id, { resume = false, ...options } = {}) => stream(`/api/agents/${encodeURIComponent(id)}/development/stream`, { resume }, options, {
       isComplete: (result) => result?.development?.agentId === id

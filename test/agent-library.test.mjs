@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentLibrary, normalizeAttachmentRefs } from "../src/agents/agent-library.mjs";
 import { InputError } from "../src/requirements/core.mjs";
+import { REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_RECORD_MAX_BYTES } from "../src/requirements/requirement-limits.mjs";
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-agent-library-"));
@@ -17,6 +18,43 @@ const snapshot = (content = "已整理") => ({ schemaVersion: 2, messages: [
   { role: "user", content: "整理材料", delivery: "pending", revision: "v1" },
   { role: "assistant", content, status: "complete", revision: "v1" },
 ] });
+
+test("需求共用UTF8总量预算，超过旧60000字的合法任务要求完整保存并读回", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  const value = input();
+  value.draft.taskSpec = { version: 1, items: Array.from({ length: 30 }, (_, index) => ({ id: `task_${index}`,
+    dimension: "processing", applicability: "applies", content: "要求".repeat(1000), critical: false,
+    source: { kind: "user", evidence: [{ messageId: "source", quote: "用户原文" }] } })) };
+  assert.ok(JSON.stringify(value.draft).length > 60_000);
+  const saved = await library.saveRequirement("large", value, { consultation: { notes: "本机协商记录".repeat(200_000) } });
+  assert.deepEqual(saved.requirement.draft, value.draft);
+  const restored = new AgentLibrary({ dataDir });
+  assert.deepEqual((await restored.list()).requirements[0].draft, value.draft);
+  const file = join(dataDir, "agents/large/requirements.json"), original = await readFile(file);
+  assert.ok(original.length > 2 * 1024 * 1024 && original.length < REQUIREMENT_RECORD_MAX_BYTES);
+  assert.throws(() => library.saveRequirement("large", { ...value, draft: { ...value.draft, excessive: "字".repeat(REQUIREMENT_DRAFT_MAX_BYTES) } }),
+    error => error.reason === "requirement_draft_too_large" && error.bytes > error.limitBytes);
+  await assert.rejects(library.saveRequirement("large", value, { consultation: { notes: "x".repeat(REQUIREMENT_RECORD_MAX_BYTES) } }),
+    error => error.reason === "requirement_record_too_large" && error.bytes > error.limitBytes);
+  assert.deepEqual(await readFile(file), original);
+});
+
+test("12000字符用户消息原文保存、恢复，超限写入不改变旧对话", async (t) => {
+  const { dataDir, library } = await fixture(t); await library.saveRequirement("long-chat", input());
+  const message = "😀".repeat(12_000), value = { schemaVersion: 2, messages: [{ role: "user", content: message },
+    { role: "assistant", content: "已接收", status: "complete" }] };
+  await library.saveConversation("long-chat", value);
+  assert.equal((await new AgentLibrary({ dataDir }).getConversation("long-chat")).conversation.messages[0].content, message);
+  assert.throws(() => library.saveConversation("long-chat", { ...value, messages: [{ role: "user", content: `${message}字` }] }), InputError);
+  assert.equal((await library.getConversation("long-chat")).conversation.messages[0].content, message);
+});
+
+test("保存名称接受120个Unicode字符，121字符拒绝后保留旧记录", async (t) => {
+  const { library } = await fixture(t), name = "😀".repeat(120);
+  await library.saveRequirement("name-limit", input(name));
+  assert.throws(() => library.saveRequirement("name-limit", input(`${name}字`)), InputError);
+  assert.equal((await library.list()).requirements[0].name, name);
+});
 
 test("requirements and explicit conversation snapshots survive restart in the same Agent folder", async (t) => {
   const { dataDir, library } = await fixture(t);

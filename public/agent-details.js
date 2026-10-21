@@ -2,8 +2,10 @@ import { createAgentRuntime } from "./agent-runtime.js";
 import { agentDisplayName, agentDisplayDescription } from "./state.js";
 import { agentIconChoices, fileDescription, newestFiles, staticArtifactDocument } from "./agent-details-view.js";
 import { avatarShapes, avatarColors, avatarIcon, resolveAgentAvatar, renderAgentAvatar } from "./agent-avatar.js";
+import { createApplicationApi } from "./application-api.js";
+import { saveFileDownload } from "./artifact-download.js";
 
-const api = createAgentRuntime(), states = new Map();
+const api = createAgentRuntime(), applicationApi = createApplicationApi(), states = new Map();
 const byId = (id) => document.getElementById(id), panel = byId("agent-panel"), fileDialog = byId("agent-file-dialog"), shell = byId("agent-page-shell");
 const emit = (type, detail) => document.dispatchEvent(new CustomEvent(type, { detail }));
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -53,8 +55,8 @@ function refreshAvailability() {
   byId("agent-artifacts-open").disabled = !id || runtime?.agentId !== id;
   byId("agent-files-refresh").disabled = !ready;
   if (runtime) {
-    byId("agent-build-shortcut").hidden = runtime.ready || runtime.busy || ["checking", "unchecked"].includes(runtime.status);
-    byId("agent-build-shortcut").textContent = runtime.developmentAction || (runtime.definition ? "重新生成" : "生成智能体");
+    byId("agent-build-shortcut").hidden = runtime.ready && !runtime.configurationAction || runtime.busy || ["checking", "unchecked"].includes(runtime.status);
+    byId("agent-build-shortcut").textContent = runtime.configurationAction || runtime.developmentAction || (runtime.definition ? "重新生成" : "生成智能体");
   }
 }
 
@@ -202,6 +204,7 @@ function openArtifacts() {
   const id = currentId();
   if (!id || runtime?.agentId !== id) return;
   const item = state(id);
+  item.taskArtifact = null;
   if (!settingsAgentId) openPanel("profile", { focus: false });
   fileFocus = { agentId: id, selectOnLoad: !item.filesLoaded };
   renderFiles(); renderFile();
@@ -211,6 +214,30 @@ function openArtifacts() {
   if (runtime.definition && !item.filesLoaded && !item.filesLoading) void loadFiles(id);
   const button = [...byId("agent-file-list").children].find((node) => node.dataset.path === path);
   (button || byId("agent-file-close")).focus({ preventScroll: true });
+}
+
+async function openTaskArtifact(detail) {
+  const id = currentId();
+  if (!id || detail?.agentId !== id || runtime?.agentId !== id || !/^[\w-]{1,80}$/.test(detail.taskId)
+    || !Number.isSafeInteger(detail.index) || detail.index < 0) return;
+  const item = state(id), returnTo = document.activeElement;
+  if (!settingsAgentId) openPanel("profile", { focus: false });
+  const artifact = { taskId: detail.taskId, index: detail.index, path: detail.artifact?.path || detail.artifact?.name || `产物 ${detail.index + 1}`,
+    note: "正在读取任务产物预览…", preview: null, downloading: false };
+  item.taskArtifact = artifact; item.fileSequence++;
+  fileFocus = { agentId: id, selectOnLoad: false, returnTo };
+  renderFiles(); renderFile();
+  if (!fileDialog.open) fileDialog.showModal();
+  byId("agent-file-close").focus({ preventScroll: true });
+  try {
+    const preview = await applicationApi.artifactPreview(id, artifact.taskId, artifact.index);
+    if (item.taskArtifact !== artifact || states.get(id) !== item) return;
+    artifact.preview = preview; artifact.note = "";
+  } catch (error) {
+    if (item.taskArtifact !== artifact || states.get(id) !== item) return;
+    artifact.note = error.message || "产物预览暂时不可用，可以下载完整文件。";
+  }
+  if (showingFile(id)) renderFile();
 }
 
 async function loadFiles(id) {
@@ -232,7 +259,7 @@ async function loadFiles(id) {
         renderFile();
         const path = item.filePath || (fileFocus.selectOnLoad ? item.files[0]?.path : null);
         fileFocus.selectOnLoad = false;
-        if (path) void loadFile(id, path);
+        if (path && !item.taskArtifact) void loadFile(id, path);
       }
     }
   } catch (error) {
@@ -254,7 +281,7 @@ function renderFiles() {
   for (const file of item.files) {
     const id = currentId(), button = document.createElement("button"); button.type = "button"; button.className = "agent-file-item";
     button.dataset.path = file.path;
-    button.setAttribute("aria-pressed", String(file.path === item.filePath));
+    button.setAttribute("aria-pressed", String(!item.taskArtifact && file.path === item.filePath));
     const title = document.createElement("strong"), info = document.createElement("small");
     title.textContent = file.path; info.textContent = fileDescription(file);
     button.append(title, info); button.addEventListener("click", () => { if (showingFile(id)) void loadFile(id, file.path); }); list.append(button);
@@ -267,6 +294,7 @@ function renderFiles() {
 async function loadFile(id, path) {
   if (!showingFile(id) || !runtime?.definition) return;
   const item = state(id), sequence = ++item.fileSequence;
+  item.taskArtifact = null; item.workspaceDownload = null;
   item.filePath = path; item.file = null; item.fileNote = "正在读取文件…";
   renderFiles(); renderFile();
   try {
@@ -281,16 +309,22 @@ async function loadFile(id, path) {
 }
 
 function renderFile() {
-  const item = state(currentId()), file = item.file, container = byId("agent-file-content");
+  const item = state(currentId()), artifact = item.taskArtifact, file = artifact ? artifact.preview : item.file, container = byId("agent-file-content");
   container.replaceChildren();
-  byId("agent-file-name").textContent = file?.path || item.filePath || "选择一份产物";
-  byId("agent-file-download").hidden = !file || file.truncated;
-  byId("agent-file-info").textContent = file ? file.truncated ? "文件过长，仅展示部分内容。" : /\.html?$/i.test(file.path) ? "静态网页预览" : "文本预览"
-    : item.fileNote || "文件保存在这个智能体的专属目录。";
+  byId("agent-file-name").textContent = file?.path || artifact?.path || item.filePath || "选择一份产物";
+  const download = byId("agent-file-download"), operation = artifact || item.workspaceDownload;
+  download.hidden = !artifact && !file; download.disabled = Boolean(operation?.downloading);
+  download.textContent = operation?.downloading ? "正在准备下载…" : artifact ? "下载本任务文件" : "下载当前文件";
+  download.setAttribute("aria-busy", String(Boolean(operation?.downloading)));
+  byId("agent-file-info").textContent = operation?.downloadNote || (file
+    ? `${artifact ? "本次任务快照预览" : "工作目录预览"} · 可能已脱敏${file.truncated ? "，仅展示部分内容。" : "。"}${artifact ? "下载获取本次任务的完整原文件。" : "下载获取目录中的当前原文件。"}`
+    : artifact?.note || item.fileNote || "文件保存在这个智能体的专属目录。");
+  byId("agent-file-info").setAttribute("role", "status");
+  container.setAttribute("aria-busy", String(Boolean(artifact && !file && artifact.note === "正在读取任务产物预览…")));
   if (!file) {
     const empty = document.createElement("div"), title = document.createElement("strong"), note = document.createElement("p");
-    empty.className = "agent-file-empty"; title.textContent = item.filePath ? "正在查看这份产物" : "成果会留在这里";
-    note.textContent = item.fileNote || "选择左侧文件，即可查看或下载。"; empty.append(title, note); container.append(empty);
+    empty.className = "agent-file-empty"; title.textContent = artifact || item.filePath ? "正在查看这份产物" : "成果会留在这里";
+    note.textContent = artifact?.note || item.fileNote || "选择左侧文件，即可查看预览。"; empty.append(title, note); container.append(empty);
   } else if (/\.html?$/i.test(file.path) && !file.truncated) {
     const frame = document.createElement("iframe"); frame.title = `预览 ${file.path}`;
     frame.setAttribute("sandbox", ""); frame.setAttribute("referrerpolicy", "no-referrer");
@@ -411,24 +445,32 @@ byId("agent-artifacts-open").addEventListener("click", openArtifacts);
 document.addEventListener("neuma:agent-artifacts-changed", (event) => {
   if (currentId() === event.detail.agentId && runtime?.definition) void loadFiles(currentId());
 });
+document.addEventListener("neuma:agent-task-artifact-open", (event) => { void openTaskArtifact(event.detail); });
 fileDialog.addEventListener("close", () => {
   if (fileDialog.open) return;
-  const id = fileFocus?.agentId; fileFocus = null;
-  if (currentId() === id && states.has(id) && showing(id)) byId("agent-artifacts-open").focus({ preventScroll: true });
+  const id = fileFocus?.agentId, returnTo = fileFocus?.returnTo; fileFocus = null;
+  if (currentId() === id && states.has(id) && showing(id))
+    (returnTo?.isConnected !== false && returnTo?.focus && !fileDialog.contains(returnTo) ? returnTo : byId("agent-artifacts-open")).focus({ preventScroll: true });
 });
-byId("agent-build-shortcut").addEventListener("click", () => runtime?.developmentAction
-  ? emit("neuma:agent-develop", { id: currentId() }) : byId("agent-build").click());
+byId("agent-build-shortcut").addEventListener("click", () => runtime?.configurationAction
+  ? emit("neuma:agent-services-open", { agentId: currentId() }) : runtime?.developmentAction
+    ? emit("neuma:agent-develop", { id: currentId() }) : byId("agent-build").click());
 byId("agent-files-refresh").addEventListener("click", () => { if (runtime?.definition) void loadFiles(currentId()); });
-byId("agent-file-download").addEventListener("click", () => {
+byId("agent-file-download").addEventListener("click", async () => {
   const id = currentId();
   if (!id || !showingFile(id)) return;
-  const file = state(id).file;
-  if (!file || file.truncated) return;
-  const url = URL.createObjectURL(new Blob([file.content], { type: "text/plain;charset=utf-8" }));
-  const link = document.createElement("a"); link.href = url; link.download = file.path.split("/").at(-1); link.hidden = true;
-  // Keep the download target in the active dialog, rather than the inert background.
-  fileDialog.append(link); link.click(); link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  const item = state(id), artifact = item.taskArtifact, file = item.file, focus = fileFocus;
+  if (!artifact && !file) return;
+  const operation = artifact || (item.workspaceDownload ??= {});
+  if (operation.downloading) return;
+  operation.downloading = true; operation.downloadNote = ""; renderFile();
+  try {
+    await saveFileDownload({ document, parent: fileDialog, name: artifact?.path || file.path,
+      read: () => artifact ? applicationApi.downloadArtifact(id, artifact.taskId, artifact.index) : api.downloadFile(id, file.path),
+      isCurrent: () => showingFile(id) && fileFocus === focus && item.taskArtifact === artifact
+        && (artifact || item.filePath === file.path) });
+  } catch (error) { operation.downloadNote = error.message || "文件下载未完成，请重试。"; }
+  finally { operation.downloading = false; if (showingFile(id) && item.taskArtifact === artifact) renderFile(); }
 });
 document.addEventListener("neuma:agent-runtime-change", (event) => {
   const detail = event.detail;

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { agentBuildState, agentHistory, agentSourceKey, createAgentRuntime } from "../public/agent-runtime.js";
+import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime } from "../public/agent-runtime.js";
+import { activeApplicationResult } from "./helpers/active-application.mjs";
 
 const agent = { id: "one", name: "会议助手", draft: { goal: { value: "整理会议", source: "user" } }, status: "ready", revision: 1 };
 const body = { agentId: "one", sessionId: "session-one", message: "整理这份记录", history: [] };
@@ -11,6 +12,20 @@ const ndjson = (events) => new Response(events.map((event) => JSON.stringify(eve
 const architecture = (overrides = {}) => ({ agentId: agent.id, name: agent.name, draft: agent.draft,
   version: 2, candidateHash: "candidate-2", status: "passed", delivery: "ready", summary: "复用现有能力。", issues: [], ...overrides });
 const designed = { ...agent, mode: "designed", architectureRef: { version: 2, candidateHash: "candidate-2" } };
+
+test("耗尽的未接受规划明确开启新批次，已执行任务和不匹配回执保持原继续语义", () => {
+  const record = { id: "dev-one", agentId: agent.id, architectureRef: { version: 2, candidateHash: "candidate-2" }, status: "failed", phase: "planning",
+    tasks: [], currentTaskId: null, package: null, continuation: { mode: "fresh", sourceRunId: "dev-one" } };
+  const current = architecture({ delivery: "needs_development" });
+  const view = agentDevelopmentState(agent, { architecture: current, development: record });
+  assert.equal(view.canStart, true); assert.equal(view.canResume, false); assert.equal(view.actionLabel, "新一轮研发");
+  assert.match(view.summary, /进度记录已保留/u);
+  for (const change of [{ continuation: { mode: "fresh", sourceRunId: "different" } }, { tasks: [{ id: "done" }] },
+    { phase: "implementing" }, { status: "interrupted" }]) {
+    const blocked = agentDevelopmentState(agent, { architecture: current, development: { ...record, ...change } });
+    assert.equal(blocked.canRestart, false); assert.equal(blocked.canStart, false); assert.equal(blocked.canResume, true);
+  }
+});
 
 test("生成、独立会话与停止使用自己的运行接口和 NDJSON 协议", async () => {
   const requests = [], progress = [];
@@ -82,6 +97,18 @@ test("没有架构记录的定义一律停用，展示信息不能绕过架构�
   assert.equal(agentBuildState({ ...agent, profile: { name: "新的展示名" } }, { agent: designed, architecture: architecture() }).status, "ready");
 });
 
+test("制作状态只显示简短进度，内部方案及评审全文保留在原记录", () => {
+  for (const status of ["designing", "evaluating", "needs_changes", "failed", "passed"]) {
+    const saved = architecture({ status, summary: "内部方案依据".repeat(1000),
+      issues: [{ description: "内部评审问题".repeat(1000), remedy: "内部修正建议".repeat(1000) }] });
+    const before = structuredClone(saved);
+    const state = agentBuildState(agent, { agent: designed, architecture: saved });
+    assert.ok(state.label.length < 100);
+    assert.doesNotMatch(state.label, /内部方案依据|内部评审问题|内部修正建议/);
+    assert.deepEqual(saved, before);
+  }
+});
+
 test("最新升级失败或取消时使用完整核实的已激活版本，仍单独报告升级状态", () => {
   const nextAgent = { ...agent, draft: { goal: { value: "新版需求" } } };
   for (const status of ["designing", "failed", "cancelled", "passed"]) {
@@ -92,6 +119,54 @@ test("最新升级失败或取消时使用完整核实的已激活版本，仍�
     assert.notEqual(agentBuildState(nextAgent, { ...result, activeRuntime: { architecture: architecture({ candidateHash: "wrong" }) } }).status, "ready");
     assert.notEqual(agentBuildState(nextAgent, { ...result, agent: null }).status, "ready");
   }
+});
+
+test("完整绑定的活动应用内部可用，接口待配只引导设置；未知或错绑交付仍不放行", () => {
+  for (const kind of ["node-action", "managed-service"]) {
+    const result = activeApplicationResult(agent);
+    result.agent.execution.kind = kind; result.activeRuntime.application.manifest.runtime = kind;
+    const before = structuredClone(result), state = agentBuildState(agent, result);
+    assert.equal(state.status, "ready"); assert.equal(state.gatewayPending, true); assert.ok(state.activeRuntime);
+    assert.match(state.label, /内部功能.*本机接口待配置/);
+    const development = agentDevelopmentState(agent, { ...result, ...state, definition: result.agent });
+    assert.equal(development.canConfigure, true); assert.equal(development.canResume, false);
+    assert.deepEqual(result, before, "前端不改写后台接口验收状态");
+  }
+  const mutations = [
+    (result) => { result.activeRuntime = null; },
+    (result) => { result.agent.execution.kind = "node-json"; },
+    (result) => { result.agent.execution.kind = "unknown"; },
+    (result) => { result.agent.execution.buildId = "another"; },
+    (result) => { result.agent.execution.codeHash = "0".repeat(64); },
+    (result) => { result.agent.developmentRef.id = "another"; },
+    (result) => { result.agent.developmentRef.planHash = "0".repeat(64); },
+    (result) => { result.activeRuntime.development.status = "failed"; },
+    (result) => { result.activeRuntime.development.delivery = "blocked"; },
+    (result) => { result.activeRuntime.development.package = null; },
+    (result) => { result.activeRuntime.development.architectureRef.candidateHash = "0".repeat(64); },
+    (result) => { result.activeRuntime.architecture.issues = [{ blocking: true }]; },
+    (result) => { result.activeRuntime.architecture.delivery = "blocked"; },
+    (result) => { result.activeRuntime.architecture.draft.goal.value = "另一需求"; },
+    (result) => { result.activeRuntime.application.deliveryVersion = "another"; },
+  ];
+  for (const mutate of mutations) {
+    const result = activeApplicationResult(agent); mutate(result);
+    assert.notEqual(agentBuildState(agent, result).status, "ready");
+    assert.equal(agentBuildState(agent, result).gatewayPending, false);
+  }
+});
+
+test("接口待配的旧活动应用保留对话，失败候选仍提供原研发继续入口", () => {
+  const result = activeApplicationResult(agent), next = { ...agent, draft: { goal: { value: "新版需求" } } };
+  result.architecture = architecture({ ...next, agentId: agent.id, version: 3, status: "failed", delivery: "blocked" });
+  const state = agentBuildState(next, result);
+  assert.equal(state.status, "ready"); assert.equal(state.updateStatus.status, "failed");
+  assert.equal(state.gatewayPending, true);
+  result.architecture.status = "passed";
+  result.development = { ...result.development, id: "dev_update", architectureRef: { version: 3, candidateHash: result.architecture.candidateHash }, status: "failed", delivery: "blocked" };
+  const updating = agentBuildState(next, result);
+  const development = agentDevelopmentState(next, { ...result, ...updating, definition: result.agent });
+  assert.equal(development.canConfigure, false); assert.equal(development.canResume, true);
 });
 
 test("已取消的请求忽略迟到的完成结果，详情路径正确编码", async () => {

@@ -77,6 +77,6 @@ test("取消、模型错误和无效输入不改变旧草稿，不保存 Agent",
   const noSave = { ...agents, async saveRequirements() { saved++; throw new Error("不可保存"); } };
   await assert.rejects(advanceRequirement(draft, "创建助手", { generateDraft: async () => { controller.abort(); return providers.generateDraft(); } }, { agents: noSave, signal: controller.signal }), { name: "AbortError" });
   await assert.rejects(advanceRequirement(draft, "创建助手", { generateDraft: async () => { throw new Error("模型故障"); } }, { agents: noSave }), /模型故障/);
-  await assert.rejects(advanceRequirement(draft, "过".repeat(4001), providers, { agents: noSave }), InputError);
+  await assert.rejects(advanceRequirement(draft, "过".repeat(12001), providers, { agents: noSave }), InputError);
   assert.deepEqual(draft, snapshot); assert.equal(saved, 0);
 });

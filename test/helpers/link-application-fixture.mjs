@@ -96,7 +96,7 @@ export function linkApplicationPlan(requirements = requirementItems(linkApplicat
     ] };
 }
 
-export async function startLinkApplicationModel({ businessArchive = false } = {}) {
+export async function startLinkApplicationModel({ businessArchive = false, inputRejection = false } = {}) {
   const deliveredFiles = businessArchive ? { ...LINK_APPLICATION_FILES, "actions.mjs": LINK_APPLICATION_SOURCE + `
     actions.archive=async(input,ctx)=>{await ctx.connection.call({connectionId:'archive_api',operationId:'archive',input});return {status:'ok',message:'已归档',items:input.items,artifact:''}};
   ` } : LINK_APPLICATION_FILES;
@@ -107,6 +107,7 @@ export async function startLinkApplicationModel({ businessArchive = false } = {}
         operations: [{ id: "archive", method: "POST", path: "/archives", input: "资料列表", output: "归档回执", safeTest: false }] });
       design.acceptance.push({ id: "archive", kind: "success", requirementIds: ["deliverable"], input: "资料列表", expected: "获得实际业务连接归档回执" });
     }
+    if (inputRejection) design.acceptance.push({ id: "schema_rejection", kind: "boundary", requirementIds: ["inputSource"], input: "链接不是字符串", expected: "平台拒绝输入且不执行业务动作" });
     return design;
   };
   const planOf = (requirements, design) => {
@@ -117,6 +118,8 @@ export async function startLinkApplicationModel({ businessArchive = false } = {}
         mocks: [{ capability: "connection.call", argsJson: '{"connectionId":"archive_api","operationId":"archive","input":{"items":[]}}', resultJson: '{"accepted":true}' }],
         assertions: [{ path: "status", expectedJson: '"ok"' }] });
     }
+    if (inputRejection) plan.cases.push({ id: "case_schema_rejection", taskId: "application", acceptanceId: "schema_rejection", kind: "input-rejection", actionId: "analyze", input: '{"url":17,"refresh":false}', mocks: [],
+      assertions: [{ path: "", expectedJson: '{"rejected":true,"reason":"input_contract_rejected"}' }] });
     return plan;
   };
   const requests = [], errors = [];
@@ -130,12 +133,19 @@ export async function startLinkApplicationModel({ businessArchive = false } = {}
       let name, args;
       if (names.includes("submit_architecture")) { name = "submit_architecture"; args = designOf(payload.requirements); }
       else if (names.includes("submit_architecture_review")) { name = "submit_architecture_review"; args = passingReview(payload.candidateHash); }
-      else if (names.includes("submit_development_plan")) { name = "submit_development_plan"; args = planOf(payload.requirements, payload.design); }
+      else if (names.includes("submit_development_plan")) {
+        const { cases, ...index } = planOf(payload.requirements, payload.design);
+        const files = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
+        const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
+        const path = Object.keys(files).find(path => !written.has(path));
+        if (path) { name = "write"; args = { path, content: JSON.stringify(files[path], null, 2) }; }
+        else { name = "submit_development_plan"; args = { indexPath: "index.json" }; }
+      }
       else if (names.includes("submit_development_review")) { name = "submit_development_review"; args = { subjectHash: payload.subjectHash, verdict: "pass", issues: [], summary: "本机模拟模型评审；实际隔离用例已经执行，不代表真实业务模型质量" }; }
       else if (names.includes("submit_development_work")) {
-        const written = new Set(calls.filter(call => call.function.name === "write_code_file").map(call => JSON.parse(call.function.arguments).path));
+        const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
         const path = Object.keys(deliveredFiles).find(path => !written.has(path));
-        if (path) { name = "write_code_file"; args = { path, content: deliveredFiles[path] }; }
+        if (path) { name = "write"; args = { path, content: deliveredFiles[path] }; }
         else { name = "submit_development_work"; args = { summary: "页面与后端操作已实现，提交真实验收", changedFiles: Object.keys(LINK_APPLICATION_FILES), knownIssues: [], nextAction: "", continue: false }; }
       } else throw new Error("unsupported_fixture_role");
       requests.push({ name, tools: names });

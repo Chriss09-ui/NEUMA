@@ -5,9 +5,12 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
-import { InputError, ProviderError } from "../src/requirements/core.mjs";
+import { InputError, ProviderError, processTurn } from "../src/requirements/core.mjs";
 import { CAPABILITIES, designHash } from "../src/architecture/architecture-contract.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
+import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
+import { REQUIREMENT_DRAFT_MAX_BYTES } from "../src/requirements/requirement-limits.mjs";
 
 const draft = validDraft;
 const input = (id = "weekly", goal) => ({ id, name: "周报助手", draft: draft(goal) });
@@ -55,14 +58,54 @@ async function fixture(t, sessionFactory) {
   return { agents, root, options };
 }
 
+test("已确认的大需求按相同总量完整交接构建，超量不能覆盖保存记录", async (t) => {
+  const { agents, options } = await fixture(t, async () => assert.fail("此测试不调用模型"));
+  const source = "用户明确列出的全部处理要求", large = draft();
+  large.taskSpec = { version: 1, items: Array.from({ length: 30 }, (_, index) => ({ id: `large_${index}`,
+    dimension: "processing", content: "细化".repeat(1000), applicability: "applies", critical: true,
+    source: { kind: "user", evidence: [{ messageId: "large_input", quote: source }] } })) };
+  const platform = createPlatformSnapshot({ allowNetwork: true });
+  const ready = await processTurn({ message: source, evidenceMessages: [{ id: "large_input", role: "user", content: source }] }, {
+    generateDraft: async () => ({ draft: large, proposedGap: "none" }), preflight: sufficientPreflight,
+  }, { enforceConsultation: true, platform, requestId: "large_prepare" });
+  assert.equal(ready.status, "ready");
+  const confirmed = await processTurn({ message: "确认", draft: ready.draft, lastQuestion: ready.confirmationQuestion,
+    consultation: ready.consultation }, {}, { enforceConsultation: true, platform, requestId: "large_confirm" });
+  assert.equal(confirmed.confirmed, true); assert.ok(JSON.stringify(confirmed.draft).length > 60_000);
+  await agents.saveRequirements("large", { name: "完整需求", draft: confirmed.draft }, confirmed);
+  const savedFile = join(options.dataDir, "agents/large/requirements.json");
+  let received;
+  agents.architecture = { async get() { return null; }, async design(definition) {
+    received = definition; return { status: "blocked", buildable: false };
+  } };
+  const result = await agents.build({ id: "large", name: "完整需求", draft: confirmed.draft });
+  assert.equal(result.architecture.status, "blocked"); assert.deepEqual(received.draft, confirmed.draft);
+  assert.deepEqual((await agents.getRequirements()).requirements[0].draft, confirmed.draft);
+  const before = await readFile(savedFile);
+  const oversized = { ...confirmed.draft, excessive: "字".repeat(REQUIREMENT_DRAFT_MAX_BYTES) };
+  await assert.rejects(agents.build({ id: "large", name: "完整需求", draft: oversized }),
+    error => error.reason === "requirement_draft_too_large" && error.bytes > error.limitBytes);
+  assert.deepEqual(await readFile(savedFile), before);
+});
+
+test("Agent实际任务与成功历史均按12000个Unicode字符传递", async (t) => {
+  const records = [], { agents } = await fixture(t, factory(records)); await agents.build(input());
+  const message = "😀".repeat(12_000), history = [{ role: "user", content: message, revision: "1", delivery: "sent" },
+    { role: "assistant", content: "历史回复", revision: "1", status: "complete" }];
+  await agents.prompt({ ...turn(), message, history });
+  const request = records.at(-1).prompts[0];
+  assert.ok(request.includes(message)); assert.ok(request.includes(JSON.stringify(history.map(({ role, content }) => ({ role, content })))));
+  await assert.rejects(agents.prompt({ ...turn("weekly", "long-rejected-session"), message: `${message}字` }), /12000/);
+});
+
 test("构建保留原始需求、原子持久化，等价需求复用定义，更新同一身份版本", async (t) => {
   const records = [], { agents, options } = await fixture(t, factory(records));
   assert.equal(await agents.get("weekly"), null);
   const first = await agents.build(input());
   assert.equal(first.agent.mode, "designed"); assert.equal(first.agent.status, "ready"); assert.equal(first.agent.revision, 1);
   assert.deepEqual(first.agent.draft, draft()); assert.equal(first.agent.fingerprint, undefined);
-  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture"]);
-  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["request_requirements", "submit_architecture_review"]);
+  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
+  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.equal(first.architecture.status, "passed"); assert.equal(first.architecture.delivery, "ready");
   assert.deepEqual(first.agent.architectureRef, { version: first.architecture.version, candidateHash: designHash(first.architecture.design) });
   assert.notEqual(records[0].session, records.reviews[0].session);
@@ -181,6 +224,16 @@ test("文本文件真实落盘并分批读取，路径、隐藏凭据和符号�
   const first = await execute("read_workspace_file", { file: "notes.txt" });
   assert.equal(first.truncated, true); assert.equal(first.nextOffset, 24_000); assert.doesNotMatch(first.text, /private-key-fixture/);
   assert.equal((await execute("read_workspace_file", { file: "notes.txt", offset: first.nextOffset })).truncated, false);
+  const unicodeText = "\ufeff中文😀\napi_key=\"private-key-fixture\"";
+  const receipt = await execute("write_workspace_file", { file: "reports/unicode.txt", content: unicodeText });
+  const readReceipt = await execute("read_workspace_file", { file: "reports/unicode.txt" });
+  assert.equal(receipt.integrity.bytes, Buffer.byteLength(unicodeText));
+  assert.equal(receipt.integrity.utf16Units, unicodeText.length);
+  assert.equal(readReceipt.integrity.utf16Units, unicodeText.length);
+  assert.equal(readReceipt.integrity.sha256, receipt.integrity.sha256);
+  assert.equal(readReceipt.integrity.bytes, receipt.integrity.bytes);
+  assert.equal(readReceipt.integrity.redacted, true);
+  assert.doesNotMatch(readReceipt.text, /private-key-fixture/);
   await writeFile(join(root, "outside.txt"), "outside");
   await symlink(join(root, "outside.txt"), join(options.cwd, "linked.txt"));
   await symlink(root, join(options.cwd, "linked-folder"));
@@ -472,8 +525,8 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
     const names = body.tools.map((tool) => tool.function.name), builder = names.includes("submit_architecture"), reviewer = names.includes("submit_architecture_review");
-    const expectedTools = builder ? ["delegate_module", "request_requirements", "search_technical_sources", "submit_architecture", "web_fetch", "web_search"]
-      : reviewer ? ["request_requirements", "submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
+    const expectedTools = builder ? ["delegate_module", "request_requirements", "revise_architecture_submission", "search_technical_sources", "submit_architecture", "submit_architecture_draft", "web_fetch", "web_search"]
+      : reviewer ? ["request_requirements", "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
     assert.deepEqual(names.sort(), expectedTools);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",

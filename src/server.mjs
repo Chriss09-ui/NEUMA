@@ -6,7 +6,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputError, ProviderError } from "./requirements/core.mjs";
 import { RequirementSessions } from "./requirements/requirement-sessions.mjs";
+import { REQUIREMENT_REQUEST_MAX_BYTES } from "./requirements/requirement-limits.mjs";
 import { getProviderConfig, makeProviders } from "./requirements/providers.mjs";
+import { createRequirementSystemVerifier } from "./agents/requirement-verification.mjs";
 import { ProjectManager } from "./projects/projects.mjs";
 import { createProjectFolderPicker } from "./projects/project-folder-picker.mjs";
 import { PiProjectAgent, createProjectAnalyzer } from "./runtime/pi-runtime.mjs";
@@ -21,6 +23,7 @@ import { routeCollaboration } from "./collaboration/collaboration-api.mjs";
 import { MainAgent } from "./main/main-agent.mjs";
 import { MAX_MATERIAL_BYTES } from "./materials/material-formats.mjs";
 import { routeApplication } from "./applications/application-api.mjs";
+import { publicInputContractFailure } from "./applications/application-errors.mjs";
 import { routeServices } from "./services/service-api.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -49,6 +52,7 @@ const PUBLIC = new Map([
   ["/agent-build-view.js", ["agent-build-view.js", "text/javascript; charset=utf-8"]],
   ["/agent-details.js", ["agent-details.js", "text/javascript; charset=utf-8"]],
   ["/agent-details-view.js", ["agent-details-view.js", "text/javascript; charset=utf-8"]],
+  ["/artifact-download.js", ["artifact-download.js", "text/javascript; charset=utf-8"]],
   ["/agent-avatar.js", ["agent-avatar.js", "text/javascript; charset=utf-8"]],
   ["/group-avatar.js", ["group-avatar.js", "text/javascript; charset=utf-8"]],
   ["/select-menu.js", ["select-menu.js", "text/javascript; charset=utf-8"]],
@@ -82,6 +86,16 @@ function sendJson(response, status, value) {
 }
 
 function safeFailure(error, config) {
+  const inputContract = publicInputContractFailure(error);
+  if (inputContract) return { status: 400, payload: { ...inputContract,
+    diagnostic: { stage: "input", reason: inputContract.reason, providerModel: config.model || null } } };
+  if (error instanceof InputError && ["input_contract_rejected", "output_contract_failed"].includes(error.reason)) {
+    const output = error.reason === "output_contract_failed";
+    return { status: output ? 500 : 400, payload: {
+      error: output ? "操作执行结果不符合交付契约，请检查或重新生成当前版本" : "输入不符合操作契约",
+      reason: error.reason, diagnostic: { stage: output ? "application" : "input", reason: error.reason, providerModel: config.model || null },
+    } };
+  }
   const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required", "requirement_conflict"].includes(error.reason) ? error.reason : null;
   const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason || ["collaboration_conflict", "main_conflict", "application_conflict", "connection_conflict"].includes(error.reason));
   const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
@@ -287,7 +301,9 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir, enforceRequirementConfirmation: true }),
   requirementSessions: injectedRequirementSessions,
   collaboration: injectedCollaboration, mainAgent: injectedMainAgent } = {}) {
-  const requirementProviders = () => makeProviders(config, fetch, { research: async ({ query, url }, { signal, platform }) => {
+  const requirementProviders = () => makeProviders(config, fetch, {
+    verifySystemIssues: createRequirementSystemVerifier({ services: prototypeAgents.services, connections: prototypeAgents.connections }),
+    research: async ({ query, url }, { signal, platform }) => {
     const options = { agentId: "requirements-preflight", scope: "public-technical-research", signal,
       allowNetwork: platform?.network?.allowNetwork !== false };
     if (!prototypeAgents.web) throw new InputError("只读资料核实通道尚未配置");
@@ -402,7 +418,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (request.method === "GET" && path === "/api/agent-requirements") return sendJson(response, 200, await prototypeAgents.getRequirements());
       const agentRequirement = path.match(/^\/api\/agents\/([\w-]+)\/requirements$/);
       if (request.method === "POST" && agentRequirement) {
-        const body = await readJson(request, 512_000);
+        const body = await readJson(request, REQUIREMENT_REQUEST_MAX_BYTES);
         return sendJson(response, 200, body.requirementSessionId
           ? await getRequirementSessions().save(body.requirementSessionId, agentRequirement[1], body, prototypeAgents)
           : await prototypeAgents.saveRequirements(agentRequirement[1], body));
@@ -426,7 +442,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         }
       }
       if (request.method === "POST" && path === "/api/agents/build") {
-        return await buildAgentReply(request, response, prototypeAgents, await readJson(request), config, false, requestController.signal);
+        return await buildAgentReply(request, response, prototypeAgents, await readJson(request, REQUIREMENT_REQUEST_MAX_BYTES), config, false, requestController.signal);
       }
       const buildCancellation = path.match(/^\/api\/agents\/([\w-]+)\/build\/cancel$/);
       if (request.method === "POST" && buildCancellation) {
@@ -512,7 +528,16 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const agentFiles = path.match(/^\/api\/agents\/([\w-]+)\/files$/);
       if (request.method === "GET" && agentFiles) return sendJson(response, 200, await prototypeAgents.files(agentFiles[1]));
       const agentFile = path.match(/^\/api\/agents\/([\w-]+)\/file$/);
-      if (request.method === "GET" && agentFile) return sendJson(response, 200, await prototypeAgents.file(agentFile[1], address.searchParams.get("path")));
+      if (request.method === "GET" && agentFile) {
+        const filePath = address.searchParams.get("path");
+        if (address.searchParams.get("download") === "1") {
+          const file = await prototypeAgents.downloadFile(agentFile[1], filePath, { signal: requestController.signal });
+          requestController.signal.throwIfAborted();
+          response.writeHead(200, { ...binaryHeaders(file.name, "application/octet-stream", true), "content-length": file.content.length });
+          response.end(file.content); return;
+        }
+        return sendJson(response, 200, await prototypeAgents.file(agentFile[1], filePath));
+      }
       const agentRemoval = path.match(/^\/api\/agents\/([\w-]+)\/remove$/);
       if (request.method === "POST" && agentRemoval) {
         await readJson(request);
@@ -583,7 +608,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (request.method === "GET" && requirementSession)
         return sendJson(response, 200, await getRequirementSessions().state(requirementSession[1]));
       if (request.method === "POST" && path === "/api/requirements/turn") {
-        const body = await readJson(request);
+        const body = await readJson(request, REQUIREMENT_REQUEST_MAX_BYTES);
         const { controller, release } = beginRequest();
         const disconnected = () => { if (!response.writableEnded) controller.abort(); };
         response.on?.("close", disconnected);

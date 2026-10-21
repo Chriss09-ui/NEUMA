@@ -517,6 +517,7 @@ function broadcastRuntime(agent = current()) {
       architecture: state.architecture ? structuredClone(state.architecture) : null,
       development: state.development ? structuredClone(state.development) : null,
       application: state.application ? structuredClone(state.application) : null,
+      configurationAction: state.gatewayPending ? "配置本机接口" : null,
       developmentAction: development.canStart || development.canResume ? development.actionLabel : null,
       status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || item.storageError || state.error,
     } }));
@@ -766,6 +767,10 @@ async function developAgent(id) {
   const agent = agents.find((entry) => entry.id === id);
   if (!agent) return;
   const state = runtime(agent), item = conversation(id), development = agentDevelopmentState(agent, state);
+  if (development.canConfigure) {
+    document.dispatchEvent(new CustomEvent("neuma:agent-services-open", { detail: { agentId: id } }));
+    return;
+  }
   if (state.operation || item.turn || (!development.canStart && !development.canResume)) return;
   const operation = { kind: "development", controller: new AbortController(), sourceKey: agentSourceKey(agent),
     phase: development.record?.phase || "intake", label: development.canResume ? "正在核实已保存的研发进度…" : "正在接收已通过的设计…" };
