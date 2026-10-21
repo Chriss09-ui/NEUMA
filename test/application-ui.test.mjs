@@ -16,7 +16,7 @@ function dom() {
     removeEventListener(type, callback) { this.listeners.set(type, (this.listeners.get(type) || []).filter((item) => item !== callback)); }
     dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) || []).map((callback) => callback(event))); }
   }
-  const document = new Events(), nodes = new Map();
+  const document = new Events(), nodes = new Map(), downloads = [];
   class Element extends Events {
     constructor(tag) { super(); this.tag = tag; }
     children = []; attributes = new Map(); hidden = false; value = ""; textContent = ""; disabled = false; open = false; classes = new Set();
@@ -28,7 +28,11 @@ function dom() {
     remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = null; }
     setAttribute(name, value) { this.attributes.set(name, value); }
     focus() { document.activeElement = this; }
-    click() { return this.disabled ? Promise.resolve() : this.dispatchEvent({ type: "click" }); }
+    click() {
+      if (this.disabled) return Promise.resolve();
+      if (this.tag === "a") downloads.push({ href: this.href, download: this.download, parent: this.parent });
+      return this.dispatchEvent({ type: "click" });
+    }
     showModal() { this.open = true; }
     close() { this.open = false; return this.dispatchEvent({ type: "close" }); }
   }
@@ -37,7 +41,7 @@ function dom() {
   get("agent-chat-actions").append(get("agent-conversation-actions"));
   get("agent-conversation-actions").append(get("agent-new-chat"));
   const window = new Events(); window.location = { origin: "http://127.0.0.1:3000" };
-  return { document, window, get };
+  return { document, window, get, downloads };
 }
 const descendants = (node) => [node, ...node.children.flatMap(descendants)];
 const text = (node) => descendants(node).map((item) => item.textContent).join(" ");
@@ -414,4 +418,76 @@ test("任务轮询保留已展开结果与键盘焦点，完成产物只通知�
     assert.equal(next.open, true); assert.equal(ui.document.activeElement, descendants(next).find((node) => node.tag === "summary"));
     assert.deepEqual(completed, ["one"]);
   } finally { tasks.stop(); }
+});
+
+test("任务卡逐个产物按任务和索引预览下载，下载失败可重试且轮询不重开下载", async () => {
+  const ui = dom(), previews = [], calls = [], blobs = [], timers = [];
+  ui.document.defaultView = { URL: { createObjectURL(blob) { blobs.push(blob); return `blob:${blobs.length}`; }, revokeObjectURL() {} },
+    setTimeout: (callback) => timers.push(callback) };
+  let resolve, reject, reads = 0, progress = "一";
+  const pending = new Promise((yes, no) => { resolve = yes; reject = no; });
+  const tasks = createApplicationTasks({ document: ui.document, list: ui.get("tasks"), status: ui.get("status"),
+    onArtifacts: (detail) => previews.push(detail), api: {
+      tasks: async () => ({ tasks: [{ id: "task_old", status: "completed", progress,
+        artifacts: [{ path: "a.csv" }, { path: "reports/result.csv" }] }] }),
+      downloadArtifact: async (...args) => { calls.push(args); return ++reads === 1 ? pending : new Blob(["原始字节😀"]); },
+    } });
+  try {
+    tasks.start("one"); await settle();
+    const buttons = () => descendants(ui.get("tasks")).filter((node) => node.tag === "button");
+    const preview = buttons()[2], download = buttons()[3];
+    assert.equal(preview.type, "button"); assert.equal(download.type, "button");
+    assert.equal(preview.attributes.get("aria-label"), "预览 reports/result.csv");
+    await preview.click(); assert.deepEqual(previews[0], { agentId: "one", taskId: "task_old", index: 1, artifact: { path: "reports/result.csv" } });
+    download.focus(); const first = download.click(); await settle();
+    assert.equal(download.disabled, true); assert.equal(download.attributes.get("aria-busy"), "true");
+    progress = "二"; await tasks.refresh();
+    const replacement = buttons()[3]; assert.equal(replacement.disabled, true); assert.equal(ui.document.activeElement, replacement);
+    await replacement.click(); assert.equal(calls.length, 1);
+    reject(new Error("完整文件暂时不可读")); await first;
+    assert.match(ui.get("status").textContent, /完整文件暂时不可读/); assert.equal(replacement.disabled, false);
+    await replacement.click();
+    assert.deepEqual(calls, [["one", "task_old", 1], ["one", "task_old", 1]]);
+    assert.equal(await blobs[0].text(), "原始字节😀"); assert.equal(ui.downloads[0].download, "result.csv");
+    assert.equal(ui.downloads[0].parent, ui.get("tasks"));
+  } finally { resolve?.(new Blob()); tasks.stop(); }
+});
+
+test("无页面智能体在既有产物栏显示任务，开关产物或切换智能体不重复轮询和取消后台任务", async (t) => {
+  const ui = dom(), pending = new Map(), calls = [], previews = [];
+  let timerId = 0;
+  t.mock.method(globalThis, "setTimeout", (callback, ms) => { const id = ++timerId; pending.set(id, { callback, ms }); return id; });
+  t.mock.method(globalThis, "clearTimeout", (id) => pending.delete(id));
+  const taskPanel = ui.document.createElement("details"), filePanel = ui.document.createElement("aside");
+  taskPanel.append(ui.get("agent-application-task-status"), ui.get("agent-application-task-list"));
+  ui.get("agent-application").append(taskPanel); filePanel.append(ui.get("agent-file-list"));
+  ui.get("agent-file-dialog").append(filePanel);
+  ui.document.addEventListener("neuma:agent-task-artifact-open", (event) => previews.push(event.detail));
+  const noPage = { ...application, pageReady: false, defaultEntry: "conversation", manifest: { protocolVersion: 3, page: null } };
+  const view = createApplicationWorkspace({ ...ui, api: {
+      tasks: async (id) => { calls.push(["tasks", id]); return { tasks: [{ id: `task_${id}`, title: `${id}的任务`, status: "completed", artifacts: [{ path: "result.csv" }] }] }; },
+    cancel: async () => calls.push(["cancel"]), open: async () => { throw new Error("无页面不应打开iframe"); }, close: async () => calls.push(["close"]),
+  } });
+  try {
+    view.route("one"); view.update("one", noPage); await settle();
+    assert.equal(taskPanel.parentElement, filePanel); assert.equal(ui.get("agent-application").hidden, true);
+    assert.equal(calls.filter(([name]) => name === "tasks").length, 1); assert.equal(pending.size, 1);
+    const preview = descendants(taskPanel).find((node) => node.tag === "button" && node.textContent === "预览");
+    preview.focus(); taskPanel.open = true;
+    ui.get("agent-file-dialog").showModal(); await preview.click(); await ui.get("agent-file-dialog").close();
+    assert.deepEqual(previews[0], { agentId: "one", taskId: "task_one", index: 0, artifact: { path: "result.csv" } });
+    view.update("one", noPage); ui.get("agent-file-dialog").showModal();
+    assert.equal(taskPanel.open, true); assert.equal(calls.length, 1); assert.equal(pending.size, 1);
+    await ui.document.dispatchEvent(new CustomEvent("neuma:agent-turn-finished", { detail: { agentId: "one" } })); await settle();
+    assert.equal(calls.length, 2); assert.equal(pending.size, 1);
+    view.route("two"); assert.equal(ui.get("agent-application-task-list").children.length, 0);
+    await preview.click(); assert.equal(previews.length, 1);
+    view.update("two", noPage); await settle();
+    assert.equal(pending.size, 1); assert.deepEqual(calls.at(-1), ["tasks", "two"]);
+    assert.ok(!text(taskPanel).includes("one的任务")); assert.ok(text(taskPanel).includes("two的任务"));
+    assert.equal(calls.some(([name]) => name === "cancel"), false);
+    view.route("one"); view.update("one", noPage); await settle(); assert.equal(pending.size, 1);
+    assert.deepEqual(calls.at(-1), ["tasks", "one"]);
+  } finally { view.close(); }
+  assert.equal(pending.size, 0);
 });

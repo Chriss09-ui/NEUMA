@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { groupCapabilityFacts, publicConnectionFacts } from "../src/agents/agent-capabilities.mjs";
+import { runtimeCapabilityContract } from "../src/runtime/runtime-capability-contract.mjs";
 
 const date = "2026-10-14T00:00:00.000Z";
 const fixture = (overrides = {}) => ({ agent: { id: "reader", revision: 3, updatedAt: date, fingerprint: "definition-one" },
@@ -28,6 +29,19 @@ test("群能力只列真实文件工具和群材料范围，职责描述不能�
   const declared = fixture();
   declared.architecture.design.capabilities.push({ id: "external_service", status: "available", reason: "描述声称可用" });
   assert.equal(item(groupCapabilityFacts(declared), "external_service").availability, "unavailable");
+});
+
+test("平台运行和网关机制不误报为群内未装配工具，真正缺少的工具仍不可用", () => {
+  const value = fixture(); value.architecture.runtimeCapabilities = runtimeCapabilityContract();
+  const hostIds = value.architecture.runtimeCapabilities.hostDeliveryCapabilities.map((entry) => entry.id);
+  value.architecture.design.capabilities.push(...hostIds.map((id) => ({ id, status: "available", reason: "平台交付机制，实际动作与授权分别验证" })),
+    { id: "missing_business_tool", status: "available", reason: "仅有声明" });
+  const facts = groupCapabilityFacts(value);
+  assert.ok(hostIds.every((id) => item(facts, id) === undefined));
+  assert.equal(item(facts, "read_workspace_file").availability, "callable");
+  assert.equal(item(facts, "missing_business_tool").availability, "unavailable");
+  delete value.architecture.runtimeCapabilities.hostDeliveryCapabilities;
+  assert.equal(item(groupCapabilityFacts(value), "managed_python_runtime").availability, "unavailable", "旧记录无冻结host组时不偷偷增加平台授权事实");
 });
 
 test("模型缺配置呈条件未满足，不根据名称推定图片或业务能力", () => {

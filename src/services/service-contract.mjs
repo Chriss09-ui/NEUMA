@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { validateValueSchema } from "../applications/application-contract.mjs";
+import { VALUE_SCHEMA_DESCRIPTION } from "../applications/value-schema-rules.mjs";
 import { validateWorkflowDefinition, WORKFLOW_SCHEMA } from "./workflow-contract.mjs";
+import { SERVICE_HOSTS, SERVICE_LANGUAGES } from "./service-runtime-options.mjs";
 
 export const SERVICE_DEFAULTS = Object.freeze({ timeoutMs: 600000, memoryMiB: 512, scratchMiB: 100, logBytes: 131072 });
 export const SERVICE_CAPABILITIES = Object.freeze(["web.search", "web.fetch", "model.call", "connection.call", "connection.readResult", "material.list", "material.read", "material.image", "files.list", "files.read", "files.write", "state.get", "state.set"]);
@@ -23,7 +25,7 @@ function integer(value, min, max) {
 
 export function validateServiceManifest(input) {
   keys(input, ["schemaVersion", "language", "host", "entrypoint", "operations", "dependencies", "resources", "docker", "dataVersion", "capabilities", "workflow", "migration"]);
-  if (input.schemaVersion !== 1 || !["javascript", "python"].includes(input.language) || !["managed", "docker"].includes(input.host)) throw new ServiceError("unsupported_service_runtime");
+  if (input.schemaVersion !== 1 || !SERVICE_LANGUAGES.includes(input.language) || !SERVICE_HOSTS.includes(input.host)) throw new ServiceError("unsupported_service_runtime");
   if (typeof input.entrypoint !== "string" || input.entrypoint.length > 500 || /[\\\x00-\x1f\x7f:*?"<>|]/.test(input.entrypoint) || input.entrypoint.split("/").some((part) => !part || part.startsWith(".") || /^(?:metadata|node_modules|credentials?|secrets?|tokens?|passwords?)$/i.test(part))) throw new ServiceError("invalid_service_entrypoint");
   if (input.language === "python" ? !input.entrypoint.endsWith(".py") : !/\.(mjs|js|cjs)$/.test(input.entrypoint)) throw new ServiceError("invalid_service_entrypoint");
   if (!Array.isArray(input.operations) || !input.operations.length || input.operations.length > 80) throw new ServiceError("invalid_service_operations");
@@ -92,10 +94,10 @@ export function validateServiceManifest(input) {
 export const hashServiceManifest = (manifest) => serviceHash(validateServiceManifest(manifest));
 
 const objectSchema = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
-const valueSchema = { type: "object", additionalProperties: true };
+const valueSchema = { type: "object", additionalProperties: true, description: VALUE_SCHEMA_DESCRIPTION };
 const text = { type: "string" }, number = { type: "integer" };
 export const SERVICE_MANIFEST_SCHEMA = objectSchema({
-  schemaVersion: { type: "integer", const: 1 }, language: { type: "string", enum: ["javascript", "python"] }, host: { type: "string", enum: ["managed", "docker"] }, entrypoint: text,
+  schemaVersion: { type: "integer", const: 1 }, language: { type: "string", enum: [...SERVICE_LANGUAGES] }, host: { type: "string", enum: [...SERVICE_HOSTS] }, entrypoint: text,
   operations: { type: "array", minItems: 1, maxItems: 80, items: objectSchema({ id: text, title: text, inputSchema: valueSchema, outputSchema: valueSchema, connectionIds: { type: "array", items: text }, idempotent: { type: "boolean" }, visibility: { type: "string", enum: ["public", "internal"] } }, ["id", "inputSchema", "outputSchema"]) },
   dependencies: objectSchema({ packages: { type: "array", items: objectSchema({ name: text, version: text, url: text, sha256: text, filename: text, target: text, installPath: text }, ["name", "version", "url", "sha256", "filename"]) } }),
   resources: objectSchema({ timeoutMs: number, memoryMiB: number, scratchMiB: number, logBytes: number }, []),

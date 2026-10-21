@@ -60,6 +60,32 @@ export async function routeApplication({ request, response, address, agents, rea
       return send(await application.submit(id, body));
     }
     if (!suffix && method === "GET") return send({ tasks: await application.store.list(id, { scope: "private" }) });
+    const artifact = suffix.match(/^([\w-]{1,80})\/artifacts\/(0|[1-9][0-9]{0,8})$/);
+    if (artifact && method === "GET") {
+      const [, taskId, index] = artifact, task = await application.store.get(id, taskId);
+      if (task.source.scope !== "private") throw new InputError("群操作产物请在对应群任务中查看");
+      const offset = address.searchParams.get("offset"), limit = address.searchParams.get("limit");
+      if (address.searchParams.get("preview") === "1") {
+        if (offset !== null || limit !== null || address.searchParams.get("download") === "1") throw new InputError("产物预览不能同时指定下载或分页");
+        return send(await agents.previewTaskArtifact(id, taskId, Number(index), { signal }));
+      }
+      if ([offset, limit].some((value) => value !== null && !/^(?:0|[1-9][0-9]*)$/.test(value))) throw new InputError("产物读取位置或分页大小无效");
+      const options = { ...(offset === null ? {} : { offset: Number(offset) }), ...(limit === null ? {} : { limit: Number(limit) }), signal };
+      const page = await agents.readTaskArtifact(id, taskId, Number(index), options);
+      if (address.searchParams.get("download") !== "1") return send(page);
+      if (options.offset !== undefined && options.offset !== 0) throw new InputError("下载完整产物不能指定续读位置");
+      signal?.throwIfAborted();
+      response.writeHead(200, { "content-type": "application/octet-stream", "content-length": page.size,
+        "content-disposition": `attachment; filename="artifact"; filename*=UTF-8''${encodeURIComponent(page.name).replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+        "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      let current = page;
+      for (;;) {
+        signal?.throwIfAborted(); response.write(Buffer.from(current.data, "base64"));
+        if (current.nextOffset === null) break;
+        current = await agents.readTaskArtifact(id, taskId, Number(index), { ...options, offset: current.nextOffset });
+      }
+      response.end(); return true;
+    }
     const operation = suffix.match(/^([\w-]{1,80})(?:\/(events|cancel|resume))?$/);
     if (operation) {
       const [, taskId, action] = operation;

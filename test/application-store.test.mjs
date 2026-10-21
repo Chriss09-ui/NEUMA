@@ -138,7 +138,7 @@ test("concurrent application file writes atomically retain every task artifact a
   const { store, storage } = await fixture(t), { task } = await store.create("agent-a", input());
   await store.update("agent-a", task.id, { status: "running" });
   const root = await storage.directory("agent-a", "workspace", { create: true });
-  const owner = { applications: { store }, materials: { tools: () => [] } };
+  const owner = { storage, applications: { store }, materials: { tools: () => [] } };
   const capability = await PrototypeAgents.prototype.applicationCapabilities.call(owner, {
     task, descriptor: { manifest: { stateVersion: 1 }, agent: { draft: {} } }, action: { connectionIds: [] },
     connectionSnapshot: { connections: [] }, workspaceRoot: root, signal: new AbortController().signal, check: async () => {},
