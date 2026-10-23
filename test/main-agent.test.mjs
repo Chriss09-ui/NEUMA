@@ -472,7 +472,10 @@ test("创建 Agent 在同一主对话澄清并用真实追问覆盖模型改写�
   assert.equal(confirmed.context.agentId, first.context.agentId); assert.equal(confirmed.context.status, "needs_build");
   assert.deepEqual(confirmed.actions.map(({ type, agentId }) => ({ type, agentId })), [{ type: "build_agent", agentId: first.context.agentId }]);
   assert.deepEqual(confirmed.context.savedRequirement, f.calls[0].requirement); assert.equal(confirmed.sources[0].type, "agent_created");
-  assert.match(confirmed.reply, /需要完成架构评估/); assert.equal(confirmed.conversation.messages.length, 4);
+  assert.match(confirmed.reply, /需求已确认并保存/);
+  assert.match(confirmed.reply, /正在打开左侧的这个智能体，开始架构评估与制作/);
+  assert.doesNotMatch(confirmed.reply, /这份需求可以确认吗/);
+  assert.equal(confirmed.conversation.messages.length, 4);
 });
 
 test("快捷需求激活不调用模型或增加消息，幂等保留最新草稿并隔离不同主会话", async (t) => {

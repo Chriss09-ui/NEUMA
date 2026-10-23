@@ -99,7 +99,8 @@ export async function advanceRequirement(requirement, message, providers, { sign
     try { signal?.throwIfAborted(); }
     catch (error) { error.mainRequirementSource = source; throw error; }
   }
-  const reply = [result.summary, result.question ?? result.confirmationQuestion,
-    result.confirmed ? "需求已确认并保存，接下来需要完成架构评估与制作。" : null].filter(Boolean).join("\n\n");
+  const reply = result.confirmed
+    ? "需求已确认并保存。正在打开左侧的这个智能体，开始架构评估与制作。"
+    : [result.summary, result.question ?? result.confirmationQuestion].filter(Boolean).join("\n\n");
   return { requirement: next, context: requirementContext(next), reply, action, source };
 }

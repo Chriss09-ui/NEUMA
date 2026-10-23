@@ -31,6 +31,9 @@ test("原需求确认规则保持，未确认不保存，明确确认保存同�
   assert.equal(confirmed.requirement.agentId, draft.agentId); assert.equal(confirmed.requirement.status, "needs_build");
   assert.equal(confirmed.context.savedRequirement.id, draft.agentId); assert.equal(confirmed.action.requirement.id, draft.agentId);
   assert.equal(confirmed.source.type, "agent_created"); assert.equal(saved, 1); assert.equal(generated, 1);
+  assert.match(confirmed.reply, /需求已确认并保存/);
+  assert.match(confirmed.reply, /正在打开左侧的这个智能体，开始架构评估与制作/);
+  assert.doesNotMatch(confirmed.reply, /这份需求可以确认吗|Agent 要解决的问题/);
   assert.equal(draft.confirmed, false); assert.equal(drafted.requirement.confirmed, false);
 });
 

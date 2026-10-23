@@ -46,6 +46,7 @@ function buildRequirement(agentId, requirement) {
   const record = requirement || selected?.context?.requirement;
   if (!record || record.id !== agentId) return showRecovery("需求保存记录尚未确认，请重新加载后重试制作。");
   document.dispatchEvent(new CustomEvent("neuma:main-requirement-saved", { detail: { requirement: record, build: true } }));
+  document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "agent", agentId } }));
 }
 function applyContext(value, { reveal = false, force = false, syncRequirement = false } = {}) {
   if (selected && value !== undefined) selected.context = value;
