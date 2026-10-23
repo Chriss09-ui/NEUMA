@@ -242,7 +242,8 @@ export function createAgentRuntime(request = fetch) {
     }),
     cancelDevelopment: (id) => json(`/api/agents/${encodeURIComponent(id)}/development/cancel`, {}),
     cancelBuild: (id) => json(`/api/agents/${encodeURIComponent(id)}/build/cancel`, {}),
-    build: (agent, options) => stream("/api/agents/build", { id: agent.id, name: agent.name, draft: agent.draft }, options, {
+    build: (agent, { architectureRepair, ...options } = {}) => stream("/api/agents/build", { id: agent.id, name: agent.name, draft: agent.draft,
+      ...(architectureRepair !== undefined ? { architectureRepair } : {}) }, options, {
       isComplete: (result) => result?.architecture
         ? result.architecture.agentId === agent.id && (result.architecture.status === "passed"
           || Object.hasOwn(architectureLabels, result.architecture.status))

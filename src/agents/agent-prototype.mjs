@@ -1350,7 +1350,8 @@ export class PrototypeAgents {
           ...(typeof this.architecture.getVersion === "function" ? { readArchitecture: (version) => this.architecture.getVersion(definition.id, version) } : {}) });
       }
       controller.signal.throwIfAborted();
-      architecture = await this.architecture.design(definition, { signal: controller.signal, onProgress, consultation, developmentFailure, historicalPlanningReference });
+      architecture = await this.architecture.design(definition, { signal: controller.signal, onProgress, consultation, developmentFailure, historicalPlanningReference,
+        ...(input.architectureRepair !== undefined ? { architectureRepair: input.architectureRepair } : {}) });
       controller.signal.throwIfAborted();
       if (architecture.status === "passed" && requiresDevelopment(architecture.design)) {
         onProgress({ type: "status", phase: "intake", label: "架构评估通过，正在进入研发…", architecture });

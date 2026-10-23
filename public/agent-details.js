@@ -56,7 +56,8 @@ function refreshAvailability() {
   byId("agent-files-refresh").disabled = !ready;
   if (runtime) {
     byId("agent-build-shortcut").hidden = runtime.ready && !runtime.configurationAction || runtime.busy || ["checking", "unchecked"].includes(runtime.status);
-    byId("agent-build-shortcut").textContent = runtime.configurationAction || runtime.developmentAction || (runtime.definition ? "重新生成" : "生成智能体");
+    byId("agent-build-shortcut").textContent = runtime.configurationAction || runtime.developmentAction || runtime.buildAction || (runtime.definition ? "重新生成" : "生成智能体");
+    byId("agent-build-shortcut").disabled = runtime.buildBlocked === true;
   }
 }
 
