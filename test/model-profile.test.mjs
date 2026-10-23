@@ -86,3 +86,32 @@ test("角色请求量不等同模型能力上限，网关和官方模型复用�
   assert.equal(architectureModelOutputBudget(target, "designer"), 8192);
   assert.throws(() => architectureModelOutputBudget(config, "__proto__"));
 });
+
+test("架构设计与模块思考预算按角色扩大，评审及模型能力上限仍独立约束", () => {
+  const official = { chatUrl: "https://api.xiaomimimo.com/v1/chat/completions", model: "mimo-v2.6-pro" };
+  const gateway = { ...target, modelProfile: checkedModelProfile(explicit({ contextWindow: 131072, maxOutputTokens: 100000 })) };
+  const budgets = { designer: 65536, module: 32768, specialist: 32768, reviewer: 16384 };
+  for (const config of [official, gateway]) {
+    for (const [role, expected] of Object.entries(budgets)) assert.equal(architectureModelOutputBudget(config, role), expected);
+  }
+  const capped = { ...target, modelProfile: checkedModelProfile(explicit({ maxOutputTokens: 24000 })) };
+  assert.equal(architectureModelOutputBudget(capped, "designer"), 24000);
+  assert.equal(architectureModelOutputBudget(capped, "module"), 24000);
+  assert.equal(architectureModelOutputBudget(capped, "specialist"), 24000);
+  assert.equal(architectureModelOutputBudget(capped, "reviewer"), 16384);
+});
+
+test("架构扩额保留未知与非思考模型的保守额度，不改变研发角色预算", () => {
+  const gateway = { ...target, modelProfile: checkedModelProfile(explicit({ contextWindow: 131072, maxOutputTokens: 100000 })) };
+  const nonReasoning = { ...target, modelProfile: checkedModelProfile(explicit({ reasoning: false, maxOutputTokens: 32000 })) };
+  const mismatched = { ...gateway, model: "changed-alias" };
+  const fallbackBudgets = { designer: 8192, module: 4096, specialist: 4096, reviewer: 4096 };
+  for (const config of [target, nonReasoning, mismatched]) {
+    for (const [role, expected] of Object.entries(fallbackBudgets)) assert.equal(architectureModelOutputBudget(config, role), expected);
+  }
+  const official = { chatUrl: "https://api.xiaomimimo.com/v1/chat/completions", model: "mimo-v2.6-pro" };
+  const developmentBudgets = { planner: 32768, developer: 65536, reviewer: 16384 };
+  for (const config of [official, gateway]) {
+    for (const [role, expected] of Object.entries(developmentBudgets)) assert.equal(developmentModelOutputBudget(config, role), expected);
+  }
+});

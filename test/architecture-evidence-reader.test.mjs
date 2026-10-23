@@ -25,6 +25,95 @@ function scopeFixture() {
     current: createArchitectureEvidenceReader({ context, candidateHash, candidateSchema: designSubmissionSchema(draft, { requirements }) }) };
 }
 
+test("历史关闭缺项按合并草稿的问题编号提供原文，输入换序不误指其他说明", () => {
+  const f = scopeFixture(), issueId = "finding_missing_evidence";
+  const canonical = { issues: [{ id: "other", references: [] }, { id: issueId, references: [] }] };
+  const raw = { issues: canonical.issues.slice().reverse() }, before = structuredClone({ canonical, raw });
+  const diagnostics = [1, 2].map(index => ({ path: "review.issues[1].references",
+    reason: "repair_candidate_reference_unrelated", candidatePath: `/acceptance/${index}` }));
+  const hints = f.current.referenceHints(raw, diagnostics, { canonicalSubmission: canonical });
+  assert.equal(hints.length, 4);
+  assert.ok(hints.every(hint => hint.issueId === issueId && hint.target === "merged-review-draft"));
+  for (const index of [1, 2]) {
+    const hint = hints.find(value => value.path === `/acceptance/${index}/expected`);
+    assert.equal(hint.quote, f.candidate.acceptance[index].expected);
+    const resolved = f.current.resolveSubmission({ candidateHash: f.candidateHash, issues: [{ references: [hint.reference] }] });
+    assert.equal(resolved.issues[0].references[0].quote, hint.quote);
+    assert.throws(() => createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash })
+      .resolveSubmission({ candidateHash: f.candidateHash, issues: [{ references: [hint.reference] }] }), /引用回执未知/u);
+  }
+  assert.deepEqual({ canonical, raw }, before, "建议不能自动改写问题或添加通过结论");
+  assert.deepEqual(f.current.referenceHints(raw, [{ ...diagnostics[0], findingId: "unknown" }], { canonicalSubmission: canonical }), []);
+  assert.equal(f.current.referenceHints(raw, [...diagnostics, ...diagnostics], { canonicalSubmission: canonical }).length, 4);
+});
+
+test("超长对象和长文本一次定位全部引用错误，真实子字段或分页回执须显式选择", () => {
+  const candidateHash = "a".repeat(64), resolution = { reason: "浏览器效果留待实际打开验收。", evidenceIds: Array(80).fill("reference_0123456789") };
+  const context = architectureReviewEvidenceContext({ design: { instructions: "中😀".repeat(600) }, requirements: [], runtimeCapabilities: {},
+    deferredVerifications: { issues: [{ resolution }] } });
+  const current = reader({ candidateHash, context });
+  const submission = { candidateHash, issues: [{ references: [
+    { source: "deferredVerifications", path: "/issues/0/resolution" },
+    { source: "candidate", path: "/instructions" },
+    { source: "candidate", path: "/missing" },
+  ] }] }, before = structuredClone(submission);
+  let issues;
+  assert.throws(() => current.resolveSubmission(submission), error => {
+    issues = error.validationIssues;
+    assert.deepEqual(issues.map(item => item.reason), ["reference_too_broad", "reference_too_broad", "reference_path_missing"]);
+    assert.equal(issues[0].sourcePath, "/issues/0/resolution");
+    assert.equal(issues[0].characters, JSON.stringify(resolution).length); assert.equal(issues[0].limit, 1000);
+    assert.equal(error.validationIssueTotal, 3); return true;
+  });
+  assert.deepEqual(submission, before);
+  const hints = current.referenceHints(submission, issues);
+  assert.equal(hints[0].path, "/issues/0/resolution/reason"); assert.equal(hints[0].quote, resolution.reason);
+  assert.ok(hints[1].nextOffset > 0); assert.ok(hints[1].quote.length <= 500);
+  assert.ok(hints.every(hint => typeof hint.reference.receiptId === "string"));
+  const corrected = { candidateHash, issues: [{ references: hints.map(hint => hint.reference) }] };
+  const resolved = current.resolveSubmission(corrected);
+  assert.equal(resolved.issues[0].references[0].quote, resolution.reason);
+  assert.deepEqual(submission, before, "提供建议不会自动改写或接受提交");
+  assert.throws(() => reader({ candidateHash, context }).resolveSubmission(corrected), /引用回执未知/u);
+});
+
+test("原文选择与历史短引用由宿主填入，错候选、错清单、混填及截短长编号拒绝", () => {
+  const f = scopeFixture(), findingId = `finding_${"a".repeat(32)}`;
+  const priorFindings = { current: { candidateHash: f.candidateHash }, findings: [{ findingId, issue: { description: "原历史问题" } }] };
+  const reader = createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash, priorFindings });
+  const official = reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: true }), before = structuredClone(official);
+  const schema = reader.submissionSchema(official), valid = new Ajv({ strict: false }).compile(schema);
+  const findingRef = reader.index.priorFindings[0].findingRef;
+  assert.ok(findingRef.length < findingId.length);
+  const review = passingReview(f.candidateHash, f.candidate);
+  review.priorFindingDecisions = [{ findingRef, status: "unresolved", reason: "待实际修订", checkIds: ["verification"], candidatePaths: ["/instructions"] }];
+  review.issues = [{ findingRef, blocking: true, checkId: "verification", kind: "design", description: "边界待明确", remedy: "完善原步骤",
+    candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions" }], factClaims: [] }];
+  review.checks.find(row => row.id === "verification").passed = false; review.verdict = "revise";
+  assert.equal(valid(review), true);
+  const input = structuredClone(review), canonical = reader.resolveSubmission(review);
+  assert.deepEqual(review, input); assert.deepEqual(official, before);
+  assert.equal(canonical.issues[0].id, findingId); assert.equal(canonical.priorFindingDecisions[0].findingId, findingId);
+  assert.equal(canonical.issues[0].references[0].quote, f.candidate.instructions);
+  assert.equal(Object.hasOwn(canonical.issues[0], "findingRef"), false);
+  assert.equal(Object.hasOwn(canonical.priorFindingDecisions[0], "findingRef"), false);
+  assert.equal(valid(canonical), true);
+  assert.doesNotThrow(() => validateReview(canonical, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }));
+  for (const field of ["id", "findingId"]) {
+    const mixed = structuredClone(review), row = field === "id" ? mixed.issues[0] : mixed.priorFindingDecisions[0];
+    row[field] = findingId; assert.equal(valid(mixed), false);
+    assert.throws(() => reader.resolveSubmission(mixed), e => e.validationIssue.reason === "invalid_reference");
+  }
+  const truncated = structuredClone(canonical); truncated.priorFindingDecisions[0].findingId = findingId.slice(0, -4);
+  assert.equal(valid(truncated), false);
+  assert.throws(() => reader.resolveSubmission({ ...review, candidateHash: "b".repeat(64) }));
+  const changed = structuredClone(priorFindings); changed.findings[0].issue.description = "来源已变化";
+  assert.throws(() => createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash, priorFindings: changed }).resolveSubmission(review));
+  const staleQuote = structuredClone(canonical); staleQuote.issues[0].references[0].quote = "模型改写的原文";
+  assert.equal(reader.resolveSubmission(staleQuote).issues[0].references[0].quote, "模型改写的原文");
+  assert.throws(() => validateReview(reader.resolveSubmission(staleQuote), { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }));
+});
+
 test("当前规则选择无需预读或回执即可还原原文，原完整覆盖及不足阻断继续校验", () => {
   const { current, candidate, candidateHash, context } = scopeFixture(), review = passingReview(candidateHash, candidate);
   review.acceptanceScopeChecks = candidate.acceptance.map(({ id }) => ({ acceptanceId: id, adapterRulePath: "/adapters/action/proves",

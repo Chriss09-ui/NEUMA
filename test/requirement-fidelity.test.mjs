@@ -13,6 +13,7 @@ import { fidelityChecker, fidelityResult } from "./helpers/fidelity.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { DESIGN_PROMPT, REVIEW_PROMPT } from "../src/architecture/architecture-prompts.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contract.mjs";
+import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 
 function context() {
   return { requirements: [{ id: "input", text: "扩展名允许任意字符，长度1至16，包含点" }, { id: "delivery", text: "完整输出全部记录，不抽样" }],
@@ -209,7 +210,7 @@ test("原评审与子复核共享5轮，子模型故障不能转成需求缺口�
 
 test("真实Pi假引文在原复核纠正，有效范围否定直接给设计者修订后才重新完整评审", { timeout: 15000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-fidelity-sdk-")), requests = [];
-  let designs = 0, reviewers = 0, fidelities = 0, serverFailure;
+  let designs = 0, reviewers = 0, fidelities = 0, serverFailure, fixedCandidate;
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "characters", dimension: "processing", content: "扩展名允许任意字符，长度1至16，包含点",
     applicability: "applies", critical: true, source: { kind: "user", evidence: [{ messageId: "scope", quote: "允许任意字符" }] } }] };
@@ -217,17 +218,23 @@ test("真实Pi假引文在原复核纠正，有效范围否定直接给设计者
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks)), names = body.tools.map((item) => item.function.name);
-      const name = names.includes("submit_requirement_fidelity") ? "submit_requirement_fidelity" : names.includes("submit_architecture") ? "submit_architecture" : "submit_architecture_review";
+      const name = ["submit_requirement_fidelity", "submit_architecture_blueprint", "submit_architecture_module",
+        "submit_architecture_integration", "submit_architecture_review"].find((name) => names.includes(name));
+      assert.ok(name, "每个原生请求须明确对应实际阶段或独立复核工具");
       requests.push(name); const content = body.messages.findLast((message) => message.role === "user").content;
       const payload = JSON.parse(typeof content === "string" ? content : content.filter((item) => item.type === "text").map((item) => item.text).join(""));
       let value;
-      if (name === "submit_architecture") {
-        designs++;
-        value = validDesign(payload.requirements, { schemaVersion: 3, connections: [],
+      if (["submit_architecture_blueprint", "submit_architecture_module", "submit_architecture_integration"].includes(name)) {
+        if (name === "submit_architecture_blueprint") fixedCandidate = validDesign(payload.requirements, { schemaVersion: 3, connections: [],
           interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "记录", results: "完整汇总", persistentData: "无" },
           execution: { language: "none", hosting: "builtin", reason: "使用现有文本处理" },
-          selectionBasis: { capacity: "固定测试输入", process: "完整处理", quality: "逐项核对", requirementIds: payload.requirements.map((item) => item.id), assumptions: [] } });
-        value.instructions = designs === 1 ? "为方便实现保守地只接收ASCII字母数字和点，其他字符拒绝。" : "扩展名允许任意字符，长度1至16，包含点；完整处理全部记录，不增加白名单。";
+          selectionBasis: { capacity: "固定测试输入", process: "完整处理", quality: "逐项核对", requirementIds: payload.requirements.map((item) => item.id), assumptions: [] },
+          instructions: "为方便实现保守地只接收ASCII字母数字和点，其他字符拒绝。" });
+        const candidate = structuredClone(fixedCandidate);
+        if (name === "submit_architecture_integration" && ++designs > 1)
+          candidate.instructions = "扩展名允许任意字符，长度1至16，包含点；完整处理全部记录，不增加白名单。";
+        const submission = architectureStageSubmission({ tools: body.tools.map((item) => item.function), payload, candidate });
+        assert.equal(submission.name, name); value = submission.args;
       } else if (name === "submit_requirement_fidelity") {
         fidelities++; assert.deepEqual(names, ["submit_requirement_fidelity"]);
         const requirement = payload.requirements.find((item) => item.text.includes("允许任意字符")); assert.ok(requirement);
@@ -273,8 +280,13 @@ test("真实Pi假引文在原复核纠正，有效范围否定直接给设计者
   assert.equal(serverFailure, undefined); assert.equal(result.status, "passed"); assert.equal(result.attempts.length, 1);
   assert.equal(result.requirementFidelity.verdict, "preserved"); assert.equal(result.revisionSource.reviewRepair.modelCalls, 3);
   assert.notEqual(result.candidateHash, negative.candidateHash);
-  assert.deepEqual(requests, ["submit_architecture", "submit_architecture_review", "submit_requirement_fidelity", "submit_requirement_fidelity",
-    "submit_architecture", "submit_architecture_review", "submit_requirement_fidelity"]);
+  assert.deepEqual(requests, ["submit_architecture_blueprint", "submit_architecture_module", "submit_architecture_integration",
+    "submit_architecture_review", "submit_requirement_fidelity", "submit_requirement_fidelity",
+    "submit_architecture_integration", "submit_architecture_review", "submit_requirement_fidelity"]);
+  assert.equal(designs, 2); assert.equal(reviewers, 2); assert.equal(fidelities, 3);
+  assert.equal(result.designProgressCheckpoint.blueprint.modelCalls, 1, "仅指令修订复用已保存蓝图");
+  assert.equal(result.designProgressCheckpoint.modules[0].modelCalls, 1, "仅指令修订复用已保存模块");
+  assert.equal(result.designProgressCheckpoint.integration.modelCalls, 2, "整合修订沿用原已用次数");
 });
 
 async function rejectedFeedback(change) {

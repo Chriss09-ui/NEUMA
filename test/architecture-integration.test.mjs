@@ -96,6 +96,21 @@ async function invoke(handler, method, url, body, streaming = false) {
   return response;
 }
 
+test("构建API显式转交局部修复授权，未绑定真实失败节点的授权在模型调用前拒绝", async t => {
+  const { agents, records } = await fixture(t);
+  const architectureRepair = { version: 4, checkpointHash: "a".repeat(64), stageKey: "demo_generation" };
+  const rejected = await invoke(api(agents), "POST", "/api/agents/build", { ...input(), architectureRepair });
+  assert.equal(rejected.status, 400); assert.match(JSON.parse(rejected.text).error, /授权/u);
+  assert.equal(records.length, 0);
+  agents.architecture.design = async (definition, options) => {
+    assert.deepEqual(options.architectureRepair, architectureRepair);
+    return { agentId: definition.id, status: "failed", delivery: "blocked" };
+  };
+  const forwarded = await invoke(api(agents), "POST", "/api/agents/build", { ...input(), architectureRepair }, true);
+  assert.equal(forwarded.events().at(-1).type, "done");
+  assert.equal(records.length, 0);
+});
+
 test("独立评估未通过或存在关键未知时，不保存新的 Agent 执行定义", async (t) => {
   for (const [label, script, expectedStatus] of [
     ["评估未通过", { review: (payload) => rejectedReview(payload.candidateHash) }, "needs_evidence"],

@@ -14,6 +14,7 @@ import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contract.mjs";
 import { fidelityChecker } from "./helpers/fidelity.mjs";
 import { architectureReviewEvidenceContext } from "../src/architecture/architecture-review-evidence.mjs";
+import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 
 const definition = (id = "weekly") => ({ id, name: "周报助手", draft: validDraft(), fingerprint: "requirements-v1" });
 const submissionNames = { designer: "submit_architecture", reviewer: "submit_architecture_review", specialist: "submit_module_design" };
@@ -847,7 +848,7 @@ test("当前MiMo架构按角色分配思考输出预算，不自动用满模型�
   designer.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     model: "mimo-v2.6-pro", apiKey: "fixture-only" };
   assert.equal((await designer.design(definition())).status, "passed");
-  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [32768, 16384]);
+  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [65536, 16384]);
 });
 
 test("架构失败保留安全的模型原因、失败阶段和重试数", async (t) => {
@@ -979,26 +980,30 @@ test("真实Pi SDK一次收到全部验收缺项后可一次修正，不靠逐�
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
     critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
-  let missing;
+  let missing, candidate;
   const model = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture", "submit_architecture_review"].includes(item.function.name));
-    const role = tool.function.name === "submit_architecture" ? "designer" : "reviewer";
+    const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture_blueprint", "submit_architecture_module",
+      "submit_architecture_integration", "submit_architecture_review"].includes(item.function.name));
+    const role = ({ submit_architecture_blueprint: "blueprint", submit_architecture_module: "module",
+      submit_architecture_integration: "integration", submit_architecture_review: "reviewer" })[tool.function.name];
     const attempt = requests.filter((value) => value === role).length + 1; requests.push(role);
     const content = body.messages.findLast((message) => message.role === "user").content;
     const payload = JSON.parse(typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join(""));
     let value;
-    if (role === "designer") {
-      value = validDesign(payload.requirements, { schemaVersion: 3, connections: [],
+    if (role !== "reviewer") {
+      if (role === "blueprint") candidate = validDesign(payload.requirements, { schemaVersion: 3, connections: [],
         interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "记录", results: "完整汇总", persistentData: "无" },
         execution: { language: "none", hosting: "builtin", reason: "已有工具即可" },
         selectionBasis: { capacity: "固定测试记录", process: "完整核对", quality: "逐项对应",
           requirementIds: payload.requirements.map((item) => item.id), assumptions: [] } });
-      missing = ["task", payload.requirements.find((item) => item.id.startsWith("spec_")).id];
-      if (attempt === 1) {
+      const submission = architectureStageSubmission({ tools: body.tools.map((item) => item.function), payload, candidate });
+      assert.equal(submission.name, tool.function.name); value = submission.args;
+      if (role === "blueprint") missing = ["task", payload.requirements.find((item) => item.id.startsWith("spec_")).id];
+      if (role === "module" && attempt === 1) {
         value.instructions = secret;
         for (const item of value.acceptance) item.requirementIds = item.requirementIds.filter((id) => !missing.includes(id));
-      } else {
+      } else if (role === "module") {
         assert.equal(attempt, 2, "完整缺项回执应允许一次修正");
         const feedback = body.messages.findLast((message) => message.role === "tool").content;
         const text = typeof feedback === "string" ? feedback : JSON.stringify(feedback);
@@ -1022,7 +1027,7 @@ test("真实Pi SDK一次收到全部验收缺项后可一次修正，不靠逐�
     sessionFactory: async (options) => { const session = await createPiSession(options); session.setAutoCompactionEnabled(false); session.setAutoRetryEnabled(false); return session; } });
   t.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
   const result = await designer.design({ ...definition(), draft }, { onProgress: (event) => progress.push(event) });
-  assert.equal(result.status, "passed"); assert.deepEqual(requests, ["designer", "designer", "reviewer"]);
+  assert.equal(result.status, "passed"); assert.deepEqual(requests, ["blueprint", "module", "module", "integration", "reviewer"]);
   const issue = progress.find((event) => event.validationIssue)?.validationIssue;
   assert.equal(issue.reason, "missing_coverage"); assert.deepEqual(issue.missingReferences, missing);
   assert.ok(issue.missingReferences.every((id) => issue.allowedReferences.includes(id)));
@@ -1106,27 +1111,32 @@ test("无代码方案承诺后台操作即使模型评审通过也不能交给�
   assert.equal(result.design.interaction.operations, true); assert.equal(result.design.execution.language, "none");
 });
 
-test("真实Pi提交工具可一次接收完整v3连接与动态schema，不以多轮修格式绕过", async (t) => {
+test("真实Pi阶段工具保留完整v3连接与动态schema，不以多轮修格式绕过", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-architecture-v3-sdk-")), requests = [];
-  let submittedSchema;
+  let submittedSchema, candidate;
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
     critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
   const model = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture", "submit_architecture_review"].includes(item.function.name));
-    const role = tool.function.name === "submit_architecture" ? "designer" : "reviewer";
+    const body = JSON.parse(Buffer.concat(chunks)), tool = body.tools.find((item) => ["submit_architecture_blueprint", "submit_architecture_module",
+      "submit_architecture_integration", "submit_architecture_review"].includes(item.function.name));
+    const role = ({ submit_architecture_blueprint: "blueprint", submit_architecture_module: "module",
+      submit_architecture_integration: "integration", submit_architecture_review: "reviewer" })[tool.function.name];
     requests.push(role);
     const source = body.messages.findLast((message) => message.role === "user").content;
     const payload = JSON.parse(typeof source === "string" ? source : source.filter((part) => part.type === "text").map((part) => part.text).join(""));
     let value;
-    if (role === "designer") {
-      submittedSchema = structuredClone(tool.function.parameters);
-      assert.deepEqual(payload.candidateSchema, submittedSchema);
-      assert.ok(tool.function.parameters.required.includes("execution"));
-      assert.ok(tool.function.parameters.required.includes("selectionBasis"));
-      assert.deepEqual(tool.function.parameters.properties.schemaVersion.enum, [3]);
-      value = validDesign(payload.requirements, { schemaVersion: 3, profile: "custom",
+    if (role !== "reviewer") {
+      if (role === "blueprint") {
+        submittedSchema = structuredClone(payload.candidateSchema);
+        const globalSchema = tool.function.parameters.properties.global;
+        assert.ok(globalSchema.required.includes("execution"));
+        assert.ok(globalSchema.required.includes("selectionBasis"));
+        assert.deepEqual(globalSchema.properties.schemaVersion.enum, [3]);
+        for (const field of ["interaction", "execution", "selectionBasis", "connections"])
+          assert.deepEqual(globalSchema.properties[field], payload.candidateSchema.properties[field], "蓝图全局字段沿用完整候选契约");
+        candidate = validDesign(payload.requirements, { schemaVersion: 3, profile: "custom",
         interaction: { defaultEntry: "conversation", page: false, operations: true, inputs: "用户记录", results: "检索结果", persistentData: "无" },
         execution: { language: "javascript", hosting: "managed", reason: "已确认的专属检索逻辑" },
         selectionBasis: { capacity: "固定材料", process: "每条核对", quality: "逐条对应",
@@ -1135,7 +1145,10 @@ test("真实Pi提交工具可一次接收完整v3连接与动态schema，不以�
           operations: [{ id: "search", method: "POST", path: "/search", readOnly: true,
             inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"], additionalProperties: false },
             outputSchema: { type: "array", items: { type: "string" } }, request: { body: { query: "q" }, encoding: "json" } }] }],
-      });
+        });
+      }
+      const submission = architectureStageSubmission({ tools: body.tools.map((item) => item.function), payload, candidate });
+      assert.equal(submission.name, tool.function.name); value = submission.args;
     } else {
       assert.deepEqual(payload.candidateSchema, submittedSchema, "评估者看到与设计者实际工具声明完全相同的候选契约");
       const system = body.messages.filter((message) => ["system", "developer"].includes(message.role))
@@ -1170,14 +1183,14 @@ test("真实Pi提交工具可一次接收完整v3连接与动态schema，不以�
   t.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise((resolve) => model.close(resolve)); await rm(root, { recursive: true, force: true }); });
   const result = await designer.design({ ...definition(), draft });
   assert.equal(result.status, "passed"); assert.equal(result.delivery, "needs_development");
-  assert.deepEqual(requests, ["designer", "reviewer"]);
+  assert.deepEqual(requests, ["blueprint", "module", "integration", "reviewer"]);
   assert.equal(result.design.connections[0].operations[0].request.body.query, "q");
 });
 
 test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完整流", async (t) => {
   for (const outcome of ["complete", "offline", "truncated", "protocol"]) await t.test(outcome, { timeout: 10_000 }, async (child) => {
     const root = await mkdtemp(join(tmpdir(), "neuma-architecture-sdk-"));
-    const requests = [], counts = new Map();
+    const requests = [], counts = new Map(), allocatedBudgets = [];
     const model = createServer(async (request, response) => {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks));
@@ -1211,6 +1224,7 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
       chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" },
       cwd: root, dataDir: join(root, "data"),
       sessionFactory: async (options) => {
+        allocatedBudgets.push(options.maxOutputTokens);
         const session = await createPiSession(options);
         session.setAutoCompactionEnabled(false); session.setAutoRetryEnabled(false);
         return session;
@@ -1227,11 +1241,7 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
         && error.diagnostic.reason === (outcome === "truncated" ? "output_limit" : "api_stream_interrupted"));
       assert.equal((await designer.get("weekly")).diagnostic.phase, "designing");
     }
-    for (const role of new Set(requests.map((request) => request.role))) {
-      const cap = role === "designer" ? 8192 : 4096;
-      const actual = requests.find((request) => request.role === role).maxTokens;
-      assert.ok(actual <= cap && actual > cap - 256, `${role} output budget ${actual}`);
-    }
+    assert.deepEqual(allocatedBudgets, [...counts.keys()].map(role => role === "designer" ? 8192 : 4096));
     assert.ok(requests.every((request) => Number.isSafeInteger(request.maxTokens) && request.maxTokens > 0
       && request.maxTokens <= (request.role === "designer" ? 8192 : 4096)), JSON.stringify(requests));
   });

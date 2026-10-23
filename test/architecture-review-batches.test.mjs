@@ -209,15 +209,17 @@ test("正文保存必须有实质进展；相同分项不无限续批，普通�
   assert.equal(f.progress.filter((entry) => entry.parts).length, 1);
 });
 
-test("末批真实保存后完整语义不自洽仍拒绝，不能把保存当作评审通过", async (t) => {
+test("末批完整语义不自洽时保留被拒草稿，不覆盖已接受分项或进入范围复核", async (t) => {
   const f = await fixture(t, { initialModelCalls: 2, onPrompt: ({ f, payload, session }) => {
     const parts = rows(f, payload.reviewParts); parts.checks[0].passed = false;
     textReply(session, { candidateHash: f.candidateHash, progressHash: payload.reviewParts.progressHash, ...parts,
       verdict: "pass", summary: "错误的自洽结论应拒绝" });
   } });
   await assert.rejects(f.run());
-  assert.equal(f.state.fidelity, 0); assert.equal(f.state.parts.checks[0].passed, false);
-  assert.ok(f.state.diagnostic.lastSubmissionError); assert.ok(f.state.validates > 0);
+  assert.equal(f.state.fidelity, 0); assert.equal(f.state.parts.checks.length, 0);
+  assert.equal(f.progress.findLast(entry => entry.rejectedParts).rejectedParts.checks[0].passed, false);
+  assert.equal(f.state.diagnostic.lastSubmissionIssue.reason, "missing_check_issue");
+  assert.equal(f.state.validates, 0);
 });
 
 test("正文保存落盘失败或保存中取消，不派发下一批也不产生通过", async (t) => {

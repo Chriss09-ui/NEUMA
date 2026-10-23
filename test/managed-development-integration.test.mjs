@@ -11,6 +11,7 @@ import { createPlatformSnapshot } from "../src/architecture/platform-contract.mj
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { sufficientPreflight } from "./helpers/consultation.mjs";
 import { fidelityResult } from "./helpers/fidelity.mjs";
+import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 
 const supported = process.platform === "darwin" && process.arch === "arm64";
 const object = (properties) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
@@ -80,6 +81,7 @@ function plan(requirements, design, edition, invalid, dataVersion = 1) {
 
 test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留与版本回退", { skip: !supported, timeout: 60000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-managed-development-")), requests = [], errors = [];
+  const stageCandidates = new Map();
   let edition = 1, invalid = false, dataVersion = 1, agents, handler, server;
   const model = createServer(async (request, response) => {
     try {
@@ -100,6 +102,13 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
         }
       }
       if (name) { /* The fixed model reads the same paged contract as a real planner. */ }
+      else if (names.some((name) => ["submit_architecture_blueprint", "submit_architecture_module", "submit_architecture_integration"].includes(name))) {
+        if (names.includes("submit_architecture_blueprint")) stageCandidates.set(edition, candidate(payload.requirements));
+        const fixed = stageCandidates.get(edition);
+        assert.ok(fixed, "模块与整合须使用本版蓝图阶段的同一固定候选");
+        const submission = architectureStageSubmission({ tools: body.tools.map((item) => item.function), payload, candidate: fixed });
+        assert.ok(submission); name = submission.name; args = submission.args;
+      }
       else if (names.includes("submit_architecture")) { name = "submit_architecture"; args = candidate(payload.requirements); }
       else if (names.includes("submit_architecture_review")) {
         name = "submit_architecture_review"; args = passingReview(payload.candidateHash, payload.design);
@@ -155,6 +164,9 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
     assert.equal(task.status, "completed", JSON.stringify(task)); assert.deepEqual(task.result, { status: "ok", text: "ACTUAL", edition: expectedEdition });
   }
   const first = await build(); assert.equal(first.architecture.design.schemaVersion, 3); assert.equal(first.architecture.design.profile, "custom");
+  assert.deepEqual(requests.filter((entry) => ["submit_architecture_blueprint", "submit_architecture_module", "submit_architecture_integration"].includes(entry.name))
+    .map((entry) => entry.name), ["submit_architecture_blueprint", "submit_architecture_module", "submit_architecture_integration"]);
+  assert.equal(first.architecture.designProgressCheckpoint.modelCalls, 3, "真实阶段请求分别累计且保存后才进入原独立评审和研发");
   assert.equal(first.development.status, "completed", JSON.stringify(first.development)); assert.equal(first.development.delivery, "ready");
   assert.equal(first.agent.execution.kind, "managed-service");
   const firstRecord = await agents.development.store.getRun(first.agent.developmentRef.id);

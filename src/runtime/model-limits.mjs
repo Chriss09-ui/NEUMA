@@ -15,9 +15,12 @@ export function reasoningModelOutputBudget(config, base = 4096) {
 }
 
 export function architectureModelOutputBudget(config, role) {
-  const budgets = { designer: 8192, reviewer: 4096, module: 4096, specialist: 4096 };
+  // 思考与正式结果共用输出额度，设计及模块咨询需要给最终提交留出空间。
+  const budgets = resolvedModelProfile(config).reasoning
+    ? { designer: 65_536, reviewer: 16_384, module: 32_768, specialist: 32_768 }
+    : { designer: 8192, reviewer: 4096, module: 4096, specialist: 4096 };
   if (!Object.hasOwn(budgets, role)) throw new TypeError("架构角色无效");
-  return reasoningModelOutputBudget(config, budgets[role]);
+  return modelOutputBudget(config, budgets[role]);
 }
 
 export function developmentModelOutputBudget(config, role) {

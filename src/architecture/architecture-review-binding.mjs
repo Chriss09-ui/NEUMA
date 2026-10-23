@@ -59,3 +59,19 @@ export function architectureReviewRecordBinding(record) {
   if (Object.hasOwn(record, "feedbackLedger")) binding.feedbackLedger = copyArchitectureReviewJson(reviewCheckpointOwn(record, "feedbackLedger"));
   return { source: { agentId, architectureVersion, candidateHash }, bindingHash: hashValue({ ...binding, designHash }) };
 }
+
+/** Storage bounds only; the controller must also verify every authorization against its source version. */
+export function architectureReviewStoredCallLimit(record) {
+  try {
+    const grant = copyArchitectureReviewJson(reviewCheckpointOwn(record, "reviewRetryCheckpoint"), { maxDepth: 5, maxNodes: 40, maxBytes: 4096 });
+    const { hash, ...body } = grant, source = grant.source, limit = source.modelCalls + grant.additionalCalls;
+    if (grant.schemaVersion === 3 && grant.additionalCalls === 5 && hash === hashValue(body)
+      && Object.keys(grant).sort().join() === "additionalCalls,bindingHash,hash,previousCheckpointHash,schemaVersion,source"
+      && Object.keys(source).sort().join() === "candidateHash,modelCalls,progressHash,version"
+      && [grant.bindingHash, grant.previousCheckpointHash, source.progressHash].every(value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value))
+      && source.candidateHash === reviewCheckpointOwn(record, "candidateHash")
+      && Number.isSafeInteger(source.version) && source.version > 0 && source.version < reviewCheckpointOwn(record, "version")
+      && Number.isSafeInteger(source.modelCalls) && source.modelCalls >= 7 && Number.isSafeInteger(limit)) return Math.max(12, limit);
+  } catch { /* Invalid authorizations cannot expand the legacy storage bound. */ }
+  return 12;
+}

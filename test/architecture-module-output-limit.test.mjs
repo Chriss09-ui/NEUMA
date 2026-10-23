@@ -51,7 +51,8 @@ async function fixture(t, { parallel = false, cancel = false, usage = true, guar
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(`data: ${JSON.stringify({ id: "module-output-fixture", choices: [{ index: 0, delta, finish_reason: finish }],
-        ...(usage && finish === "length" ? { usage: { prompt_tokens: 100, completion_tokens: 16384, total_tokens: 16484 } } : {}) })}\n\ndata: [DONE]\n\n`);
+        ...(usage && finish === "length" ? { usage: { prompt_tokens: 100, completion_tokens: body.max_completion_tokens,
+          total_tokens: 100 + body.max_completion_tokens } } : {}) })}\n\ndata: [DONE]\n\n`);
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: error.message } }));
     }
@@ -89,11 +90,14 @@ for (const parallel of [false, true]) test(`原生Pi子模块thinking-only达到
     return diagnostic.reason === "module_output_limit" && diagnostic.role === "designer" && diagnostic.modelCalls === 1;
   });
   assert.equal(f.requests.length, parallel ? 3 : 2);
+  assert.deepEqual(f.requests.map(request => request.max_completion_tokens), Array(parallel ? 3 : 2).fill(32768),
+    "设计者和子模块的实际请求额度均受模型32768上限约束");
+  assert.equal(diagnostic.requestedMaxOutputTokens, 32768);
   assert.equal(diagnostic.delegation.status, "incomplete"); assert.equal(diagnostic.delegation.retryAllowed, false);
   assert.deepEqual(diagnostic.delegation.failures.map(({ moduleId, ...entry }) => {
     assert.match(moduleId, /^module_[a-f0-9]{24}$/u); return entry;
   }), [{ role: "specialist", reason: "output_limit", validResult: false, stopReason: "length", modelCalls: 1,
-    requestedMaxOutputTokens: 16384, outputTokens: 16384, outputUsageReceipts: 1 }]);
+    requestedMaxOutputTokens: 32768, outputTokens: 32768, outputUsageReceipts: 1 }]);
   assert.equal(diagnostic.delegation.completedModuleIds.length, parallel ? 1 : 0);
   assert.equal(diagnostic.delegation.savedModuleCount, parallel ? 1 : 0);
   assert.equal(diagnostic.requestAdmission?.requestSent, false);
@@ -102,7 +106,10 @@ for (const parallel of [false, true]) test(`原生Pi子模块thinking-only达到
   assert.equal(record.design, null); assert.deepEqual(record.attempts, []); assert.deepEqual(record.diagnostic, diagnostic);
   assert.deepEqual(record.modules, parallel ? [{ assignment: assignments[0], result: moduleResult }] : []);
   assert.ok(f.progress.some(entry => entry.delegationFailure?.failures[0].stopReason === "length"));
-  assert.doesNotMatch(JSON.stringify({ diagnostic, progress: f.progress }), /fixture-private-thinking|核对当前算式|fixture explicit cancellation/u);
+  assert.ok(f.progress.some(entry => entry.type === "architecture_thought" && entry.delta === "fixture-private-thinking-must-not-be-logged"));
+  assert.doesNotMatch(JSON.stringify({ diagnostic, record, progress: f.progress.filter(entry => entry.type !== "architecture_thought") }),
+    /fixture-private-thinking/u);
+  assert.doesNotMatch(JSON.stringify({ diagnostic, progress: f.progress }), /核对当前算式|fixture explicit cancellation/u);
 });
 
 test("未收到正数usage不补造子模块消耗；显式取消优先于length诊断", { timeout: 20000 }, async t => {
@@ -153,7 +160,7 @@ for (const queued of ["delegate", "submit"]) test(`同一原生回复首个子�
   await assert.rejects(f.run(), error => { diagnostic = error.diagnostic; return diagnostic.reason === "module_output_limit"; });
   assert.equal(f.requests.length, 2); assert.equal(f.sessions.length, 2);
   assert.equal(diagnostic.delegation.failures.length, 1); assert.equal(diagnostic.delegation.failures[0].stopReason, "length");
-  assert.equal(diagnostic.delegation.failures[0].outputTokens, 16384);
+  assert.equal(diagnostic.delegation.failures[0].outputTokens, 32768);
   assert.equal(f.progress.filter(entry => entry.delegationFailure).length, 1);
   const queuedResult = f.sessions[0].messages.find(entry => entry.role === "toolResult" && entry.toolCallId === "queued_fixture");
   assert.ok(queuedResult); assert.equal(queuedResult.isError, true);

@@ -409,6 +409,39 @@ test("已知待实现与未经验证分开，任何缺失能力都不能进入�
   assert.throws(() => validateDesign(design(), { ...context, evidence: [null] }), InputError);
 });
 
+test("待验收效果须显式修正分类，程序不按说明自动豁免且真实缺失能力仍阻断", () => {
+  const value = currentDesign({ profile: "custom",
+    execution: { language: "javascript", hosting: "builtin", reason: "专属计算逻辑需实际研发" } });
+  value.capabilities.push(
+    { id: "demo_math", status: "needs_development", reason: "在受支持的隔离 Node 中开发和验证数值逻辑" },
+    { id: "browser_visual_slider", status: "unverified", reason: "浏览器视觉与滑块效果留待实际打开时验收" });
+  value.acceptance.push({ id: "code_failure", kind: "tool_failure", requirementIds: ["task"],
+    input: "专属代码运行失败", expected: "停止交付并保留真实失败，不宣称通过",
+    verification: { stage: "development", owner: "generated-code", adapterId: "action" } });
+  const before = structuredClone(value), checked = checkDesign(value, context);
+  const blocker = checked.issues.find(item => item.id === "capability_browser_visual_slider");
+  assert.equal(blocker.blocking, true);
+  assert.match(blocker.remedy, /待验收的业务效果/);
+  assert.match(blocker.remedy, /保留需求引用、验证阶段和失败处置/);
+  assert.match(blocker.remedy, /真实缺口仍须阻断/);
+  assert.deepEqual(value, before, "程序不能按能力名称或待验收说明自动删除能力");
+  const forged = structuredClone(value); forged.capabilities.at(-1).status = "available";
+  assert.throws(() => validateDesign(forged, context), /未被工具目录证实/);
+
+  const corrected = structuredClone(value);
+  corrected.capabilities.pop();
+  corrected.unknowns.push({ question: "浏览器视觉与滑块效果是否符合要求", blocking: false,
+    resolution: "保留实际打开后的验收义务和原需求范围，未验收时明确待验证，失败不宣称已交付" });
+  const result = checkDesign(corrected, context);
+  assert.equal(result.issues.some(item => item.blocking), false);
+  assert.equal(result.runnable, false, "分类修正不跳过研发或标为可直接运行");
+  assert.deepEqual(corrected.acceptance, before.acceptance);
+  assert.deepEqual(corrected.coverage, before.coverage);
+  assert.ok(result.issues.some(item => item.id === "unknown_1" && !item.blocking));
+  corrected.capabilities.push({ id: "browser_automation", status: "unverified", reason: "实际必需的自动浏览器执行工具尚不可用" });
+  assert.ok(checkDesign(corrected, context).issues.some(item => item.id === "capability_browser_automation" && item.blocking));
+});
+
 test("程序能力问题的 ID 满足评测契约，包括合法下划线与最长能力名", () => {
   const value = design();
   value.capabilities.push(...["dynamic_geometry_rendering", "external_visualization_embed", "a".repeat(80)]

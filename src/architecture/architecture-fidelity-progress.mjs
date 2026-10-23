@@ -1,6 +1,6 @@
 import { hashValue } from "../development/development-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
-  reviewCheckpointObject as object, reviewCheckpointOwn as own } from "./architecture-review-binding.mjs";
+  reviewCheckpointObject as object, reviewCheckpointOwn as own, architectureReviewStoredCallLimit } from "./architecture-review-binding.mjs";
 import { readMainReviewCheckpoint, mainReviewCheckpointMatches } from "./architecture-main-review-checkpoint.mjs";
 import { architectureFidelityContextVersion } from "./architecture-fidelity-context.mjs";
 
@@ -40,7 +40,7 @@ function checkedProgress(progress, record, sameVersion) {
     || sameVersion && value.source.architectureVersion !== current.source.architectureVersion
     || !hash(value.source.reviewHash) || value.source.reviewHash !== checkpoint.reviewHash
     || !hash(value.bindingHash) || value.bindingHash !== current.bindingHash || !hash(value.hash)
-    || !count(value.parentModelCalls, 12)) return null;
+    || !count(value.parentModelCalls, architectureReviewStoredCallLimit(record))) return null;
   const state = stateCopy(value.state);
   if (value.parentModelCalls < state.calls) return null;
   const { hash: savedHash, ...body } = value;
@@ -51,7 +51,7 @@ function checkedProgress(progress, record, sameVersion) {
 export function createArchitectureFidelityProgress(record, state, parentModelCalls) {
   try {
     const current = recordBinding(record), checkpoint = mainCheckpoint(record, true), savedState = stateCopy(state);
-    if (!current || !checkpoint || !count(parentModelCalls, 12) || parentModelCalls < savedState.calls) return null;
+    if (!current || !checkpoint || !count(parentModelCalls, architectureReviewStoredCallLimit(record)) || parentModelCalls < savedState.calls) return null;
     const body = { schemaVersion: 1, source: { ...current.source, reviewHash: checkpoint.reviewHash },
       bindingHash: current.bindingHash, state: savedState, parentModelCalls };
     const progress = { ...body, hash: hashValue(body) };

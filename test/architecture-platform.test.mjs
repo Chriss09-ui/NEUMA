@@ -190,6 +190,7 @@ test("论文候选误把已实现公共正文工具标为 unverified 时仍阻�
       assert.equal(issue.source, "program");
       assert.equal(issue.blocking, true);
       assert.ok(issue.candidateFields.includes("capabilities"));
+      assert.ok(issue.candidateFields.includes("unknowns"), "能力分类纠错须允许在未知项保留原验证义务");
       assert.match(issue.remedy, /available/);
       assert.match(issue.remedy, /unknowns/);
       return submit(revisionReview(record.payload, [{ id: "availability_object", blocking: true,

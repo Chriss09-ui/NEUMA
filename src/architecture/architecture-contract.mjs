@@ -229,8 +229,11 @@ function uniqueIds(items, label, key = "id") {
 }
 
 function assertReference(id, ids, path, exposeReferences = false) {
-  if (!ids.has(id)) fail(`${path} 引用了不存在的 ID`, { path, reason: "invalid_reference",
-    ...(exposeReferences ? { allowedReferences: [...ids].slice(0, 100) } : {}) });
+  if (!ids.has(id)) {
+    const allowedReferences = [...ids].slice(0, 100);
+    fail(exposeReferences ? `${path} 引用了不存在的 ID。允许的编号：${allowedReferences.join("、")}` : `${path} 引用了不存在的 ID`,
+      { path, reason: "invalid_reference", ...(exposeReferences ? { allowedReferences } : {}) });
+  }
 }
 
 export function requirementItems(value) {
@@ -260,7 +263,48 @@ export function requirementItems(value) {
   return items;
 }
 
-export function validateDesign(value, { requirements, capabilities = CAPABILITIES, evidence = [], draft, deferredVerifications, requireAcceptanceVerification = false,
+export function architectureDecisionSources({ evidence = [], confirmedRequirementContext, deferredVerifications, requirements = [] } = {}) {
+  const ids = new Set(evidence.map(row => row.id)), aliases = new Map();
+  const confirmed = confirmedRequirementContext;
+  try {
+    const { hash, ...body } = confirmed ?? {};
+    if (hash === designHash(body) && Array.isArray(confirmed.sourceQuotes)) {
+      const registered = new Set([...confirmed.taskSources ?? [], ...confirmed.resolvedChoices ?? []].flatMap(row => row.quoteIds ?? []));
+      const byMessage = new Map();
+      for (const quote of confirmed.sourceQuotes) {
+        const { id, ...source } = quote;
+        if (!registered.has(id) || id !== `quote_${designHash(source).slice(0, 24)}`) continue;
+        ids.add(id);
+        const matches = byMessage.get(quote.messageId) ?? []; matches.push(id); byMessage.set(quote.messageId, matches);
+      }
+      for (const [messageId, matches] of byMessage) if (typeof messageId === "string" && messageId.startsWith("msg_") && matches.length === 1)
+        aliases.set(`quote_${messageId.slice(4)}`, matches[0]);
+    }
+  } catch { /* Unverified source snapshots cannot register decision evidence. */ }
+  try {
+    const deferred = deferredVerifications, issues = deferred?.issues;
+    const source = issues?.map(({ id, stage, question, impact, requirementIds, checks }) => ({ id, stage, question, impact, requirementIds, checks }));
+    if (Array.isArray(issues) && deferred.hash === designHash(source)) {
+      const known = new Set(requirements.map(row => row.id));
+      for (const issue of issues) if (known.has(issue.requirementId)) ids.add(issue.id);
+    }
+  } catch { /* Unknown or changed system findings are not evidence identifiers. */ }
+  return { ids, aliases };
+}
+
+export function normalizeArchitectureDecisionReferences(decisions, context) {
+  const { ids, aliases } = architectureDecisionSources(context);
+  return decisions.map(row => ({ ...row, evidenceIds: [...new Set(row.evidenceIds.map(id => ids.has(id) ? id : aliases.get(id) ?? id))] }));
+}
+
+export function validateArchitectureDecisionReferences(design, context, root = "design") {
+  const { ids, aliases } = architectureDecisionSources(context);
+  for (const [index, row] of design.decisions.entries()) for (const [position, id] of row.evidenceIds.entries())
+    assertReference(root === "module" && !ids.has(id) ? aliases.get(id) ?? id : id, ids, `${root}.decisions[${index}].evidenceIds[${position}]`, true);
+  return design;
+}
+
+export function validateDesign(value, { requirements, capabilities = CAPABILITIES, evidence = [], draft, deferredVerifications, confirmedRequirementContext, requireAcceptanceVerification = false,
   runtimeCapabilities = runtimeCapabilityContract(), acceptanceAdapterGuide = ACCEPTANCE_ADAPTER_GUIDE, contextManifest } = {}) {
   if (draft?.taskSpec && value?.schemaVersion !== 3) fail("包含任务规格的新需求必须使用 v3 架构，不能绕过规模与验收依据");
   validateSchema(value, value?.schemaVersion === 3 ? DESIGN_V3_SCHEMA : value?.schemaVersion === 2 ? DESIGN_V2_SCHEMA : LEGACY_DESIGN_SCHEMA);
@@ -315,7 +359,7 @@ export function validateDesign(value, { requirements, capabilities = CAPABILITIE
   }
   const usedComponents = new Set();
   for (const [index, step] of value.steps.entries()) {
-    assertReference(step.componentId, componentIds, `design.steps[${index}].componentId`);
+    assertReference(step.componentId, componentIds, `design.steps[${index}].componentId`, true);
     usedComponents.add(step.componentId);
     step.dependsOn.forEach((id, child) => assertReference(id, stepIds, `design.steps[${index}].dependsOn[${child}]`));
   }
@@ -344,9 +388,8 @@ export function validateDesign(value, { requirements, capabilities = CAPABILITIE
     if (capability.status === "available" && !knownCapabilities.has(capability.id)) fail(`design.capabilities[${index}].id 未被工具目录证实可用`,
       { path: `design.capabilities[${index}].id`, reason: "invalid_reference", allowedReferences: [...knownCapabilities] });
   }
-  const evidenceIds = uniqueIds(evidence, "evidence");
-  for (const [index, decision] of value.decisions.entries()) decision.evidenceIds.forEach((id, child) =>
-    assertReference(id, evidenceIds, `design.decisions[${index}].evidenceIds[${child}]`, true));
+  uniqueIds(evidence, "evidence");
+  validateArchitectureDecisionReferences(value, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const kinds = new Set(value.acceptance.map((item) => item.kind));
   for (const kind of ["success", "missing_input", "boundary"]) if (!kinds.has(kind)) fail(`缺少 ${kind} 验收场景`);
   if (value.capabilities.some((item) => item.id !== "conversation") && !kinds.has("tool_failure")) fail("使用工具时必须提供 tool_failure 验收场景");
@@ -414,7 +457,7 @@ export function checkDesign(value, context) {
       description: provided ? `候选把本轮目录已提供的能力 ${capability.id} 标为 ${capability.status}：${capability.reason}`
         : `能力 ${capability.id} 尚未可用：${capability.reason}`,
       remedy: provided ? "按宿主完整目录修正 capabilities.status 为 available；这只表示工具已提供且允许调用，不代表具体目标读取或业务验收成功。将目标与效果的未知写入 unknowns、失败处理和 acceptance，不改程序标记，也不虚构调用证据。"
-        : "若为实际执行依赖，选择真实可用的替代能力或现有研发通道，并核对步骤、需求覆盖及验收；仍缺能力时保留未就绪。若为未采用或未来方案，从 capabilities 移至 decisions，保留缺口事实；不能修改程序检查标记来放行。",
+        : "先区分实际执行依赖与待验收的业务效果。若只是尚未验收的效果，修正 capabilities 分类，将原义务完整保留在 unknowns、适用的 acceptance 或已有后续验证安排中，保留需求引用、验证阶段和失败处置，不伪改为 available 或宣称已通过。若为实际执行依赖，选择真实可用的替代能力或已有明确实现路径的研发通道，并核对步骤、需求覆盖及验收；真实缺口仍须阻断，不能仅移入 unknowns 或改阶段。若为未采用或未来方案，从 capabilities 移至 decisions，保留缺口事实；不能修改程序检查标记来放行。",
     });
   }
   if (!requiresDevelopment(design) && design.state.mode === "persistent") issues.push({
