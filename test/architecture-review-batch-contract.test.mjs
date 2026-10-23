@@ -90,7 +90,12 @@ test("旧详细行的坏逐字引文与旧CAS均保留已有成果", async () =>
   await assert.rejects(parts.save(input(parts, { acceptanceScopeChecks: [{ ...f.review.acceptanceScopeChecks[1], criterionQuote: "不存在的逐字引用" }] })),
     issueReason("reference_quote_mismatch"));
   await assert.rejects(parts.save({ ...stale, checks: [f.review.checks[0]] }), issueReason("invalid_reference"));
-  assert.equal(writes.length, 1); assert.deepEqual(parts.snapshot(), before); assert.deepEqual(parts.reference(), reference);
+  assert.equal(writes.length, 1); assert.deepEqual(parts.snapshot(), before);
+  const { rejectedPartsHash, rejectedPartsTrust, rejectedPartsIssues, ...acceptedReference } = parts.reference();
+  assert.deepEqual(acceptedReference, reference); assert.match(rejectedPartsHash, /^[a-f0-9]{64}$/u);
+  assert.equal(rejectedPartsTrust, "untrusted-reference");
+  assert.equal(rejectedPartsIssues[0].reason, "reference_quote_mismatch");
+  assert.equal(parts.rejectedSnapshot().acceptanceScopeChecks[1].criterionQuote, "不存在的逐字引用");
 });
 
 test("宿主batch仅派发两种四字段短行，保存为canonical且旧完整提交保持兼容", async () => {
@@ -175,11 +180,11 @@ test("最后一批保存中取消不得完成提交，合法部分行也不替�
   await assert.rejects(pending, { name: "AbortError" });
   assert.deepEqual(parts.snapshot(), initial); assert.equal(parts.reference().missing.checks.length, 1);
   const inconsistent = createArchitectureReviewParts({ ...f.options, initial, remainingModelCalls: () => 3 });
-  const result = await inconsistent.finalize(input(inconsistent, { checks: [{ ...f.review.checks.at(-1), passed: false }],
-    verdict: "revise", summary: "尚无该失败项的阻断依据" }));
-  assert.equal(inconsistent.reference().missing.checks.length, 0);
-  assert.throws(() => validateReview(result, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }),
-    issueReason("missing_check_issue"));
+  await assert.rejects(inconsistent.finalize(input(inconsistent, { checks: [{ ...f.review.checks.at(-1), passed: false }],
+    verdict: "revise", summary: "尚无该失败项的阻断依据" })), issueReason("missing_check_issue"));
+  assert.deepEqual(inconsistent.snapshot(), initial);
+  assert.equal(inconsistent.reference().missing.checks.length, 1);
+  assert.equal(inconsistent.rejectedSnapshot().checks.at(-1).passed, false);
 });
 
 test("未启用宿主批次的旧调用继续允许同值保存，不增加新无进展限制", async () => {

@@ -13,6 +13,7 @@ import { validatePlan } from "../src/development/development-contract.mjs";
 import { sufficientPreflight } from "./helpers/consultation.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { fidelityChecker } from "./helpers/fidelity.mjs";
+import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 
 function draft() {
   return { ...validDraft(), taskSpec: { version: 1, items: [{ id: "full_coverage", dimension: "processing", content: "完整处理全部输入",
@@ -51,11 +52,25 @@ function review(hash, candidate) {
   return value;
 }
 function sessions(script = {}) {
-  return async ({ customTools }) => {
-    const tools = Object.fromEntries(customTools.map((tool) => [tool.name, tool]));
-    return { messages: [], subscribe: () => () => {}, async abort() {}, dispose() {},
+  const candidates = new Map();
+  return async (options) => {
+    const tools = Object.fromEntries(options.customTools.map((tool) => [tool.name, tool])), storage = options.sessionStorage;
+    return { messages: [], modelCallAccounting: true,
+      ...(storage ? { sessionFile: join(storage.directory, storage.file ?? `${storage.binding.key}-${storage.binding.generation}.jsonl`) } : {}),
+      subscribe: () => () => {}, async abort() {}, dispose() {},
       async prompt(text) {
+        await options.onModelCall();
         const payload = JSON.parse(text);
+        if (storage) {
+          const id = storage.binding.pipelineId;
+          if (storage.binding.stage === "blueprint") {
+            const value = currentDesign(payload.requirements); script.change?.(value, payload); candidates.set(id, value);
+          }
+          const candidate = candidates.get(id);
+          assert.ok(candidate, "模块和整合必须复用蓝图阶段的完整固定候选");
+          const stage = architectureStageSubmission({ tools, payload, candidate });
+          assert.ok(stage); return stage.tool.execute(`fixture-${storage.binding.stage}`, stage.args);
+        }
         if (tools.submit_architecture) {
           const value = currentDesign(payload.requirements); script.change?.(value, payload);
           return tools.submit_architecture.execute("candidate", value);
@@ -94,8 +109,20 @@ test("缺少后续义务的设计覆盖或验收均不能通过，不能只把�
       else for (const item of value.acceptance) item.requirementIds = item.requirementIds.filter((id) => !id.startsWith("verification_"));
     } });
     await assert.rejects(f.designer.design({ id: "agent", name: "核对助手", draft: source, fingerprint: contentHash(source) }, { consultation: saved }),
-      target === "coverage" ? /未被设计覆盖/ : /验收|数量/);
-    assert.notEqual((await f.designer.get("agent")).status, "passed");
+      (error) => {
+        if (target === "coverage") assert.deepEqual(error.validationIssue, { path: "module.coverage", reason: "invalid_reference" });
+        else {
+          assert.match(error.validationIssue.path, /^module\.acceptance\[\d+\]\.requirementIds$/u);
+          assert.equal(error.validationIssue.reason, "size_limit");
+          assert.equal(error.validationIssue.constraints.minItems, 1);
+        }
+        return true;
+      });
+    const stopped = await f.designer.get("agent");
+    assert.notEqual(stopped.status, "passed");
+    assert.ok(stopped.designProgressCheckpoint.blueprint.result);
+    assert.equal(stopped.designProgressCheckpoint.modules[0].result, null);
+    assert.equal(stopped.designProgressCheckpoint.integration.modelCalls, 0, "模块缺项不能进入整合补造覆盖");
   });
 });
 

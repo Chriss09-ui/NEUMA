@@ -69,6 +69,31 @@ export function architectureReviewEvidenceContext({ design, requirements, runtim
   return structuredClone({ ...values, contextManifest });
 }
 
+/** Interpret an old review against its exact sources, while keeping later research available to new work. */
+export function architectureHistoricalEvidenceCatalog(record, history = []) {
+  const manifest = record.reviewEvidence?.snapshot?.contextManifest?.evidence;
+  if (!manifest) return record.evidence;
+  const matches = catalog => {
+    if (!Array.isArray(catalog)) return false;
+    const encoded = JSON.stringify(catalog);
+    return manifest.delivery === "full" && manifest.characters === encoded.length
+      && manifest.sha256 === createHash("sha256").update(encoded).digest("hex");
+  };
+  if (Object.hasOwn(record.reviewEvidence, "frozenEvidence")) {
+    if (!matches(record.reviewEvidence.frozenEvidence)) throw new InputError("旧评审的冻结证据目录与原摘要不一致，不能换用其他资料。");
+    return structuredClone(record.reviewEvidence.frozenEvidence);
+  }
+  if (matches(record.evidence)) return structuredClone(record.evidence);
+  for (const source of history) {
+    if (source.agentId !== record.agentId || !Number.isSafeInteger(source.version) || source.version > record.version
+      || source.sourceFingerprint !== record.sourceFingerprint || source.platformHash !== record.platformHash
+      || !isDeepStrictEqual(source.draft, record.draft)) continue;
+    for (const catalog of [source.reviewEvidence?.frozenEvidence, source.evidence])
+      if (matches(catalog)) return structuredClone(catalog);
+  }
+  throw new InputError("找不到与旧评审冻结摘要完全匹配的证据目录，已有新旧材料均保留。");
+}
+
 export function architectureReviewPathExists(value, pointer) { return at(value, pointer).found; }
 
 export function validateArchitectureReviewEvidence(review, context, { partial = false } = {}) {

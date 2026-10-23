@@ -17,6 +17,7 @@ import { developmentRevisionReference, readHistoricalPlanningReference } from ".
 import { hashValue } from "../src/development/development-contract.mjs";
 import { validDesign, passingReview, validDraft } from "./helpers/architecture.mjs";
 import { fidelityChecker } from "./helpers/fidelity.mjs";
+import { createArchitectureStageSessionFactory } from "./helpers/architecture-stages.mjs";
 
 const recorded = JSON.parse(await readFile(new URL("./fixtures/architecture-feedback-recorded-defect.json", import.meta.url), "utf8"));
 const object = (properties) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
@@ -102,10 +103,26 @@ async function controllerFixture(t) {
     source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对用户提供的记录" }] } }] };
   const input = { id: "recorded_feedback_agent", name: "离线反馈回归", fingerprint: "same-business-source", draft };
   const state = { mode: "initial", payloads: [], fixtureResponses: 0 };
+  const stages = createArchitectureStageSessionFactory((payload) => {
+    const design = validDesign(payload.requirements, { schemaVersion: 3, profile: "custom", connections: [],
+      interaction: { defaultEntry: "conversation", page: false, operations: true, inputs: "用户记录", results: "完整结果", persistentData: "无" },
+      execution: { language: "javascript", hosting: "builtin", reason: "确定性处理" },
+      selectionBasis: { capacity: "保留全部输入边界", process: "逐项处理", quality: "独立核对", requirementIds: payload.requirements.map((row) => row.id), assumptions: [] } });
+    const raw = recorded.unchangedDecision;
+    design.decisions.push({ id: raw.oldId, problem: raw.problem, choice: raw.choice, reason: raw.reason,
+      alternatives: [{ option: "明确冻结预期", reason: "最小历史错误回放" }], evidenceIds: [], uncertainties: [] });
+    return design;
+  }, { onPrompt: ({ stage, payload }) => {
+    assert.equal(state.mode, "initial", "已有完整旧候选的技术修订继续走受控局部修订入口");
+    state.payloads.push({ designer: false, stage, payload }); state.fixtureResponses++;
+  } });
   const designer = new ArchitectureDesigner({ config: { llmConfigured: true }, cwd: root, dataDir: join(root, "data"), fidelitySessionFactory: fidelityChecker(),
-    sessionFactory: async ({ customTools }) => {
+    sessionFactory: async (options) => {
+      const stage = await stages(options); if (stage) return stage;
+      const { customTools } = options;
       const tools = Object.fromEntries(customTools.map((tool) => [tool.name, tool]));
-      return { messages: [], subscribe: () => () => {}, dispose() {}, abort() {}, async prompt(text) {
+      return { messages: [], modelCallAccounting: true, subscribe: () => () => {}, dispose() {}, abort() {}, async prompt(text) {
+        await options.onModelCall();
         const payload = JSON.parse(text);
         state.payloads.push({ designer: Boolean(tools.submit_architecture), payload });
         if (state.mode === "capture") {
@@ -147,7 +164,9 @@ async function controllerFixture(t) {
     } });
   t.after(async () => { await designer.persistence; await rm(root, { recursive: true, force: true }); });
   const original = await designer.design(input);
-  assert.equal(original.status, "passed"); assert.equal(state.fixtureResponses, 2);
+  assert.equal(original.status, "passed"); assert.equal(state.fixtureResponses, 4);
+  assert.deepEqual(state.payloads.map((entry) => entry.stage ?? (entry.designer ? "designer" : "reviewer")),
+    ["blueprint", "module", "integration", "reviewer"]);
   const ref = (architecture) => ({ version: architecture.version, candidateHash: architecture.candidateHash });
   const oldPlan = { schemaVersion: 2, summary: "按历史错误建议把占位符作为受支持功能", runtime: "node-action", tasks: [], cases: [] };
   const oldHash = hashValue(oldPlan), oldRun = { id: "historical_feedback_run", agentId: input.id, version: 1, revision: 1,
@@ -178,7 +197,7 @@ test("最新只有泛化失败时，真实修订控制器首包仍带唯一历�
   await assert.rejects(designer.design(input, options), (error) => error.diagnostic?.stage === "architecture");
   assert.equal(state.payloads.length, oldPayloads + 1);
   const firstPayload = state.payloads.at(-1).payload;
-  assert.equal(state.fixtureResponses, 2, "仅前置历史夹具返回固定答案，修订首包在真实调用前已截获停止");
+  assert.equal(state.fixtureResponses, 4, "仅前置三阶段与独立评审返回固定答案，修订首包在真实调用前已截获停止");
   assert.equal(firstPayload.developmentRevision.source.runId, latest.id);
   assert.equal(firstPayload.developmentRevision.context.feedback.reason, recorded.latestFailure.feedback.reason);
   const summary = firstPayload.developmentRevision.reviewFeedbackSummary;
@@ -210,7 +229,7 @@ test("正式架构提交拒绝原样D9的假通过；真实修订后同断点完
   assert.equal(passed.delivery, "needs_development", "架构通过不冒充研发、真实业务验收或交付成功");
   assert.equal(hashValue((await designer.getVersion(input.id, rejected.version)).feedbackLedger), rejectedLedger, "旧失败版本不回写关闭状态");
   assert.equal(hashValue({ original, oldRun, parent, latest }), before);
-  assert.equal(state.fixtureResponses, 6, "两次历史夹具、两次负例角色和两次修复角色均为本地固定回答，没有真实模型请求");
+  assert.equal(state.fixtureResponses, 8, "首次三阶段与独立评审、两次负例角色和两次修复角色均为本地固定回答，没有真实模型请求");
 });
 
 test("旧评审推荐的动态占位符不构成平台事实，两个编码入口均保留字面值", async () => {

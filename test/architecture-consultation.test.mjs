@@ -12,6 +12,7 @@ import { validDraft, validDesign, passingReview } from "./helpers/architecture.m
 import { sufficientPreflight } from "./helpers/consultation.mjs";
 import { handoffChecker, requirementReference } from "./helpers/handoff.mjs";
 import { fidelityChecker } from "./helpers/fidelity.mjs";
+import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 
 function sourceDraft() {
   return { ...validDraft("逐项核对材料并输出完整清单"), taskSpec: { version: 1, items: [{ id: "full_coverage", dimension: "processing",
@@ -31,16 +32,28 @@ function review(hash, candidate) {
   return value;
 }
 async function fixture(t, action) {
-  const root = await mkdtemp(join(tmpdir(), "neuma-architecture-consultation-")), calls = [];
+  const root = await mkdtemp(join(tmpdir(), "neuma-architecture-consultation-")), calls = [], candidates = new Map();
   const designer = new ArchitectureDesigner({ config: { llmConfigured: true }, cwd: root, dataDir: root,
     handoffSessionFactory: handoffChecker(),
     fidelitySessionFactory: fidelityChecker(),
-    sessionFactory: async ({ customTools }) => {
-      const tools = Object.fromEntries(customTools.map((tool) => [tool.name, tool]));
-      const role = tools.submit_architecture ? "designer" : "reviewer";
-      return { subscribe: () => () => {}, messages: [], dispose() {}, async abort() {},
-        async prompt(text) { const payload = JSON.parse(text); calls.push({ role, payload });
-          await action({ role, payload, tools, submit: (value) => tools[role === "designer" ? "submit_architecture" : "submit_architecture_review"].execute("submit", value) }); } };
+    sessionFactory: async (options) => {
+      const tools = Object.fromEntries(options.customTools.map((tool) => [tool.name, tool])), storage = options.sessionStorage;
+      const role = storage?.binding.stage ?? (tools.submit_architecture ? "designer" : "reviewer");
+      return { subscribe: () => () => {}, messages: [], modelCallAccounting: true, dispose() {}, async abort() {},
+        ...(storage ? { sessionFile: join(storage.directory, storage.file ?? `${storage.binding.pipelineId}-${storage.binding.key}-${storage.binding.generation}.jsonl`) } : {}),
+        async prompt(text) {
+          await options.onModelCall(); const payload = JSON.parse(text); calls.push({ role, payload });
+          const submit = (value) => {
+            if (!storage) return tools[role === "designer" ? "submit_architecture" : "submit_architecture_review"].execute("submit", value);
+            if (role === "blueprint") candidates.set(storage.binding.pipelineId, structuredClone(value));
+            const candidate = candidates.get(storage.binding.pipelineId);
+            assert.ok(candidate, "模块和整合必须复用同一次蓝图的固定候选");
+            const stage = architectureStageSubmission({ tools, payload, candidate });
+            return stage.tool.execute(`fixture-${role}`, stage.args);
+          };
+          if (role === "module" || role === "integration") return submit();
+          return action({ role, payload, tools, submit });
+        } };
     } });
   t.after(async () => { await designer.persistence; await rm(root, { recursive: true, force: true }); });
   const draft = sourceDraft(), definition = { id: "agent", name: "核对助手", draft, fingerprint: "frozen_requirements" };
@@ -67,18 +80,18 @@ test("v3独立评审必须含需求充分性与验收质量，不能沿用旧六
   assert.throws(() => validateReview(failed, { candidateHash: hash, schemaVersion: 3 }), /不能判定 pass/);
 });
 
-for (const returningRole of ["designer", "reviewer"]) test(`${returningRole}可正式返需，交接持久绑定需求和架构版本，补充后重新确认`, async (t) => {
+for (const returningRole of ["blueprint", "reviewer"]) test(`${returningRole}可正式返需，交接持久绑定需求和架构版本，补充后重新确认`, async (t) => {
   const f = await fixture(t, async ({ role, payload, tools, submit }) => {
     if (role === returningRole) return tools.request_requirements.execute("return", { issues: [{ id: "scale", question: "通常每批有多少份材料？",
       impact: "决定处理批次和失败恢复方式", requirementIds: ["inputSource"], references: [requirementReference(payload, "inputSource")] }] });
-    return submit(role === "designer" ? design(payload.requirements) : review(payload.candidateHash, payload.design));
+    return submit(role === "blueprint" ? design(payload.requirements) : review(payload.candidateHash, payload.design));
   });
   const result = await f.designer.design(f.definition);
   assert.equal(result.status, "needs_input"); assert.equal(result.delivery, "blocked");
   assert.equal(result.handoff.requirementHash, substantiveRequirementHash(f.definition.draft));
   assert.equal(result.handoff.architectureVersion, result.version);
   assert.deepEqual((await f.designer.get("agent")).handoff, result.handoff);
-  assert.deepEqual(f.calls.map((item) => item.role), returningRole === "designer" ? ["designer"] : ["designer", "reviewer"]);
+  assert.deepEqual(f.calls.map((item) => item.role), returningRole === "blueprint" ? ["blueprint"] : ["blueprint", "module", "integration", "reviewer"]);
   const consultation = newConsultation(); consultation.evidenceMessages.push({ id: "source", role: "user", content: "逐项覆盖全部输入" });
   const claimed = claimRequirementHandoff({ agentId: "agent", draft: f.definition.draft, version: 1, confirmed: true,
     status: "needs_build", consultation }, result.handoff);
@@ -109,9 +122,11 @@ test("正式返需不能引用不存在的要求，也不能写成方案通过",
 });
 
 test("完整v3设计经八项独立评审通过；正式任务规格引用也可在预评估中继续核对", async (t) => {
-  const f = await fixture(t, async ({ role, payload, submit }) => submit(role === "designer" ? design(payload.requirements) : review(payload.candidateHash, payload.design)));
+  const f = await fixture(t, async ({ role, payload, submit }) => submit(role === "blueprint" ? design(payload.requirements) : review(payload.candidateHash, payload.design)));
   const result = await f.designer.design(f.definition);
   assert.equal(result.status, "passed"); assert.equal(result.review.checks.length, 8); assert.equal(result.delivery, "blocked");
+  assert.deepEqual(f.calls.map(({ role }) => role), ["blueprint", "module", "integration", "reviewer"]);
+  assert.equal(result.designProgressCheckpoint.modelCalls, 3);
   const preflight = await sufficientPreflight(), specId = result.requirements.find((item) => item.id.startsWith("spec_")).id;
   preflight.dimensionChecks.find((item) => item.dimension === "processing").requirementIds = [specId];
   assert.doesNotThrow(() => validatePreflight(preflight, f.definition.draft));

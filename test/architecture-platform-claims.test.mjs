@@ -14,6 +14,7 @@ import { ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contrac
 import { resolveTestJson } from "../src/development/development-fixtures.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { fidelityResult } from "./helpers/fidelity.mjs";
+import { architectureStageSubmission, createArchitectureStageSessionFactory } from "./helpers/architecture-stages.mjs";
 
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const facts = () => ({ runtimeCapabilities: runtimeCapabilityContract(), acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE });
@@ -110,27 +111,35 @@ test("只允许有界标量/小列表，不调用源访问器或读取未允许�
   await assert.rejects(tool.execute("bad", { requests: [{ source: "runtimeCapabilities", path: "/enabled", expected: Array(17).fill(true) }] }));
 });
 
-test("控制器在独立评审前拒绝错误声明，原设计会话核对并局部纠正后才进入独立评审", async (t) => {
+test("控制器在模块保存前拒绝错误声明，原模块会话核对并纠正后才整合及独立评审", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-platform-claims-")), order = [], { draft } = fixture();
-  let queryCount = 0, sourceHash;
+  let queryCount = 0, sourceHash, candidate;
+  const stages = createArchitectureStageSessionFactory((payload) => {
+    candidate = fixture().design;
+    candidate.coverage = payload.requirements.map(row => ({ requirementId: row.id, componentIds: ["summarize"], verification: row.text }));
+    candidate.platformClaims = [claim({ expected: false })];
+    return candidate;
+  }, { onPrompt: async ({ stage, payload, options, tools }) => {
+    order.push(stage);
+    if (stage !== "module") return;
+    assert.ok(tools.check_platform_contract); assert.ok(options.rawInputValidators.check_platform_contract);
+    const bad = structuredClone(candidate); bad.platformClaims[0].expected = true;
+    const submission = architectureStageSubmission({ tools, payload, candidate: bad });
+    await assert.rejects(submission.tool.execute("false-capability", submission.args), error => error.validationIssue.reason === "platform_fact_mismatch");
+    assert.deepEqual(order, ["blueprint", "module"]);
+    const row = JSON.parse((await tools.check_platform_contract.execute("actual", { requests: [{ source: claim().source,
+      path: claim().path, expected: true }] })).content[0].text).results[0];
+    queryCount++; sourceHash = row.sourceHash; assert.equal(row.actual, false); assert.equal(row.matches, false);
+  } });
   const designer = new ArchitectureDesigner({ config: { llmConfigured: true }, cwd: root, dataDir: join(root, "data"), sessionFactory: async (options) => {
+    const stage = await stages(options); if (stage) return stage;
     const tools = Object.fromEntries(options.customTools.map(row => [row.name, row])), role = tools.submit_architecture ? "designer" : "reviewer";
-    return { messages: [], subscribe: () => () => {}, async abort() {}, dispose() {}, async prompt(text) {
+    return { messages: [], modelCallAccounting: true, subscribe: () => () => {}, async abort() {}, dispose() {}, async prompt(text) {
+      await options.onModelCall();
       const payload = JSON.parse(text); order.push(role);
       assert.ok(tools.check_platform_contract); assert.ok(options.rawInputValidators.check_platform_contract);
-      if (role === "reviewer") return tools.submit_architecture_review.execute("review", passingReview(payload.candidateHash, payload.design, payload.priorFindings));
-      const f = fixture(), design = { ...f.design, coverage: payload.requirements.map(row => ({ requirementId: row.id, componentIds: ["summarize"], verification: row.text })) };
-      design.platformClaims = [claim({ expected: true })];
-      let rejected;
-      await assert.rejects(tools.submit_architecture.execute("false-capability", design), error => {
-        rejected = error; return error.validationIssue.reason === "platform_fact_mismatch";
-      });
-      assert.deepEqual(order, ["designer"]);
-      const row = JSON.parse((await tools.check_platform_contract.execute("actual", { requests: [{ source: claim().source, path: claim().path, expected: true }] })).content[0].text).results[0];
-      queryCount++; sourceHash = row.sourceHash; assert.equal(row.actual, false); assert.equal(row.matches, false);
-      const submissionHash = rejected.message.match(/"submissionHash":"([a-f0-9]{64})"/u)?.[1];
-      assert.ok(submissionHash);
-      return tools.revise_architecture_submission.execute("corrected", { submissionHash, updates: [{ path: "/platformClaims/0/expected", value: false }] });
+      assert.equal(role, "reviewer");
+      return tools.submit_architecture_review.execute("review", passingReview(payload.candidateHash, payload.design, payload.priorFindings));
     } };
   }, fidelitySessionFactory: async (options) => ({ messages: [], modelCallAccounting: true, subscribe: () => () => {},
     setAutoCompactionEnabled() {}, async abort() {}, dispose() {}, async prompt(text) {
@@ -138,6 +147,8 @@ test("控制器在独立评审前拒绝错误声明，原设计会话核对并�
     } }) });
   t.after(async () => { await designer.persistence; await rm(root, { recursive: true, force: true }); });
   const record = await designer.design({ id: "claims", name: "显式事实依赖", fingerprint: "same-source", draft });
-  assert.equal(record.status, "passed"); assert.deepEqual(order, ["designer", "reviewer"]); assert.equal(queryCount, 1);
+  assert.equal(record.status, "passed"); assert.deepEqual(order, ["blueprint", "module", "integration", "reviewer"]); assert.equal(queryCount, 1);
+  assert.equal(record.designProgressCheckpoint.modules[0].modelCalls, 1, "错误声明在原模块会话修正，不能启动替代节点或额外领取轮次");
+  assert.equal(record.designProgressCheckpoint.modules[0].result.platformClaims[0].expected, false, "错误声明不得先保存为已完成模块");
   assert.equal(sourceHash, digest(ACCEPTANCE_ADAPTER_GUIDE)); assert.equal(record.design.platformClaims[0].expected, false);
 });

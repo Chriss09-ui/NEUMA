@@ -243,9 +243,12 @@ export function architecturePriorFindingClosureIssues(parts, prior, candidate, e
       }
     } catch (error) {
       if (!(error instanceof InputError) || !error.validationIssue) throw error;
-      const issue = error.validationIssues?.[0] ?? error.validationIssue;
-      issues.push({ findingId: row.findingId, path: issue.path, reason: issue.reason,
-        remedy: issue.remedy ?? error.message });
+      const explanationIndex = (parts.issues ?? []).findIndex(issue => issue.id === row.findingId);
+      for (const issue of error.validationIssues ?? [error.validationIssue])
+        issues.push({ findingId: row.findingId,
+          path: explanationIndex > 0 ? issue.path.replace(/^review\.issues\[0\](?=\.)/u, `review.issues[${explanationIndex}]`) : issue.path,
+          reason: issue.reason,
+          ...(issue.candidatePath ? { candidatePath: issue.candidatePath } : {}), remedy: issue.remedy ?? error.message });
     }
   }
   return issues;

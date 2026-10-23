@@ -12,6 +12,7 @@ import { validDraft, validDesign, passingReview } from "./helpers/architecture.m
 import { sufficientPreflight } from "./helpers/consultation.mjs";
 import { handoffChecker, requirementReference } from "./helpers/handoff.mjs";
 import { fidelityChecker } from "./helpers/fidelity.mjs";
+import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 
 async function source() {
   const draft = validDraft("逐项核对并输出材料清单");
@@ -126,45 +127,53 @@ function candidate(requirements) {
 }
 
 async function fixture(t, script) {
-  const root = await mkdtemp(join(tmpdir(), "neuma-confirmed-architecture-")), calls = [];
+  const root = await mkdtemp(join(tmpdir(), "neuma-confirmed-architecture-")), calls = [], candidates = new Map(), handoffChecks = [];
   const designer = new ArchitectureDesigner({ config: { llmConfigured: true }, cwd: root, dataDir: root,
-    handoffSessionFactory: handoffChecker(),
+    handoffSessionFactory: async (options) => { handoffChecks.push(options); return handoffChecker()(options); },
     fidelitySessionFactory: fidelityChecker(),
-    sessionFactory: async ({ customTools }) => {
-      const tools = Object.fromEntries(customTools.map((tool) => [tool.name, tool]));
-      const role = tools.submit_architecture ? "designer" : tools.submit_module_design ? "specialist" : "reviewer";
-      return { messages: [], subscribe: () => () => {}, dispose() {}, async abort() {},
-        async prompt(text) { const payload = JSON.parse(text); calls.push({ role, payload });
+    sessionFactory: async (options) => {
+      const tools = Object.fromEntries(options.customTools.map((tool) => [tool.name, tool]));
+      const storage = options.sessionStorage, role = storage?.binding.stage ?? (tools.submit_architecture ? "designer" : "reviewer");
+      return { messages: [], modelCallAccounting: true,
+        ...(storage ? { sessionFile: join(storage.directory, storage.file ?? `${storage.binding.key}-${storage.binding.generation}.jsonl`) } : {}),
+        subscribe: () => () => {}, dispose() {}, async abort() {},
+        async prompt(text) { await options.onModelCall(); const payload = JSON.parse(text); calls.push({ role, payload });
           if (script) return script({ role, payload, tools });
-          if (role === "designer") {
-            await tools.delegate_module.execute("module", { modules: [{ question: "核对完整覆盖的最小方案", boundary: "不改变业务要求", benefit: "独立检查核对关系" }] });
-            return tools.submit_architecture.execute("candidate", candidate(payload.requirements));
+          if (storage) {
+            const id = storage.binding.pipelineId;
+            if (role === "blueprint") candidates.set(id, candidate(payload.requirements));
+            const fixed = candidates.get(id);
+            assert.ok(fixed, "模块和整合必须复用同一蓝图阶段的固定候选");
+            const stage = architectureStageSubmission({ tools, payload, candidate: fixed });
+            assert.ok(stage); return stage.tool.execute(`fixture-${role}`, stage.args);
           }
-          if (role === "specialist") return tools.submit_module_design.execute("module_result", {
-            proposal: "使用已有工具逐项核对", interfaces: "输入与清单条目一一对应", tradeoffs: "不新增后台系统", evidenceIds: [], unknowns: [] });
+          if (role === "designer") return tools.submit_architecture.execute("candidate", candidate(payload.requirements));
           const review = passingReview(payload.candidateHash, payload.design);
           review.checks.push(...["requirement_sufficiency", "acceptance_quality"].filter((id) => !review.checks.some((item) => item.id === id)).map((id) => ({ id, passed: true, evidence: "当前任务要求与验收已经覆盖" })));
           return tools.submit_architecture_review.execute("review", review);
         } };
     } });
   t.after(async () => { await designer.persistence; await rm(root, { recursive: true, force: true }); });
-  return { designer, calls };
+  return { designer, calls, handoffChecks };
 }
 
-test("设计者、评审者和模块顾问共享冻结的确认证据，证据本身不会替代独立评审", async (t) => {
+test("蓝图、模块、整合及独立评审共享冻结的确认证据，证据本身不会替代独立评审", async (t) => {
   const input = await source(), before = contentHash(input.draft), f = await fixture(t);
   const result = await f.designer.design({ id: "agent", name: "核对助手", draft: input.draft, fingerprint: before }, { consultation: input.consultation });
-  assert.deepEqual(f.calls.map((item) => item.role), ["designer", "specialist", "reviewer"]);
+  assert.deepEqual(f.calls.map((item) => item.role), ["blueprint", "module", "integration", "reviewer"]);
   const expected = await architectureConfirmedContext(input.draft, input.consultation, input.platform);
   for (const call of f.calls) assert.deepEqual(call.payload.confirmedRequirementContext, expected);
   assert.deepEqual(result.confirmedRequirementContext, expected);
   assert.deepEqual((await f.designer.get("agent")).confirmedRequirementContext, expected);
+  assert.equal(result.designProgressCheckpoint.modelCalls, 3);
+  assert.ok([result.designProgressCheckpoint.blueprint, ...result.designProgressCheckpoint.modules,
+    result.designProgressCheckpoint.integration].every((stage) => stage.resultHash && stage.modelCalls === 1 && stage.sessionRef));
   assert.equal(contentHash(input.draft), before); assert.equal(result.status, "passed"); assert.equal(result.delivery, "blocked");
 });
 
 test("有确认证据仍允许真正缺少的关键选择正式返需，不自动解决或放行", async (t) => {
   const input = await source(), f = await fixture(t, async ({ role, payload, tools }) => {
-    assert.equal(role, "designer"); assert.ok(payload.confirmedRequirementContext);
+    assert.equal(role, "blueprint"); assert.ok(payload.confirmedRequirementContext);
     return tools.request_requirements.execute("handoff", { issues: [{ id: "new_audience", question: "这份结果供哪个使用对象使用？",
       impact: "不同对象需要不同交付范围", requirementIds: ["deliverable"], references: [requirementReference(payload, "deliverable")] }] });
   });
@@ -172,4 +181,5 @@ test("有确认证据仍允许真正缺少的关键选择正式返需，不自�
   assert.equal(result.status, "needs_input"); assert.equal(result.delivery, "blocked");
   assert.equal(result.handoff.issues[0].id, "new_audience"); assert.equal(result.handoff.issues[0].blocking, true);
   assert.equal(f.calls.length, 1);
+  assert.equal(f.handoffChecks.length, 1, "蓝图返需仍须经过独立必要性复核");
 });

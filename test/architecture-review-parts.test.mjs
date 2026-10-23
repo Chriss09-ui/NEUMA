@@ -12,6 +12,7 @@ import { createReviewProgressCheckpoint, readReviewProgressCheckpoint, reviewPro
   advanceReviewProgressCheckpoint } from "../src/architecture/architecture-review-progress.mjs";
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { fidelityResult } from "./helpers/fidelity.mjs";
+import { createArchitectureStageSessionFactory } from "./helpers/architecture-stages.mjs";
 
 function material() {
   const requirements = [{ id: "R1", text: "逐项检查完整记录" }];
@@ -93,14 +94,62 @@ test("取消或持久化失败不产生新可提交分项，访问器不被执�
   assert.equal(invoked, false);
 });
 
-async function recoveryFixture(t) {
+test("被拒分项独立保留，恢复后用新编号仅修正错误行并重验全部草稿", async () => {
+  const f = material(), rejected = [], saved = [];
+  const parts = createArchitectureReviewParts({ ...f.options, onRejected: value => rejected.push(value), onSave: value => saved.push(value) });
+  await parts.save({ candidateHash: f.candidateHash, progressHash: parts.reference().progressHash, checks: [f.review.checks[0]] });
+  const accepted = parts.snapshot();
+  const issue = { id: "review_note", blocking: false, checkId: "verification", kind: "design", description: "本地测试解释", remedy: "保留要求",
+    candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions", quote: "wrong quotation" }], factClaims: [] };
+  await assert.rejects(parts.finalize({ candidateHash: f.candidateHash, progressHash: parts.reference().progressHash,
+    verdict: "pass", summary: "尚未通过的报告", checks: f.review.checks, issues: [issue], acceptanceScopeChecks: f.review.acceptanceScopeChecks }),
+  error => error.validationIssue.reason === "reference_quote_mismatch" && /rejectedPartsHash/u.test(error.message));
+  assert.deepEqual(parts.snapshot(), accepted); assert.equal(saved.length, 1); assert.equal(rejected.length, 1);
+  assert.deepEqual(parts.rejectedSnapshot().issues, [issue]);
+  assert.equal(parts.rejectedSnapshot().checks.length, f.review.checks.length);
+  const old = parts.reference();
+  const resumed = createArchitectureReviewParts({ ...f.options, initial: accepted, initialRejected: rejected[0] });
+  const current = resumed.reference(); assert.notEqual(current.rejectedPartsHash, old.rejectedPartsHash);
+  assert.equal(current.rejectedPartsIssues[0].reason, "reference_quote_mismatch");
+  const corrected = { ...issue, references: [{ source: "candidate", path: "/instructions", quote: f.design.instructions }] };
+  await assert.rejects(resumed.save({ candidateHash: f.candidateHash, progressHash: current.progressHash,
+    rejectedPartsHash: old.rejectedPartsHash, issues: [corrected] }), error => error.validationIssue.path === "reviewParts.rejectedPartsHash");
+  assert.deepEqual(resumed.snapshot(), accepted);
+  const review = await resumed.finalize({ candidateHash: f.candidateHash, progressHash: current.progressHash,
+    rejectedPartsHash: current.rejectedPartsHash, issues: [corrected], verdict: "pass", summary: "重验完整报告" });
+  assert.equal(validateReview(review, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }).verdict, "pass");
+  assert.deepEqual(review.checks, f.review.checks); assert.deepEqual(review.acceptanceScopeChecks, f.review.acceptanceScopeChecks);
+  assert.equal(resumed.rejectedSnapshot(), null); assert.equal(resumed.reference().rejectedPartsHash, undefined);
+  await assert.rejects(resumed.save({ candidateHash: f.candidateHash, progressHash: resumed.reference().progressHash,
+    rejectedPartsHash: current.rejectedPartsHash, issues: [corrected] }));
+});
+
+test("被拒草稿保存失败锁住后续写入，迟到修正不能替代失败成果", async () => {
+  const f = material(); let saved = 0;
+  const parts = createArchitectureReviewParts({ ...f.options, onRejected: () => { throw new Error("rejected draft storage failed"); }, onSave: () => saved++ });
+  const before = parts.snapshot(), row = { ...f.review.acceptanceScopeChecks[0], criterionQuote: "wrong quotation" };
+  await assert.rejects(parts.save({ candidateHash: f.candidateHash, progressHash: parts.reference().progressHash, acceptanceScopeChecks: [row] }), /storage failed/u);
+  assert.deepEqual(parts.snapshot(), before); assert.equal(parts.rejectedSnapshot(), null);
+  assert.throws(parts.assertActive, /storage failed/u);
+  await assert.rejects(parts.save({ candidateHash: f.candidateHash, progressHash: parts.reference().progressHash,
+    checks: f.review.checks, acceptanceScopeChecks: f.review.acceptanceScopeChecks }), /storage failed/u);
+  assert.equal(saved, 0);
+});
+
+async function recoveryFixture(t, { rejectDraft = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-review-parts-recovery-")), calls = [];
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
     critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
   const definition = { id: "parts", name: "分项评审续接", fingerprint: "same-source", draft };
   const state = { resumed: false, oldReference: null, firstParts: null, fidelity: 0 };
+  const stages = createArchitectureStageSessionFactory(payload => validDesign(payload.requirements, {
+    schemaVersion: 3, connections: [], interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "全部记录", results: "完整结果", persistentData: "无" },
+    execution: { language: "none", hosting: "builtin", reason: "已有文本能力" },
+    selectionBasis: { capacity: "已确认边界", process: "完整处理", quality: "逐项核对", requirementIds: payload.requirements.map(row => row.id), assumptions: [] },
+  }), { onPrompt: ({ stage, payload }) => calls.push({ role: stage, resumed: state.resumed, payload }) });
   const sessionFactory = async (options) => {
+    const staged = await stages(options); if (staged) return staged;
     const tools = Object.fromEntries(options.customTools.map(tool => [tool.name, tool])), role = tools.submit_architecture ? "designer" : "reviewer";
     return { messages: [], modelCallAccounting: true, subscribe: () => () => {}, async abort() {}, dispose() {}, async prompt(text) {
       const payload = JSON.parse(text); calls.push({ role, resumed: state.resumed, payload }); await options.onModelCall();
@@ -118,12 +167,34 @@ async function recoveryFixture(t) {
         const saved = await tools.save_architecture_review_parts.execute("first", { candidateHash: payload.candidateHash,
           progressHash: reference.progressHash, checks: review.checks.slice(0, 3), acceptanceScopeChecks: scopeRows.slice(0, 1) });
         assert.equal(saved.terminate, undefined); state.firstParts = JSON.parse(saved.content[0].text);
+        if (rejectDraft) {
+          state.rejectedIssue = { id: "draft_note", blocking: false, checkId: "verification", kind: "design", description: "本地被拒草稿", remedy: "核对引用",
+            candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions", quote: "unmatched draft quote" }], factClaims: [] };
+          await assert.rejects(tools.submit_architecture_review_parts.execute("rejected", { candidateHash: payload.candidateHash,
+            progressHash: state.firstParts.progressHash, checks: review.checks.slice(3), acceptanceScopeChecks: scopeRows.slice(1),
+            ...(review.priorFindingDecisions ? { priorFindingDecisions: review.priorFindingDecisions } : {}),
+            issues: [state.rejectedIssue], verdict: "pass", summary: "尚未通过的分项报告" }), error => {
+            state.rejectedPartsHash = error.message.match(/"rejectedPartsHash":"([a-f0-9]{64})"/u)?.[1];
+            return error.validationIssue.reason === "reference_quote_mismatch" && Boolean(state.rejectedPartsHash);
+          });
+        }
         throw new Error("fetch failed");
       }
       assert.notEqual(reference.progressHash, state.firstParts.progressHash, "重启生成新的宿主CAS编号");
       assert.deepEqual(reference.saved.checks, review.checks.slice(0, 3));
       assert.equal(reference.missing.checks.length, 5);
       assert.equal(reference.missing.acceptanceScopeChecks.length, review.acceptanceScopeChecks.length - 1);
+      if (rejectDraft) {
+        assert.notEqual(reference.rejectedPartsHash, state.rejectedPartsHash);
+        assert.equal(reference.rejectedDraft.checks.length, review.checks.length);
+        assert.equal(reference.rejectedDraft.acceptanceScopeChecks.length, review.acceptanceScopeChecks.length);
+        assert.deepEqual(reference.rejectedDraft.issues, [state.rejectedIssue]);
+        assert.equal(reference.rejectedPartsIssues[0].reason, "reference_quote_mismatch");
+        return tools.submit_architecture_review_parts.execute("repair-draft", { candidateHash: payload.candidateHash,
+          progressHash: reference.progressHash, rejectedPartsHash: reference.rejectedPartsHash,
+          issues: [{ ...state.rejectedIssue, references: [{ source: "candidate", path: "/instructions", quote: payload.design.instructions }] }],
+          verdict: "pass", summary: "原草稿已逐条重新校验" });
+      }
       await assert.rejects(tools.submit_architecture_review_parts.execute("stale", { candidateHash: payload.candidateHash,
         progressHash: state.firstParts.progressHash, verdict: "pass", summary: "旧编号不能提交" }));
       await assert.rejects(tools.submit_architecture_review_parts.execute("missing", { candidateHash: payload.candidateHash,
@@ -149,6 +220,8 @@ test("离线端到端：保存部分评审后重启，只补缺项并正式独�
   const f = await recoveryFixture(t);
   await assert.rejects(f.designer.design(f.definition), error => error.diagnostic.reason === "api_connection");
   const source = await f.designer.get(f.definition.id), before = designHash(source);
+  assert.deepEqual(f.calls.filter(row => ["blueprint", "module", "integration"].includes(row.role)).map(row => row.role),
+    ["blueprint", "module", "integration"]);
   const checkpoint = readReviewProgressCheckpoint(source);
   assert.equal(checkpoint.schemaVersion, 2); assert.equal(checkpoint.modelCalls, 1); assert.equal(checkpoint.review, null);
   assert.equal(source.review, null); assert.deepEqual(source.attempts, []); assert.equal(f.state.fidelity, 0);
@@ -170,5 +243,25 @@ test("离线端到端：保存部分评审后重启，只补缺项并正式独�
   assert.deepEqual(f.calls.filter(row => row.resumed).map(row => row.role), ["reviewer"]);
   assert.equal(result.status, "passed"); assert.equal(result.review.verdict, "pass"); assert.equal(f.state.fidelity, 1);
   assert.equal(result.reviewProgressCheckpoint.modelCalls, 3); assert.equal(result.attempts.length, 1);
+  assert.equal(designHash(await f.designer.getVersion(f.definition.id, source.version)), before);
+});
+
+test("离线端到端：被拒报告在重启后可只改错误行，原通过分项和累计预算保持", async t => {
+  const f = await recoveryFixture(t, { rejectDraft: true });
+  await assert.rejects(f.designer.design(f.definition), error => error.diagnostic.reason === "api_connection");
+  const source = await f.designer.get(f.definition.id), checkpoint = readReviewProgressCheckpoint(source), before = designHash(source);
+  assert.equal(checkpoint.schemaVersion, 4); assert.equal(checkpoint.modelCalls, 1);
+  assert.equal(checkpoint.rejectedInput.input.issues[0].references[0].quote, "unmatched draft quote");
+  assert.equal(checkpoint.parts.checks.length, 3); assert.equal(checkpoint.parts.acceptanceScopeChecks.length, 1);
+  assert.equal(checkpoint.rejectedParts.checks.length, 8);
+  assert.equal(checkpoint.rejectedParts.issues[0].references[0].quote, "unmatched draft quote");
+  assert.equal(source.review, null); assert.equal(f.state.fidelity, 0);
+  await f.reload(); f.state.resumed = true;
+  const result = await f.designer.design(f.definition);
+  assert.equal(result.status, "passed"); assert.equal(result.reviewProgressCheckpoint.modelCalls, 3);
+  assert.equal(result.reviewProgressCheckpoint.rejectedParts, null); assert.equal(result.reviewProgressCheckpoint.rejectedInput, null);
+  assert.equal(f.state.fidelity, 1);
+  assert.equal(result.review.issues[0].references[0].quote, result.design.instructions);
+  assert.deepEqual(f.calls.filter(row => row.resumed).map(row => row.role), ["reviewer"]);
   assert.equal(designHash(await f.designer.getVersion(f.definition.id, source.version)), before);
 });

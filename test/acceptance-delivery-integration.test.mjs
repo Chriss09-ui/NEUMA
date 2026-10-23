@@ -13,6 +13,7 @@ import { processTurn } from "../src/requirements/core.mjs";
 import { requirementItems } from "../src/architecture/architecture-contract.mjs";
 import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
 import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { createArchitectureStageSessionFactory } from "./helpers/architecture-stages.mjs";
 
 const id = "acceptance-integration";
 const verification = (adapterId) => ({ stage: ACCEPTANCE_ADAPTERS[adapterId].stage, owner: ACCEPTANCE_ADAPTERS[adapterId].owner, adapterId });
@@ -63,7 +64,16 @@ function plan(requirements) {
 }
 
 function modelFactory(state) {
+  const stages = createArchitectureStageSessionFactory(payload => {
+    const candidate = design(payload.requirements);
+    if (state.managed) candidate.execution.hosting = "managed";
+    return candidate;
+  }, { onPrompt: ({ stage, payload }) => {
+    state.stageCalls.push({ stage, requirementIds: payload.requirements.map(item => item.id) });
+  } });
   return async (options) => {
+    const staged = await stages(options);
+    if (staged) return staged;
     if (options.customTools.some((tool) => tool.name === "submit_requirement_fidelity")) return fidelityChecker()(options);
     const tools = Object.fromEntries(options.customTools.map((tool) => [tool.name, tool]));
     const submit = ["submit_architecture", "submit_architecture_review", "submit_development_plan", "submit_development_review",
@@ -120,7 +130,7 @@ function modelFactory(state) {
 async function unseal(path) { await chmod(path, 0o700); for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) await unseal(join(path, entry.name)); }
 async function fixture(t, { managed = false, largeRequirements = false } = {}) {
   const probe = await new DevelopmentExecutor().probe(); if (!probe.available) { t.skip(probe.reason); return null; }
-  const root = await mkdtemp(join(tmpdir(), "neuma-acceptance-delivery-")), state = { prompts: [], reviewFails: false, managed };
+  const root = await mkdtemp(join(tmpdir(), "neuma-acceptance-delivery-")), state = { prompts: [], stageCalls: [], reviewFails: false, managed };
   const agents = new PrototypeAgents({ config: { llmConfigured: true }, cwd: root, dataDir: join(root, "data"), sessionFactory: modelFactory(state), fidelityChecker: fidelityChecker() });
   t.after(async () => { await agents.close(); await unseal(root); await rm(root, { recursive: true, force: true }); });
   const draft = validDraft("把用户文字转换为大写并保存完整结果");
@@ -156,6 +166,9 @@ test("120项需求及超过512KB的完整依据经确认、保存、架构、研
   const f = await fixture(t, { largeRequirements: true }); if (!f) return;
   const record = await f.record(), ids = requirementItems(f.draft).map(item => item.id);
   assert.ok(ids.length > 100);
+  assert.deepEqual(f.state.stageCalls.map(call => call.stage), ["blueprint", "module", "integration"]);
+  assert.ok(f.state.stageCalls.every(call => JSON.stringify(call.requirementIds) === JSON.stringify(ids)));
+  assert.equal(f.result.architecture.designProgressCheckpoint.modelCalls, 3);
   assert.deepEqual(record.plan.tasks[0].requirementIds, ids);
   assert.deepEqual(record.architecture.design.coverage.map(item => item.requirementId), ids);
   assert.deepEqual(record.architecture.draft, f.draft);

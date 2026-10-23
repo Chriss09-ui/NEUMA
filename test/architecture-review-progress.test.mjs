@@ -35,6 +35,27 @@ function rejectedReview(review) {
   return result;
 }
 
+test("原始被拒提交独立保存并跨版本恢复，不替换接受分项或把旧会话引用变成证据", () => {
+  const { record, review } = fixture();
+  const rejectedInput = { toolName: "submit_architecture_review_parts", input: { candidateHash: record.candidateHash,
+    progressHash: "a".repeat(64), verdict: "revise", summary: "最新修改",
+    issues: [{ references: [{ source: "candidate", path: "/decisions" }, { receiptId: "old-session" }] }] } };
+  const checkpoint = createReviewProgressCheckpoint(record, review, 3, { origin: "unsubmitted", rejectedInput });
+  assert.ok(checkpoint); assert.equal(checkpoint.schemaVersion, 4); assert.deepEqual(checkpoint.rejectedInput, rejectedInput);
+  assert.deepEqual(checkpoint.review, review); assert.deepEqual(checkpoint.parts.issues, []); assert.equal(record.review, null);
+  record.reviewProgressCheckpoint = checkpoint;
+  assert.deepEqual(readReviewProgressCheckpoint(record).rejectedInput, rejectedInput);
+  assert.deepEqual(advanceReviewProgressCheckpoint(record, 4).rejectedInput, rejectedInput);
+  const next = { ...record, version: record.version + 1 };
+  assert.ok(reviewProgressCheckpointMatches(checkpoint, next));
+  assert.deepEqual(createReviewProgressCheckpoint(next, review, 4, checkpoint).rejectedInput, rejectedInput);
+  const damaged = structuredClone(checkpoint); damaged.rejectedInput.input.summary = "tampered";
+  assert.equal(readReviewProgressCheckpoint({ ...record, reviewProgressCheckpoint: damaged }), null);
+  assert.equal(createReviewProgressCheckpoint(record, null, 3, { rejectedInput: {
+    ...rejectedInput, input: { ...rejectedInput.input, candidateHash: "b".repeat(64) } } }), null);
+  assert.equal(advanceReviewProgressCheckpoint(record, 4, { rejectedInput: null }).rejectedInput, null);
+});
+
 test("progress stores only a complete canonical draft and grants no formal submission or pass", () => {
   const { record, review } = fixture(), before = structuredClone(record);
   const checkpoint = createReviewProgressCheckpoint(record, review, 2, { origin: "unsubmitted",
@@ -68,6 +89,39 @@ test("budget-only progress is saved before a draft exists and never rolls back s
   assert.equal(advanceReviewProgressCheckpoint(record, 0), null);
   assert.equal(advanceReviewProgressCheckpoint(record, 12).modelCalls, 12);
   for (const count of [undefined, null, false, "1", -1, 13, 1.5, Infinity]) assert.equal(advanceReviewProgressCheckpoint(record, count), null);
+});
+
+test("rejected parts persist separately from accepted rows, retain budget and cannot be promoted or rebound", () => {
+  const { record, review } = fixture(), rejected = rejectedReview(review);
+  const draft = { candidateHash: record.candidateHash, checks: rejected.checks, issues: rejected.issues,
+    acceptanceScopeChecks: rejected.acceptanceScopeChecks, priorFindingDecisions: [] };
+  const before = structuredClone(record);
+  const checkpoint = createReviewProgressCheckpoint(record, null, 3, { rejectedParts: draft,
+    diagnostic: { lastSubmissionIssue: { path: "review.issues[0].references", reason: "repair_candidate_reference_unrelated", candidatePath: "/decisions/0" } } });
+  assert.ok(checkpoint); assert.equal(checkpoint.schemaVersion, 3); assert.deepEqual(record, before);
+  assert.deepEqual(checkpoint.parts.issues, []); assert.deepEqual(checkpoint.rejectedParts, draft);
+  assert.equal(checkpoint.review, null); assert.equal(record.review, null);
+  assert.equal(createReviewProgressCheckpoint(record, null, 3, { parts: draft }), null, "错误引用不能作为接受分项保存");
+  record.reviewProgressCheckpoint = checkpoint;
+  assert.deepEqual(readReviewProgressCheckpoint(record), checkpoint);
+  const charged = advanceReviewProgressCheckpoint(record, 4);
+  assert.equal(charged.modelCalls, 4); assert.deepEqual(charged.rejectedParts, draft); assert.deepEqual(charged.parts, checkpoint.parts);
+  const next = { ...record, version: record.version + 1 };
+  assert.ok(reviewProgressCheckpointMatches(checkpoint, next));
+  assert.deepEqual(createReviewProgressCheckpoint(next, null, 4, checkpoint).rejectedParts, draft);
+  assert.equal(advanceReviewProgressCheckpoint({ ...record, reviewProgressCheckpoint: charged }, 2), null);
+  for (const mutate of [
+    value => { value.rejectedParts.issues[0].description += " changed"; },
+    value => { value.rejectedPartsHash = "0".repeat(64); },
+    value => { value.bindingHash = "0".repeat(64); },
+  ]) {
+    const changed = structuredClone(checkpoint); mutate(changed);
+    assert.equal(readReviewProgressCheckpoint({ ...record, reviewProgressCheckpoint: changed }), null);
+  }
+  assert.equal(createReviewProgressCheckpoint(record, null, 4, { rejectedParts: { ...draft, nonce: "old-session" } }), null);
+  assert.equal(reviewProgressCheckpointMatches(checkpoint, { ...record, requirements: [] }), false);
+  const cleared = advanceReviewProgressCheckpoint(record, 4, { rejectedParts: null });
+  assert.equal(cleared.rejectedParts, null); assert.equal(cleared.rejectedPartsHash, null);
 });
 
 test("later malformed or short-form submissions preserve the last complete draft while charging budget", () => {

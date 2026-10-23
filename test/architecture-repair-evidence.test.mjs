@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { historicalRepairSnapshot, validateHistoricalRepairDecision } from "../src/architecture/architecture-repair-evidence.mjs";
 import { architectureReviewEvidenceContext } from "../src/architecture/architecture-review-evidence.mjs";
-import { designHash } from "../src/architecture/architecture-contract.mjs";
+import { designHash, reviewSubmissionSchema } from "../src/architecture/architecture-contract.mjs";
+import { createArchitectureReviewParts } from "../src/architecture/architecture-review-parts.mjs";
 import { runtimeCapabilityContract } from "../src/runtime/runtime-capability-contract.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contract.mjs";
-import { validDesign } from "./helpers/architecture.mjs";
+import { validDesign, passingReview } from "./helpers/architecture.mjs";
 
 const factPath = "/adapters/action/executionFacts/dynamicPlaceholders";
 const wrongChoice = "写入替身使用<computed-result-json>；执行器会动态展开后匹配真实结果。";
@@ -100,6 +101,70 @@ test("原意见确实错误时可用当前双来源反证推翻，无需伪造�
   assert.doesNotThrow(f.validate);
   f.explanation.references[1].quote = "true";
   rejects(f, "reference_quote_mismatch");
+});
+
+test("逐条指出关闭说明缺失的关联与原文引用，不把引用问题归到状态字段", () => {
+  const f = fixture({ status: "unsupported" });
+  f.finding.kind = "historical-review-opinion"; f.finding.closureEvidenceRequired = true; f.finding.issue = { kind: "design" };
+  const paths = ["/acceptance/0", "/acceptance/1", "/acceptance/2"];
+  f.row.candidatePaths = paths;
+  f.explanation.candidatePaths = paths.slice(0, 2);
+  const references = paths.map((path, index) => ({ source: "candidate", path: path + "/expected", quote: f.candidate.acceptance[index].expected }));
+  f.explanation.references = references.slice(0, 1);
+  assert.throws(f.validate, error => {
+    assert.equal(error.validationIssueTotal, 3);
+    assert.equal(error.validationIssuesTruncated, false);
+    assert.deepEqual(error.validationIssues.map(({ path, candidatePath }) => ({ path, candidatePath })), [
+      { path: "review.issues[0].references", candidatePath: paths[1] },
+      { path: "review.issues[0].candidatePaths", candidatePath: paths[2] },
+      { path: "review.issues[0].references", candidatePath: paths[2] },
+    ]);
+    assert.ok(error.validationIssues.every(issue => issue.reason === "repair_candidate_reference_unrelated"));
+    assert.ok(!error.message.includes(references[0].quote), "错误只定位条款，不复制业务正文");
+    return true;
+  });
+  f.explanation.candidatePaths = paths; f.explanation.references = references;
+  assert.doesNotThrow(f.validate);
+});
+
+test("最终分项集中反馈关闭缺项与范围矛盾，保留草稿后局部补齐重验", async () => {
+  const f = fixture({ status: "unsupported" });
+  f.finding.kind = "historical-review-opinion"; f.finding.closureEvidenceRequired = true; f.finding.issue = { kind: "design" };
+  const paths = ["/acceptance/0", "/acceptance/1", "/acceptance/2"];
+  f.row.candidatePaths = paths; f.explanation.candidatePaths = paths;
+  const references = paths.map((path, index) => ({ source: "candidate", path: path + "/expected", quote: f.candidate.acceptance[index].expected }));
+  f.explanation.references = references.slice(0, 1);
+  const context = f.context(), candidateHash = designHash(f.candidate), rejected = [];
+  const prior = { current: { candidateHash, guideHash: context.contextManifest.acceptanceAdapterGuide.sha256,
+    contextManifestHash: designHash(context.contextManifest) }, sameReviewObject: false, findings: [f.finding] };
+  const parts = createArchitectureReviewParts({ schema: reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: true }),
+    candidateHash, context, priorFindings: prior, onRejected: draft => rejected.push(draft) });
+  const review = passingReview(candidateHash, f.candidate);
+  const scopes = structuredClone(review.acceptanceScopeChecks);
+  scopes[0].sufficient = false;
+  await assert.rejects(parts.finalize({ candidateHash, progressHash: parts.reference().progressHash,
+    checks: review.checks, acceptanceScopeChecks: scopes, priorFindingDecisions: [f.row], issues: [f.explanation],
+    verdict: "pass", summary: "被拒原稿" }), error => {
+    const closure = error.validationIssues.filter(issue => issue.reason === "repair_candidate_reference_unrelated");
+    assert.deepEqual(closure.map(issue => [issue.findingId, issue.candidatePath]),
+      [[f.finding.findingId, paths[1]], [f.finding.findingId, paths[2]]]);
+    assert.ok(closure.every(issue => issue.path === "review.issues[0].references"));
+    assert.ok(error.validationIssues.some(issue => issue.reason === "missing_scope_issue"
+      && issue.path === "review.acceptanceScopeChecks[0].sufficient"), "最终提交同时返回完整报告矛盾，不等引用补齐后才报");
+    return true;
+  });
+  assert.equal(rejected.length, 1); assert.deepEqual(parts.snapshot().priorFindingDecisions, []);
+  assert.deepEqual(parts.reference().rejectedPartsIssues.filter(issue => issue.candidatePath).map(issue => issue.candidatePath), paths.slice(1));
+  assert.ok(parts.reference().rejectedPartsIssues.some(issue => issue.reason === "missing_scope_issue"));
+  const restored = createArchitectureReviewParts({ schema: reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: true }),
+    candidateHash, context, priorFindings: prior, initialRejected: rejected[0] });
+  assert.ok(restored.reference().rejectedPartsIssues.some(issue => issue.reason === "missing_scope_issue"),
+    "旧完整拒稿恢复时就指出报告矛盾，无须再消耗一轮才发现");
+  const repaired = await parts.finalize({ candidateHash, progressHash: parts.reference().progressHash,
+    rejectedPartsHash: parts.reference().rejectedPartsHash, issues: [{ ...f.explanation, references }],
+    acceptanceScopeChecks: [review.acceptanceScopeChecks[0]], verdict: "pass", summary: "逐条补齐后重验" });
+  assert.deepEqual(repaired.priorFindingDecisions, [f.row]); assert.deepEqual(repaired.checks, review.checks);
+  assert.equal(parts.rejectedSnapshot(), null);
 });
 
 test("缺少或损坏旧依据不能声称改动，缺少当前来源或摘要陈旧不能关闭", () => {

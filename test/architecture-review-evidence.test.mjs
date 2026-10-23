@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { InputError } from "../src/requirements/core.mjs";
 import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
 import { designHash, requirementItems, reviewSubmissionSchema, validateReview } from "../src/architecture/architecture-contract.mjs";
-import { architectureReviewEvidenceContext, architectureReviewIssues } from "../src/architecture/architecture-review-evidence.mjs";
+import { architectureReviewEvidenceContext, architectureReviewIssues, architectureHistoricalEvidenceCatalog } from "../src/architecture/architecture-review-evidence.mjs";
 import { runtimeCapabilityContract, RUNTIME_CAPABILITY_CONTRACT, WORKSPACE_TEXT_WRITE_CODE_UNITS, MANAGED_SERVICE_MESSAGE_BYTES } from "../src/runtime/runtime-capability-contract.mjs";
 import { passingReview, validDesign, validDraft } from "./helpers/architecture.mjs";
 import { ACCEPTANCE_ADAPTERS, ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contract.mjs";
@@ -22,6 +22,34 @@ function fixture() {
     references: [{ source: "candidate", path: "/steps/0/output", quote: design.steps[0].output }], factClaims: [] };
   return { requirements, design, context, review, issue, options: { candidateHash: review.candidateHash, schemaVersion: 3, evidenceContext: context } };
 }
+
+test("旧评审只用精确冻结目录，新追加资料保留供新修订使用", () => {
+  const f = fixture(), catalog = [{ id: "original", excerpt: "原评审依据" }];
+  const manifest = architectureReviewEvidenceContext({ ...f.context, design: f.design, evidence: catalog }).contextManifest;
+  const previous = { agentId: "same_agent", version: 1, sourceFingerprint: "same", draft: { original: true }, platformHash: "same-platform", evidence: catalog };
+  const current = { ...structuredClone(previous), version: 2, evidence: [...catalog, { id: "later", excerpt: "评审结束后追加" }],
+    reviewEvidence: { snapshot: { contextManifest: manifest } } };
+  const original = structuredClone(current);
+  assert.deepEqual(architectureHistoricalEvidenceCatalog(current, [previous]), catalog);
+  assert.deepEqual(current, original);
+  assert.throws(() => architectureHistoricalEvidenceCatalog(current), /找不到/u, "不能猜测当前目录的前缀");
+  current.reviewEvidence.frozenEvidence = structuredClone(catalog);
+  assert.deepEqual(architectureHistoricalEvidenceCatalog(current), catalog);
+  current.reviewEvidence.frozenEvidence[0].excerpt = "错误来源";
+  assert.throws(() => architectureHistoricalEvidenceCatalog(current, [previous]), /不一致/u, "已知快照损坏不能换用旧历史掩盖");
+});
+
+test("历史目录不跨智能体、需求、平台或未来版本，长度相同也必须摘要匹配", () => {
+  const f = fixture(), catalog = [{ id: "original", excerpt: "原始来源" }];
+  const current = { agentId: "same_agent", version: 2, sourceFingerprint: "same", draft: { original: true }, platformHash: "same-platform",
+    evidence: [...catalog, { id: "later" }], reviewEvidence: { snapshot: {
+      contextManifest: architectureReviewEvidenceContext({ ...f.context, design: f.design, evidence: catalog }).contextManifest } } };
+  for (const change of [{ agentId: "other" }, { version: 3 }, { sourceFingerprint: "other" }, { draft: { original: false } },
+    { platformHash: "other" }, { evidence: [{ id: "original", excerpt: "篡改来源" }] }]) {
+    const previous = { ...structuredClone(current), version: 1, evidence: structuredClone(catalog), ...change };
+    assert.throws(() => architectureHistoricalEvidenceCatalog(current, [previous]));
+  }
+});
 
 test("运行协议冻结真实同步/异步调用、文件单位和权限，调用者不能改写共享事实", () => {
   const value = runtimeCapabilityContract();

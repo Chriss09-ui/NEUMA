@@ -74,7 +74,7 @@ test("共享输出预算使用调用方任务预算并受模型能力上限约�
     assert.equal(modelOutputBudget(config), 4096);
     assert.equal(modelOutputBudget(config, 8192), 8192);
     assert.equal(modelOutputBudget(config, 999_999), 131_072);
-    assert.equal(architectureModelOutputBudget(config, "designer"), 32768);
+    assert.equal(architectureModelOutputBudget(config, "designer"), 65536);
     assert.equal(architectureModelOutputBudget(config, "reviewer"), 16384);
     assert.equal(knownModelLimits(config).contextWindow, 1_048_576);
     assert.equal(knownModelLimits(config).reasoning, true);
@@ -204,6 +204,25 @@ test("auto采用锁定Pi默认档位，官方与显式网关的原生payload不�
       assert.deepEqual(payload.thinking, { type: reasoningMode === "auto" ? "enabled" : "disabled" });
       assert.equal(payload.reasoningEffort, reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : undefined);
       assert.equal(payload.thinkingBudget, undefined, "未声明独立思考额度时不能假造正文预留");
+    } finally { session.dispose(); }
+  }
+  assert.equal(networkCalls, 0);
+});
+
+test("架构加大输出额度仍用默认medium，真实SDK参数不伪造独立思考额度", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-pi-architecture-output-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let networkCalls = 0;
+  for (const role of ["designer", "specialist", "reviewer"]) {
+    const session = await createPiSession({ config: mimoConfig, cwd: root, dataDir: root, customTools: [], systemPrompt: "fixture",
+      reasoningMode: role === "reviewer" ? "off" : "auto", maxOutputTokens: architectureModelOutputBudget(mimoConfig, role),
+      beforeModelRequest: () => { networkCalls++; throw new Error("NETWORK_FORBIDDEN"); } });
+    try {
+      const payload = await capturePiPayload(session);
+      assert.equal(payload.maxTokens, { designer: 65536, specialist: 32768, reviewer: 16384 }[role]);
+      assert.deepEqual(payload.thinking, { type: role === "reviewer" ? "disabled" : "enabled" });
+      assert.equal(payload.reasoningEffort, role === "reviewer" ? undefined : DEFAULT_THINKING_LEVEL);
+      assert.equal(payload.thinkingBudget, undefined);
     } finally { session.dispose(); }
   }
   assert.equal(networkCalls, 0);

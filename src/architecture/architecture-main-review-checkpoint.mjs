@@ -1,6 +1,6 @@
 import { hashValue } from "../development/development-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
-  reviewCheckpointObject as object, reviewCheckpointOwn as own } from "./architecture-review-binding.mjs";
+  reviewCheckpointObject as object, reviewCheckpointOwn as own, architectureReviewStoredCallLimit } from "./architecture-review-binding.mjs";
 
 const sourceMaxBytes = 2 * 1024 * 1024;
 export const MAIN_REVIEW_CHECKPOINT_MAX_BYTES = 2 * sourceMaxBytes + 64 * 1024;
@@ -8,7 +8,7 @@ const checkpointFields = ["schemaVersion", "source", "bindingHash", "reviewHash"
 const sourceFields = ["agentId", "architectureVersion", "candidateHash"];
 const hash = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const version = (value) => Number.isSafeInteger(value) && value >= 1;
-const calls = (value) => Number.isSafeInteger(value) && value >= 1 && value <= 12;
+const calls = (value, record) => Number.isSafeInteger(value) && value >= 1 && value <= architectureReviewStoredCallLimit(record);
 const fidelity = (status, evidence) => status === "pending" ? evidence === null
   : status === "not_preserved" && object(evidence) && ["narrowed", "unproven"].includes(evidence.verdict) && hash(evidence.contextHash);
 
@@ -22,7 +22,7 @@ function checkedCheckpoint(checkpoint, record, sameVersion) {
     ["review", "fidelityEvidence"].includes(key) ? { maxBytes: sourceMaxBytes } : { maxBytes: 64 * 1024, maxNodes: 64, maxDepth: 8 })]));
   const current = recordBinding(record);
   if (!current || !exact(value, checkpointFields) || value.schemaVersion !== 1 || !exact(value.source, sourceFields)
-    || !version(value.source.architectureVersion) || !calls(value.modelCalls) || !fidelity(value.fidelityStatus, value.fidelityEvidence)
+    || !version(value.source.architectureVersion) || !calls(value.modelCalls, record) || !fidelity(value.fidelityStatus, value.fidelityEvidence)
     || value.source.agentId !== current.source.agentId || value.source.candidateHash !== current.source.candidateHash
     || sameVersion && value.source.architectureVersion !== current.source.architectureVersion
     || !hash(value.bindingHash) || value.bindingHash !== current.bindingHash || !hash(value.reviewHash) || !hash(value.hash)
@@ -40,7 +40,7 @@ export function createMainReviewCheckpoint(record, review, modelCalls, options =
     const suppliedStatus = own(options, "fidelityStatus"), fidelityStatus = suppliedStatus === undefined ? "pending" : suppliedStatus;
     const suppliedEvidence = own(options, "fidelityEvidence"), fidelityEvidence = suppliedEvidence === undefined ? null : jsonCopy(suppliedEvidence);
     const current = recordBinding(record), savedReview = jsonCopy(review);
-    if (!current || !calls(modelCalls) || !fidelity(fidelityStatus, fidelityEvidence) || !object(savedReview) || savedReview.verdict !== "pass"
+    if (!current || !calls(modelCalls, record) || !fidelity(fidelityStatus, fidelityEvidence) || !object(savedReview) || savedReview.verdict !== "pass"
       || savedReview.candidateHash !== current.source.candidateHash) return null;
     const body = { schemaVersion: 1, source: current.source, bindingHash: current.bindingHash,
       reviewHash: hashValue(savedReview), review: savedReview, modelCalls, fidelityStatus, fidelityEvidence };

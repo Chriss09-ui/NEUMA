@@ -5,6 +5,7 @@ import { architectureReviewEvidenceContext } from "../src/architecture/architect
 import { architecturePriorFindings, architecturePriorFindingClosureIssues,
   validateArchitecturePriorFindings } from "../src/architecture/architecture-prior-findings.mjs";
 import { createArchitectureReviewParts } from "../src/architecture/architecture-review-parts.mjs";
+import { createArchitectureEvidenceReader } from "../src/architecture/architecture-evidence-reader.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../src/verification/acceptance-contract.mjs";
 import { passingReview, validDesign } from "./helpers/architecture.mjs";
 
@@ -38,6 +39,38 @@ function fixture(count = 1) {
 
 const input = (parts, value) => ({ candidateHash: parts.reference().candidateHash, progressHash: parts.reference().progressHash, ...value });
 const reason = (expected) => (error) => error.validationIssue?.reason === expected;
+const unchangedAcceptedReference = (parts, before) => {
+  const { rejectedPartsHash, rejectedPartsTrust, rejectedPartsIssues, ...accepted } = parts.reference();
+  assert.deepEqual(accepted, before); assert.match(rejectedPartsHash, /^[a-f0-9]{64}$/u);
+  assert.equal(rejectedPartsTrust, "untrusted-reference");
+  assert.ok(rejectedPartsIssues.length);
+};
+
+test("同次返回原文、结论矛盾、错编号及独立关闭缺项，正式提交与分项共用预检", async () => {
+  const f = fixture(2), saved = [], rejected = [], parts = createArchitectureReviewParts({ ...f.options,
+    onSave: value => saved.push(value), onRejected: value => rejected.push(value) });
+  const before = parts.snapshot();
+  const candidate = structuredClone(f.review);
+  candidate.issues = [{ ...f.explanation(), id: "new_problem", blocking: true,
+    references: [{ source: "candidate", path: "/instructions", quote: "不是当前原文" }] }];
+  candidate.priorFindingDecisions.push({ ...candidate.priorFindingDecisions[0], findingId: "truncated_finding" });
+  const verify = error => {
+    const reasons = new Set(error.validationIssues.map(issue => issue.reason));
+    for (const reason of ["reference_quote_mismatch", "contradictory_review", "invalid_reference", "native_counterevidence_missing"])
+      assert.ok(reasons.has(reason), reason);
+    assert.equal(error.validationIssueTotal, error.validationIssues.length);
+    assert.equal(error.validationIssuesTruncated, false); return true;
+  };
+  assert.throws(() => parts.validateSubmission(candidate), verify);
+  await assert.rejects(parts.save(input(parts, { checks: candidate.checks, issues: candidate.issues,
+    priorFindingDecisions: candidate.priorFindingDecisions })), verify);
+  assert.deepEqual(parts.snapshot(), before); assert.equal(saved.length, 0); assert.equal(rejected.length, 1);
+  assert.ok(parts.reference().rejectedPartsIssues.some(issue => issue.reason === "invalid_reference"));
+  candidate.issues = [f.explanation(0), f.explanation(1)]; candidate.priorFindingDecisions = f.review.priorFindingDecisions;
+  await parts.save(input(parts, { checks: candidate.checks, issues: candidate.issues, priorFindingDecisions: candidate.priorFindingDecisions }));
+  assert.equal(saved.length, 1); assert.equal(parts.rejectedSnapshot(), null);
+  assert.doesNotThrow(() => parts.validateSubmission(candidate));
+});
 
 test("native unsupported缺对应反证在保存前拒绝，既有分项与落盘回调不受影响", async () => {
   const f = fixture(), saved = [], parts = createArchitectureReviewParts({ ...f.options, onSave: value => saved.push(value) });
@@ -49,7 +82,8 @@ test("native unsupported缺对应反证在保存前拒绝，既有分项与落�
     assert.ok(error.message.includes(reference.progressHash));
     return true;
   });
-  assert.deepEqual(parts.snapshot(), before); assert.deepEqual(parts.reference(), reference); assert.equal(saved.length, 0);
+  assert.deepEqual(parts.snapshot(), before); unchangedAcceptedReference(parts, reference); assert.equal(saved.length, 0);
+  assert.deepEqual(parts.rejectedSnapshot().priorFindingDecisions, f.review.priorFindingDecisions);
 });
 
 test("partial native闭合允许未来checks尚未派发，但最终仍须完整原校验", async () => {
@@ -78,6 +112,15 @@ test("当前验收或适配器的坏反证不能在partial保存为闭合", asyn
   await assert.rejects(parts.save(input(parts, { priorFindingDecisions: f.review.priorFindingDecisions, issues: [f.explanation()] })), reason("native_counterevidence_missing"));
 });
 
+test("单条历史依据校验的位置映射回完整报告，不把后续问题的错误标成第一条", () => {
+  const f = fixture(), unrelated = { ...f.explanation(), id: "unrelated" }, explanation = f.explanation();
+  explanation.references[0].quote = "不是当前原文";
+  const issues = architecturePriorFindingClosureIssues({ candidateHash: f.candidateHash,
+    issues: [unrelated, explanation], priorFindingDecisions: f.review.priorFindingDecisions }, f.prior, f.candidate, f.context);
+  assert.ok(issues.some(issue => issue.path === "review.issues[1].references[0]" && issue.reason === "reference_quote_mismatch"));
+  assert.ok(issues.every(issue => !issue.path.startsWith("review.issues[0]")));
+});
+
 test("后续删除或替换issues不得拆掉已经闭合的native反证", async () => {
   const f = fixture(), parts = createArchitectureReviewParts(f.options);
   await parts.save(input(parts, { priorFindingDecisions: f.review.priorFindingDecisions, issues: [f.explanation()] }));
@@ -85,7 +128,7 @@ test("后续删除或替换issues不得拆掉已经闭合的native反证", async
   await assert.rejects(parts.save(input(parts, { removeIssueIds: [f.prior.findings[0].findingId] })), reason("native_counterevidence_missing"));
   const replaced = f.explanation(); replaced.blocking = true;
   await assert.rejects(parts.save(input(parts, { issues: [replaced] })), reason("native_counterevidence_missing"));
-  assert.deepEqual(parts.snapshot(), before); assert.deepEqual(parts.reference(), reference);
+  assert.deepEqual(parts.snapshot(), before); unchangedAcceptedReference(parts, reference);
 });
 
 test("旧CP未闭合行保留并重开missing，可分批修复而不重抄其他旧行", async () => {
@@ -105,6 +148,16 @@ test("旧CP未闭合行保留并重开missing，可分批修复而不重抄其�
   assert.deepEqual(parts.reference().missing.priorFindingDecisions, []); assert.equal(parts.reference().pendingNativeClosures, undefined);
   assert.equal(parts.reference().batch.remainingModelCalls, 3); assert.deepEqual(initial, before); assert.equal(saved.length, 2);
   await assert.rejects(parts.save(input(parts, { removeIssueIds: [f.prior.findings[0].findingId] })), reason("native_counterevidence_missing"));
+});
+
+test("短引用明确重交旧未闭合行时仍重验，不能因完整编号由宿主填回而漏掉关闭门槛", async () => {
+  const f = fixture(), reader = createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash, priorFindings: f.prior });
+  const initial = { candidateHash: f.candidateHash, checks: [], issues: [], acceptanceScopeChecks: [], priorFindingDecisions: f.review.priorFindingDecisions };
+  const parts = createArchitectureReviewParts({ ...f.options, initial, toolSchema: reader.submissionSchema(f.options.schema), resolve: reader.resolveSubmission });
+  const { findingId: _id, ...row } = f.review.priorFindingDecisions[0];
+  await assert.rejects(parts.save(input(parts, { priorFindingDecisions: [{ ...row, findingRef: reader.index.priorFindings[0].findingRef }] })),
+    reason("native_counterevidence_missing"));
+  assert.deepEqual(parts.snapshot(), initial);
 });
 
 test("partial resolved使用原真实变化依据，不能靠保存绕过原native门禁", async () => {

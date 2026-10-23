@@ -420,7 +420,7 @@ test("真实Pi独立评审局部修订仍通过原完整review语义和逐字依
     candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions", quote: candidate.instructions }], factClaims: [] }];
   const f = await actualPi(t, (body, turn) => {
     if (turn === 1) return { name: "submit_architecture_review", args: initial };
-    assert.equal(turn, 2); assert.match(feedbackText(body), /不能判定 pass/u);
+    assert.equal(turn, 2); assert.match(feedbackText(body), /contradictory_review/u);
     return { name: "revise_architecture_submission", args: { submissionHash: rejectedHash(feedbackText(body)),
       updates: [{ path: "/verdict", value: "revise" }, { path: "/checks/5/passed", value: false }] } };
   });

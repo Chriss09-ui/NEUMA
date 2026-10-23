@@ -7,6 +7,11 @@ const reasons = Object.freeze({ required: "required_field", additionalProperties
   enum: "invalid_value", const: "invalid_value", pattern: "invalid_value", minLength: "size_limit", maxLength: "size_limit",
   minItems: "size_limit", maxItems: "size_limit", minimum: "size_limit", maximum: "size_limit", exclusiveMinimum: "size_limit",
   exclusiveMaximum: "size_limit", minProperties: "size_limit", maxProperties: "size_limit", multipleOf: "size_limit", uniqueItems: "invalid_reference" });
+export const ARCHITECTURE_FORMAT_SUBMISSION_LIMIT = 10;
+const formatReasons = new Set(["required_field", "unknown_field", "invalid_type", "invalid_contract"]);
+export function isArchitectureFormatSubmissionIssue(issue) {
+  return Boolean(issue && formatReasons.has(issue.reason));
+}
 const remedies = Object.freeze({ required_field: "补齐这个已声明的必填字段，再在当前会话重新提交。",
   unknown_field: "移除该对象中工具未声明的字段，保留其他内容。", invalid_type: "按当前工具声明的字段类型填写，不将对象、数组或布尔值编码成字符串。",
   invalid_value: "使用当前工具字段允许的取值；验收适配器、负责方和阶段必须遵循同一个固定映射。",

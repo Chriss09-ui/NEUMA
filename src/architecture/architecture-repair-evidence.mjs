@@ -129,13 +129,27 @@ export function validateHistoricalRepairDecision(row, finding, review, candidate
         fail(`${path}.status`, "repair_basis_unchanged", "对应旧技术内容仍完整存在于当前候选，不能靠新增或移动另一项方案将它关闭。");
     }
   }
-  const explanation = (review.issues ?? []).find((issue) => issue.id === finding.findingId && issue.blocking === false
+  const explanationIndex = (review.issues ?? []).findIndex((issue) => issue.id === finding.findingId && issue.blocking === false
     && row.checkIds?.includes(issue.checkId));
+  const explanation = review.issues?.[explanationIndex];
   if (!explanation) fail(`${path}.status`, "repair_counterevidence_missing",
     "关闭历史意见必须有id等于findingId的非阻断解释，关联本轮检查并提供当前候选及平台事实的逐字依据；一句reason不足以关闭。");
   validateArchitectureReviewEvidence({ checks: [], issues: [explanation], acceptanceScopeChecks: [] }, context, { partial: true });
-  if (!selected.every((anchor) => explanation.candidatePaths?.some((pointer) => materialPath(pointer, anchor))
-    && explanation.references?.some((reference) => materialReference(reference, anchor, candidate))))
-    fail(`${path}.status`, "repair_candidate_reference_unrelated", "解释必须逐字引用决议所指当前技术内容，不得用无关候选字段关闭历史问题。");
+  const missing = selected.flatMap((anchor) => [
+    ...(!explanation.candidatePaths?.some((pointer) => materialPath(pointer, anchor)) ? [{
+      path: `review.issues[${explanationIndex}].candidatePaths`, reason: "repair_candidate_reference_unrelated", candidatePath: anchor.path,
+      remedy: `关闭说明尚未关联当前条款 ${anchor.path}；在本说明的 candidatePaths 中关联该条款的实际功能字段。`,
+    }] : []),
+    ...(!explanation.references?.some((reference) => materialReference(reference, anchor, candidate)) ? [{
+      path: `review.issues[${explanationIndex}].references`, reason: "repair_candidate_reference_unrelated", candidatePath: anchor.path,
+      remedy: `关闭说明缺少当前条款 ${anchor.path} 的功能原文依据；在 references 中提供 source=candidate 的对应实际字段及逐字引用，不能只引用编号或其他条款。`,
+    }] : []),
+  ]);
+  if (missing.length) {
+    const issues = missing.slice(0, 64);
+    throw Object.assign(new InputError("历史问题关闭依据未逐条对应：" + JSON.stringify({ issues, total: missing.length, truncated: missing.length > issues.length })), {
+      validationIssue: issues[0], validationIssues: issues, validationIssueTotal: missing.length, validationIssuesTruncated: missing.length > issues.length,
+    });
+  }
   if (platformRequired) relatedClaims(candidate, selected, explanation, context, path);
 }
