@@ -2885,7 +2885,9 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
     if (path === "/api/agents/research") return Response.json({ architecture: { agentId: "research", name: requirement.name, draft, status: "designing" } });
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
+  const navigations = [];
   ui.document.addEventListener("neuma:main-requirement-saved", (event) => events.push(event.detail));
+  ui.document.addEventListener("neuma:navigate", (event) => navigations.push(event.detail));
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "我稍后要补充的主聊天草稿";
   await ui.get("main-create-agent").click(); await settle();
   assert.equal(writes[0].path, "/api/main/conversations/main-one/requirements");
@@ -2896,6 +2898,8 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   assert.equal(writes[1].path, "/api/main/conversations/main-one/messages"); assert.equal(writes[1].body.message, "确认需求");
   assert.equal(ui.get("main-message").value, "我稍后要补充的主聊天草稿");
   assert.equal(events.filter((event) => event.build).length, 1); assert.deepEqual(events.find((event) => event.build).requirement, requirement);
+  assert.equal(navigations.at(-1)?.page, "agent");
+  assert.equal(navigations.at(-1)?.agentId, "research");
   assert.match(ui.text("main-context-content"), /正在设计方案/);
   // Re-reading a saved conversation must never replay its build action, even without a visible recovery control.
   await ui.get("main-refresh").click(); await settle(); assert.equal(events.filter((event) => event.build).length, 1);
