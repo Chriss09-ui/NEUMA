@@ -1291,6 +1291,21 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .agent-making-status-copy p { color: var(--text-2); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
 .agent-making-status[data-error="true"] { background: var(--danger-soft); }
 .agent-making-status[data-error="true"] .agent-making-status-dot { background: var(--danger); }
+.agent-making-thoughts { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--reply-surface); }
+.agent-making-thoughts[hidden] { display: none; }
+.agent-making-thoughts summary { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 16px 0 18px; list-style: none; cursor: pointer; }
+.agent-making-thoughts summary::-webkit-details-marker { display: none; }
+.agent-making-thoughts-mark { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.agent-making-thoughts[open] .agent-making-thoughts-mark { box-shadow: 0 0 0 4px var(--accent-soft); }
+.agent-making-thoughts-title { font-size: 13px; font-weight: 600; }
+.agent-making-thoughts-meta { color: var(--muted); font-size: 12px; }
+.agent-making-thoughts-chevron { width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-2px) rotate(45deg); }
+.agent-making-thoughts[open] .agent-making-thoughts-chevron { transform: translateY(2px) rotate(225deg); }
+.agent-making-thoughts-body { max-height: 320px; overflow: auto; padding: 4px 20px 16px 34px; border-top: 1px solid var(--border); }
+.agent-making-thought + .agent-making-thought { margin-top: 16px; }
+.agent-making-thought-role { margin: 12px 0 4px; color: var(--accent-hover); font-size: 11px; font-weight: 600; letter-spacing: .06em; }
+.agent-making-thought-text, .agent-making-thought-empty { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-making-thought-empty { color: var(--muted); }
 .agent-making-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 24px; }
 .agent-making-actions button { min-height: 40px; }
 .agent-making-stop { color: var(--danger); }

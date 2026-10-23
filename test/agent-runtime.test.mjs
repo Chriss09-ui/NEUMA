@@ -56,6 +56,18 @@ test("没有完成事件、错误结果和错绑会话均不能标为成功", as
   await assert.rejects(failed.turn(body), /请先配置模型/);
 });
 
+test("只有显式修复操作携带宿主绑定授权，普通生成不自动领取额外轮次", async () => {
+  const requests = [], architectureRepair = { version: 4, checkpointHash: "a".repeat(64), stageKey: "demo_generation" };
+  const api = createAgentRuntime(async (_path, options) => {
+    requests.push(JSON.parse(options.body));
+    return Response.json({ agent: null, architecture: architecture({ status: "failed" }) });
+  });
+  await api.build(agent);
+  await api.build(agent, { architectureRepair });
+  assert.equal(Object.hasOwn(requests[0], "architectureRepair"), false);
+  assert.deepEqual(requests[1].architectureRepair, architectureRepair);
+});
+
 test("架构未就绪也是完整构建结果，不能误报为连接中断", async () => {
   for (const status of ["needs_changes", "needs_evidence", "infeasible", "failed", "cancelled", "passed"]) {
     const result = { agent: null, architecture: architecture({ status, delivery: "needs_development" }) };

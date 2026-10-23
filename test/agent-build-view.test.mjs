@@ -14,6 +14,64 @@ const development = (overrides = {}) => ({ agentId: agent.id, id: "development-o
   architectureRef: { version: 1, candidateHash: "candidate-1" }, delivery: "needs_development", tasks: [], ...overrides });
 const currentStage = (presentation) => presentation.stages.find((stage) => stage.status === "current")?.id;
 
+test("阶段额度耗尽显示显式修复入口与具体原因，二次耗尽不再出现无效重生成按钮", () => {
+  for (const status of ["available", "continuing", "blocked"]) {
+    const result = agentMakingState(agent, { status: "failed", error: "旧的通用错误",
+      architecture: architecture({ status: "failed", designRecovery: { status, message: "执行步骤尚未覆盖组件，已保留成果。" } }) });
+    assert.match(result.summary, /执行步骤/u);
+    assert.equal(result.canRetry, status !== "blocked");
+    assert.equal(result.actionLabel, status === "available" ? "修复未完成阶段（最多2轮）"
+      : status === "continuing" ? "继续修复未完成阶段" : "本次修复额度已用尽");
+  }
+});
+
+test("全部模块已保存时明确继续整合，不要求重新生成或重新授权模块修复", () => {
+  const result = agentMakingState(agent, { status: "failed", architecture: architecture({ status: "failed",
+    designRecovery: { status: "continuing", actionLabel: "继续整合与评审", message: "全部模块已保存，不会重跑已完成模块。" } }) });
+  assert.equal(result.canRetry, true); assert.equal(result.actionLabel, "继续整合与评审");
+  assert.match(result.summary, /全部模块已保存/u);
+});
+
+test("已有独立评审时显示评审修订入口和专属阻断说明", () => {
+  const result = agentMakingState(agent, { status: "failed", architecture: architecture({ status: "failed",
+    designRecovery: { status: "available", actionLabel: "按评审修订（最多3轮）", message: "完整方案及独立评审意见已保存。" } }) });
+  assert.equal(result.canRetry, true); assert.equal(result.actionLabel, "按评审修订（最多3轮）");
+  assert.match(result.summary, /完整方案及独立评审/u);
+});
+
+test("未完成评审的一次手动续评显示按钮，额度耗尽后保留真实失败且关闭入口", () => {
+  for (const status of ["available", "continuing", "blocked"]) {
+    const result = agentMakingState(agent, { status: "failed", architecture: architecture({ status: "failed",
+      diagnostic: { phase: "evaluating" }, designRecovery: { kind: "review_retry", status,
+        actionLabel: "手动继续评审（最多2次）", message: "独立评审引用未通过校验，尚未形成正式结论。" } }) });
+    assert.equal(result.canRetry, status !== "blocked");
+    assert.equal(result.actionLabel, "手动继续评审（最多2次）");
+    assert.equal(result.phase, "evaluating"); assert.match(result.summary, /尚未形成正式结论/u);
+  }
+});
+
+test("评审额度耗尽仍显示继续设计，等待用户点击再开启一轮并保留真实未完成状态", () => {
+  const result = agentMakingState(agent, { status: "failed", architecture: architecture({ status: "failed",
+    diagnostic: { phase: "evaluating" }, designRecovery: { kind: "review_retry", status: "available", modelCalls: 9, modelCallLimit: 14,
+      actionLabel: "继续设计", message: "方案和检查结果已保留，点击继续当前未完成的独立评估。",
+      request: { kind: "review_continue", version: 30 } } }) });
+  assert.equal(result.canRetry, true); assert.equal(result.actionLabel, "继续设计");
+  assert.equal(result.phase, "evaluating"); assert.equal(result.failed, true);
+  assert.equal(result.active, false); assert.equal(result.stages.at(-1).status, "pending");
+});
+
+test("本次构建错误优先于旧恢复提示，仍保留修订操作，进行中不残留失败原因", () => {
+  const saved = architecture({ status: "failed", designRecovery: { status: "available", actionLabel: "按评审修订（最多3轮）",
+    message: "完整方案已保存，可继续修订。" } });
+  const result = agentMakingState(agent, { status: "failed", architecture: saved, error: "旧的通用额度错误",
+    buildError: "本次来源摘要与冻结评审不一致" });
+  assert.equal(result.summary, "本次来源摘要与冻结评审不一致");
+  assert.equal(result.canRetry, true); assert.equal(result.actionLabel, "按评审修订（最多3轮）");
+  const active = agentMakingState(agent, { status: "building", architecture: saved, buildError: "旧的失败",
+    operation: { phase: "designing", label: "正在修订原方案" } });
+  assert.equal(active.summary, "正在修订原方案");
+});
+
 test("制作阶段以当前控制器和持久记录为准，重连与方案修订保留真实阶段", () => {
   for (const phase of ["researching", "designing", "designer", "specialist"]) {
     const result = agentMakingState(agent, { status: "building", operation: { phase } });

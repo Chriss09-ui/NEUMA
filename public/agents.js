@@ -4,7 +4,7 @@ import { AgentAttachments, createAgentAttachmentView } from "./agent-attachments
 import { addUserMessage, createReplyView, renderUserMessage } from "./chat-ui.js";
 import { agentBuildState, agentDevelopmentState, agentHistory, agentSourceKey, createAgentRuntime, developmentPhases } from "./agent-runtime.js";
 import { createDevelopmentView } from "./agent-details-view.js";
-import { createAgentMakingView } from "./agent-build-view.js";
+import { agentMakingState, createAgentMakingView, rememberArchitectureThought } from "./agent-build-view.js";
 import { avatarColors, installAvatarMotion, renderAgentAvatar, resolveAgentAvatar, setAgentAvatarActivity } from "./agent-avatar.js";
 import { conversationDate } from "./group-view.js";
 import { createSidebarHistory } from "./sidebar-history.js";
@@ -231,7 +231,7 @@ async function deleteConversation(id, cid) {
 function runtime(agent) {
   if (!runtimes.has(agent.id)) runtimes.set(agent.id, {
     status: "unchecked", sourceKey: agentSourceKey(agent), definition: null, architecture: null, development: null, operation: null, inspection: null, sequence: 0,
-    error: "", label: "", inspectionError: false, rebuildRequested: false, application: null,
+    error: "", buildError: "", label: "", inspectionError: false, rebuildRequested: false, application: null,
   });
   return runtimes.get(agent.id);
 }
@@ -402,8 +402,9 @@ function renderControls(agent) {
         : state.status === "checking" || state.status === "unchecked" ? "正在读取智能体…"
           : state.status === "error" ? "生成未完成，可以重试。" : state.label || "需求已确认，点击生成智能体开始设计与检查。";
   if (profilesError) byId("agent-runtime-status").textContent += " · 名称与图标暂时未加载";
-  byId("agent-build").disabled = busy || state.status === "checking";
-  byId("agent-build").textContent = state.status === "building" ? "正在生成…" : state.definition ? "重新生成智能体" : "生成智能体";
+  byId("agent-build").disabled = busy || state.status === "checking" || state.architecture?.designRecovery?.status === "blocked";
+  byId("agent-build").textContent = state.status === "building" ? "正在生成…" : state.architecture?.designRecovery
+    ? agentMakingState(agent, state).actionLabel : state.definition ? "重新生成智能体" : "生成智能体";
   byId("agent-send").hidden = Boolean(operation);
   byId("agent-send").disabled = state.status !== "ready" || busy || attachments.blocked(agent.id, item.id);
   attachmentView.setContext({ agentId: agent.id, conversationId: item.id, disabled: state.status !== "ready" || busy });
@@ -445,12 +446,14 @@ function renderMaking(agent) {
   if (!making) { byId("agent-making-content").replaceChildren(); makingView = null; return; }
   const focused = makingView?.agentId === agent.id
     ? ["stop", "start", "details"].find((key) => makingView[key] === document.activeElement) : null;
+  const thoughtsOpen = makingView?.agentId === agent.id ? Boolean(makingView.thoughts?.open) : false;
   const progressState = showingUpdate ? { ...state, ...agentBuildState(agent, { agent: state.definition, architecture: state.architecture, development: state.development }) } : state;
   makingView = { ...createAgentMakingView(agent, progressState, {
     onStop: () => stopMaking(agent.id),
     onStart: () => {
       const development = agentDevelopmentState(agent, state);
-      return development.canStart || development.canResume ? developAgent(agent.id) : buildAgent(agent.id);
+      return development.canStart || development.canResume ? developAgent(agent.id)
+        : buildAgent(agent.id, false, progressState.architecture?.designRecovery?.request);
     },
     onDetails: () => {
       if (byId("agent-panel-toggle").getAttribute("aria-expanded") !== "true") byId("agent-panel-toggle").click();
@@ -458,6 +461,7 @@ function renderMaking(agent) {
       const details = byId("agent-brief").closest?.("details");
       if (details) details.open = true;
     },
+    thoughtsOpen,
   }), agentId: agent.id };
   byId("agent-making-content").replaceChildren(makingView.root);
   if (focused) (makingView[focused] || makingView.start || makingView.details).focus({ preventScroll: true });
@@ -519,6 +523,8 @@ function broadcastRuntime(agent = current()) {
       application: state.application ? structuredClone(state.application) : null,
       configurationAction: state.gatewayPending ? "配置本机接口" : null,
       developmentAction: development.canStart || development.canResume ? development.actionLabel : null,
+      buildAction: state.architecture?.designRecovery ? agentMakingState(agent, state).actionLabel : null,
+      buildBlocked: state.architecture?.designRecovery?.status === "blocked",
       status: state.status, ready: state.status === "ready" && !busy, busy, error: item.error || item.storageError || state.error,
     } }));
   } finally { broadcasting.delete(agent.id); }
@@ -661,6 +667,7 @@ function inspectAgent(agent, refresh = false) {
       state.application = result.application ?? result.activeRuntime?.application ?? null;
       state.error = "";
       Object.assign(state, agentBuildState(agent, result));
+      if (state.status === "ready" || state.architecture?.status === "passed") state.buildError = "";
       syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
     } catch (error) {
       if (!valid()) return;
@@ -678,10 +685,11 @@ function inspectAgent(agent, refresh = false) {
   return inspection.promise;
 }
 
-async function buildAgent(id, queueIfBusy = false) {
+async function buildAgent(id, queueIfBusy = false, architectureRepair) {
   const agent = agents.find((item) => item.id === id);
   if (!agent) return;
   const state = runtime(agent), item = conversation(id);
+  if (state.architecture?.designRecovery?.status === "blocked") return;
   if (state.operation || item.turn || agentDevelopmentState(agent, state).active) {
     if (queueIfBusy && (item.turn || state.operation?.sourceKey !== agentSourceKey(agent)
       || state.operation?.controller.signal.aborted)) state.rebuildRequested = true;
@@ -697,13 +705,20 @@ async function buildAgent(id, queueIfBusy = false) {
   state.development = null;
   if (!state.activeRuntime) state.application = null;
   state.error = item.error = "";
+  state.buildError = "";
   state.inspectionError = false;
   state.label = "正在设计与检查…";
+  state.architectureThoughts = [];
   renderSidebar();
   if (visible(id)) renderControls(agent);
   try {
-    const result = await api.build(agent, { signal: operation.controller.signal, onProgress(progress) {
+    const result = await api.build(agent, { architectureRepair, signal: operation.controller.signal, onProgress(progress) {
       if (operation.controller.signal.aborted || state.operation !== operation) return;
+      if (progress.type === "architecture_thought") {
+        state.architectureThoughts = rememberArchitectureThought(state.architectureThoughts, progress);
+        if (visible(id) && makingView?.agentId === id && makingView.syncThoughts) makingView.syncThoughts();
+        else if (visible(id)) renderControls(agent);
+      } else {
       if (progress.type === "status") {
         operation.phase = progress.phase || operation.phase;
         state.label = operation.label = progress.label || "正在设计与检查…";
@@ -713,8 +728,9 @@ async function buildAgent(id, queueIfBusy = false) {
         state.development = progress.development; operation.development = true;
         operation.phase = progress.phase; operation.label = progress.label;
       }
-      syncAvatarActivity(agent);
       if (visible(id)) renderControls(agent);
+      }
+      syncAvatarActivity(agent);
     } });
     operation.controller.signal.throwIfAborted();
     if (state.sourceKey !== operation.sourceKey || state.operation !== operation) return;
@@ -723,18 +739,21 @@ async function buildAgent(id, queueIfBusy = false) {
     state.development = result.development ?? null;
     state.application = result.application ?? result.activeRuntime?.application ?? null;
     Object.assign(state, agentBuildState(agent, result));
+    state.buildError = "";
     if (state.status === "ready") item.sessionId = crypto.randomUUID();
     syncProfile(id, result.profile || result.agent?.profile, profileVersion);
   } catch (error) {
     if (state.sourceKey !== operation.sourceKey || state.operation !== operation) return;
     state.status = "error";
     state.error = operation.controller.signal.aborted || error.reason === "cancelled" ? "生成已停止，可以重新生成。" : error.message || "生成失败，请重试。";
+    state.buildError = operation.controller.signal.aborted || error.reason === "cancelled" ? "" : state.error;
     try {
       if (operation.cancelPromise) await operation.cancelPromise;
       if (state.operation !== operation || state.sourceKey !== operation.sourceKey) return;
       const snapshot = await api.inspect(id);
       if (state.operation === operation && state.sourceKey === operation.sourceKey) {
         applyDevelopmentResult(agent, state, snapshot);
+        if (state.status === "ready" || state.architecture?.status === "passed") state.buildError = "";
         if (operation.stopping && !serverOperationPending(agent, state)) state.error = "";
         else if (operation.development && snapshot.development?.status !== "completed") state.error = "研发进度已保存，可以继续。";
       }
@@ -775,7 +794,7 @@ async function developAgent(id) {
   const operation = { kind: "development", controller: new AbortController(), sourceKey: agentSourceKey(agent),
     phase: development.record?.phase || "intake", label: development.canResume ? "正在核实已保存的研发进度…" : "正在接收已通过的设计…" };
   const profileVersion = profileVersions.get(id) || 0;
-  state.sequence++; state.operation = operation; state.status = "developing"; state.error = item.error = "";
+  state.sequence++; state.operation = operation; state.status = "developing"; state.error = item.error = ""; state.buildError = "";
   state.label = operation.label;
   renderSidebar(); if (visible(id)) renderControls(agent);
   try {
@@ -995,6 +1014,7 @@ document.addEventListener("neuma:agents-changed", (event) => {
     if (!state.activeRuntime) state.application = null;
     state.label = "";
     state.error = "";
+    state.buildError = "";
     state.inspectionError = false;
   }
   renderSidebar();
@@ -1023,7 +1043,10 @@ document.addEventListener("neuma:route", (event) => {
     return Promise.all([inspectAgent(current(), serverOperationPending(current())), loadConversation(current())]);
   }
 });
-document.addEventListener("neuma:agent-build", (event) => buildAgent(event.detail.id, true));
+document.addEventListener("neuma:agent-build", (event) => {
+  const agent = agents.find(item => item.id === event.detail.id);
+  if (agent) return buildAgent(agent.id, true, runtime(agent).architecture?.designRecovery?.request);
+});
 document.addEventListener("neuma:agent-develop", (event) => developAgent(event.detail.id));
 document.addEventListener("neuma:agent-development-stop", (event) => stopDevelopment(event.detail.id));
 document.addEventListener("neuma:agent-runtime-request", (event) => {
@@ -1071,7 +1094,10 @@ document.addEventListener("neuma:agent-saved", (event) => {
 byId("sidebar-create-agent").addEventListener("click", () => action("create"));
 byId("agent-iterate").addEventListener("click", () => action("edit"));
 byId("agent-save-entry").addEventListener("click", () => action("save"));
-byId("agent-build").addEventListener("click", () => buildAgent(route.agentId));
+byId("agent-build").addEventListener("click", () => {
+  const agent = current();
+  if (agent) return buildAgent(agent.id, false, runtime(agent).architecture?.designRecovery?.request);
+});
 byId("agent-upgrade-toggle").addEventListener("click", () => {
   const agent = current(); if (!agent) return;
   const state = runtime(agent); state.showUpgrade = !state.showUpgrade; renderControls(agent);

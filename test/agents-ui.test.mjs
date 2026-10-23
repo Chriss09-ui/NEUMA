@@ -14,6 +14,63 @@ const source = (await Promise.all(["chat-ui.js", "agent-runtime.js", "agent-deta
   text.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "")).join("\n");
 const settle = () => new Promise(setImmediate);
 
+test("失败阶段的修复按钮携带当前授权，普通加载不调用模型，二次耗尽禁止重复生成", async () => {
+  const architectureRepair = { version: 6, checkpointHash: "a".repeat(64), stageKey: "demo_generation" };
+  const saved = { agent: null, architecture: architecture({ version: 6, status: "failed", delivery: "blocked",
+    designRecovery: { status: "available", request: architectureRepair, message: "步骤尚未覆盖计算组件，已保存两个模块。" } }) };
+  const ui = await setup({ inspect: () => Response.json(saved), build: body => {
+    assert.deepEqual(body.architectureRepair, architectureRepair);
+    return Response.json({ agent: null, architecture: { ...saved.architecture,
+      designRecovery: { status: "blocked", message: "本次修复额度已耗尽，已完成成果保留。" } } });
+  } });
+  assert.equal(ui.requests.some(request => request.path === "/api/agents/build"), false);
+  assert.equal(ui.get("agent-build").textContent, "修复未完成阶段（最多2轮）");
+  assert.match(treeText(ui.get("agent-making-content")), /计算组件/u);
+  await ui.get("agent-build").click();
+  assert.equal(ui.requests.filter(request => request.path === "/api/agents/build").length, 1);
+  assert.equal(ui.get("agent-build").disabled, true);
+  await ui.emit("neuma:agent-build", { id: "one" });
+  assert.equal(ui.requests.filter(request => request.path === "/api/agents/build").length, 1);
+});
+
+test("修订请求被前置拒绝后展示本次原因，读取旧恢复记录仍保留修订入口，新构建清除旧错误", async () => {
+  const failure = "原方案与独立评审来源不能完整核验";
+  const architectureRepair = { kind: "review_revision", version: 20, checkpointHash: "a".repeat(64) };
+  const saved = { agent: null, architecture: architecture({ version: 20, status: "failed", delivery: "blocked",
+    designRecovery: { status: "available", actionLabel: "按评审修订（最多3轮）", request: architectureRepair,
+      message: "完整方案和评审意见已保存，可按评审修订。" } }) };
+  let attempts = 0, finish;
+  const ui = await setup({ inspect: () => Response.json(saved), build: body => {
+    assert.deepEqual(body.architectureRepair, architectureRepair);
+    if (++attempts === 1) return Response.json({ error: failure }, { status: 400 });
+    return new Promise(resolve => { finish = () => resolve(Response.json(readyResult(definition("one", 2)))); });
+  } });
+  await ui.get("agent-build").click();
+  assert.equal(ui.requests.filter(request => request.path === "/api/agents/one").length, 2, "失败后实际重新读取旧记录");
+  assert.equal(ui.runtime().architecture.version, 20);
+  assert.match(treeText(ui.get("agent-making-content")), new RegExp(failure));
+  assert.equal(ui.get("agent-build").textContent, "按评审修订（最多3轮）");
+  assert.equal(ui.get("agent-build").disabled, false);
+  const pending = ui.get("agent-build").click(); await settle();
+  assert.equal(ui.runtime().buildError, "");
+  assert.doesNotMatch(treeText(ui.get("agent-making-content")), new RegExp(failure));
+  finish(); await pending;
+  assert.equal(ui.runtime().status, "ready"); assert.equal(ui.runtime().buildError, "");
+});
+
+test("需求变化清除上次构建失败，不让旧修订错误污染新需求", async () => {
+  const failure = "旧候选来源无法核验";
+  const saved = { agent: null, architecture: architecture({ status: "failed", delivery: "blocked",
+    designRecovery: { status: "available", message: "可继续修订。" } }) };
+  const ui = await setup({ inspect: () => Response.json(saved), build: () => Response.json({ error: failure }, { status: 400 }) });
+  await ui.get("agent-build").click();
+  assert.equal(ui.runtime().buildError, failure);
+  await ui.emit("neuma:agents-changed", { items: requirements.map(agent => agent.id === "one"
+    ? { ...agent, draft: { ...agent.draft, goal: { value: "新需求" } } } : agent), busy: false });
+  assert.equal(ui.runtime().buildError, "");
+  assert.doesNotMatch(treeText(ui.get("agent-making-content")), new RegExp(failure));
+});
+
 test("发送时冻结当前页面参考，新一轮读取新参数，其他Agent不携带该页面", async () => {
   const ui = await setup();
   const instance = { instanceId: "dashboard-page", deliveryVersion: "dashboard-v1" };
