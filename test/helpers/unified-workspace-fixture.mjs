@@ -82,7 +82,7 @@ export async function startUnifiedWorkspaceFixture({ port = 4372 } = {}) {
       let name, args, reply, slow = false, role = "private";
       assert.equal(request.url, "/v1/chat/completions");
       if (!body.stream) {
-        const preflight = textOf(body.messages[0]?.content).includes("独立架构预评估者");
+        const preflight = textOf(body.messages[0]?.content).includes("需求实现审查者");
         role = preflight ? "preflight" : "requirements";
         const result = preflight ? await sufficientPreflight() : requirementResult(payload);
         records.push({ role, message: payload.latestUserMessage });

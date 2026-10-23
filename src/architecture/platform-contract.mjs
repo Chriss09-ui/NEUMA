@@ -163,6 +163,25 @@ capabilities 只列当前选定执行路径真正使用的依赖；available 必
 未确认的用户环境和需求解读写为“设计假设，待需求方确认”；没有明确依据不得称“已接受”。涉及自包含 HTML 时，生成约定与自查需同时写清内联资源、禁止运行时外部加载等正向约束；涉及公式时，公式原文、规范化结果及文件内容应有可观察核对项。未提供的能力：${snapshot.unsupported.join("、")}；Node 代码生成不证明这些能力已具备。`;
 }
 
+export function renderRequirementDeliveryFacts(value) {
+  const snapshot = validateSnapshot(value);
+  const { deliveryRoutes: routes, network } = snapshot;
+  const files = routes.downloadableFiles;
+  const hosted = routes.hostedApplication;
+  const managed = routes.managedService
+    ? `受管服务是已有交付通道，runtime ${routes.managedService.runtime}，语言 ${routes.managedService.languages.join("、")}，位置 ${routes.managedService.hosts.join("、")}。当前电脑是否准备好，留到激活前核实。`
+    : "";
+  const visual = snapshot.version >= 3
+    ? "node-check 只核对资源和逻辑。画面留到真实页面验收。"
+    : "画面留到用户真正打开页面或文件时验收。";
+  return `需求实现审查使用的交付事实（platform v${snapshot.version}）。这些事实只判断这份需求有没有合法交付路径。此时没有架构候选，不提交新候选，不选择语言、运行位置、组件或步骤。
+可下载文本文件使用 ${files.format}，例如 ${files.examples.join("、")}。现有文本生成和文件工具可以保存并供下载。写入并读回核对文件内容。自包含 HTML、SVG 和页面脚本是交付内容，可以由后续交付按约定生成。
+工作台内托管页面使用 ${hosted.runtime}，协议 ${hosted.protocolVersion}，必须研发并做真实页面验收。公式或概念的动态图形、滑块和旁边的文字讲解，走托管页面或可下载图形文件。${visual}
+${managed}
+联网：${network.allowNetwork ? "本轮允许公开网页检索，以及已经声明的业务连接。" : "本轮禁止网页检索和外部业务请求。"}
+明确不支持：${snapshot.unsupported.join("、")}。用户明确要求其中一项时，保留需求阶段的系统阻断。自写图形、托管页面和可下载图形文件可以交付。`;
+}
+
 export function renderPlatformRules(value, { runtimeCapabilities } = {}) {
   const snapshot = validateSnapshot(value);
   if (snapshot.version === 4) return renderVersionFourRules(snapshot, runtimeCapabilities);

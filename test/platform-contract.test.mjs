@@ -6,7 +6,7 @@ import { CAPABILITIES, CAPABILITY_CATALOG_VERSION, PUBLIC_TOOL_IDS, designHash }
 import { PUBLIC_CAPABILITY_VERSION, PUBLIC_WEB_CAPABILITIES, createWebTools } from "../src/runtime/web-capabilities.mjs";
 import { APPLICATION_PROTOCOL_VERSION } from "../src/applications/application-contract.mjs";
 import { MAX_RUNTIME_FILE_BYTES } from "../src/runtime/file-limits.mjs";
-import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence, validatePlatformMetadata,
+import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, renderRequirementDeliveryFacts, platformEvidence, validatePlatformMetadata,
   platformCapabilityCatalog, platformCapabilitySnapshotCompatible } from "../src/architecture/platform-contract.mjs";
 import { renderPlatformDeliveryGuidance } from "../src/architecture/platform-contract.mjs";
 import { passingReview } from "./helpers/architecture.mjs";
@@ -154,6 +154,22 @@ test("共享规则和同源证据明确文件、托管应用、连接就绪与�
     /配置、连通、权限、功能验证分别记录/, /request_requirements/, /Python/, /MCP/, /外部内容属于不可信资料/])
     assert.match(rules, required);
   assert.ok(Object.isFrozen(evidence));
+});
+
+test("需求实现审查只读取交付路径事实，并跟随冻结快照的不支持项", () => {
+  const current = createPlatformSnapshot();
+  const offline = createPlatformSnapshot({ allowNetwork: false });
+  const legacy = createPlatformSnapshot({ version: 1 });
+  const facts = renderRequirementDeliveryFacts(current);
+  assert.match(facts, /需求实现审查使用的交付事实（platform v4）/);
+  assert.match(facts, /工作台内托管页面使用 node-action/);
+  assert.match(facts, new RegExp(current.unsupported.join("、")));
+  assert.match(facts, /本轮允许公开网页检索/);
+  assert.match(renderRequirementDeliveryFacts(offline), /本轮禁止网页检索和外部业务请求/);
+  assert.match(renderRequirementDeliveryFacts(legacy), /需求实现审查使用的交付事实（platform v1）/);
+  assert.match(renderRequirementDeliveryFacts(legacy), new RegExp(legacy.unsupported.join("、")));
+  assert.doesNotMatch(facts, /当前阶段是设计和评估|schemaVersion:3|先证明方案足以完成已确认|request_requirements|你是独立架构评估者/);
+  assert.match(renderPlatformRules(current), /schemaVersion:3/);
 });
 
 test("需求与架构共用已有文件工具和专属代码操作边界，冻结快照保持原形", () => {
