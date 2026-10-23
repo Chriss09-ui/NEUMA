@@ -112,7 +112,7 @@ test("真实 HTTP 入口、模型适配器、需求保存门槛串联；确认�
   const modelRequests = [];
   const actualProviders = makeProviders(config, async (_url, options) => {
     const request = JSON.parse(options.body); modelRequests.push(request);
-    const response = request.messages[0].content.includes("独立架构预评估者") ? await sufficientPreflight()
+    const response = request.messages[0].content.includes("需求实现审查者") ? await sufficientPreflight()
       : { draft: validDraft("核对固定材料并返回清单"), proposedGap: "none", question: "", confirmed: false };
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(response) } }] }), { status: 200 });
   });

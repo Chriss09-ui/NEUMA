@@ -214,7 +214,7 @@ test("独立复核根据完整原话消除已回答问题，并把拒绝降级�
   assert.equal(recorded.status, "resolved"); assert.deepEqual(recorded.resolution.evidence, decisions[0].evidence);
   assert.equal(recorded.resolution.assessmentId, result.assessments.at(-1).id);
   assert.equal(consultationGate(draft(), result, {}).allowed, true);
-  assert.match(real.requests[1].messages[0].content, /独立的问题、证据与阶段复核者/);
+  assert.match(real.requests[1].messages[0].content, /需求实现审查中的问题、证据与阶段复核者/);
 });
 
 test("已解决问题不能靠更换编号重问，也不把同一字段下真正的新问题一并删除", async () => {
