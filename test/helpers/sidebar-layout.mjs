@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 function inspectSidebarLayout({ markup, stylesheet, avatarAssets }, createHistory, renderAgent, renderGroup) {
   const style = document.createElement("style");
-  style.textContent = stylesheet + "\n#test-result { display: none; }\n*, *::before, *::after { animation: none !important; transition: none !important; }";
+  style.textContent = stylesheet + "\n.page-main-agent, .page-group { min-height: 0; }\n#test-result { display: none; }\n*, *::before, *::after { animation: none !important; transition: none !important; }";
   document.head.append(style); document.body.insertAdjacentHTML("beforeend", markup);
   const byId = (id) => document.getElementById(id);
   const agentList = byId("sidebar-agent-list"), groupList = byId("sidebar-group-list");
