@@ -128,7 +128,7 @@ cp .env.example .env
 npm start
 ```
 
-源码开发现已进入 TypeScript 渐进迁移。`npm start` 会先构建到 `dist/ts-build/package/` 再启动；开发数据、配置与 Agent 工作根仍指向源码仓库。需求、架构、研发控制器，以及服务、连接、群协作、项目、材料、技能和主 Agent 已迁为 TypeScript；前端、安装及维护脚本继续按迁移计划分批处理。运行产物仍使用原文件名，浏览器地址与应用协议保持现有形式。
+自有后端、前端、测试、安装及维护代码已迁为 TypeScript。`npm start` 会先严格编译到 `dist/ts-build/package/` 再启动；开发数据、配置与 Agent 工作根仍指向源码仓库。Node 源码使用 `.mts`，浏览器使用 `.ts`，CLI 使用 `.cts`，分别生成原 `.mjs`、`.js`、`.cjs` 路径。仅保留薄的 `scripts/build.mjs` 构建引导器；Python、C/C++ 和第三方资源保留原格式。浏览器地址与应用协议保持现有形式。
 
 启动后在网页“设置”中配置模型。服务端源码统一放在 `src/`，按功能分组；前端资源、测试和开发脚本分别在 `public/`、`test/` 和 `scripts/`。
 
@@ -140,7 +140,7 @@ npm run test:integration   # 本机模拟模型的真实 SDK、隔离执行、�
 npm run test:browser       # 显式启用外部浏览器验收
 npm test                   # 原有全量入口，默认关闭外部浏览器
 npm run release:preview:check
-npm run typecheck         # 严格检查已迁移的 TypeScript
+npm run typecheck         # 严格检查全部自有 TypeScript
 npm run build             # 生成同一目录布局的运行产物
 npm run package:pack      # 编译、检查并打包到 dist/npm/
 npm run test:package:smoke # 解包启动检查，复用开发依赖
@@ -149,13 +149,13 @@ npm run test:package:install # 独立临时安装生产依赖并启动
 
 测试命令自动构建并运行产物目录中的测试，构建失败或产物过期会停止执行。请使用 `package:pack` 生成安装包；源码目录直接 `npm pack`／`npm publish` 会被保护入口拒绝。打包本身不会公开发布。
 
-前三个命令加 `-- --list` 可只查看文件清单。分类按文件维护在 `scripts/run-tests.mjs`；混有真实执行的文件归入集成组，新文件未登记时提示并默认加入集成组。模块和集成命令始终关闭外部浏览器。浏览器命令运行现有 3 个文件中的 4 项浏览器验收及附带的 2 项状态检查，保留 `NEUMA_TEST_BROWSER` 指定的程序；macOS 默认只尝试 Dia，当前无界面参数兼容性仍待验证，不能把未运行或失败的浏览器检查当作通过。模型协议测试使用本机模拟接口，不调用真实模型服务。
+前三个命令加 `-- --list` 可只查看文件清单。分类按文件维护在 `scripts/run-tests.mts`，运行产物为同名 `.mjs`；混有真实执行的文件归入集成组，新文件未登记时提示并默认加入集成组。模块和集成命令始终关闭外部浏览器。浏览器命令运行现有 4 个文件中的浏览器验收及附带状态检查，保留 `NEUMA_TEST_BROWSER` 指定的程序；macOS 默认只尝试 Dia，当前无界面参数兼容性仍待验证，不能把未运行或失败的浏览器检查当作通过。模型协议测试使用本机模拟接口，不调用真实模型服务。
 
 ```text
 src/
-├── server.mjs         服务与 API 入口
-├── settings.mjs       模型与本机设置
-├── app-metadata.mjs   应用版本与元数据
+├── server.mts         服务与 API 入口
+├── settings.mts       模型与本机设置
+├── app-metadata.mts   应用版本与元数据
 ├── installation/      命令行、安装、数据迁移与实例锁
 ├── architecture/      方案设计、契约校验与独立评估
 ├── development/       研发流程、验收、工作区与交付

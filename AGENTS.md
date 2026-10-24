@@ -1,6 +1,6 @@
 # NEUMA 当前开发约定
 
-- TypeScript M0–M5 已引入编译目录 `dist/ts-build/package/`。开发使用 `npm start`；`npm test` 及分层测试会先严格检查已迁移模块、构建，再运行产物测试。源码根不能直接打包，使用 `npm run package:pack`；不要手改 dist 产物。现有 JS 按原字节复制，Node `.mts` 发射为 `.mjs`，浏览器 `.ts` 发射为 `.js`。本机已有改动和未完成的架构规则测试失败须与迁移回归分开记录。
+- TypeScript M0–M8 使用编译目录 `dist/ts-build/package/`。自有后端、前端、测试、安装和维护代码全部严格编译，关闭 `allowJs`，不使用 `noCheck`。开发使用 `npm start`；`npm test` 及分层测试先构建，再运行产物测试。源码根不能直接打包，使用 `npm run package:pack`；不要手改 dist。Node `.mts`、浏览器 `.ts`、CLI `.cts` 分别发射为 `.mjs`、`.js`、`.cjs`；唯一自有 JS 源码例外是薄的 `scripts/build.mjs` 引导器。发布验证当前只覆盖 Mac ARM64，Linux/Windows 打包与既有原生工作流不在本次收口范围。详见 `docs/typescript-m6-m8-results.md`。
 
 - M4/M5 已迁移需求、架构、研发及服务、连接、协作、项目、材料、技能、主 Agent 和 server 组装；源码 `.mts`、运行 import `.mjs`。历史 JSON 在对应读取边界验证消费字段，版本化检查点、授权、额度和业务状态仍由原验证器决定，不补写缺省版本或清零。详见 `docs/typescript-m4-m5-results.md`。
 
