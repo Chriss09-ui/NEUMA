@@ -261,8 +261,8 @@ export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult
           }
           await safeCall(onToolDiagnostic, { stage: "arguments", toolName: call.name,
             raw: { available: Boolean(raw), complete: raw?.complete ?? false, bytes: raw?.bytes ?? 0, validJson: valid,
-              ...(valid ? { shape: argumentShape(parsed, tools.get(call.name)!.parameters) } : {}) },
-            parsed: argumentShape(call.arguments, tools.get(call.name)!.parameters),
+              ...(valid ? { shape: argumentShape(parsed, tools.get(call.name)!.parameters as ToolSchema) } : {}) },
+            parsed: argumentShape(call.arguments, tools.get(call.name)!.parameters as ToolSchema),
             stopReason: ["stop", "length", "toolUse", "error", "aborted"].includes(message.stopReason) ? message.stopReason : "other",
             rawStopReason, ...(usage && Object.keys(usage).length ? { usage } : {}) });
         }
@@ -277,7 +277,7 @@ export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult
       const result = tools.has(message.toolName) ? await safeCall(toolErrorResult,
         { toolName: message.toolName, toolCallId: message.toolCallId, args: call?.type === "toolCall" ? call.arguments : undefined }) : undefined;
       const feedback = !result?.content && tools.has(message.toolName) && call?.type === "toolCall" && call.name === message.toolName
-        ? toolInputValidation(call.arguments, tools.get(message.toolName)!.parameters, { root: message.toolName }) : undefined;
+        ? toolInputValidation(call.arguments, tools.get(message.toolName)!.parameters as ToolSchema, { root: message.toolName }) : undefined;
       const replacement = { ...message, content: result?.content ?? [{ type: "text", text: JSON.stringify({ executed: false, reason: "sdk_validation",
         ...(feedback && !feedback.valid ? feedback : {}), nextAction: "工具参数未通过结构校验，本次未执行。按具体字段修正；未修改参数的重试不能解决此错误。" }) }],
         details: result?.details ?? { reason: "sdk_validation" }, structuredContent: undefined };

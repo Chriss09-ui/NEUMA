@@ -1,11 +1,12 @@
-import type { AgentSession, AgentSessionEvent, ContextEvent, PromptOptions } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, ContextEvent, PromptOptions, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelConfig, ResolvedModelProfile } from "../contracts/model.mjs";
-import type { UnknownRecord } from "../contracts/json.mjs";
+import type { UnknownRecord, JsonValue } from "../contracts/json.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 export interface NeumaTool {
   name: string; label: string; description: string; parameters: ToolSchema; executionMode?: "sequential" | "parallel";
   execute(id: string, input: unknown, signal?: AbortSignal): Promise<ToolResult>;
 }
+export type RegisteredTool = NeumaTool | ToolDefinition;
 export interface SessionStorage { directory: string; binding: unknown; file?: string }
 export interface RawToolInput { toolName: string; toolCallId: string; args: unknown }
 export interface RawDecision { valid: boolean; reason?: string }
@@ -18,16 +19,20 @@ export interface PiSessionPort {
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   setAutoCompactionEnabled(enabled: boolean): void;
   getLastAssistantText(): string | undefined;
-  readonly messages: readonly { role: string; stopReason?: string; errorMessage?: string }[];
+  readonly messages: AgentSession["messages"];
+  modelCallAccounting?: boolean;
+  readonly modelRequestRejection?: ModelRequestRejection;
+  sessionBindingHash?: string;
+  readonly sessionFile?: string | undefined;
 }
 export interface PiSessionOptions {
-  config: ModelConfig; cwd: string; dataDir: string; manager?: ProjectManagerPort; turn?: ProjectTurn; customTools?: NeumaTool[];
+  config: ModelConfig; cwd: string; dataDir: string; manager?: ProjectManagerPort; turn?: ProjectTurn; customTools?: RegisteredTool[];
   systemPrompt?: string; maxOutputTokens?: number; reasoningMode?: "off" | "auto";
   sessionStorage?: SessionStorage;
   beforeModelRequest?: (event: { signal?: AbortSignal | null | undefined }) => unknown | Promise<unknown>;
-  onModelCall?: (event: { signal?: AbortSignal | null | undefined; purpose: string; retryAttempt: number }) => unknown | Promise<unknown>;
+  onModelCall?: (event: { signal?: AbortSignal | undefined; purpose?: string; retryAttempt?: number }) => unknown | Promise<unknown>;
   onToolDiagnostic?: (event: UnknownRecord) => unknown | Promise<unknown>;
-  toolErrorResult?: (input: RawToolInput) => ToolResult | undefined | Promise<ToolResult | undefined>;
+  toolErrorResult?: (input: RawToolInput) => (ToolResult & { details: JsonValue }) | undefined | Promise<(ToolResult & { details: JsonValue }) | undefined>;
   rawInputValidators?: Record<string, (input: RawToolInput) => RawDecision | Promise<RawDecision>>;
   transformContext?: (messages: ContextEvent["messages"]) => ContextEvent["messages"] | undefined | Promise<ContextEvent["messages"] | undefined>;
   preparePrompt?: (text: string) => string | Promise<string>;
@@ -41,9 +46,9 @@ export interface ProjectSummary extends UnknownRecord {
 export interface ProjectManagerPort {
   list(): Promise<ProjectSummary[]>;
   failures(input: { limit: unknown }): Promise<unknown>;
-  runtime(options: { signal?: AbortSignal | null | undefined }): Promise<{ checkedAt: unknown; summary: unknown; warnings: unknown; projects: (ProjectSummary & { runtime: { state: string } })[]; ports: { port: number; processName: string; projects: { name: string }[] }[] }>;
-  add(input: UnknownRecord, options: { signal?: AbortSignal | null | undefined; instructions: string; onProgress: Progress }): Promise<ProjectSummary>;
-  inspect(id: unknown, options: { signal?: AbortSignal | null | undefined; instructions: string; onProgress: Progress }): Promise<ProjectSummary>;
+  runtime(options: { signal?: AbortSignal | undefined }): Promise<{ checkedAt: unknown; summary: unknown; warnings: unknown; projects: (ProjectSummary & { runtime: { state: string } })[]; ports: { port: number; processName: string; projects: { name: string }[] }[] }>;
+  add(input: UnknownRecord, options: { signal?: AbortSignal | undefined; instructions: string; onProgress: Progress }): Promise<ProjectSummary>;
+  inspect(id: unknown, options: { signal?: AbortSignal | undefined; instructions: string; onProgress: Progress }): Promise<ProjectSummary>;
   start(id: unknown): Promise<ProjectSummary>; stop(id: unknown): Promise<ProjectSummary>;
   remove(id: unknown, options: { removeOnly: unknown }): Promise<UnknownRecord>;
 }

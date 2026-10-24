@@ -1,3 +1,4 @@
+import type { NeumaTool } from "./pi-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import { objectFields, isArray, isInteger, errorField } from "./type-boundary.mjs";
@@ -44,7 +45,7 @@ export function modelContextValue(source: UnknownRecord, section: unknown, point
   return value;
 }
 
-export function createModelContextReader(getSource: () => UnknownRecord | Promise<UnknownRecord>) {
+export function createModelContextReader(getSource: () => UnknownRecord | Promise<UnknownRecord>): NeumaTool {
   const request = { type: "object", additionalProperties: false, required: ["section"], properties: {
     section: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]{0,79}$" },
     pointer: { type: "string", maxLength: 500 }, offset: { type: "integer", minimum: 0 },

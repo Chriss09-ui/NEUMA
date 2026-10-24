@@ -1,3 +1,4 @@
+import type { ServiceManifest } from "./service.mjs";
 import type { JsonPrimitive, JsonValue, UnknownRecord } from "./json.mjs";
 export type ValueKind = "object" | "array" | "string" | "number" | "integer" | "boolean" | "null";
 export interface ValueSchema {
@@ -12,9 +13,9 @@ export interface ValueSchema {
 }
 export interface ApplicationAction { id: string; title: string; inputSchema: ValueSchema; outputSchema: ValueSchema; connectionIds: string[] }
 export interface ApplicationPage { entrypoint: string; resources: { path: string; sha256: string }[] }
-/** Service implementation is checked by its existing validator; full service migration belongs to M5. */
+/** Service payload is checked by its M5 runtime validator. */
 export interface ApplicationManifestBase extends UnknownRecord { entrypoint: string; page: ApplicationPage | null; actions: ApplicationAction[]; stateVersion: number; evidenceIds: string[] }
-export type ApplicationManifest = ApplicationManifestBase & ({ protocolVersion: 2; runtime: "node-action" } | { protocolVersion: 3; runtime: "managed-service"; service: UnknownRecord });
+export type ApplicationManifest = ApplicationManifestBase & ({ protocolVersion: 2; runtime: "node-action"; service?: never } | { protocolVersion: 3; runtime: "managed-service"; service: ServiceManifest });
 export interface SnapshotFile { path: string; hash: string; [key: string]: unknown }
 export interface ApplicationSnapshot { files: SnapshotFile[]; [key: string]: unknown }
 export interface TaskSource extends UnknownRecord { scope: string; kind?: string }
@@ -26,7 +27,7 @@ export interface TaskEvent extends UnknownRecord { type: string; seq: number; at
 export interface ApplicationTask extends ApplicationTaskInput {
   id: string; agentId: string; status: string; sequence: number; requestHash: string; createdAt: string; updatedAt: string;
   progress: unknown; result: unknown; artifacts: TaskArtifact[]; events: TaskEvent[];
-  workflowId?: string; resumeReceipts?: { mutationId: string; requestHash: string }[];
+  allowNetwork?: boolean | undefined; waiting?: unknown; workflowId?: string; resumeReceipts?: { mutationId: string; requestHash: string }[];
   error?: string | null; finishedAt?: string | null;
 }
 export interface TaskRecord { version: 1; agentId: string; tasks: ApplicationTask[]; [key: string]: unknown }

@@ -6,7 +6,7 @@ export interface ToolSchema {
   items?: ToolSchema; anyOf?: ToolSchema[]; oneOf?: ToolSchema[]; allOf?: ToolSchema[];
   then?: ToolSchema; else?: ToolSchema; const?: unknown; enum?: unknown[];
 }
-export interface ToolResult { content: { type: "text"; text: string }[]; details: JsonValue; terminate?: boolean }
+export interface ToolResult { content: ({ type: "text"; text: string } | { type: "image"; mimeType: string; data: string })[]; details: unknown; terminate?: boolean }
 export interface DiagnosticHint {
   expectedType?: string | undefined; expectedTypes?: string[];
   allowedFields?: string[]; requiredFields?: string[]; allowedValues?: unknown[];

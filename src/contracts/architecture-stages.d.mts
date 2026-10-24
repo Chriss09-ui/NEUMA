@@ -1,0 +1,14 @@
+import type { ArchitectureBase, ArchitectureDesign, ArchitectureComponent, ArchitectureStep, ArchitectureDecision, ArchitectureAcceptance, ArchitectureInteraction, PlatformClaim, ArchitectureContext, RequirementItem, EvidenceItem, ConfirmedRequirementContext, DeferredVerifications } from "./architecture.mjs";
+import type { ConnectionDefinition } from "./connection.mjs";
+import type { ToolSchema } from "./tools.mjs";
+export type StageReference = string | { moduleId: string; id: string };
+export interface BlueprintAssignment { id: string; purpose: string; requirementIds: string[]; componentIds?: string[]; stepIds?: string[]; dependsOn: string[]; inputs: string; outputs: string }
+export interface CandidateDraft extends ArchitectureBase { schemaVersion?: 2 | 3; interaction?: ArchitectureInteraction; connections?: ConnectionDefinition[]; execution?: { language: "none" | "javascript" | "python"; hosting: "builtin" | "managed" | "docker"; reason: string }; selectionBasis?: { capacity: string; process: string; quality: string; requirementIds: string[]; assumptions: string[] }; platformClaims?: PlatformClaim[] }
+export type ArchitectureGlobal = Omit<CandidateDraft, "components" | "steps" | "capabilities" | "failureHandling" | "decisions" | "coverage" | "acceptance" | "unknowns" | "platformClaims">;
+export interface ArchitectureBlueprint { global: ArchitectureGlobal; modules: BlueprintAssignment[] }
+export interface ArchitectureModule { moduleId: string; blueprintHash: string; instructions: string; components: ArchitectureComponent[]; steps: (Omit<ArchitectureStep, "dependsOn"> & { dependsOn: StageReference[] })[]; capabilities: ArchitectureBase["capabilities"]; failureHandling: ArchitectureBase["failureHandling"]; decisions: ArchitectureDecision[]; coverage: { requirementId: string; componentIds: StageReference[]; verification: string }[]; acceptance: ArchitectureAcceptance[]; unknowns: ArchitectureBase["unknowns"]; platformClaims?: PlatformClaim[] }
+export interface ResolvedArchitectureModule extends Omit<ArchitectureModule, "steps" | "coverage"> { steps: ArchitectureBase["steps"]; coverage: ArchitectureBase["coverage"] }
+export interface ArchitectureConflict { path: string; reason: string; relatedPaths: string[]; moduleIds: string[] }
+export interface StageSchema extends ToolSchema { properties?: Record<string, StageSchema>; items?: StageSchema; anyOf?: StageSchema[]; maxItems?: number; minItems?: number; maxLength?: number }
+export interface StageSchemaOptions { candidateSchema: StageSchema; requirements?: RequirementItem[]; legacyBlueprint?: boolean }
+export interface StageAssemblyOptions extends StageSchemaOptions { blueprint: ArchitectureBlueprint; modules: ArchitectureModule[]; mergeCapabilityReasons?: boolean; evidence?: EvidenceItem[]; confirmedRequirementContext?: unknown; deferredVerifications?: unknown }
