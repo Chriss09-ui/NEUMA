@@ -104,8 +104,8 @@ test("构建保留原始需求、原子持久化，等价需求复用定义，�
   const first = await agents.build(input());
   assert.equal(first.agent.mode, "designed"); assert.equal(first.agent.status, "ready"); assert.equal(first.agent.revision, 1);
   assert.deepEqual(first.agent.draft, draft()); assert.equal(first.agent.fingerprint, undefined);
-  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
-  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
+  assert.deepEqual(records[0].options.customTools.map((tool) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
+  assert.deepEqual(records.reviews[0].options.customTools.map((tool) => tool.name), ["read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.equal(first.architecture.status, "passed"); assert.equal(first.architecture.delivery, "ready");
   assert.deepEqual(first.agent.architectureRef, { version: first.architecture.version, candidateHash: designHash(first.architecture.design) });
   assert.notEqual(records[0].session, records.reviews[0].session);
@@ -525,8 +525,8 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks)); requests.push(body);
     const names = body.tools.map((tool) => tool.function.name), builder = names.includes("submit_architecture"), reviewer = names.includes("submit_architecture_review");
-    const expectedTools = builder ? ["delegate_module", "request_requirements", "revise_architecture_submission", "search_technical_sources", "submit_architecture", "submit_architecture_draft", "web_fetch", "web_search"]
-      : reviewer ? ["request_requirements", "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
+    const expectedTools = builder ? ["delegate_module", "read_model_context", "request_requirements", "revise_architecture_submission", "search_technical_sources", "submit_architecture", "submit_architecture_draft", "web_fetch", "web_search"]
+      : reviewer ? ["read_model_context", "request_requirements", "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
     assert.deepEqual(names.sort(), expectedTools);
     response.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture-model",
@@ -538,9 +538,14 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
       const name = builder ? "submit_architecture" : reviewer ? "submit_architecture_review" : "write_workspace_file";
       const arguments_ = builder ? validDesign(payload.requirements, { capabilities: fileCapabilities(), instructions: "将用户材料保存为周报，回复文件名。" })
         : reviewer ? passingReview(payload.candidateHash) : { file: "weekly.md", content: "真实工具产物" };
-      if (builder) assert.deepEqual(payload.requirement.draft, draft());
+      if (builder) {
+        assert.deepEqual(payload.draft, draft());
+        assert.equal(payload.requirement, undefined); assert.equal(payload.candidateSchema, undefined);
+        assert.ok(payload.contextIndex.some(item => item.section === "candidateSchema"));
+      }
       if (reviewer) {
-        assert.deepEqual(payload.requirement, draft());
+        assert.equal(payload.requirement, undefined); assert.equal(payload.draft, undefined);
+        assert.ok(payload.requirements.length);
         assert.equal(payload.candidateHash, designHash(payload.design));
       }
       chunk({ role: "assistant", tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(arguments_) } }] }); chunk({}, "tool_calls");

@@ -16,7 +16,7 @@ const parameters = { type: "object", additionalProperties: false, required: ["do
 for (const wrapped of [false, true]) test(`返需复核完整JSON${wrapped ? "终止封装" : "参数正文"}首轮通过同一提交校验`, async () => {
   const prompts = [];
   const sessionFactory = async (options) => {
-    assert.deepEqual(options.customTools.map((tool) => tool.name), ["submit_handoff_necessity"]);
+    assert.deepEqual(options.customTools.map((tool) => tool.name), ["submit_handoff_necessity", "read_model_context"]);
     assert.match(options.systemPrompt, /role=handoff-verifier，submitName=submit_handoff_necessity/u);
     assert.match(options.systemPrompt, /技术问题一律不得判user_choice/);
     assert.match(options.systemPrompt, /需求原文仍未写明用户要的业务结果/);
@@ -130,7 +130,7 @@ test("真实Pi主会话返需先触发独立检查，被认定候选新增限制
     const payload = JSON.parse(typeof content === "string" ? content : content.filter((entry) => entry.type === "text").map((entry) => entry.text).join(""));
     let name, value;
     if (checker) {
-      assert.deepEqual(body.tools.map((tool) => tool.function.name), ["submit_handoff_necessity"]);
+      assert.deepEqual(body.tools.map((tool) => tool.function.name), ["submit_handoff_necessity", "read_model_context"]);
       const retry = body.messages.some((message) => message.role === "tool");
       name = "submit_handoff_necessity"; value = { contextHash: payload.contextHash, decisions: [{ issueId: "allowed_characters", classification: "candidate_design_issue",
         reason: "用户只规定长度及小写，字母白名单由候选自行增加。", references: retry && !alwaysInvalid ? proposal().references : [{ source: "requirements", path: "/0/text", quote: "不存在的证据" }] }] };

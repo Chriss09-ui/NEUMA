@@ -421,7 +421,11 @@ test("真实SDK与隔离动作区分平台结构拒绝和带位置的业务拒�
   assert.deepEqual(result.plan.cases, DEVELOPMENT_REJECTION_EXAMPLE.cases);
   const first = fixture.requests.filter(({ body }) => body.messages.every((item) => ["system", "user"].includes(item.role)));
   assert.deepEqual([...new Set(first.map((item) => item.key.split("-")[0]))].sort(), ["developer", "planner", "reviewer"]);
-  for (const request of first) assert.equal(request.payload.valueSchemaGuide, VALUE_SCHEMA_DESCRIPTION);
+  for (const request of first) {
+    assert.equal(request.payload.valueSchemaGuide, undefined);
+    const guide = request.payload.contextSections.find(item => item.section === "valueSchemaGuide");
+    assert.equal(guide.delivery, "paged"); assert.equal(guide.totalChars, JSON.stringify(VALUE_SCHEMA_DESCRIPTION).length);
+  }
   const tool = first.find((item) => item.key === "planner").body.tools.find((item) => item.function.name === "submit_development_plan");
   assert.ok(tool.function.parameters.properties.indexPath);
   const fullSchema = fixture.readSchema;
@@ -452,7 +456,8 @@ test("真实Pi专用用例数组拒绝外层字符串，保留夹具后正式提
   assert.doesNotMatch(textOf(replies[0].content), /研发协议验证|Received arguments/);
   const first = fixture.requests.find((entry) => entry.key === "planner");
   const schema = first.body.tools.find((item) => item.function.name === "save_plan_cases").function.parameters.properties.cases;
-  assert.equal(first.payload.valueSchemaGuide, VALUE_SCHEMA_DESCRIPTION);
+  assert.equal(first.payload.valueSchemaGuide, undefined);
+  assert.equal(first.payload.contextSections.find(item => item.section === "valueSchemaGuide").delivery, "paged");
   assert.equal(fixture.planSchemaPages.length, Math.ceil(fixture.planSchemaPages[0].totalChars / 8000));
   assert.equal(fixture.planSchemaPages.at(-1).nextOffset, null);
   assert.equal(fixture.toolCalls.filter((item) => item.name === "read_development_context" && item.args.section === "planSchema").length, fixture.planSchemaPages.length);

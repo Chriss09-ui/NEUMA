@@ -5,6 +5,8 @@ import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs
 import { readPiBoundSession } from "../runtime/pi-session-state.mjs";
 import { architectureModelOutputBudget } from "../runtime/model-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
+import { createModelContextReader } from "../runtime/model-context.mjs";
+import { projectArchitectureMessages, architectureNodePrompt } from "./architecture-model-context.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   architectureTurnBudgetSpent, CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
@@ -39,7 +41,8 @@ import { createArchitectureFidelityProgress, readArchitectureFidelityProgress, a
 import { readArchitectureFidelityRevision } from "./architecture-fidelity-revision.mjs";
 import { readArchitectureRejectedFidelityReference } from "./architecture-fidelity-rejected-reference.mjs";
 import { ARCHITECTURE_FIDELITY_CONTEXT_VERSION, architectureFidelityContextVersion, createArchitectureFidelityContext } from "./architecture-fidelity-context.mjs";
-import { architectureDesignRecovery, runArchitectureDesignPipeline } from "./architecture-design-pipeline.mjs";
+import { architectureDesignRecovery, runArchitectureDesignPipeline, architectureDesignCallLimits,
+  ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT } from "./architecture-design-pipeline.mjs";
 import { applyArchitectureIntegration } from "./architecture-design-stages.mjs";
 import { architectureReviewRevisionRecovery, createArchitectureReviewRevision, readArchitectureReviewRevision, runArchitectureReviewRevision,
   createArchitectureReviewRetry, createArchitectureReviewTestRetry, createArchitectureReviewContinuation, readArchitectureReviewRetry,
@@ -700,7 +703,8 @@ export class ArchitectureDesigner {
       const origin = previous.find(value => value.designStageDiagnostics?.[recovery.stageKey]?.lastSubmissionIssue
         || value.diagnostic?.lastSubmissionIssue && [value.designProgressCheckpoint.blueprint,
           ...value.designProgressCheckpoint.modules, value.designProgressCheckpoint.integration]
-          .filter(entry => entry.result === null && entry.modelCalls >= 3).map(entry => entry.key).join() === recovery.stageKey);
+          .filter(entry => entry.result === null && entry.modelCalls >= architectureDesignCallLimits(value.designProgressCheckpoint).stage)
+          .map(entry => entry.key).join() === recovery.stageKey);
       const issue = origin?.designStageDiagnostics?.[recovery.stageKey]?.lastSubmissionIssue ?? origin?.diagnostic?.lastSubmissionIssue;
       const reason = issue?.reason === "component_unused" || issue?.path === "module.steps.componentId"
         ? "执行步骤尚未覆盖全部已声明组件。"
@@ -716,6 +720,37 @@ export class ArchitectureDesigner {
     if (!Number.isSafeInteger(version) || version < 1) return null;
     await this.ready;
     return structuredClone(this.records.get(`${id}:${version}`) ?? null);
+  }
+
+  // Maintenance operation: the caller must stop active builds and obtain an explicit user request.
+  // Preparing a new attempt never invokes a model or changes any previous version.
+  prepareRestart(id, { expectedVersion, expectedHash, authorization } = {}) {
+    agentId(id);
+    const task = this.persistence.then(async () => {
+      await this.ready;
+      const previous = [...this.records.values()].filter(record => record.agentId === id).sort((a, b) => b.version - a.version)[0];
+      if (!previous || previous.version !== expectedVersion || designHash(previous) !== expectedHash)
+        throw new InputError("待重开设计的原始版本已变化，请先核对当前材料。");
+      if (!["failed", "cancelled", "needs_changes", "needs_evidence", "infeasible"].includes(previous.status) || !previous.draft?.taskSpec)
+        throw new InputError("只有已停止且未通过的阶段化架构可以准备新一轮设计。");
+      if (typeof authorization !== "string" || !authorization.trim() || !textWithinLimit(authorization, 2000))
+        throw new InputError("从架构起点重开需要保留用户的明确请求。");
+      const now = new Date().toISOString();
+      const record = { agentId: id, name: previous.name, draft: structuredClone(previous.draft),
+        version: previous.version + 1, contractVersion: ARCHITECTURE_VERSION, sourceFingerprint: previous.sourceFingerprint,
+        status: "pending", delivery: "blocked", summary: "已准备从架构蓝图重新开始；原方案、检查结果和历史用量已保留，等待手动开始。",
+        requirements: structuredClone(previous.requirements), design: null, review: null, candidateHash: null,
+        evidence: [], researchGaps: [], modules: [], attempts: [], issues: [],
+        restartSource: { version: previous.version, recordHash: expectedHash, preparedVersion: previous.version + 1,
+          authorization: authorization.trim(), createdAt: now }, createdAt: now, updatedAt: now };
+      const next = new Map(this.records); next.set(`${id}:${record.version}`, record);
+      await this.storage.writeJson(id, "architecture.json", { version: 1,
+        records: [...next.values()].filter(value => value.agentId === id) });
+      this.records = next;
+      return structuredClone(record);
+    });
+    this.persistence = task.catch(() => {});
+    return task;
   }
 
   save(record) {
@@ -814,7 +849,17 @@ export class ArchitectureDesigner {
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = ARCHITECTURE_ROLE_TURN_LIMIT, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
     stageReasoningMode, maxOutputTokens, formatSubmissionLimit, resumeSubmissionIssue, reviewRetry = false }) {
-    const allowedCallLimit = role === "reviewer" && reviewRetry ? typeof reviewRetry === "object"
+    let modelMaterials = { ...payload, roleGuide: systemPrompt };
+    const contextReader = createModelContextReader(() => ({ ...modelMaterials,
+      ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(), rejectedDraft: reviewParts.rejectedSnapshot() } } : {}),
+      ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) }));
+    const modelPrompt = (value) => {
+      modelMaterials = { ...modelMaterials, ...value };
+      return JSON.stringify(value);
+    };
+    const allowedCallLimit = ["blueprint", "module", "integration"].includes(payload.pipelineStage) && typeof onStageModelCall === "function"
+      ? ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT + ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT
+      : role === "reviewer" && reviewRetry ? typeof reviewRetry === "object"
       ? architectureReviewRetryCallLimit(reviewRetry) : ARCHITECTURE_REVIEW_TEST_RETRY_CALL_LIMIT : ARCHITECTURE_ROLE_TURN_LIMIT;
     if (!Number.isSafeInteger(allowedCallLimit) || !Number.isSafeInteger(modelCallLimit) || modelCallLimit < 1 || modelCallLimit > allowedCallLimit
       || formatSubmissionLimit !== undefined && formatSubmissionLimit !== ARCHITECTURE_FORMAT_SUBMISSION_LIMIT)
@@ -1189,7 +1234,7 @@ export class ArchitectureDesigner {
           throw error;
         }
       } } : null;
-    const roleTools = [...tools, ...(evidenceReader ? [evidenceReader.tool] : []), ...(platformContractTool ? [platformContractTool] : []), ...(allowHandoff ? [requestRequirements] : []),
+    const roleTools = [...tools, contextReader, ...(evidenceReader ? [evidenceReader.tool] : []), ...(platformContractTool ? [platformContractTool] : []), ...(allowHandoff ? [requestRequirements] : []),
       ...(reviewParts ? [saveReviewParts, submitReviewParts] : []),
       submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), submit]
       .map((tool) => ({ ...tool, execute: async (...args) => {
@@ -1312,7 +1357,10 @@ export class ArchitectureDesigner {
         reasoningMode: stageReasoningMode ?? (role === "reviewer" || role === "designer" && editableDesign
           || role === "specialist" && technicalRevision ? "off" : "auto"),
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
-        systemPrompt: systemPrompt + (platformContractTool && role === "designer" ? "\n" + PLATFORM_CLAIMS_PROMPT : "") + "\n" + renderPiSubmissionContract({ role, submitName, tools: roleTools,
+        transformContext: messages => projectArchitectureMessages(messages, { role, roleGuide: systemPrompt }),
+        preparePrompt: text => projectArchitectureMessages([{ role: "user", content: text }], { role, roleGuide: systemPrompt })[0].content,
+        systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName })
+          + (platformContractTool && role === "designer" ? "\n" + PLATFORM_CLAIMS_PROMPT : "") + "\n" + renderPiSubmissionContract({ role, submitName, tools: roleTools,
           alternativeTools: [submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), ...(submitReviewParts ? [submitReviewParts] : []), ...(allowHandoff ? [requestRequirements] : [])].map((tool) => tool.name), structuredResponse: true })
           + (reviewParts?.reference().batch ? "\n当前batch的save_architecture_review_parts也明确允许用单个严格JSON正文提交分项参数，或submission包装。宿主执行同一保存校验并落盘后才派发下一批；这不是整阶段终止或通过，其他读写和外部操作仍须真实工具调用。" : ""), customTools: roleTools,
         rawInputValidators: Object.fromEntries(roleTools.map(({ name }) => [name, async (call) => {
@@ -1374,16 +1422,16 @@ export class ArchitectureDesigner {
           else try { charge(); } catch { failed = true; }
         }
       }) ?? (() => {});
-      let prompt = resumeStage ? JSON.stringify({ type: "resume_architecture_stage", pipelineStage: payload.pipelineStage,
+      let prompt = resumeStage ? modelPrompt({ type: "resume_architecture_stage", pipelineStage: payload.pipelineStage,
         submitName, modelBudget: modelBudget(),
         ...(payload.stageRepair ? { stageRepair: payload.stageRepair } : {}),
         ...(rejectedReference() ? { rejectedSubmission: rejectedReference(), lastSubmissionIssue,
           repairInstruction: "宿主已从原会话恢复上次被拒的完整模块稿。可使用当前submissionHash调用revise_architecture_submission，只替换需要修正的已有字段；仍执行完整校验。" } : {}),
-        instruction: "继续原会话中的同一设计阶段，只补未完成的提交或按原工具错误修正；已用轮次不重置。只使用本轮公开的阶段提交契约，阶段保存不代表整体通过。" }) : undefined;
+        instruction: "继续原会话中的同一设计阶段，只补未完成的提交或按原工具错误修正；已用轮次不重置。只使用本轮公开的阶段提交契约，阶段保存不代表整体通过。" }, true) : undefined;
       while (true) {
         signal?.throwIfAborted();
         if (!session.modelCallAccounting) { fallbackEnded = false; await chargeRequest(); }
-        prompt ??= JSON.stringify({ ...payload, handoffPolicy: HANDOFF_POLICY, modelBudget: modelBudget(),
+        prompt ??= modelPrompt({ ...payload, handoffPolicy: HANDOFF_POLICY, modelBudget: modelBudget(),
           ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(),
             ...(reviewParts.rejectedSnapshot() ? { rejectedDraft: reviewParts.rejectedSnapshot() } : {}) } } : {}),
           ...(editableReference() ? { editableSubmission: editableReference() } : {}),
@@ -1431,9 +1479,9 @@ export class ArchitectureDesigner {
           if (stalled()) throw failure("review_repair_stalled", details());
         }
         if (reviewParts?.reference().batch && savedPartChanges > changesBeforePrompt && !structuredFeedback) {
-          prompt = JSON.stringify({ type: "review_batch", modelBudget: modelBudget(),
+          prompt = modelPrompt({ type: "review_batch", modelBudget: modelBudget(),
             reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot() },
-            instruction: "仅处理当前batch稳定编号：save保存本批；submit-with-parts或final-only同时正式提交剩余真实行与结论；submit仅正式提交已保存成果。已有分项仅在发现具体错误时修正，仍须完整校验与独立复核。" });
+            instruction: "仅处理当前batch稳定编号：save保存本批；submit-with-parts或final-only同时正式提交剩余真实行与结论；submit仅正式提交已保存成果。已有分项仅在发现具体错误时修正，仍须完整校验与独立复核。" }, true);
           continue;
         }
         const staged = !structured && last?.stopReason === "stop" ? unsubmittedDraft.captureAssistant(last,
@@ -1452,14 +1500,14 @@ export class ArchitectureDesigner {
         if (last?.stopReason !== "stop" || submissionContinuations >= 1) throw failure("submission_incomplete", details());
         submissionContinuations++;
         if (staged) stagedDrafts++;
-        prompt = JSON.stringify({ type: "submission_required", submitName, modelBudget: modelBudget(),
+        prompt = modelPrompt({ type: "submission_required", submitName, modelBudget: modelBudget(),
           ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot() } } : {}),
           ...(rejectedReference() ? { rejectedSubmission: rejectedReference() } : {}),
           ...(editableReference() ? { editableSubmission: editableReference() } : {}),
           ...(staged ? { unsubmittedDraft: staged } : {}),
           ...(draftDiagnostic ? { unsubmittedDraftDiagnostic: draftDiagnostic } : {}),
           ...(structuredFeedback ? { structuredSubmissionFeedback: structuredFeedback } : {}),
-          instruction: "当前阶段尚无有效正式提交。继续同一任务，核对现有材料并调用submitName所指定的提交工具；如提供unsubmittedDraft，可主动调用其submitToolName并仅携带draftHash正式提交原完整草稿；宿主提供editableSubmission或rejectedSubmission时可使用当前编号和本轮修订工具。纯文字说明不算提交，不得凭空宣布通过、改写用户要求或制造新的业务选择。此提醒最多一次，继续使用原剩余预算。" });
+          instruction: "当前阶段尚无有效正式提交。继续同一任务，核对现有材料并调用submitName所指定的提交工具；如提供unsubmittedDraft，可主动调用其submitToolName并仅携带draftHash正式提交原完整草稿；宿主提供editableSubmission或rejectedSubmission时可使用当前编号和本轮修订工具。纯文字说明不算提交，不得凭空宣布通过、改写用户要求或制造新的业务选择。此提醒最多一次，继续使用原剩余预算。" }, true);
       }
     } catch (error) {
       if (signal?.aborted) throw failure("cancelled", details());
@@ -1499,6 +1547,15 @@ export class ArchitectureDesigner {
     await this.ready; signal?.throwIfAborted();
     const requirements = requirementItems(definition.draft);
     const previous = await this.get(definition.id);
+    const restartSource = previous?.sourceFingerprint === definition.fingerprint
+      && designHash(previous.draft) === designHash(definition.draft) ? previous.restartSource : null;
+    if (restartSource && (!Number.isSafeInteger(restartSource.preparedVersion) || restartSource.preparedVersion > previous.version
+      || restartSource.version >= restartSource.preparedVersion
+      || designHash(await this.getVersion(definition.id, restartSource.version)) !== restartSource.recordHash))
+      throw new InputError("新一轮设计的历史来源无法核验，请保留原记录检查。");
+    // A later interruption must not pull a candidate from before the explicitly requested restart.
+    const attemptHistory = [...this.records.values()].filter(record => record.agentId === definition.id
+      && (!restartSource || record.version >= restartSource.preparedVersion));
     const designProgressSource = definition.draft.taskSpec && previous
       && previous.sourceFingerprint === definition.fingerprint && designHash(previous.draft) === designHash(definition.draft)
       && Object.hasOwn(previous, "designProgressCheckpoint") && previous.status !== "passed" ? previous : null;
@@ -1521,7 +1578,7 @@ export class ArchitectureDesigner {
     const runtimeCapabilities = runtimeCapabilityContract();
     const candidateSchema = designSubmissionSchema(definition.draft, { requirements });
     const revisionContext = { requirements, platformContext, deferred, confirmedRequirementContext, runtimeCapabilities,
-      evidenceHistory: [...this.records.values()].filter(record => record.agentId === definition.id) };
+      evidenceHistory: attemptHistory };
     const reviewRetry = recovery?.kind === "review_retry";
     const reviewRevision = recovery?.kind === "review_revision" || reviewRetry;
     const reviewRetryCheckpoint = reviewRetry ? architectureRepair?.kind === "review_continue"
@@ -1541,12 +1598,12 @@ export class ArchitectureDesigner {
       ? await this.getVersion(definition.id, savedReviewRevision.source.version) : previous : null;
     const reviewedRevisionSeed = reviewRevision ? reviewedArchitectureSeed(reviewRevisionSource, definition, revisionContext) : null;
     if (reviewRevision && !reviewedRevisionSeed) throw new InputError("原方案与独立评审来源不能完整核验，请保留材料检查；不能建立替代修订。");
-    const feedbackSeed = feedbackRepairSeed(previous, this.records.values(), definition, revisionContext);
+    const feedbackSeed = feedbackRepairSeed(previous, attemptHistory, definition, revisionContext);
     let revisionSeed = architectureRevisionSeed(previous, definition, revisionContext)
-      ?? interruptedArchitectureRevisionSeed(previous, this.records.values(), definition, revisionContext);
-    revisionSeed = await rejectedFidelityArchitectureRevisionSeed(previous, this.records.values(), definition, revisionContext,
+      ?? interruptedArchitectureRevisionSeed(previous, attemptHistory, definition, revisionContext);
+    revisionSeed = await rejectedFidelityArchitectureRevisionSeed(previous, attemptHistory, definition, revisionContext,
       { storage: this.storage, cwd: this.cwd, signal })
-      ?? fidelityArchitectureRevisionSeed(previous, this.records.values(), definition, revisionContext)
+      ?? fidelityArchitectureRevisionSeed(previous, attemptHistory, definition, revisionContext)
       ?? interruptedArchitectureReviewSeed(previous, definition, revisionContext, revisionSeed) ?? revisionSeed;
     if (feedbackSeed) revisionSeed = feedbackSeed;
     if (reviewRevision) revisionSeed = reviewRevisionContinuationSeed(previous, definition, revisionContext,
@@ -1592,6 +1649,7 @@ export class ArchitectureDesigner {
     const record = { agentId: definition.id, name: definition.name, draft: structuredClone(definition.draft),
       version: (previous?.version ?? 0) + 1, contractVersion: ARCHITECTURE_VERSION,
       sourceFingerprint: definition.fingerprint, status: "designing", delivery: "blocked", summary: "正在设计方案",
+      ...(restartSource ? { restartSource: structuredClone(restartSource) } : {}),
       requirements, capabilityCatalogVersion: CAPABILITY_CATALOG_VERSION,
       runtimeCapabilities,
       ...(deferred.context ? { deferredVerifications: deferred.context } : {}),

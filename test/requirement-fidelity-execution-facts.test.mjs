@@ -93,7 +93,7 @@ async function reviewRole(t, { unproven = false } = {}) {
         assert.deepEqual(payload.candidate.decisions, current.candidate.decisions);
         assert.deepEqual(payload.candidate.acceptance, current.candidate.acceptance);
         assert.deepEqual(payload.acceptanceAdapterGuide.adapters.action.executionFacts.fixtureConstruction.schema, TEST_FIXTURE_SCHEMA);
-        assert.deepEqual(options.customTools.map(({ name }) => name), ["submit_requirement_fidelity"]);
+        assert.deepEqual(options.customTools.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context"]);
       } })(options);
     },
     sessionFactory: async (options) => ({ modelCallAccounting: true, messages: [], subscribe: () => () => {}, dispose() {}, async abort() {}, async prompt(text) {

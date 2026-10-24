@@ -185,7 +185,7 @@ test("研发规划、开发与独立评审接收同一冻结平台事实，评�
       assert.equal(await contextField(record, payload, "platformContractVersion"), snapshot.version);
       assert.equal(await contextField(record, payload, "platformHash"), architecture.platformHash);
       assert.deepEqual(await contextField(record, payload, "capabilities"), platformCapabilityCatalog(snapshot));
-      assert.ok(record.options.systemPrompt.includes(renderPlatformRules(snapshot)), `${record.role} 应使用同一平台规则`);
+      assert.equal(await contextField(record, payload, "platformGuide"), renderPlatformRules(snapshot), `${record.role} 应能按需读取同一平台规则`);
       if (record.role === "reviewer") {
         assert.equal(record.tools.web_fetch, undefined); assert.equal(record.tools.web_search, undefined);
       } else {

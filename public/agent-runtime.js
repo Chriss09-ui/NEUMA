@@ -6,6 +6,7 @@ export function agentSourceKey(agent) {
 }
 
 const architectureLabels = {
+  pending: "已准备从架构蓝图重新开始；原方案与检查结果已保留，等待手动开始。",
   designing: "正在设计架构，尚未生成可运行的智能体。",
   evaluating: "正在检查架构，尚未生成可运行的智能体。",
   needs_input: "需要补充影响交付的关键选择，请继续澄清需求。",

@@ -66,6 +66,7 @@ export function agentMakingState(agent, state) {
   });
   return { active, stopping, reading, stopped, failed, phase, headline, summary, stages, development,
     canRetry: !active && !reading && recovery?.status !== "blocked", actionLabel: development.canStart || development.canResume ? development.actionLabel
+      : architecture?.status === "pending" ? "从架构蓝图开始"
       : recovery?.status === "available" ? recovery.actionLabel || "修复未完成阶段（最多2轮）"
         : recovery?.status === "continuing" ? recovery.actionLabel || "继续修复未完成阶段"
           : recovery?.status === "blocked" ? recovery.actionLabel || "本次修复额度已用尽"

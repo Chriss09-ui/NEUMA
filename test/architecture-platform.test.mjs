@@ -12,6 +12,7 @@ import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 import { passingReview, validDesign, validDraft } from "./helpers/architecture.mjs";
 import { mathDemoDesign, mathDemoDraft } from "./helpers/math-demo-fixture.mjs";
 import { paperOverviewDesign, paperOverviewDraft } from "./helpers/paper-overview-fixture.mjs";
+import { readModelContextSection } from "./helpers/model-context.mjs";
 
 const submissionNames = { designer: "submit_architecture", reviewer: "submit_architecture_review", specialist: "submit_module_design" };
 const definition = (id = "platform", draft = validDraft()) => ({ id, name: draft.name.value, draft, fingerprint: "platform-requirements-v1" });
@@ -84,7 +85,8 @@ test("三个架构角色共享固定平台规则，局部模型修改其输入�
       platformCapabilityCatalog(result.platformSnapshot, { runtimeCapabilities: record.originalPayload.runtimeCapabilities }));
     assert.equal(record.originalPayload.platformContractVersion, result.platformContractVersion);
     assert.equal(record.originalPayload.platformHash, result.platformHash);
-    assert.ok(record.options.systemPrompt.includes(sharedRules), `${record.role} 必须收到同一份完整平台规则`);
+    assert.ok((await readModelContextSection(record.options, "roleGuide")).includes(sharedRules), `${record.role} 必须能读取同一份完整平台规则`);
+    assert.ok(!record.options.systemPrompt.includes(sharedRules), "主提示不再重复展开平台说明");
     assert.ok(record.disposed);
   }
   assert.deepEqual(result.reviewContext, { candidateHash: result.candidateHash, platformHash: result.platformHash });
@@ -387,7 +389,9 @@ test("冻结平台政策禁止联网时不暴露联网工具或检索预算，�
       if (record.payload.requirement.draft.constraints.some((item) => item.text === "禁止联网")) {
         for (const name of ["web_search", "web_fetch", "search_technical_sources"]) assert.equal(record.tools[name], undefined);
         assert.ok(record.tools.delegate_module); assert.equal(record.payload.remaining.searches, 0);
-        assert.match(record.options.systemPrompt, /检索预算为 0/);
+        assert.match(await readModelContextSection(record.options, "roleGuide"), /检索预算为 0/);
+        const wire = record.options.transformContext([{ role: "user", content: JSON.stringify(record.originalPayload) }]);
+        assert.equal(JSON.parse(wire[0].content).platformOverview.network.allowNetwork, false);
       } else {
         for (const name of ["web_search", "web_fetch", "search_technical_sources"]) assert.ok(record.tools[name]);
         assert.equal(record.payload.remaining.searches, 3);

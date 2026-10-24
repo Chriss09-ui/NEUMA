@@ -104,9 +104,8 @@ test("预评估和独立复核共用完整示例及阶段正反例，不增加�
     assert.ok(request.messages[0].content.includes(REQUIREMENT_STAGE_GUIDANCE));
     assert.match(request.messages[0].content, /交互可视化：用户要在工作台里看公式或概念的动态图形/);
     assert.match(request.messages[0].content, /没有其他真实缺口时 verdict=sufficient/);
-    assert.match(request.messages[0].content, /需求实现审查使用的交付事实（platform v4）/);
-    assert.match(request.messages[0].content, /工作台内托管页面使用 node-action/);
-    assert.match(request.messages[0].content, /自写图形、托管页面和可下载图形文件可以交付/);
+    assert.match(request.messages[0].content, /平台事实只见任务包platform/);
+    assert.deepEqual(JSON.parse(request.messages[1].content).platform, createPlatformSnapshot());
     assert.doesNotMatch(request.messages[0].content, /当前阶段是设计和评估|schemaVersion:3|先证明方案足以完成已确认|request_requirements/);
   }
   assert.equal(result.preflightDiagnostic.readOnlyCalls, 0);

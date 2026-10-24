@@ -12,7 +12,7 @@ import { validDesign } from "./helpers/architecture.mjs";
 import { createMainReviewCheckpoint } from "../src/architecture/architecture-main-review-checkpoint.mjs";
 import { createArchitectureFidelityProgress } from "../src/architecture/architecture-fidelity-progress.mjs";
 
-function fixture() {
+function fixture({ progressVersion = 1, designCalls = 15 } = {}) {
   const requirements = [{ id: "req_0", text: "完整处理记录" }], draft = { taskSpec: { version: 1 } };
   const design = validDesign(requirements, { schemaVersion: 3, connections: [],
     interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "工作记录", results: "完整摘要", persistentData: "无" },
@@ -23,7 +23,7 @@ function fixture() {
   const issues = [{ id: "incomplete_instructions", blocking: true, candidateFields: ["instructions"], description: "补充处理边界" }];
   const source = { agentId: "review_revision", version: 8, status: "failed", sourceFingerprint: "frozen", draft, requirements,
     platformHash: "a".repeat(64), runtimeCapabilities: {}, evidence: [], researchGaps: [], designResearchCalls: 0,
-    designProgressCheckpoint: { pipelineId: "fixed-pipeline", hash: "b".repeat(64), modelCalls: 15 },
+    designProgressCheckpoint: { schemaVersion: progressVersion, pipelineId: "fixed-pipeline", hash: "b".repeat(64), modelCalls: designCalls },
     candidateHash, design, review, issues, attempts: [{ candidateHash, design, review, issues }] };
   const { hash: _hash, ...progress } = source.designProgressCheckpoint;
   source.designProgressCheckpoint.hash = designHash(progress);
@@ -52,6 +52,20 @@ test("已耗尽原设计的完整候选可显式按评审修订，原15轮及模
   assert.equal(f.record.review, null); assert.equal(f.record.design, null);
   assert.deepEqual(await f.run({ runRole: () => assert.fail("已保存修订不能重跑") }), candidate);
   assert.ok(readArchitectureReviewRevision(f.record));
+});
+
+test("新设计二十五轮总账允许正式评审后修订，旧版和未知预算版本不能借此放宽", async () => {
+  const f = fixture({ progressVersion: 2, designCalls: 25 });
+  assert.equal(architectureReviewRevisionRecovery(f.source).status, "available");
+  await f.run();
+  assert.equal(f.record.designProgressCheckpoint.modelCalls, 25);
+  assert.equal(f.record.reviewRevisionCheckpoint.modelCalls, 1);
+  for (const options of [{ progressVersion: 1, designCalls: 16 }, { progressVersion: 2, designCalls: 26 },
+    { progressVersion: 3, designCalls: 1 }]) {
+    const invalid = fixture(options);
+    await assert.rejects(invalid.run());
+    assert.equal(invalid.calls.length, 0);
+  }
 });
 
 test("中断沿同一修订会话续接，累计三次后不能重开或重复授权", async () => {

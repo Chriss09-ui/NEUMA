@@ -3,13 +3,13 @@ import { isAbsolute } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { designHash, designSubmissionSchema } from "./architecture-contract.mjs";
 import { copyArchitectureReviewJson, reviewCheckpointObject } from "./architecture-review-binding.mjs";
-import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule,
+import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule, architectureModuleLayers,
   assembleArchitectureCandidate, applyArchitectureIntegration } from "./architecture-design-stages.mjs";
 
-export const ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT = 15;
-export const ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT = 3;
+export const ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT = 25;
+export const ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT = 5;
 export const ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT = 2;
-export const ARCHITECTURE_DESIGN_INTEGRATION_RESERVE = 3;
+export const ARCHITECTURE_DESIGN_INTEGRATION_RESERVE = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT;
 export const ARCHITECTURE_DESIGN_PROGRESS_MAX_BYTES = 2 * 1024 * 1024;
 
 const checkpointKeys = ["schemaVersion", "pipelineId", "bindingHash", "schemaHash", "modelCalls", "revisionHash", "assignmentHash", "blueprint", "modules", "integration", "hash"];
@@ -24,6 +24,13 @@ const sealed = checkpoint => {
   return copy({ ...body, hash: designHash(body) });
 };
 
+// Limits belong to a persisted attempt; deploying new defaults must not refill old attempts.
+export function architectureDesignCallLimits(checkpoint) {
+  if (checkpoint?.schemaVersion === 1) return { stage: 3, pipeline: 15 };
+  if ([2, 3].includes(checkpoint?.schemaVersion)) return { stage: ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, pipeline: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT };
+  throw invalid();
+}
+
 function invalid(reason = "design_progress_invalid") {
   const error = new InputError(reason === "design_history_unavailable"
     ? "设计节点已发生模型调用，但原会话引用不可用；不能新建会话替代已用进度。"
@@ -36,11 +43,11 @@ function stopped(checkpoint, stage, reason = "turn_limit") {
   return new ProviderError(reason === "cancelled" ? "架构设计已停止，已保存的节点成果保留。"
     : "架构设计节点达到共享调用额度，已保存成果保留；未完成方案不能进入评审。", {
     stage: "architecture", reason, role: stage === "module" ? "specialist" : "designer", phase: "designing",
-    pipelineStage: stage, modelCalls: checkpoint.modelCalls, modelCallLimit: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT,
+    pipelineStage: stage, modelCalls: checkpoint.modelCalls, modelCallLimit: architectureDesignCallLimits(checkpoint).pipeline,
   });
 }
 
-const stageLimit = (checkpoint, stage, key) => ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT
+const stageLimit = (checkpoint, stage, key) => architectureDesignCallLimits(checkpoint).stage
   + (checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT : 0);
 const integrationReserve = checkpoint => complete(checkpoint.integration) ? 0
   : Math.max(0, stageLimit(checkpoint, "integration", "integration") - checkpoint.integration.modelCalls);
@@ -71,12 +78,12 @@ function stageState(value, limit = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT) {
 function checkpointState(checkpoint) {
   const keys = [...checkpointKeys, ...["repair", "assemblyVersion"].filter(key => Object.hasOwn(checkpoint, key))];
   if (!exact(checkpoint, keys) || Object.hasOwn(checkpoint, "assemblyVersion") && checkpoint.assemblyVersion !== 2
-    || checkpoint.schemaVersion !== 1 || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
+    || ![1, 2, 3].includes(checkpoint.schemaVersion) || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
     || !hash(checkpoint.hash) || checkpoint.hash !== sealed(checkpoint).hash
     || checkpoint.revisionHash !== null && !hash(checkpoint.revisionHash)
     || checkpoint.assignmentHash !== null && !hash(checkpoint.assignmentHash)
     || !Number.isSafeInteger(checkpoint.modelCalls) || checkpoint.modelCalls < 0
-    || checkpoint.modelCalls > ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT || !Array.isArray(checkpoint.modules)
+    || checkpoint.modelCalls > architectureDesignCallLimits(checkpoint).pipeline || !Array.isArray(checkpoint.modules)
     || checkpoint.modules.length > 3) throw invalid();
   if (Object.hasOwn(checkpoint, "repair")) {
     const repair = checkpoint.repair;
@@ -85,7 +92,7 @@ function checkpointState(checkpoint) {
       || repair.additionalCalls !== ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT
       || !Number.isSafeInteger(repair.sourceVersion) || repair.sourceVersion < 1 || !hash(repair.sourceHash)
       || !stages(checkpoint).some(({ stage, entry }) => stage === repair.stage && entry?.key === repair.key
-        && entry.modelCalls >= ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT)) throw invalid();
+        && entry.modelCalls >= architectureDesignCallLimits(checkpoint).stage)) throw invalid();
   }
   for (const { stage, entry } of stages(checkpoint)) stageState(entry, stageLimit(checkpoint, stage, entry?.key));
   if (checkpoint.blueprint.key !== "blueprint" || checkpoint.integration.key !== "integration"
@@ -96,8 +103,9 @@ function checkpointState(checkpoint) {
 }
 
 function programIntegration(checkpoint, context) {
+  context = { ...context, legacyBlueprint: checkpoint.schemaVersion < 3 };
   if (!complete(checkpoint.blueprint) || !checkpoint.modules.length || !checkpoint.modules.every(complete)
-    || complete(checkpoint.integration) || checkpoint.integration.modelCalls < ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT) return null;
+    || complete(checkpoint.integration) || checkpoint.integration.modelCalls < architectureDesignCallLimits(checkpoint).stage) return null;
   const blueprint = checkpoint.blueprint.result, modules = checkpoint.modules.map(entry => entry.result);
   const assembled = assembleArchitectureCandidate({ ...context, blueprint, modules, mergeCapabilityReasons: true });
   if (assembled.conflicts.length) return null;
@@ -127,15 +135,15 @@ export function architectureDesignRecovery(record) {
     const reserved = stage === "integration" ? 0 : integrationReserve(checkpoint)
       + checkpoint.modules.filter(item => item.key !== entry.key && !complete(item)).length;
     const available = !checkpoint.repair && checkpoint.modelCalls + reserved + ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT
-      <= ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT;
+      <= architectureDesignCallLimits(checkpoint).pipeline;
     const status = localCompletion ? "continuing" : exhausted ? available ? "available" : "blocked"
-      : integrationReady && ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT - checkpoint.modelCalls < integrationReserve(checkpoint)
+      : integrationReady && architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls < integrationReserve(checkpoint)
         ? "blocked" : "continuing";
     const stageLabel = stage === "module" ? "功能模块" : stage === "blueprint" ? "架构蓝图" : "架构整合";
     return { status, stage, stageKey: entry.key, stageLabel,
       completedModules: checkpoint.modules.filter(complete).length, totalModules: checkpoint.modules.length,
       modelCalls: entry.modelCalls, modelCallLimit: stageLimit(checkpoint, stage, entry.key),
-      pipelineModelCalls: checkpoint.modelCalls, pipelineModelCallLimit: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT,
+      pipelineModelCalls: checkpoint.modelCalls, pipelineModelCallLimit: architectureDesignCallLimits(checkpoint).pipeline,
       message: localCompletion ? "现有模块可由程序完成一致能力说明的合并，无需新增设计调用；下一步仍须独立评审。"
         : status === "available" ? `${stageLabel}已用完本节点轮次，已完成成果保留；可手动授权最多2轮局部修复。`
         : status === "continuing" ? integrationReady ? "全部功能模块已保存，可继续整合与独立评审；不会重跑已完成模块。"
@@ -150,7 +158,7 @@ export function architectureDesignRecovery(record) {
 function inputs({ context, binding }) {
   if (!reviewCheckpointObject(context) || !Array.isArray(context.requirements) || !reviewCheckpointObject(context.candidateSchema)
     || !reviewCheckpointObject(binding)) throw invalid();
-  const schemas = createArchitectureStageSchemas({ candidateSchema: context.candidateSchema, requirements: context.requirements });
+  const schemas = createArchitectureStageSchemas(context);
   return { schemas, schemaHash: designHash({ candidateSchema: context.candidateSchema, schemas }), bindingHash: designHash(copy(binding)) };
 }
 
@@ -158,6 +166,7 @@ function inputs({ context, binding }) {
 export function readArchitectureDesignProgress(record, { context, binding }) {
   if (!Object.hasOwn(record, "designProgressCheckpoint")) return null;
   try {
+    context = { ...context, legacyBlueprint: record.designProgressCheckpoint?.schemaVersion < 3 };
     const { schemas, schemaHash, bindingHash } = inputs({ context, binding });
     const checkpoint = copy(record.designProgressCheckpoint);
     checkpointState(checkpoint);
@@ -173,9 +182,14 @@ export function readArchitectureDesignProgress(record, { context, binding }) {
     for (const [index, assignment] of blueprint.modules.entries()) {
       const entry = checkpoint.modules[index];
       if (entry.key !== assignment.id) throw invalid();
+    }
+    const verified = [];
+    for (const layer of architectureModuleLayers(blueprint)) for (const assignment of layer) {
+      const entry = checkpoint.modules.find(item => item.key === assignment.id);
       if (complete(entry)) {
-        const result = validateArchitectureModule(entry.result, { ...context, blueprint, assignment });
+        const result = validateArchitectureModule(entry.result, { ...context, blueprint, assignment, dependencyModules: verified });
         if (designHash(result) !== entry.resultHash) throw invalid();
+        verified.push(result);
       }
     }
     if (complete(checkpoint.integration)) {
@@ -195,9 +209,13 @@ export function readArchitectureDesignProgress(record, { context, binding }) {
 }
 
 const instructions = {
+  blueprint: "你负责本轮架构蓝图，不承担模块内部的详细设计。只提交全局执行选择与1至3个功能模块的职责、正式需求归属、输入输出和依赖边界。每条正式需求恰有一个主责模块，跨模块依赖明确声明。不要声明或冻结组件、步骤编号；这些由模块设计者按需要补充。不提前展开完整覆盖表和验收表，不编造平台能力，不执行外部动作。蓝图保存只是中间成果，不代表完整候选或通过。",
+  module: "你只设计本轮assignment主责的功能模块。遵守蓝图的模块职责、输入输出与依赖，自主设计和补充本模块的组件、步骤、能力、失败处理、决策、需求覆盖和验收义务。每个组件至少由一个步骤使用。组件和步骤编号在本模块内唯一；本地引用用字符串，跨模块步骤依赖及组件覆盖用{moduleId,id}，只能引用dependencyInterfaces提供的直接依赖模块真实编号，不猜测或代写其他模块。不修改其他模块或全局选择，不递归委派、不缩减用户要求。只按当前节点工具提交完整模块产物；保存不代表最终通过。",
+  integration: "你是架构整合者。程序已经拼装蓝图与模块产物，只处理给定冲突和整体验收衔接，按baseHash提交必要的局部updates；无须修改时提交空updates。保留蓝图约束、模块职责、稳定ID及有效内容，不重写完整候选，不重新开展全局设计。修改仍受完整原结构与独立评审约束，不能以整合自述宣布通过。",
+};
+const legacyInstructions = {
   blueprint: "你负责冻结本轮架构蓝图，不承担全部模块的详细设计。只提交全局执行选择与1至3个功能模块的职责、正式需求归属、稳定组件/步骤编号、输入输出和依赖边界。每条正式需求恰有一个主责模块，跨模块依赖明确声明。不提前展开完整覆盖表和验收表，不编造平台能力，不执行外部动作。蓝图保存只是中间成果，不代表完整候选或通过。",
   module: "你只设计本轮assignment主责的功能模块。遵守已冻结蓝图、编号、输入输出与依赖，交付本模块的组件、步骤、能力、失败处理、决策、需求覆盖和验收义务。不得修改其他模块或全局选择，不递归委派、不重新统筹整个架构。不确定事项明确保留，不能缩减用户要求。只按当前节点工具提交完整模块产物；保存不代表最终通过。",
-  integration: "你是架构整合者。程序已经拼装蓝图与模块产物，只处理给定冲突和整体验收衔接，按baseHash提交必要的局部updates；无须修改时提交空updates。保留蓝图约束、模块职责、稳定ID及有效内容，不重写完整候选，不重新开展全局设计。修改仍受完整原结构与独立评审约束，不能以整合自述宣布通过。",
 };
 
 function revisionOwners(revision, blueprint, modules, assembledCandidate) {
@@ -218,7 +236,7 @@ function revisionOwners(revision, blueprint, modules, assembledCandidate) {
       const rows = module[field] ?? [], assembledRows = assembledCandidate[field]?.slice(offset, offset + rows.length) ?? [];
       offset += rows.length;
       if (item === undefined) return true;
-      if (["decisions", "acceptance", "platformClaims"].includes(field)) return assembledRows.some(row => row.id === item.id);
+      if (["components", "steps", "decisions", "acceptance", "platformClaims"].includes(field)) return assembledRows.some(row => row.id === item.id);
       return rows.some(row => typeof row?.id === "string" && row.id === item?.id
         || field === "coverage" && row.requirementId === item.requirementId
         || designHash(row) === designHash(item));
@@ -239,8 +257,9 @@ function revisionOwners(revision, blueprint, modules, assembledCandidate) {
 export async function runArchitectureDesignPipeline({ record, context, binding, runRole, onSave, signal, onProgress, sessionDirectory, revision, repair,
   forceIntegration = false, validateProgramCandidate = value => value }) {
   if (typeof runRole !== "function" || typeof onSave !== "function" || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) throw invalid();
+  context = { ...context, legacyBlueprint: record.designProgressCheckpoint?.schemaVersion < 3 };
   const { schemas, schemaHash, bindingHash } = inputs({ context, binding });
-  let checkpoint = readArchitectureDesignProgress(record, { context, binding }) ?? sealed({ schemaVersion: 1, pipelineId: randomUUID(),
+  let checkpoint = readArchitectureDesignProgress(record, { context, binding }) ?? sealed({ schemaVersion: 3, pipelineId: randomUUID(),
     bindingHash, schemaHash, modelCalls: 0, revisionHash: null, assignmentHash: null, assemblyVersion: 2,
     blueprint: state("blueprint"), modules: [], integration: state("integration") });
   let writes = Promise.resolve(), persistenceError;
@@ -289,11 +308,11 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       if (!hasBlockingIssues && !forceIntegration) return candidate;
       const targets = stages(checkpoint).filter(({ stage, entry }) => stage === "integration"
         || stage === "blueprint" && reviseBlueprint || stage === "module" && (reviseBlueprint || owners.has(entry.key)));
-      if (checkpoint.modelCalls + targets.length > ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT
+      if (checkpoint.modelCalls + targets.length > architectureDesignCallLimits(checkpoint).pipeline
         || targets.some(({ stage, entry }) => entry.modelCalls >= stageLimit(checkpoint, stage, entry.key))) {
         const error = new InputError("评审修订所需节点没有足够的剩余调用额度；已评审候选、阶段成果和评审意见均保留，不能启动无法完成的修订。");
         error.diagnostic = { stage: "architecture", reason: "revision_budget_exhausted", role: "designer", phase: "designing",
-          modelCalls: checkpoint.modelCalls, modelCallLimit: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT };
+          modelCalls: checkpoint.modelCalls, modelCallLimit: architectureDesignCallLimits(checkpoint).pipeline };
         throw error;
       }
       await update(next => {
@@ -339,7 +358,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         const unusedModules = stage === "module" ? next.modules.filter(item => item.key !== key && !complete(item) && item.modelCalls === 0).length : 0;
         const reserved = stage === "integration" ? 0 : integrationReserve(next) + unusedModules;
         if (complete(entry) || entry.modelCalls >= modelCallLimit
-          || next.modelCalls >= ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT - reserved) throw stopped(next, stage);
+          || next.modelCalls >= architectureDesignCallLimits(next).pipeline - reserved) throw stopped(next, stage);
         entry.modelCalls++; next.modelCalls++;
       });
     };
@@ -358,19 +377,19 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         }
       });
     };
-    onProgress?.({ type: "status", phase: "designing", label: ({ blueprint: "正在确定架构蓝图与模块边界…", module: "正在并行设计功能模块…", integration: "正在整合模块并核对交接…" })[stage] });
-    const value = await runRole({ stage, key, role, stageInstruction: instructions[stage],
+    onProgress?.({ type: "status", phase: "designing", label: ({ blueprint: "正在确定架构蓝图与模块边界…", module: "正在设计功能模块并核对上游接口…", integration: "正在整合模块并核对交接…" })[stage] });
+    const value = await runRole({ stage, key, role, stageInstruction: context.legacyBlueprint && legacyInstructions[stage] || instructions[stage],
       submitName: ({ blueprint: "submit_architecture_blueprint", module: "submit_architecture_module", integration: "submit_architecture_integration" })[stage],
-      payload: { ...payload, pipelineStage: stage, designModelBudget: { limit: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT, used: checkpoint.modelCalls,
-        remaining: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT - checkpoint.modelCalls, stageLimit: modelCallLimit },
+      payload: { ...payload, blueprintProtocol: context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
+        remaining: architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls, stageLimit: modelCallLimit },
       ...(checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? { stageRepair: {
         additionalCalls: ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT,
-        instruction: "用户已显式授权一次局部修复。继续原会话，先修正上次提交被拒的结构与引用；不要重写已完成模块。每个声明组件都必须有实际执行步骤，保持蓝图编号及业务范围。" } } : {}),
+        instruction: "用户已显式授权一次局部修复。继续原会话，先修正上次提交被拒的结构与引用；不要重写已完成模块。每个声明组件都必须有实际执行步骤，保持模块职责、接口及业务范围，按当前蓝图协议处理内部编号。" } } : {}),
       ...(revision ? { revisionFeedback: copy(revision.issues ?? []) } : {}) }, parameters,
       validate: value => {
         const result = validate(value);
         if (stage === "blueprint" && checkpoint.assignmentHash !== null && designHash(result.modules) !== checkpoint.assignmentHash)
-          throw new InputError("蓝图修订必须保留已冻结的模块职责、需求归属、组件和步骤编号；不能借修订重开模块预算。");
+          throw new InputError("蓝图修订必须保留本轮模块分工及接口约定；不能借修订重开模块预算。");
         return result;
       },
       modelCalls: existing.modelCalls, modelCallLimit, sessionStorage, onSessionRef, onModelCall, onResult,
@@ -393,15 +412,25 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     return local.candidate;
   }
   const missing = checkpoint.modules.filter(entry => !complete(entry));
-  if (ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT - checkpoint.modelCalls < integrationReserve(checkpoint) + missing.length) throw stopped(checkpoint, "module");
+  if (architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls < integrationReserve(checkpoint) + missing.length) throw stopped(checkpoint, "module");
   const { draft: _draft, requirement: _requirement, requirements: _requirements, candidateSchema: _candidateSchema,
     previousDesign: _previousDesign, ...facts } = context;
-  const settled = await Promise.allSettled(blueprint.modules.map(assignment => runStage("module", assignment.id,
-    { ...facts, assignment, blueprint, blueprintHash: designHash(blueprint), requirements: context.requirements.filter(item => assignment.requirementIds.includes(item.id)) },
-    schemas.module, value => validateArchitectureModule(value, { ...context, blueprint, assignment }))));
-  active();
-  const failed = settled.find(result => result.status === "rejected");
-  if (failed) throw failed.reason;
+  const layers = context.legacyBlueprint ? [blueprint.modules] : architectureModuleLayers(blueprint);
+  for (const layer of layers) {
+    const settled = await Promise.allSettled(layer.map(assignment => {
+      const dependencyModules = checkpoint.modules.filter(entry => assignment.dependsOn.includes(entry.key) && complete(entry)).map(entry => copy(entry.result));
+      const dependencyInterfaces = dependencyModules.map(module => ({ moduleId: module.moduleId,
+        components: module.components, steps: module.steps.map(({ id, componentId, input, output, completion }) => ({ id, componentId, input, output, completion })) }));
+      return runStage("module", assignment.id,
+        { ...facts, assignment, blueprint, blueprintHash: designHash(blueprint),
+          ...(!context.legacyBlueprint ? { dependencyInterfaces } : {}),
+          requirements: context.requirements.filter(item => assignment.requirementIds.includes(item.id)) },
+        schemas.module, value => validateArchitectureModule(value, { ...context, blueprint, assignment, dependencyModules }));
+    }));
+    active();
+    const failed = settled.find(result => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
   const modules = checkpoint.modules.map(entry => copy(entry.result));
   const mergeCapabilityReasons = checkpoint.assemblyVersion === 2;
   const assembled = assembleArchitectureCandidate({ ...context, blueprint, modules, mergeCapabilityReasons });

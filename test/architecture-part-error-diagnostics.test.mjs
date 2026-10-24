@@ -64,6 +64,7 @@ test("恢复历史关闭缺项用规范草稿定位，仅补说明行即可保�
         } catch (error) { innerFailure = error; throw error; }
         throw new Error("offline stop after partial save");
       } }) });
+  await designer.ready;
   await assert.rejects(designer.role({ role: "reviewer", systemPrompt: "本地检查", submitName: "submit_architecture_review",
     parameters: reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: true }),
     payload: { candidateHash, design, requirements, priorFindings }, reviewEvidenceContext: context,

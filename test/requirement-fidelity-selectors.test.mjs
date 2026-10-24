@@ -28,7 +28,7 @@ test("full-v2的ID短行通过实际SDK校验，只恢复明确选择的原文�
   const result = await invoke(current, async (message, options) => {
     const tool = options.customTools[0], value = fidelityResult(message, "narrowed"), untouched = structuredClone(value);
     assert.equal(options.reasoningMode, "off"); assert.equal(options.maxOutputTokens, 8192);
-    assert.deepEqual(options.customTools.map(({ name }) => name), ["submit_requirement_fidelity"]);
+    assert.deepEqual(options.customTools.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context"]);
     assert.match(options.systemPrompt, /原本合法输入被候选排除、用户被要求新增资料或确认义务、原承诺输出或覆盖程度被减少/u);
     assert.match(options.systemPrompt, /实现选择、无损协议包装、系统自选验收见证、系统承担的技术证明义务，本身不构成用户新限制/u);
     assert.match(options.systemPrompt, /合法延期至development的验证，不因尚未执行就自动判unproven或narrowed/u);

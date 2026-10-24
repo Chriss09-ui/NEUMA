@@ -92,7 +92,7 @@ test("native fidelity recovery keeps the rejected tool history and exact feedbac
   let valid, rejectedFeedback, charges = 0;
   const f = await fixture(t, (body, turn) => {
     const payload = latestUser(body);
-    assert.deepEqual(body.tools.map((item) => item.function.name), ["submit_requirement_fidelity"]);
+    assert.deepEqual(body.tools.map((item) => item.function.name), ["submit_requirement_fidelity", "read_model_context"]);
     if (turn === 1) {
       valid = fidelityResult(payload, "narrowed");
       const invalid = structuredClone(valid); invalid.restrictions[0].quote = "UNMATCHED_FIXTURE_QUOTE";
@@ -339,7 +339,9 @@ test("full-v2实际wire使用ID selector，原生成功回执恢复canonical证�
   const f = await fixture(t, (body) => {
     const message = latestUser(body), schema = body.tools[0].function.parameters;
     assert.equal(message.fidelityContextVersion, "full-v2");
-    assert.deepEqual(message.deferredVerifications, current.deferredVerifications);
+    assert.deepEqual(message.deferredObligations, current.deferredVerifications.issues);
+    assert.equal(message.deferredVerifications, undefined);
+    assert.ok(message.contextIndex.some(item => item.section === "deferredVerifications" && item.delivery === "paged"));
     assert.ok(schema.properties.restrictions.items.anyOf.some((item) => item.properties?.claimRef));
     const system = body.messages.filter((item) => item.role === "system").map((item) => textOf(item.content)).join("\n");
     assert.match(system, /原本合法输入被候选排除/u); assert.match(system, /合法延期至development/u);

@@ -12,6 +12,7 @@ import { createArchitectureReviewTestRetry } from "../src/architecture/architect
 import { validDraft, validDesign, passingReview } from "./helpers/architecture.mjs";
 import { architectureStageSubmission } from "./helpers/architecture-stages.mjs";
 import { fidelityResult } from "./helpers/fidelity.mjs";
+import { readModelContextSection } from "./helpers/model-context.mjs";
 
 const text = content => typeof content === "string" ? content : (content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
 const users = body => body.messages.filter(message => message.role === "user").map(message => {
@@ -87,7 +88,7 @@ async function fixture(t, { failModule = false, rejectReview = false, researchBe
         assert.ok(payload); name = "submit_architecture_review";
         args = passingReview(payload.candidateHash, payload.design, payload.priorFindings);
         args.acceptanceScopeChecks = payload.reviewEvidenceIndex.acceptanceScope.map(row => ({ acceptanceId: row.acceptanceId,
-          adapterRulePath: row.adapterRulePaths[0], sufficient: true, reason: "固定模型核对本项冻结范围" }));
+          adapterRulePath: payload.reviewEvidenceIndex.adapterRules[row.adapterId][0], sufficient: true, reason: "固定模型核对本项冻结范围" }));
         if (state.rejectReview && !state.reviewRejected) {
           state.reviewRejected = true; args.verdict = "revise";
           args.checks.find(row => row.id === "verification").passed = false;
@@ -149,11 +150,54 @@ async function fixture(t, { failModule = false, rejectReview = false, researchBe
     sessionPath: file => join(sessions.find(row => row.options.sessionStorage)?.options.sessionStorage.directory, file) };
 }
 
+test("显式重开只准备待启动记录，手动运行从新蓝图开始且中断恢复不会取回旧方案", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { rejectReview: true });
+  const rejected = await f.run();
+  assert.equal(rejected.status, "needs_changes");
+  const original = await f.designer.getVersion(f.definition.id, rejected.version);
+  const history = structuredClone([...f.designer.records.values()]);
+  const requestCount = f.requests.length;
+  const grant = { expectedVersion: original.version, expectedHash: designHash(original), authorization: "用户要求保留旧结果，从架构起点手动测试。" };
+  await assert.rejects(f.designer.prepareRestart(f.definition.id, { ...grant, expectedHash: "stale" }), /原始版本已变化/u);
+  await assert.rejects(f.designer.prepareRestart(f.definition.id, { ...grant, authorization: "" }), /明确请求/u);
+  const pending = await f.designer.prepareRestart(f.definition.id, grant);
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.design, null); assert.equal(pending.review, null);
+  assert.equal(pending.designProgressCheckpoint, undefined);
+  assert.equal(f.requests.length, requestCount, "准备不请求模型");
+  await assert.rejects(f.designer.prepareRestart(f.definition.id, grant), /原始版本已变化/u);
+  await assert.rejects(f.designer.prepareRestart(f.definition.id, { ...grant,
+    expectedVersion: pending.version, expectedHash: designHash(pending) }), /已停止且未通过/u);
+  await f.reload();
+  assert.equal((await f.designer.get(f.definition.id)).designRecovery, undefined);
+  assert.equal((await f.designer.get(f.definition.id)).status, "pending");
+  assert.equal(f.requests.length, requestCount, "重启不自动执行");
+  f.state.controller = new AbortController(); f.state.cancelStage = "blueprint";
+  await assert.rejects(f.run());
+  const stopped = await f.designer.get(f.definition.id);
+  assert.deepEqual(f.requests.slice(requestCount).map(row => row.kind), ["blueprint"]);
+  assert.notEqual(stopped.designProgressCheckpoint.pipelineId, original.designProgressCheckpoint.pipelineId);
+  assert.equal(stopped.designProgressCheckpoint.modelCalls, 1);
+  assert.equal(stopped.reviewRevisionCheckpoint, undefined);
+  assert.equal(stopped.revisionSource, undefined);
+  assert.equal(stopped.restartSource.preparedVersion, pending.version);
+  f.state.controller = null;
+  await f.reload();
+  const resumed = await f.run();
+  assert.equal(resumed.status, "passed");
+  assert.deepEqual(f.requests.slice(requestCount).map(row => row.kind), ["blueprint", "module", "integration", "reviewer", "fidelity"]);
+  assert.equal(resumed.designProgressCheckpoint.pipelineId, stopped.designProgressCheckpoint.pipelineId);
+  assert.equal(resumed.designProgressCheckpoint.modelCalls, 3);
+  assert.equal(resumed.revisionSource, undefined);
+  for (const record of history) assert.deepEqual(await f.designer.getVersion(record.agentId, record.version), record);
+  assert.deepEqual(f.errors, []);
+});
+
 test("整合耗尽后程序只完成可确定的拼装，保留原用量且仍需独立评审和范围复核", { timeout: 30000 }, async t => {
-  const f = await fixture(t, { rejectIntegrationCalls: 3 });
+  const f = await fixture(t, { rejectIntegrationCalls: 5 });
   await assert.rejects(f.run());
   const failed = await f.designer.get(f.definition.id), start = f.requests.length;
-  assert.equal(failed.designProgressCheckpoint.integration.modelCalls, 3);
+  assert.equal(failed.designProgressCheckpoint.integration.modelCalls, 5);
   assert.equal(failed.designRecovery.localCompletion, true);
   assert.equal(failed.review, null);
   const integrationRequest = f.requests.find(row => row.kind === "integration");
@@ -172,7 +216,7 @@ test("整合耗尽后程序只完成可确定的拼装，保留原用量且仍�
 });
 
 for (const damage of ["missing", "invalid"]) test(`程序恢复前仍核验原生历史，${damage}会话不创建替代历史或调用评审`, { timeout: 30000 }, async t => {
-  const f = await fixture(t, { rejectIntegrationCalls: 3 }); await assert.rejects(f.run());
+  const f = await fixture(t, { rejectIntegrationCalls: 5 }); await assert.rejects(f.run());
   const failed = await f.designer.get(f.definition.id), start = f.requests.length;
   const path = f.sessionPath(failed.designProgressCheckpoint.integration.sessionRef.file);
   if (damage === "missing") await rm(path);
@@ -184,14 +228,14 @@ for (const damage of ["missing", "invalid"]) test(`程序恢复前仍核验原�
   assert.equal(saved.designProgressCheckpoint.modelCalls, failed.designProgressCheckpoint.modelCalls);
 });
 
-for (const outcome of ["success", "exhausted"]) test(`原生模块三轮提交被拒后显式局部修复${outcome}，不重跑蓝图且授权不能重领`, { timeout: 30000 }, async t => {
-  const f = await fixture(t, { rejectModuleCalls: 3 });
+for (const outcome of ["success", "exhausted"]) test(`原生模块五轮提交被拒后显式局部修复${outcome}，不重跑蓝图且授权不能重领`, { timeout: 30000 }, async t => {
+  const f = await fixture(t, { rejectModuleCalls: 5 });
   await assert.rejects(f.run(), error => error.diagnostic?.reason === "turn_limit");
   const failed = await f.designer.get(f.definition.id), before = f.requests.length;
   const request = failed.designRecovery.request, moduleFile = failed.designProgressCheckpoint.modules[0].sessionRef.file;
   assert.equal(failed.designRecovery.status, "available");
   assert.match(failed.designRecovery.message, /结构|引用|步骤/u);
-  assert.equal(failed.designProgressCheckpoint.modules[0].modelCalls, 3);
+  assert.equal(failed.designProgressCheckpoint.modules[0].modelCalls, 5);
   await assert.rejects(f.run(), /手动授权/u);
   assert.equal((await f.designer.get(f.definition.id)).version, failed.version, "无效重试不新增失败版本");
   await assert.rejects(f.run({ architectureRepair: { ...request, version: 99 } }), /授权/u);
@@ -202,13 +246,13 @@ for (const outcome of ["success", "exhausted"]) test(`原生模块三轮提交�
     const passed = await f.run({ architectureRepair: request });
     assert.equal(passed.status, "passed");
     assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["module", "integration", "reviewer", "fidelity"]);
-    assert.equal(passed.designProgressCheckpoint.modelCalls, 6);
+    assert.equal(passed.designProgressCheckpoint.modelCalls, 8);
     assert.deepEqual(passed.designProgressCheckpoint.blueprint, failed.designProgressCheckpoint.blueprint);
   } else {
     await assert.rejects(f.run({ architectureRepair: request }), error => error.diagnostic?.reason === "turn_limit");
     const stopped = await f.designer.get(f.definition.id);
     assert.equal(stopped.designRecovery.status, "blocked");
-    assert.equal(stopped.designProgressCheckpoint.modules[0].modelCalls, 5);
+    assert.equal(stopped.designProgressCheckpoint.modules[0].modelCalls, 7);
     assert.equal(stopped.design, null); assert.equal(stopped.review, null);
     const count = f.requests.length;
     await assert.rejects(f.run({ architectureRepair: request }), /授权/u);
@@ -219,7 +263,7 @@ for (const outcome of ["success", "exhausted"]) test(`原生模块三轮提交�
   assert.equal(latest.designProgressCheckpoint.modules[0].sessionRef.file, moduleFile);
   const resumed = users(f.requests[before].body).at(-1);
   assert.equal(resumed.type, "resume_architecture_stage");
-  assert.equal(resumed.modelBudget.used, 3); assert.equal(resumed.modelBudget.limit, 5);
+  assert.equal(resumed.modelBudget.used, 5); assert.equal(resumed.modelBudget.limit, 7);
   assert.equal(resumed.stageRepair.additionalCalls, 2);
   assert.ok(resumed.rejectedSubmission?.submissionHash, "宿主从原生历史恢复被拒模块，支持仅提交局部字段");
   assert.ok(resumed.lastSubmissionIssue);
@@ -326,7 +370,9 @@ test("耗尽评审可手动追加两次，授权先保存、原候选与分项�
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["reviewer", "fidelity"]);
   const payload = users(f.requests[before].body).find(row => row.candidateHash);
   assert.deepEqual(payload.modelBudget, { limit: 7, used: 5, remaining: 2 });
-  assert.equal(payload.reviewParts.saved.acceptanceScopeChecks.length, source.design.acceptance.length);
+  assert.equal(payload.reviewParts.saved, undefined);
+  const reader = f.sessions.findLast(row => row.options.customTools.some(tool => tool.name === "submit_architecture_review")).options;
+  assert.equal((await readModelContextSection(reader, "reviewParts", "/saved/acceptanceScopeChecks")).length, source.design.acceptance.length);
   assert.deepEqual(payload.reviewParts.missing.acceptanceScopeChecks, []);
   assert.equal(passed.reviewProgressCheckpoint.modelCalls, 7);
   assert.equal(passed.reviewRetryCheckpoint.source.modelCalls, 5);
@@ -428,7 +474,9 @@ test("修复后显式测试续评核对两级授权，保存后等待手动运�
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["reviewer", "fidelity"]);
   const payload = users(f.requests[before].body).find(row => row.candidateHash);
   assert.deepEqual(payload.modelBudget, { limit: 9, used: 7, remaining: 2 });
-  assert.deepEqual(payload.reviewParts.saved.acceptanceScopeChecks, progress.parts.acceptanceScopeChecks);
+  assert.equal(payload.reviewParts.saved, undefined);
+  const reader = f.sessions.findLast(row => row.options.customTools.some(tool => tool.name === "submit_architecture_review")).options;
+  assert.deepEqual(await readModelContextSection(reader, "reviewParts", "/saved/acceptanceScopeChecks"), progress.parts.acceptanceScopeChecks);
   assert.equal(passed.reviewProgressCheckpoint.modelCalls, 9);
   assert.deepEqual(passed.reviewRetryCheckpoint, grant);
   assert.deepEqual((await f.designer.getVersion(f.definition.id, source.version)).reviewProgressCheckpoint, progress);
@@ -552,7 +600,10 @@ for (const legacy of [false, true]) test(`评审后追加检索资料仍能完�
   assert.equal(passed.status, "passed");
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["review_revision", "reviewer", "fidelity"]);
   const payload = users(f.requests[before].body).find(row => row.pipelineStage === "review_revision");
-  assert.deepEqual(payload.evidence, source.evidence);
+  assert.equal(payload.evidence, undefined);
+  assert.deepEqual(payload.evidenceCatalog.map(row => row.id), source.evidence.map(row => row.id));
+  const reader = f.sessions.findLast(row => row.options.customTools.some(tool => tool.name === "submit_architecture_review")).options;
+  assert.deepEqual(await readModelContextSection(reader, "evidence"), source.evidence);
   assert.deepEqual(passed.evidence, source.evidence); assert.deepEqual(passed.researchGaps, source.researchGaps);
   assert.equal(passed.designResearchCalls, 2); assert.equal(passed.reviewRevisionCheckpoint.modelCalls, 1);
   assert.deepEqual(passed.designProgressCheckpoint, source.designProgressCheckpoint);

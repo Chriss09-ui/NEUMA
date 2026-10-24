@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { designHash } from "../../src/architecture/architecture-contract.mjs";
+import { completeVerificationContext } from "./model-context.mjs";
 
 export function fidelityResult(payload, classification = "preserved", { requirementId = payload.requirements[0].id, candidatePath = "/instructions", canonical = false } = {}) {
   assert.ok(["preserved", "narrowed", "unproven"].includes(classification));
@@ -20,8 +21,8 @@ export function fidelityChecker(classification = "preserved", { inspect, ...resu
   return async (options) => ({ modelCallAccounting: true, setAutoCompactionEnabled() {}, dispose() {}, async abort() {},
     async prompt(text) {
       await options.onModelCall();
-      assert.deepEqual(options.customTools.map((tool) => tool.name), ["submit_requirement_fidelity"], "独立复核不能继承文件、网络或主角色工具");
-      const payload = JSON.parse(text), { contextHash, ...context } = payload;
+      assert.deepEqual(options.customTools.map((tool) => tool.name), ["submit_requirement_fidelity", "read_model_context"], "独立复核只有提交及本节点冻结材料读取，不继承文件、网络或主角色工具");
+      const payload = await completeVerificationContext(JSON.parse(text), options), { contextHash, ...context } = payload;
       assert.equal(contextHash, designHash(context), "模型决定必须绑定完整当前只读上下文");
       assert.ok(payload.requirements.length); assert.equal(new Set(payload.requirements.map((item) => item.id)).size, payload.requirements.length);
       await inspect?.(payload, options);

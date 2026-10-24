@@ -8,6 +8,7 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 // Classify whole files. Files mixing doubles and real SDK/process execution belong in integration.
 export const TEST_LAYERS = Object.freeze({
   unit: Object.freeze([
+    "model-context.test.mjs", "architecture-model-context.test.mjs",
     "application-ui.test.mjs", "application-context-ui.test.mjs", "application-assistant-ui.test.mjs", "application-context.test.mjs", "web-capabilities.test.mjs", "agent-connections.test.mjs",
     "agent-api.test.mjs", "agent-attachments.test.mjs", "agent-avatar.test.mjs", "agent-conversations.test.mjs",
     "agent-details.test.mjs", "agent-library.test.mjs", "agent-runtime.test.mjs", "agent-scheduler.test.mjs",
@@ -26,6 +27,7 @@ export const TEST_LAYERS = Object.freeze({
     "select-menu.test.mjs", "skills-api.test.mjs", "skills-splitter.test.mjs", "skills-ui.test.mjs", "skills.test.mjs", "state.test.mjs", "task-spec-schema.test.mjs", "test-layers.test.mjs", "value-schema-rules.test.mjs",
   ]),
   integration: Object.freeze([
+    "model-context-native.test.mjs",
     "application-store.test.mjs", "application-resources.test.mjs", "application-service.test.mjs", "input-framing-integration.test.mjs",
     "node-action.test.mjs", "application-delivery-integration.test.mjs", "dashboard-application-integration.test.mjs", "agent-web-runtime.test.mjs", "python-gateway-integration.test.mjs",
     "agent-attachments-api.test.mjs", "agent-build-view.test.mjs", "agent-collaboration-runtime.test.mjs",
