@@ -1,5 +1,5 @@
 import type { UnknownRecord } from "./json.mjs";
-export interface ModelConfig extends UnknownRecord { chatUrl?: string; model?: string; apiKey?: string; modelAuthType?: string; modelProfile?: unknown; llmConfigured?: boolean; llmIdleTimeoutMs?: number; llmTimeoutMs?: number }
+export interface ModelConfig extends UnknownRecord { chatUrl?: string | undefined; model?: string | undefined; apiKey?: string | undefined; modelAuthType?: string | undefined; modelProfile?: unknown; llmConfigured?: boolean | undefined; llmIdleTimeoutMs?: number | undefined; llmTimeoutMs?: number | undefined }
 export interface ModelCompat {
   supportsStore?: boolean; supportsDeveloperRole?: boolean; supportsReasoningEffort?: boolean; supportsUsageInStreaming?: boolean;
   supportsFinishReason?: boolean; requiresToolResultName?: boolean; requiresAssistantAfterToolResult?: boolean;

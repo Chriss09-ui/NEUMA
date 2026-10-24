@@ -1,3 +1,5 @@
+import type { Dispatcher } from "undici-types";
+import type { ProjectRecord } from "../contracts/project.mjs";
 import type { AgentSession, AgentSessionEvent, ResourceLoader, LoadExtensionsResult, ExtensionFactory, EventBus, ExtensionRuntime, Extension, ProviderConfig, CreateModelRuntimeOptions, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
@@ -254,7 +256,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   const { loadExtensionFromFactory }: { loadExtensionFromFactory: (factory: ExtensionFactory, cwd: string, events: EventBus, runtime: ExtensionRuntime, path: string) => Promise<Extension> } = await import(new URL("./core/extensions/loader.js", sdkUrl).href);
   const { fetch: transportFetch, EnvHttpProxyAgent }: {
     fetch: (input: Parameters<FetchPort>[0], options: RequestInit & { dispatcher: { destroy(): Promise<void> } }) => ReturnType<FetchPort>;
-    EnvHttpProxyAgent: new (options: { headersTimeout: number; bodyTimeout: number; allowH2: boolean; proxyTunnel: boolean }) => NonNullable<RequestInit["dispatcher"]> & { destroy(): Promise<void> };
+    EnvHttpProxyAgent: new (options: { headersTimeout: number; bodyTimeout: number; allowH2: boolean; proxyTunnel: boolean }) => Dispatcher & { destroy(): Promise<void> };
   } = fromPi("undici");
   const baseUrl = modelBaseUrl(config.chatUrl);
   const contextWindow = profile.contextWindow;
@@ -422,7 +424,7 @@ Mac/Linux 支持项目内已有的 .sh/.bash/.zsh/.command 启动脚本。先读
 必须调用 submit_launch_plan，不能只在文字回复里描述配置。`;
 
 export function createProjectAnalyzer({ config, dataDir, sessionFactory = createPiSession }: { config: ModelConfig; dataDir: string; sessionFactory?: SessionFactory }) {
-  const analyze = async (project: { root: string; kind: string; path: unknown; name: unknown; description: unknown; setup?: { summary?: unknown } }, { signal, instructions = "", onProgress = () => {} }: { signal?: AbortSignal; instructions?: string; onProgress?: Progress } = {}) => {
+  const analyze = async (project: ProjectRecord, { signal, instructions = "", onProgress = () => {} }: { signal?: AbortSignal | undefined; instructions?: string | undefined; onProgress?: Progress | undefined } = {}) => {
     if (!config.llmConfigured) throw new InputError("请先在设置中连接模型，再点击“自动识别启动方式”。");
     const combined = signal ?? new AbortController().signal;
     const context: { reader: ReturnType<typeof createProjectReader>; session: PiSessionPort | null; plan: Awaited<ReturnType<typeof validateProjectPlan>> | null; signal: AbortSignal; onProgress: Progress; lastToolError: string | null } = { reader: createProjectReader(project.root), session: null, plan: null, signal: combined, onProgress, lastToolError: null };
@@ -462,7 +464,7 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
         if (params.status === "ready" && !context.reader.readFiles.size && project.kind !== "desktop") throw new InputError("请先读取实际项目文件再保存启动方式");
         const plan = await validateProjectPlan(project, params);
         if (plan.kind === "script") {
-          const scripts = [projectScriptFile(plan.launch), ...(plan.launch.stop ? [projectScriptFile(plan.launch.stop)] : [])];
+          const scripts = [projectScriptFile(plan.launch), ...("stop" in plan.launch! && plan.launch.stop ? [projectScriptFile(plan.launch.stop)] : [])];
           if (scripts.some((file) => !context.reader.readFiles.has(relative(project.root, file)))) throw new InputError("请先读取实际的启动和停止脚本，再保存配置");
         }
         context.plan = plan;

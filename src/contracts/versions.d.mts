@@ -6,7 +6,7 @@ export type ArchitectureDesignCheckpointVersion = 1 | 2 | 3;
 export type ArchitectureReviewProgressVersion = 1 | 2 | 3 | 4;
 export type DevelopmentPlanVersion = 1 | 2 | 3;
 export interface VersionedInput<V extends number> extends UnknownRecord { schemaVersion: V }
-/** M2 types the public envelope; M4 owns the remaining nested semantic payloads. */
+/** Shared task facts retain their original evidence and version discriminants. */
 export interface EvidenceReference { messageId: string; quote: string }
 export interface TaskSpecV1 {
   version: 1;
@@ -15,8 +15,6 @@ export interface TaskSpecV1 {
     source: { kind: "user" | "accepted" | "measured" | "inferred" | "unknown"; evidence: EvidenceReference[]; reason?: string } }[];
   retired?: { id: string; reason: string; evidence: EvidenceReference[] }[];
 }
-export interface ArchitectureDesignEnvelope extends UnknownRecord { schemaVersion?: 2 | 3; profile: "light" | "workflow" | "custom" }
-export type DevelopmentPlanEnvelope = UnknownRecord & ({ schemaVersion?: never; runtime: "node-json" } | { schemaVersion: 2; runtime: "node-action" } | { schemaVersion: 3; runtime: "node-action" | "managed-service" });
+export type ArchitectureDesignEnvelope = import("./architecture.mjs").ArchitectureDesign;
+export type DevelopmentPlanEnvelope = import("./development.mjs").DevelopmentPlan;
 export interface TaskSpecValidator { (value: unknown): TaskSpecV1 }
-export interface ArchitectureValidator { (value: unknown, options?: UnknownRecord): ArchitectureDesignEnvelope }
-export interface DevelopmentValidator { (value: unknown, options?: UnknownRecord): DevelopmentPlanEnvelope }

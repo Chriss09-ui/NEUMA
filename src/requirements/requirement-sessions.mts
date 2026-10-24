@@ -1,3 +1,4 @@
+import { checkedConsultation } from "./consultation-storage.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { JsonStoragePort } from "../runtime/storage-port.mjs";
 import { readStoredObject } from "../runtime/storage-port.mjs";
@@ -93,7 +94,7 @@ export class RequirementSessions {
       const turnOptions = { signal, onProgress, enforceConsultation: true, requestId,
         ...(record.boundAgentId ? { verificationContext: { agentId: record.boundAgentId } } : {}) };
       const result = await processTurn({ message: input.message, draft: record.draft, lastQuestion: record.lastQuestion,
-        consultation: record.consultation, userMessages: [], evidenceMessages: [{
+        consultation: checkedConsultation(record.consultation), userMessages: [], evidenceMessages: [{
           id: `request_user_${contentHash({ sessionId, requestId }).slice(0, 32)}`,
           role: "user", content: typeof input.message === "string" ? input.message.trim() : "",
         }] }, providers,
@@ -117,7 +118,7 @@ export class RequirementSessions {
       const record = await this.get(sessionId);
       if (!record?.confirmed || record.boundAgentId && record.boundAgentId !== agentId
         || contentHash(normalizeDraft(value.draft)) !== contentHash(record.draft)) throw new InputError("这份需求尚未在当前会话确认，或确认后内容已改变");
-      const confirmation = issueConfirmation(record.draft, record.consultation, { requestId: record.confirmedRequestId });
+      const confirmation = issueConfirmation(normalizeDraft(record.draft), checkedConsultation(record.consultation), { requestId: record.confirmedRequestId ?? undefined });
       // Bind before saving, so a disconnected response cannot duplicate one confirmation under another Agent ID.
       if (!record.boundAgentId) { record.boundAgentId = agentId; checkRecordSize(record); await this.storage.writeJson(sessionId, "session.json", record); }
       return agents.saveRequirements(agentId, { name: value.name, draft: record.draft },

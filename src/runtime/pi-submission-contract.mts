@@ -2,12 +2,12 @@ import { Ajv } from "ajv";
 import type { ValidateFunction } from "ajv";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import { objectFields, isArray, isRecord } from "./type-boundary.mjs";
-interface SubmissionTool { name: string; parameters: ToolSchema }
+interface SubmissionTool { name: string; parameters: object }
 
 const identifier = /^[A-Za-z][A-Za-z0-9_-]{0,119}$/;
 const ajv = new Ajv({ strict: false, coerceTypes: false });
-const validators = new WeakMap<ToolSchema, ValidateFunction<unknown>>();
-function matchesArguments(value: unknown, schema: ToolSchema) {
+const validators = new WeakMap<object, ValidateFunction<unknown>>();
+function matchesArguments(value: unknown, schema: object) {
   if (!validators.has(schema)) validators.set(schema, ajv.compile(schema));
   return validators.get(schema)!(value);
 }
@@ -27,7 +27,7 @@ export function renderPiSubmissionContract({ role, submitName, tools, alternativ
 }
 
 /** Decode data from a complete controller response; never infer or execute general tool calls. */
-export function readPiStructuredSubmission<T extends SubmissionTool>(raw: unknown, { tools, validate = matchesArguments }: { tools: T[]; validate?: (value: unknown, schema: ToolSchema) => boolean }) {
+export function readPiStructuredSubmission<T extends SubmissionTool>(raw: unknown, { tools, validate = matchesArguments }: { tools: T[]; validate?: (value: unknown, schema: object) => boolean }) {
   const message = objectFields(raw);
   if (message?.role !== "assistant" || message.stopReason !== "stop" || !isArray(message.content)
     || message.content.some((part) => !new Set<unknown>(["text", "thinking"]).has(objectFields(part).type))) return null;

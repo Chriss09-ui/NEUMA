@@ -108,8 +108,8 @@ export function validateActionValue(value: unknown, schemaInput: unknown, path =
   if (Buffer.byteLength(JSON.stringify(value)) > APPLICATION_ACTION_VALUE_BYTES) reject(root, "channel_limit", "超过通道限制，请通过文件引用传递");
   return structuredClone(value) as JsonValue;
 }
-export const validateActionInput = (action: Pick<ApplicationAction, "inputSchema">, value: unknown) => validateActionValue(value, action.inputSchema, "input");
-export const validateActionOutput = (action: Pick<ApplicationAction, "outputSchema">, value: unknown) => validateActionValue(value, action.outputSchema, "output");
+export const validateActionInput = (action: { inputSchema: unknown }, value: unknown) => validateActionValue(value, action.inputSchema, "input");
+export const validateActionOutput = (action: { outputSchema: unknown }, value: unknown) => validateActionValue(value, action.outputSchema, "output");
 
 export function validateApplicationManifest(value: unknown, { snapshot, allowUnverified = false }: { snapshot?: ApplicationSnapshot; allowUnverified?: boolean } = {}): ApplicationManifest {
   const managed = plain(value) && value.protocolVersion === 3;
