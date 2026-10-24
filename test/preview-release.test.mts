@@ -6,14 +6,15 @@ import { tmpdir } from "node:os";
 import { checkPreviewRelease } from "../scripts/check-preview-release.mjs";
 import { REQUIRED_ENTRIES } from "../scripts/build.mjs";
 
-async function fixture(t) {
+async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "neuma-preview-release-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const manifest = { name: "@fixture/neuma", version: "0.1.0-preview.1", private: false,
+  const baseManifest = { name: "@fixture/neuma", version: "0.1.0-preview.1", private: false,
     os: ["darwin"], cpu: ["arm64"], bin: { neuma: "bin/neuma.cjs" },
     files: ["src/", "bin/", "public/"],
     publishConfig: { access: "public", tag: "preview", registry: "https://registry.npmjs.org/" },
     dependencies: { fixture: "1.0.0" } };
+  const manifest: typeof baseManifest & Record<string, unknown> = baseManifest;
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: {
     "": { name: manifest.name, version: manifest.version, dependencies: manifest.dependencies,
       os: manifest.os, cpu: manifest.cpu, bin: manifest.bin },
@@ -22,10 +23,10 @@ async function fixture(t) {
     if (syncManifest) {
       lock.name = manifest.name; lock.version = manifest.version;
       for (const key of ["name", "version", "dependencies", "os", "cpu", "bin"])
-        lock.packages[""][key] = manifest[key];
+        Reflect.set(lock.packages[""], key, manifest[key]);
     }
-    for (const [path, value] of [["package.json", manifest], ["package-lock.json", lock], ["npm-shrinkwrap.json", lock]])
-      await writeFile(join(root, path), JSON.stringify(value));
+    for (const [path, value] of [["package.json", manifest], ["package-lock.json", lock], ["npm-shrinkwrap.json", lock]] as const)
+      await writeFile(join(root, path!), JSON.stringify(value));
   }
   await save();
   for (const path of ["bin/neuma.cjs", "src/installation/installation-cli.mjs", "src/installation/installation-runtime.mjs",

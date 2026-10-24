@@ -7,13 +7,13 @@ test("分层清单覆盖实际测试文件，快速组不包含真实执行或�
   const files = (await readdir(new URL("./", import.meta.url))).filter((name) => name.endsWith(".test.mjs"));
   const layers = Object.fromEntries(["unit", "integration", "browser"].map((layer) => [layer, selectTestFiles(layer, files)]));
   assert.deepEqual([...new Set(Object.values(layers).flatMap((layer) => layer.files))].sort(), files.sort());
-  for (const layer of Object.values(layers)) assert.deepEqual(layer.missing, []);
-  assert.deepEqual(layers.unit.files.filter((name) => layers.integration.files.includes(name) || layers.browser.files.includes(name)), []);
-  assert.ok(layers.unit.files.includes("core.test.mjs")); assert.ok(layers.unit.files.includes("collaboration-ui.test.mjs"));
+  for (const layer of Object.values(layers)) assert.deepEqual<NonNullable<typeof layer>["missing"]>(layer.missing, []);
+  assert.deepEqual(layers.unit!.files.filter((name) => layers.integration!.files.includes(name) || layers.browser!.files.includes(name)), []);
+  assert.ok(layers.unit!.files.includes("core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration-ui.test.mjs"));
   for (const name of ["agent-prototype.test.mjs", "pi-runtime.test.mjs", "development-executor.test.mjs", "materials-runner.test.mjs", "project-platform.test.mjs"])
-    assert.ok(layers.integration.files.includes(name), `${name} 必须归入集成组`);
-  assert.deepEqual(layers.browser.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "sidebar-layout.test.mjs"]);
-  assert.deepEqual(layers.browser.files.filter((name) => layers.integration.files.includes(name)), ["agent-build-view.test.mjs"]);
+    assert.ok(layers.integration!.files.includes(name), `${name} 必须归入集成组`);
+  assert.deepEqual(layers.browser!.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "sidebar-layout.test.mjs"]);
+  assert.deepEqual(layers.browser!.files.filter((name) => layers.integration!.files.includes(name)), ["agent-build-view.test.mjs"]);
 });
 
 test("未登记的新测试默认进入集成组并提供分类提示，不把夹具当成测试", () => {

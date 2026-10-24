@@ -1,3 +1,4 @@
+import { objectFields, errorField } from "../src/runtime/type-boundary.mjs";
 import { constants } from "node:fs";
 import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -11,16 +12,16 @@ const ALLOWED_FILES = new Set(["src/", "npm-shrinkwrap.json", "bin/", "public/",
 const PREVIEW_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-preview\.(0|[1-9]\d*)$/;
 const SCOPED_NAME = /^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/;
 
-async function readJson(root, path, failures) {
+async function readJson(root: string, path: string, failures: string[]): Promise<Record<string, unknown> | null> {
   try {
-    const value = JSON.parse(await readFile(join(root, path), "utf8"));
+    const value: unknown = JSON.parse(await readFile(join(root, path), "utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
-    return value;
+    return value as Record<string, unknown>;
   } catch { failures.push(`无法读取有效的 ${path}`); return null; }
 }
 
-export async function checkPreviewRelease(root, options = {}) {
-  const failures = [];
+export async function checkPreviewRelease(root: string, options: { artifact?: boolean } = {}) {
+  const failures: string[] = [];
   const manifest = await readJson(root, "package.json", failures);
   const artifact = options.artifact ?? Boolean(manifest?.neumaBuild);
   const lock = artifact ? null : await readJson(root, "package-lock.json", failures);
@@ -28,10 +29,10 @@ export async function checkPreviewRelease(root, options = {}) {
   if (manifest) {
     if (!Array.isArray(manifest.files) || !manifest.files.includes("src/"))
       failures.push("发布文件清单必须包含完整源码目录 src/");
-    if (Array.isArray(manifest.files) && manifest.files.some((path) => !ALLOWED_FILES.has(path)))
+    if (Array.isArray(manifest.files) && manifest.files.some((path) => !ALLOWED_FILES.has(path as string)))
       failures.push("发布文件清单只能包含已批准的程序、文档和资源路径，禁止扩大范围或加入用户数据与依赖目录");
     if (["bundleDependencies", "bundledDependencies"].some((key) => manifest[key] !== undefined
-      && manifest[key] !== false && !(Array.isArray(manifest[key]) && manifest[key].length === 0)))
+      && manifest[key] !== false && !(Array.isArray(manifest[key]) && (manifest[key] as unknown[]).length === 0)))
       failures.push("试用包禁止捆绑本机依赖，请移除 bundleDependencies 和 bundledDependencies 或保持禁用");
     if (typeof manifest.name !== "string" || manifest.name.length > 214 || !SCOPED_NAME.test(manifest.name))
       failures.push("试用包需要有效的 scoped npm 包名，例如 @账号/neuma");
@@ -42,26 +43,26 @@ export async function checkPreviewRelease(root, options = {}) {
       failures.push("本次试用版只支持 Apple 芯片 Mac：os 为 darwin，cpu 为 arm64");
     if (!isDeepStrictEqual(manifest.bin, { neuma: "bin/neuma.cjs" }))
       failures.push("命令入口必须为 neuma: bin/neuma.cjs");
-    if (manifest.publishConfig?.access !== "public" || manifest.publishConfig?.tag !== "preview"
-      || manifest.publishConfig?.registry !== "https://registry.npmjs.org/")
+    if (objectFields(manifest.publishConfig).access !== "public" || objectFields(manifest.publishConfig).tag !== "preview"
+      || objectFields(manifest.publishConfig).registry !== "https://registry.npmjs.org/")
       failures.push("发布配置必须使用 public、preview 标签和官方 npm registry");
     if (!manifest.dependencies || typeof manifest.dependencies !== "object" || Array.isArray(manifest.dependencies))
       failures.push("包的 dependencies 必须明确声明");
     if (lock && (lock.name !== manifest.name || lock.version !== manifest.version
-      || lock.packages?.[""]?.name !== manifest.name || lock.packages?.[""]?.version !== manifest.version
-      || ["dependencies", "devDependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(lock.packages?.[""]?.[key], manifest[key]))))
+      || objectFields(objectFields(lock.packages)[""]).name !== manifest.name || objectFields(objectFields(lock.packages)[""]).version !== manifest.version
+      || ["dependencies", "devDependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(objectFields(objectFields(lock.packages)[""])[key], manifest[key]))))
       failures.push("包名、版本、依赖或安装范围与 package-lock.json 不一致");
   }
   if (lock && shrinkwrap && !isDeepStrictEqual(shrinkwrap, lock))
     failures.push("npm-shrinkwrap.json 与 package-lock.json 不一致");
   if (artifact) {
-    if (manifest?.neumaBuild?.format !== 1 || !/^[a-f0-9]{64}$/.test(manifest?.neumaBuild?.sourceHash ?? ""))
+    if (objectFields(manifest?.neumaBuild).format !== 1 || !/^[a-f0-9]{64}$/.test(String(objectFields(manifest?.neumaBuild).sourceHash ?? "")))
       failures.push("缺少有效的编译产物标识");
     if (!shrinkwrap || shrinkwrap.name !== manifest?.name || shrinkwrap.version !== manifest?.version
-      || ["dependencies", "devDependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(shrinkwrap.packages?.[""]?.[key], manifest?.[key])))
+      || ["dependencies", "devDependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(objectFields(objectFields(shrinkwrap.packages)[""])[key], manifest?.[key])))
       failures.push("编译产物包信息与发布锁不一致");
     if (Object.keys(manifest?.scripts ?? {}).some((key) => key !== "start")) failures.push("编译产物不能包含开发构建或安装生命周期脚本");
-    async function inspect(path) {
+    async function inspect(path: string): Promise<void> {
       const info = await lstat(join(root, path));
       if (info.isSymbolicLink()) { failures.push(`发布产物不允许链接：${path}`); return; }
       if (info.isDirectory()) {
@@ -100,7 +101,7 @@ if (process.argv[1] && await realpath(resolve(process.argv[1])).catch(() => null
       await (await import("./build.mjs")).assertFreshBuild(root);
       const artifact = await checkPreviewRelease(root, { artifact: true });
       result = { ok: source.ok && artifact.ok, failures: [...source.failures, ...artifact.failures] };
-    } catch (error) { result = { ok: false, failures: [...source.failures, `编译产物不可用：${error.message}`] }; }
+    } catch (error) { result = { ok: false, failures: [...source.failures, `编译产物不可用：${String(errorField(error, "message"))}`] }; }
   }
   if (!result.ok) {
     process.stderr.write("尚不能发布 Apple 芯片 Mac 试用版：\n" + result.failures.map((value) => `- ${value}`).join("\n") + "\n");

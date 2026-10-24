@@ -1,3 +1,6 @@
+import type { InstanceInfo } from "./instance-lock.mjs";
+import type { LocalApplication } from "./installation-runtime.mjs";
+import { objectFields, errorField } from "../runtime/type-boundary.mjs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -22,7 +25,7 @@ const HELP = `NEUMA ${APP_VERSION}
 更新后重新启动；更新与卸载程序均不会删除用户数据。
 `;
 
-export function parseCliArgs(args, { home = homedir() } = {}) {
+export function parseCliArgs(args: string[], { home = homedir() } = {}) {
   if (args.some((value, index) => value === "--port" && /^-\d/.test(args[index + 1] ?? "")))
     throw new Error("端口必须是 1 到 65535 的整数。");
   let parsed;
@@ -49,17 +52,17 @@ export function parseCliArgs(args, { home = homedir() } = {}) {
     dataDir: resolve(values["data-dir"] ?? resolve(home, ".neuma")), from: values.from };
 }
 
-async function existingInstanceReady(instance) {
+async function existingInstanceReady(instance: InstanceInfo) {
   if (instance.purpose !== "service" || instance.state !== "ready" || !Number.isInteger(instance.port)) return false;
   return new Promise((done) => {
-    const client = request({ hostname: "127.0.0.1", port: instance.port, path: "/api/health", agent: false,
+    const client = request({ hostname: "127.0.0.1", port: instance.port!, path: "/api/health", agent: false,
       timeout: 1500 }, (response) => {
-      const chunks = []; let size = 0;
+      const chunks: Buffer[] = []; let size = 0;
       response.on("data", (chunk) => { size += chunk.length; if (size > 4096) response.destroy(); else chunks.push(chunk); });
       response.on("error", () => done(false));
       response.on("end", () => {
         try {
-          const health = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          const health = objectFields(JSON.parse(Buffer.concat(chunks).toString("utf8")));
           done(response.statusCode === 200 && health.ok === true && health.state === "ready" && health.instanceId === instance.instanceId);
         } catch { done(false); }
       });
@@ -70,17 +73,17 @@ async function existingInstanceReady(instance) {
   });
 }
 
-async function openPage(url, output) {
+async function openPage(url: string, output: Pick<NodeJS.WriteStream, "write">) {
   try {
     const { openProjectPage } = await import("../projects/projects.mjs");
     await openProjectPage(url);
   } catch { output.write(`浏览器未能自动打开，请访问 ${url}\n`); }
 }
 
-export async function runCli(args = process.argv.slice(2), { stdout = process.stdout, stderr = process.stderr } = {}) {
+export async function runCli(args = process.argv.slice(2), { stdout = process.stdout, stderr = process.stderr }: { stdout?: Pick<NodeJS.WriteStream, "write">; stderr?: Pick<NodeJS.WriteStream, "write"> } = {}) {
   let options;
   try { options = parseCliArgs(args); }
-  catch (error) { stderr.write(`${error.message}\n`); process.exitCode = 1; return; }
+  catch (error) { stderr.write(`${String(errorField(error, "message"))}\n`); process.exitCode = 1; return; }
   if (options.help) { stdout.write(HELP); return; }
   if (options.version) { stdout.write(`${APP_VERSION}\n`); return; }
   if (options.command === "doctor") {
@@ -100,7 +103,7 @@ export async function runCli(args = process.argv.slice(2), { stdout = process.st
     }
     return;
   }
-  let application;
+  let application: LocalApplication | undefined;
   const controller = new AbortController();
   const removeSignals = installShutdownSignals({ abort: () => controller.abort(), getApplication: () => application, output: stderr });
   try {
@@ -128,7 +131,7 @@ export async function runCli(args = process.argv.slice(2), { stdout = process.st
     if (options.open && !controller.signal.aborted) await openPage(application.url, stderr);
   } catch (error) {
     removeSignals();
-    stderr.write(`${controller.signal.aborted ? "NEUMA 操作已取消。" : error.message}\n`);
+    stderr.write(`${controller.signal.aborted ? "NEUMA 操作已取消。" : String(errorField(error, "message"))}\n`);
     process.exitCode = controller.signal.aborted ? 0 : 1;
   }
 }

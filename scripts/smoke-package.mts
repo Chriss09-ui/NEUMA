@@ -1,3 +1,7 @@
+import type { ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
+import type { AddressInfo } from "node:net";
+import { objectFields } from "../src/runtime/type-boundary.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -17,9 +21,9 @@ if ((await lstat(archive)).size > 16 * 1024 * 1024) throw new Error("安装包�
 const temporary = await mkdtemp(join(tmpdir(), "neuma-packed-test-"));
 let root = join(temporary, "package");
 const dataDir = join(temporary, "用户 数据");
-let child;
+let child: ChildProcessByStdio<null, Readable, Readable> | null = null;
 
-async function permissions(path, readonly) {
+async function permissions(path: string, readonly: boolean): Promise<void> {
   const info = await lstat(path);
   if (info.isSymbolicLink()) throw new Error("安装包包含非预期链接。");
   if (info.isDirectory()) {
@@ -37,24 +41,24 @@ async function stop() {
   try { assert.equal((await exited)[0], 0); } finally { clearTimeout(timeout); child = null; }
 }
 
-async function start(port) {
+async function start(port?: number): Promise<string> {
   let text = "", errors = "";
-  child = spawn(process.execPath, [join(root, "bin", "neuma.cjs"), "--no-open", "--data-dir", dataDir,
+  const currentChild = child = spawn(process.execPath, [join(root, "bin", "neuma.cjs"), "--no-open", "--data-dir", dataDir,
     ...(port === undefined ? [] : ["--port", String(port)])], {
     cwd: temporary, env: { PATH: process.env.PATH, NODE_OPTIONS: "--max-old-space-size=128" },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout.on("data", (chunk) => { text += chunk; });
-  child.stderr.on("data", (chunk) => { errors += chunk; });
+  currentChild.stdout.on("data", (chunk) => { text += chunk; });
+  currentChild.stderr.on("data", (chunk) => { errors += chunk; });
   return new Promise((done, reject) => {
     const timeout = setTimeout(() => reject(new Error(`安装包启动未就绪：${errors.slice(0, 1000)}`)), 8000);
     const received = () => {
       const match = text.match(/http:\/\/127\.0\.0\.1:\d+\//);
-      if (match && text.includes("Ctrl+C")) { clearTimeout(timeout); child.stdout.removeListener("data", received); done(match[0]); }
+      if (match && text.includes("Ctrl+C")) { clearTimeout(timeout); currentChild.stdout.removeListener("data", received); done(match[0]); }
     };
-    child.stdout.on("data", received);
-    child.once("exit", (code) => { clearTimeout(timeout); if (!text.includes("Ctrl+C")) reject(new Error(`安装包提前退出${code}：${errors.slice(0, 1000)}`)); });
-    child.once("error", reject);
+    currentChild.stdout.on("data", received);
+    currentChild.once("exit", (code) => { clearTimeout(timeout); if (!text.includes("Ctrl+C")) reject(new Error(`安装包提前退出${code}：${errors.slice(0, 1000)}`)); });
+    currentChild.once("error", reject);
   });
 }
 
@@ -66,35 +70,35 @@ try {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   if (cleanInstall) {
     const prefix = join(temporary, "installed");
-    await execute(process.platform === "win32" ? "npm.cmd" : "npm", ["install", "--prefix", prefix,
+    await execute("npm", ["install", "--prefix", prefix,
       "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--fetch-retries=2", "--fetch-timeout=30000", archive], { capture: true });
     root = join(prefix, "node_modules", manifest.name);
     assert.equal((await checkPreviewRelease(root, { artifact: true })).ok, true);
   } else {
     // Resolve dependencies outside the readonly package; this is explicitly not a clean install.
-    await symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), join(temporary, "node_modules"), "dir");
+    await symlink(process.argv[4] ? join(resolve(process.argv[4]), "node_modules") : fileURLToPath(new URL("../node_modules", import.meta.url)), join(temporary, "node_modules"), "dir");
   }
   await permissions(root, true);
   const reservation = createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
-  const port = reservation.address().port; await new Promise((done) => reservation.close(done));
+  const port = (reservation.address() as AddressInfo).port; await new Promise((done) => reservation.close(done));
   const url = await start(port);
-  const request = (path, options) => fetch(new URL(path, url), { signal: AbortSignal.timeout(5000), ...options });
-  const health = await (await request("api/health")).json();
+  const request = (path: string, options: RequestInit = {}) => fetch(new URL(path!, url), { signal: AbortSignal.timeout(5000), ...options });
+  const health = objectFields(await (await request("api/health")).json());
   assert.equal(health.ok, true); assert.equal(health.llmConfigured, false);
   const html = await (await request("")).text();
   assert.match(html, /agents-list/);
-  const pending = [...html.matchAll(/<script[^>]+src="(\/[^"?#]+)"/g)].map((match) => match[1]);
+  const pending = [...html.matchAll(/<script[^>]+src="(\/[^"?#]+)"/g)].map((match) => match[1]!);
   const loaded = new Set();
   while (pending.length) {
-    const path = pending.pop();
+    const path = pending.pop()!;
     if (loaded.has(path)) continue;
     loaded.add(path);
     const response = await request(path);
     assert.equal(response.status, 200, path);
-    assert.match(response.headers.get("content-type"), /javascript/, path);
+    assert.match(response.headers.get("content-type") ?? "", /javascript/, path);
     const source = await response.text();
     for (const [, dependency] of source.matchAll(/(?:from\s*|import\s*)["'](\.\.?\/[^"']+)["']/g))
-      pending.push(new URL(dependency, new URL(path, url)).pathname);
+      pending.push(new URL(dependency!, new URL(path!, url)).pathname);
   }
   for (const path of ["vendor/marked.mjs", "vendor/katex/katex.mjs", "vendor/katex/katex.min.css"])
     assert.equal((await request(path)).status, 200, path);
@@ -102,7 +106,7 @@ try {
     body: JSON.stringify({ model: "fixture-package-model" }) })).status, 200);
   await stop();
   assert.equal(await start(), url);
-  assert.equal((await (await request("api/settings")).json()).model, "fixture-package-model");
+  assert.equal(objectFields(await (await request("api/settings")).json()).model, "fixture-package-model");
   await stop();
   process.stdout.write(`实际 tgz 从任意目录、只读程序目录启动：通过；${loaded.size} 个前端模块、vendor、设置保存、重启与 Ctrl+C：通过。\n`
     + (cleanInstall ? "独立临时 npm 安装生产依赖：通过；未复用仓库 node_modules。\n" : "依赖复用仓库 node_modules；本项是解包 smoke，不是干净安装验收。\n"));

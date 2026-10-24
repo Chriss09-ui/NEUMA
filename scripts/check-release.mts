@@ -1,3 +1,4 @@
+import { objectFields } from "../src/runtime/type-boundary.mjs";
 import { createHash } from "node:crypto";
 import { readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -15,7 +16,7 @@ const SYSTEMS = ["darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64",
 const CHECKS = ["installedTarball", "sdkLocalModel", "dataUpgrade", "migration", "projectLifecycle", "folderPicker",
   "isolation", "cancellation", "nodeMinimum"];
 
-export async function checkRelease(root) {
+export async function checkRelease(root: string) {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const lock = JSON.parse(await readFile(join(root, manifest.neumaBuild ? "npm-shrinkwrap.json" : "package-lock.json"), "utf8"));
   const failures = [];
@@ -27,7 +28,7 @@ export async function checkRelease(root) {
   if (shrinkwrap && JSON.stringify(shrinkwrap) !== JSON.stringify(lock)) failures.push("发布锁文件与 package-lock.json 不一致");
   if (lock.name !== manifest.name || lock.version !== manifest.version || lock.packages?.[""]?.version !== manifest.version
     || ["dependencies", "devDependencies"].some((key) => !isDeepStrictEqual(lock.packages?.[""]?.[key], manifest[key]))) failures.push("包信息与依赖锁文件不一致");
-  const artifacts = {};
+  const artifacts: Record<string, string> = {};
   for (const path of NATIVE_ARTIFACTS) {
     try {
       const info = await lstat(join(root, path));
