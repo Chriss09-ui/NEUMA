@@ -43,9 +43,10 @@ function unique(items, path, field = "id") {
   return ids;
 }
 
-function scopeLocalIds(modules) {
-  const maps = modules.map(() => Object.fromEntries(LOCAL_ID_FIELDS.map(field => [field, new Map()])));
-  for (const field of LOCAL_ID_FIELDS) {
+function scopeLocalIds(modules, legacyBlueprint) {
+  const fields = legacyBlueprint ? LOCAL_ID_FIELDS : ["components", "steps", ...LOCAL_ID_FIELDS];
+  const maps = modules.map(() => Object.fromEntries(fields.map(field => [field, new Map()])));
+  for (const field of fields) {
     const counts = new Map();
     for (const module of modules) for (const row of module[field] ?? []) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
     const reserved = new Set(counts.keys());
@@ -62,8 +63,20 @@ function scopeLocalIds(modules) {
       reserved.add(scoped); maps[index][field].set(row.id, scoped);
     }
   }
+  const resolve = (index, field, reference) => {
+    const owner = typeof reference === "string" ? index : modules.findIndex(module => module.moduleId === reference.moduleId);
+    const id = typeof reference === "string" ? reference : reference.id;
+    return maps[owner][field].get(id) ?? id;
+  };
   for (const [index, module] of modules.entries()) {
-    for (const field of LOCAL_ID_FIELDS) for (const row of module[field] ?? []) row.id = maps[index][field].get(row.id) ?? row.id;
+    for (const field of fields) for (const row of module[field] ?? []) row.id = maps[index][field].get(row.id) ?? row.id;
+    if (!legacyBlueprint) {
+      for (const step of module.steps) {
+        step.componentId = resolve(index, "components", step.componentId);
+        step.dependsOn = step.dependsOn.map(ref => resolve(index, "steps", ref));
+      }
+      for (const row of module.coverage) row.componentIds = row.componentIds.map(ref => resolve(index, "components", ref));
+    }
     for (const claim of module.platformClaims ?? []) {
       claim.decisionIds = claim.decisionIds.map(id => maps[index].decisions.get(id) ?? id);
       claim.acceptanceIds = claim.acceptanceIds.map(id => maps[index].acceptance.get(id) ?? id);
@@ -83,8 +96,19 @@ function acyclic(items, path) {
   entries.forEach((_entry, id) => visit(id));
 }
 
+export function architectureModuleLayers(blueprint) {
+  const pending = [...blueprint.modules], completed = new Set(), layers = [];
+  while (pending.length) {
+    const ready = pending.filter(module => module.dependsOn.every(id => completed.has(id)));
+    if (!ready.length) fail("blueprint.modules.dependsOn", "invalid_reference", "模块依赖不存在或形成循环。");
+    layers.push(ready);
+    for (const module of ready) { completed.add(module.id); pending.splice(pending.indexOf(module), 1); }
+  }
+  return layers;
+}
+
 /** Each wire schema derives its business fields from this build's actual final contract. */
-export function createArchitectureStageSchemas({ candidateSchema, requirements = [] }) {
+export function createArchitectureStageSchemas({ candidateSchema, requirements = [], legacyBlueprint = false }) {
   const source = copy(candidateSchema, "candidateSchema", 2 * 1024 * 1024);
   if (!source.properties || !Array.isArray(source.required)) throw new TypeError("架构阶段需要完整候选提交契约");
   const properties = Object.fromEntries(Object.entries(source.properties).filter(([key]) => !PART_FIELDS.includes(key)));
@@ -94,12 +118,18 @@ export function createArchitectureStageSchemas({ candidateSchema, requirements =
   const maximum = Math.max(80, ids.length);
   const blueprint = object({ global: object(properties, source.required.filter((key) => !PART_FIELDS.includes(key))), modules: list(object({
     id: identifier, purpose: text(2000), requirementIds: list(requirementId, 1, maximum),
-    componentIds: list(identifier, 1, source.properties.components.maxItems ?? 80),
-    stepIds: list(identifier, 1, source.properties.steps.maxItems ?? 80),
+    ...(legacyBlueprint ? { componentIds: list(identifier, 1, source.properties.components.maxItems ?? 80),
+      stepIds: list(identifier, 1, source.properties.steps.maxItems ?? 80) } : {}),
     dependsOn: list(identifier, 0, ARCHITECTURE_MODULE_LIMIT - 1), inputs: text(2000), outputs: text(2000),
   }), 1, ARCHITECTURE_MODULE_LIMIT) });
   const partProperties = Object.fromEntries(PART_FIELDS.filter((key) => source.properties[key]).map((key) =>
     [key, { ...source.properties[key], minItems: 0 }]));
+  if (!legacyBlueprint) {
+    const reference = { anyOf: [identifier, object({ moduleId: identifier, id: identifier })] };
+    partProperties.components.minItems = partProperties.steps.minItems = 1;
+    partProperties.steps.items.properties.dependsOn.items = reference;
+    partProperties.coverage.items.properties.componentIds.items = reference;
+  }
   const module = object({ moduleId: identifier, blueprintHash: hash, instructions: text(3000), ...partProperties },
     ["moduleId", "blueprintHash", "instructions", ...source.required.filter((key) => PART_FIELDS.includes(key))]);
   const integration = object({ baseHash: hash, updates: { type: "array", minItems: 0, maxItems: 24, items: object({
@@ -108,11 +138,11 @@ export function createArchitectureStageSchemas({ candidateSchema, requirements =
   return { blueprint, module, integration };
 }
 
-export function validateArchitectureBlueprint(value, { candidateSchema, requirements = [] }) {
-  const blueprint = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements }).blueprint, "blueprint");
+export function validateArchitectureBlueprint(value, { candidateSchema, requirements = [], legacyBlueprint = false }) {
+  const blueprint = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements, legacyBlueprint }).blueprint, "blueprint");
   const ids = unique(blueprint.modules, "blueprint.modules");
   equalIds(blueprint.modules.flatMap((entry) => entry.requirementIds), requirements.map((entry) => entry.id), "blueprint.modules.requirementIds");
-  for (const field of ["componentIds", "stepIds"]) {
+  for (const field of legacyBlueprint ? ["componentIds", "stepIds"] : []) {
     const declared = blueprint.modules.flatMap((entry) => entry[field]);
     unique(declared, `blueprint.modules.${field}`, null);
     const maximum = candidateSchema.properties[field === "componentIds" ? "components" : "steps"].maxItems ?? 80;
@@ -124,40 +154,55 @@ export function validateArchitectureBlueprint(value, { candidateSchema, requirem
   return blueprint;
 }
 
-function moduleOptions(blueprint, assignment) {
+function moduleOptions(blueprint, assignment, dependencyModules, legacyBlueprint) {
   const frozen = blueprint.modules.find((entry) => entry.id === assignment?.id);
   if (!frozen || !isDeepStrictEqual(frozen, assignment)) fail("module.assignment", "invalid_reference", "模块分工必须逐字匹配当前冻结蓝图。");
+  if (!legacyBlueprint) {
+    const dependencies = frozen.dependsOn.map(id => {
+      const matches = dependencyModules.filter(module => module.moduleId === id);
+      if (matches.length !== 1 || matches[0].blueprintHash !== designHash(blueprint))
+        fail("module.dependencies", "invalid_reference", "依赖模块尚无绑定当前蓝图的已保存成果，不能猜测其组件或步骤。");
+      return matches[0];
+    });
+    return { frozen, dependencies };
+  }
   const dependencies = blueprint.modules.filter((entry) => frozen.dependsOn.includes(entry.id));
   return { frozen, componentIds: [frozen, ...dependencies].flatMap((entry) => entry.componentIds),
     stepIds: [frozen, ...dependencies].flatMap((entry) => entry.stepIds) };
 }
 
-export function validateArchitectureModule(value, { blueprint, assignment, candidateSchema, requirements = [] }) {
-  const frozenBlueprint = validateArchitectureBlueprint(blueprint, { candidateSchema, requirements });
-  const { frozen, componentIds, stepIds } = moduleOptions(frozenBlueprint, assignment);
-  const module = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements }).module, "module");
+export function validateArchitectureModule(value, { blueprint, assignment, candidateSchema, requirements = [], legacyBlueprint = false, dependencyModules = [] }) {
+  const frozenBlueprint = validateArchitectureBlueprint(blueprint, { candidateSchema, requirements, legacyBlueprint });
+  const { frozen, componentIds, stepIds, dependencies } = moduleOptions(frozenBlueprint, assignment, dependencyModules, legacyBlueprint);
+  const module = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements, legacyBlueprint }).module, "module");
   if (module.moduleId !== frozen.id || module.blueprintHash !== designHash(frozenBlueprint))
     fail("module.blueprintHash", "invalid_reference", "模块成果不属于当前冻结蓝图或指定模块。");
-  equalIds(unique(module.components, "module.components"), frozen.componentIds, "module.components");
-  equalIds(unique(module.steps, "module.steps"), frozen.stepIds, "module.steps");
+  const localComponents = unique(module.components, "module.components"), localSteps = unique(module.steps, "module.steps");
+  if (legacyBlueprint) {
+    equalIds(localComponents, frozen.componentIds, "module.components");
+    equalIds(localSteps, frozen.stepIds, "module.steps");
+  }
+  const validReference = (reference, field) => typeof reference === "string"
+    ? (field === "steps" ? localSteps : localComponents).includes(reference)
+    : dependencies.some(dependency => dependency.moduleId === reference.moduleId && dependency[field].some(row => row.id === reference.id));
   equalIds(unique(module.coverage, "module.coverage", "requirementId"), frozen.requirementIds, "module.coverage");
   for (const field of ["capabilities", "decisions", "acceptance", "platformClaims"]) if (module[field]) unique(module[field], `module.${field}`);
   const usedComponents = new Set();
   for (const [index, step] of module.steps.entries()) {
-    if (!frozen.componentIds.includes(step.componentId)) fail(`module.steps[${index}].componentId`, "invalid_reference", "模块步骤只能执行本模块负责的组件。");
+    if (!localComponents.includes(step.componentId)) fail(`module.steps[${index}].componentId`, "invalid_reference", "模块步骤只能执行本模块负责的组件。");
     usedComponents.add(step.componentId);
-    if (step.dependsOn.some((id) => !stepIds.includes(id)))
-      fail(`module.steps[${index}].dependsOn`, "invalid_reference", "步骤只能依赖本模块或蓝图明确依赖模块的已声明步骤。");
+    if (step.dependsOn.some(ref => legacyBlueprint ? !stepIds.includes(ref) : !validReference(ref, "steps")))
+      fail(`module.steps[${index}].dependsOn`, "invalid_reference", "本模块步骤用本地编号引用；跨模块须以{moduleId,id}引用蓝图直接依赖模块已保存的真实步骤。");
   }
-  acyclic(module.steps.map((step) => ({ ...step, dependsOn: step.dependsOn.filter((id) => frozen.stepIds.includes(id)) })), "module.steps.dependsOn");
-  const unusedComponents = frozen.componentIds.filter(id => !usedComponents.has(id));
+  acyclic(module.steps.map((step) => ({ ...step, dependsOn: step.dependsOn.filter((id) => localSteps.includes(id)) })), "module.steps.dependsOn");
+  const unusedComponents = localComponents.filter(id => !usedComponents.has(id));
   if (unusedComponents.length) {
     const validationIssue = { path: "module.steps.componentId", reason: "component_unused",
-      allowedReferences: frozen.componentIds, missingReferences: unusedComponents };
-    throw Object.assign(new InputError("模块步骤尚未使用全部已声明组件；请核对步骤与组件职责，保留蓝图编号："
+      allowedReferences: localComponents, missingReferences: unusedComponents };
+    throw Object.assign(new InputError("模块步骤尚未使用全部已声明组件；请核对步骤与组件职责："
       + JSON.stringify(validationIssue)), { validationIssue });
   }
-  for (const [index, row] of module.coverage.entries()) if (row.componentIds.some((id) => !componentIds.includes(id)))
+  for (const [index, row] of module.coverage.entries()) if (row.componentIds.some(ref => legacyBlueprint ? !componentIds.includes(ref) : !validReference(ref, "components")))
     fail(`module.coverage[${index}].componentIds`, "invalid_reference", "覆盖关系不能引用未授权的其他模块组件。");
   const tested = new Set();
   for (const [index, row] of module.acceptance.entries()) for (const id of row.requirementIds) {
@@ -179,13 +224,17 @@ export function validateArchitectureModule(value, { blueprint, assignment, candi
 
 /** Merge verified partial results without asking another model to retype a complete design. */
 export function assembleArchitectureCandidate({ blueprint, modules, candidateSchema, requirements = [], mergeCapabilityReasons = true,
-  evidence = [], confirmedRequirementContext, deferredVerifications }) {
-  const frozen = validateArchitectureBlueprint(blueprint, { candidateSchema, requirements });
+  evidence = [], confirmedRequirementContext, deferredVerifications, legacyBlueprint = false }) {
+  const frozen = validateArchitectureBlueprint(blueprint, { candidateSchema, requirements, legacyBlueprint });
   const source = copy(modules, "modules", 2 * 1024 * 1024);
   equalIds(unique(source, "modules", "moduleId"), frozen.modules.map((entry) => entry.id), "modules");
-  const ordered = scopeLocalIds(frozen.modules.map((assignment) => validateArchitectureModule(source.find((entry) => entry.moduleId === assignment.id), {
-    blueprint: frozen, assignment, candidateSchema, requirements,
-  })));
+  const verified = [];
+  // Validate upstream results before using their actual interfaces for downstream references.
+  for (const layer of architectureModuleLayers(frozen)) for (const assignment of layer)
+    verified.push(validateArchitectureModule(source.find(entry => entry.moduleId === assignment.id), {
+      blueprint: frozen, assignment, candidateSchema, requirements, legacyBlueprint, dependencyModules: verified,
+    }));
+  const ordered = scopeLocalIds(frozen.modules.map(assignment => verified.find(module => module.moduleId === assignment.id)), legacyBlueprint);
   if (mergeCapabilityReasons) for (const module of ordered)
     module.decisions = normalizeArchitectureDecisionReferences(module.decisions, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const candidate = copy(frozen.global), conflicts = [];
@@ -214,9 +263,11 @@ export function assembleArchitectureCandidate({ blueprint, modules, candidateSch
       candidate[field] = rows;
     } else if (["components", "steps", "decisions", "acceptance", "platformClaims"].includes(field)) unique(candidate[field], `candidate.${field}`);
   }
-  const componentOrder = frozen.modules.flatMap((entry) => entry.componentIds), stepOrder = frozen.modules.flatMap((entry) => entry.stepIds);
-  candidate.components.sort((a, b) => componentOrder.indexOf(a.id) - componentOrder.indexOf(b.id));
-  candidate.steps.sort((a, b) => stepOrder.indexOf(a.id) - stepOrder.indexOf(b.id));
+  if (legacyBlueprint) {
+    const componentOrder = frozen.modules.flatMap((entry) => entry.componentIds), stepOrder = frozen.modules.flatMap((entry) => entry.stepIds);
+    candidate.components.sort((a, b) => componentOrder.indexOf(a.id) - componentOrder.indexOf(b.id));
+    candidate.steps.sort((a, b) => stepOrder.indexOf(a.id) - stepOrder.indexOf(b.id));
+  }
   acyclic(candidate.steps, "candidate.steps.dependsOn");
   const feedback = architectureToolValidation(candidate, candidateSchema, { root: "candidate" });
   for (const issue of feedback.issues) {
@@ -243,13 +294,13 @@ function target(candidate, path) {
 }
 
 export function applyArchitectureIntegration(value, { candidate, conflicts = [], candidateSchema, requirements = [], blueprint, modules, mergeCapabilityReasons = true,
-  evidence = [], confirmedRequirementContext, deferredVerifications }) {
+  evidence = [], confirmedRequirementContext, deferredVerifications, legacyBlueprint = false }) {
   const input = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements }).integration, "integration");
   const original = copy(candidate), result = copy(candidate);
   if (input.baseHash !== designHash(original)) fail("integration.baseHash", "invalid_reference", "整合结果不属于当前已拼装候选。");
   // Reconstruct the base from its checked owners, rather than trusting a caller-supplied candidate.
   const assembled = assembleArchitectureCandidate({ blueprint, modules, candidateSchema, requirements, mergeCapabilityReasons,
-    evidence, confirmedRequirementContext, deferredVerifications });
+    evidence, confirmedRequirementContext, deferredVerifications, legacyBlueprint });
   if (!isDeepStrictEqual(original, assembled.candidate) || !isDeepStrictEqual(conflicts, assembled.conflicts))
     fail("integration.baseHash", "invalid_reference", "整合基底或冲突清单与当前模块成果不一致。");
   const permitted = new Set(conflicts.map((entry) => entry.path)), changed = [];
@@ -280,6 +331,19 @@ export function applyArchitectureIntegration(value, { candidate, conflicts = [],
   }
   for (const row of result.coverage) if (!Array.isArray(row.componentIds) || row.componentIds.some((id) => !components.has(id)))
     fail("integration.coverage.componentIds", "invalid_reference", "整合覆盖只能引用当前已冻结组件。");
+  if (!legacyBlueprint) {
+    const owners = new Map(); let offset = 0;
+    for (const assignment of blueprint.modules) {
+      const count = modules.find(module => module.moduleId === assignment.id).components.length;
+      for (const row of original.components.slice(offset, offset + count)) owners.set(row.id, assignment.id);
+      offset += count;
+    }
+    for (const row of result.coverage) {
+      const owner = blueprint.modules.find(module => module.requirementIds.includes(row.requirementId));
+      if (!owner || row.componentIds.some(id => ![owner.id, ...owner.dependsOn].includes(owners.get(id))))
+        fail("integration.coverage.componentIds", "invalid_reference", "整合补充覆盖也必须遵守蓝图的直接模块依赖，不能跨模块越权引用。");
+    }
+  }
   for (const [index, row] of original.acceptance.entries()) {
     const current = result.acceptance?.find((entry) => entry.id === row.id);
     if (!current || !isDeepStrictEqual(current.requirementIds, row.requirementIds))

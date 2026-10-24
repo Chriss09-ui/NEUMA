@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
 import { createPiSession } from "../src/runtime/pi-runtime.mjs";
-import { CAPABILITY_CATALOG_VERSION, CAPABILITIES, capabilitySnapshotCompatible, designHash } from "../src/architecture/architecture-contract.mjs";
+import { CAPABILITY_CATALOG_VERSION, CAPABILITIES, capabilitySnapshotCompatible, designHash, designSubmissionSchema } from "../src/architecture/architecture-contract.mjs";
 import { InputError, ProviderError } from "../src/requirements/core.mjs";
 import { validDraft, validDesign, passingReview, withPriorFindingDecisions } from "./helpers/architecture.mjs";
 import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
@@ -109,8 +109,8 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   assert.deepEqual(sessions[0].payload.candidateSchema, sessions[0].tools.submit_architecture.parameters);
   assert.deepEqual(sessions[1].payload.candidateSchema, sessions[0].tools.submit_architecture.parameters);
   for (const session of sessions) assert.deepEqual(session.payload.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
-  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
-  assert.deepEqual(Object.keys(sessions[1].tools), ["request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
+  assert.deepEqual(Object.keys(sessions[0].tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
+  assert.deepEqual(Object.keys(sessions[1].tools), ["read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.deepEqual(researchCalls, []); assert.deepEqual(result.modules, []);
   assert.ok(sessions.every((item) => item.disposed));
   const ready = await designer.markReady(result);
@@ -641,7 +641,7 @@ test("仅按需委派最多三个局部模块，专员没有搜索或递归委�
     { question: "如何核对交付边界", boundary: "只分析已确认输入和结果", benefit: "避免扩大承诺" }];
   const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
     if (record.role === "specialist") {
-      assert.deepEqual(Object.keys(record.tools), ["submit_architecture_draft", "submit_module_design"]);
+      assert.deepEqual(Object.keys(record.tools), ["read_model_context", "submit_architecture_draft", "submit_module_design"]);
       return submit({ proposal: "只保留任务状态", interfaces: "文本输入和摘要输出", tradeoffs: "不保留跨任务状态",
         evidenceIds: [`neuma-runtime-v${record.payload.platformContractVersion}`], unknowns: [] });
     }
@@ -661,7 +661,7 @@ test("仅按需委派最多三个局部模块，专员没有搜索或递归委�
   assert.equal(sessions.filter((item) => item.role === "specialist").length, 3);
   for (const session of sessions) {
     const prompt = session.options.systemPrompt, submitName = submissionNames[session.role], contract = prompt.slice(prompt.lastIndexOf("宿主提交契约："));
-    assert.match(prompt, /首次仍用本阶段公开的提交工具提交完整工具参数/u);
+    assert.ok(prompt.includes(`按实际公开工具schema提交${submitName}`));
     assert.doesNotMatch(prompt, /首次仍用submit_architecture提交完整工具参数/u);
     assert.ok(contract.startsWith(`宿主提交契约：role=${session.role}，submitName=${submitName}；`));
     assert.ok(contract.includes(`实际发起${submitName}的正式tool_call`));
@@ -1129,13 +1129,14 @@ test("真实Pi阶段工具保留完整v3连接与动态schema，不以多轮修�
     let value;
     if (role !== "reviewer") {
       if (role === "blueprint") {
-        submittedSchema = structuredClone(payload.candidateSchema);
+        submittedSchema = designSubmissionSchema(draft, { requirements: payload.requirements });
+        assert.equal(payload.candidateSchema, undefined, "首包不再重复实际工具已有的结构");
         const globalSchema = tool.function.parameters.properties.global;
         assert.ok(globalSchema.required.includes("execution"));
         assert.ok(globalSchema.required.includes("selectionBasis"));
         assert.deepEqual(globalSchema.properties.schemaVersion.enum, [3]);
         for (const field of ["interaction", "execution", "selectionBasis", "connections"])
-          assert.deepEqual(globalSchema.properties[field], payload.candidateSchema.properties[field], "蓝图全局字段沿用完整候选契约");
+          assert.deepEqual(globalSchema.properties[field], submittedSchema.properties[field], "蓝图全局字段沿用完整候选契约");
         candidate = validDesign(payload.requirements, { schemaVersion: 3, profile: "custom",
         interaction: { defaultEntry: "conversation", page: false, operations: true, inputs: "用户记录", results: "检索结果", persistentData: "无" },
         execution: { language: "javascript", hosting: "managed", reason: "已确认的专属检索逻辑" },
@@ -1150,13 +1151,14 @@ test("真实Pi阶段工具保留完整v3连接与动态schema，不以多轮修�
       const submission = architectureStageSubmission({ tools: body.tools.map((item) => item.function), payload, candidate });
       assert.equal(submission.name, tool.function.name); value = submission.args;
     } else {
-      assert.deepEqual(payload.candidateSchema, submittedSchema, "评估者看到与设计者实际工具声明完全相同的候选契约");
+      assert.equal(payload.candidateSchema, undefined);
+      assert.ok(payload.contextIndex.some(item => item.section === "candidateSchema"), "完整契约仍可按需读取");
       const system = body.messages.filter((message) => ["system", "developer"].includes(message.role))
         .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
-      assert.match(system, /当前批保存义务/u);
-      assert.match(system, /最终完整提交义务/u);
+      assert.match(system, /本批编号/u);
+      assert.match(system, /完整检查后提交真实结论/u);
       assert.ok(payload.reviewParts.batch.acceptanceScopeChecks.length > 0, "正常构建首包使用宿主派发的真实范围编号");
-      const interactionSchema = payload.candidateSchema.properties.interaction;
+      const interactionSchema = submittedSchema.properties.interaction;
       assert.deepEqual(interactionSchema.required, ["defaultEntry", "page", "operations", "inputs", "results", "persistentData"]);
       assert.equal(interactionSchema.properties.operations.type, "boolean");
       assert.equal(interactionSchema.additionalProperties, false);

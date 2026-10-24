@@ -3,6 +3,34 @@ import test from "node:test";
 import { InputError } from "../src/requirements/core.mjs";
 import { compactDevelopmentContext, createContextReadTool } from "../src/development/development-context.mjs";
 import { developmentCaseFacts } from "../src/development/development-case-facts.mjs";
+import { developmentContextMessage } from "../src/development/development-context.mjs";
+
+test("开发首包只给当前任务及依赖接口，完整回归和指南仍可按路径读取", async () => {
+  const payload = { architectureRef: { version: 1 }, task: { id: "t2", requirementIds: ["r2"], acceptanceIds: ["a2"] },
+    requirements: [{ id: "r1", text: "其他要求" }, { id: "r2", text: "当前完整要求" }],
+    design: { execution: { language: "javascript" }, coverage: [{ requirementId: "r1", componentIds: ["c1"] }, { requirementId: "r2", componentIds: ["c2"] }],
+      components: [{ id: "c1" }, { id: "c2" }, { id: "c3" }], steps: [{ id: "s1", componentId: "c1", dependsOn: [] },
+        { id: "s2", componentId: "c2", dependsOn: ["s1"] }, { id: "s3", componentId: "c3", dependsOn: [] }],
+      acceptance: [{ id: "a1" }, { id: "a2", expected: "不得少一条" }] },
+    cases: [{ id: "other", taskId: "t1", acceptanceId: "a1" }, { id: "current", taskId: "t2", acceptanceId: "a2" }],
+    roleGuide: "完整规程".repeat(10000), planSchema: { properties: { cases: { description: "用例结构" } } } };
+  payload.feedback = { reason: "修复本次失败", report: { status: "failed" } };
+  payload.task.feedback = payload.feedback;
+  payload.submissionFeedback = { issues: [{ path: "changedFiles", reason: "work_file_unauthorized" }] };
+  const original = structuredClone(payload), packet = JSON.parse(developmentContextMessage(payload, 24000, { kind: "developer" }).message);
+  assert.deepEqual(packet.requirements, [payload.requirements[1]]);
+  assert.deepEqual(packet.design.steps.map(item => item.id), ["s1", "s2"], "依赖接口不能丢失");
+  assert.deepEqual(packet.cases, [payload.cases[1]]);
+  assert.equal(packet.contextSections.find(item => item.section === "cases").delivery, "summary");
+  assert.equal(packet.roleGuide, undefined);
+  assert.deepEqual(packet.feedback, payload.feedback); assert.equal(packet.task.feedback, undefined);
+  assert.deepEqual(packet.submissionFeedback, payload.submissionFeedback);
+  const tool = createContextReadTool(() => payload);
+  assert.deepEqual(JSON.parse((await call(tool, { section: "cases" })).text), payload.cases);
+  assert.equal(JSON.parse((await call(tool, { section: "planSchema", pointer: "/properties/cases/description" })).text), "用例结构");
+  assert.deepEqual(payload, original);
+  assert.ok(JSON.stringify(packet).length <= 24000);
+});
 
 const call = async (tool, params, signal) => JSON.parse((await tool.execute("context-read", params, signal)).content[0].text);
 

@@ -213,9 +213,10 @@ function controlledResources(extensions, systemPrompt) {
 }
 
 export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT,
-  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, reasoningMode = "off" }) {
+  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, reasoningMode = "off" }) {
   if (!["off", "auto"].includes(reasoningMode)) throw new InputError("模型思考配置无效");
   if (transformContext !== undefined && typeof transformContext !== "function") throw new InputError("模型上下文投影配置无效");
+  if (preparePrompt !== undefined && typeof preparePrompt !== "function") throw new InputError("模型首包投影配置无效");
   const profile = resolvedModelProfile(config), known = profile.source.kind !== "fallback";
   if (profile.contextWindow < 8192)
     throw new InputError("当前模型上下文不足以容纳 Pi 的安全余量，请使用至少 8192 上下文的模型");
@@ -346,6 +347,11 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
       if (runtimeError) throw runtimeError;
       if (operation === "prompt" && args[1]?.images?.length && !profile.input.includes("image"))
         throw new InputError("当前模型未声明支持图片，请选择支持图片的模型或配置其已确认能力");
+      if (operation === "prompt" && preparePrompt) {
+        const prepared = await preparePrompt(args[0]);
+        if (typeof prepared !== "string") throw new InputError("模型首包投影必须返回文本");
+        args[0] = prepared;
+      }
       try { return await invoke(...args); }
       finally { secureHistory(); if (runtimeError) throw runtimeError; }
     };

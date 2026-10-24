@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentMakingState } from "../public/agent-build-view.js";
+import { agentBuildState } from "../public/agent-runtime.js";
 import { agentDisplayName } from "../public/state.js";
 import { browserResult, testBrowser } from "./helpers/browser.mjs";
 
@@ -13,6 +14,18 @@ const architecture = (overrides = {}) => ({ agentId: agent.id, name: agent.name,
 const development = (overrides = {}) => ({ agentId: agent.id, id: "development-one", status: "running", phase: "implementing",
   architectureRef: { version: 1, candidateHash: "candidate-1" }, delivery: "needs_development", tasks: [], ...overrides });
 const currentStage = (presentation) => presentation.stages.find((stage) => stage.status === "current")?.id;
+
+test("显式重开停在架构起点并提供可用的手动开始按钮", () => {
+  const pending = architecture({ status: "pending", delivery: "blocked", candidateHash: null, design: null, review: null });
+  const state = agentBuildState(agent, { architecture: pending });
+  assert.equal(state.status, "pending");
+  const result = agentMakingState(agent, { ...state, architecture: pending });
+  assert.equal(result.active, false); assert.equal(result.failed, false);
+  assert.equal(result.phase, "designing"); assert.equal(result.canRetry, true);
+  assert.equal(result.actionLabel, "从架构蓝图开始");
+  assert.match(result.summary, /原方案与检查结果已保留/u);
+  assert.deepEqual(result.stages.map(row => row.status), ["complete", "waiting", "pending", "pending", "pending"]);
+});
 
 test("阶段额度耗尽显示显式修复入口与具体原因，二次耗尽不再出现无效重生成按钮", () => {
   for (const status of ["available", "continuing", "blocked"]) {

@@ -1,6 +1,6 @@
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { ARCHITECTURE_ROLE_TURN_LIMIT, designHash } from "./architecture-contract.mjs";
-import { ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT } from "./architecture-design-pipeline.mjs";
+import { architectureDesignCallLimits } from "./architecture-design-pipeline.mjs";
 import { copyArchitectureReviewJson } from "./architecture-review-binding.mjs";
 import { createArchitectureSubmissionRepair } from "./architecture-submission-repair.mjs";
 import { readMainReviewCheckpoint } from "./architecture-main-review-checkpoint.mjs";
@@ -27,7 +27,8 @@ const contentError = message => Object.assign(new InputError(message), {
 });
 const validProgress = record => {
   const { hash, ...body } = record.designProgressCheckpoint;
-  return hash === designHash(body) && Number.isSafeInteger(body.modelCalls) && body.modelCalls >= 0 && body.modelCalls <= ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT;
+  return hash === designHash(body) && Number.isSafeInteger(body.modelCalls) && body.modelCalls >= 0
+    && body.modelCalls <= architectureDesignCallLimits(body).pipeline;
 };
 
 export function hasReviewedArchitectureCandidate(record) {

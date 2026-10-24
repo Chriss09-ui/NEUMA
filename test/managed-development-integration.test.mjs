@@ -95,6 +95,7 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
           catch { return []; }
         });
         for (const section of ["requirements", "design"]) {
+          if (payload.contextSections?.find(item => item.section === section)?.delivery === "full") continue;
           const selected = [...new Map(pages.filter((page) => page.section === section).map((page) => [page.offset, page])).values()].sort((a, b) => a.offset - b.offset);
           const last = selected.at(-1);
           if (!last || last.nextOffset !== null) { name = "read_development_context"; args = { section, offset: last?.nextOffset ?? 0, limit: 8000 }; break; }
@@ -113,7 +114,7 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
       else if (names.includes("submit_architecture_review")) {
         name = "submit_architecture_review"; args = passingReview(payload.candidateHash, payload.design);
       } else if (names.includes("submit_requirement_fidelity")) {
-        assert.deepEqual(names, ["submit_requirement_fidelity"], "范围复核保持独立只读会话");
+        assert.deepEqual(names, ["submit_requirement_fidelity", "read_model_context"], "范围复核只有提交及当前冻结材料读取");
         name = "submit_requirement_fidelity"; args = fidelityResult(payload, "preserved");
       } else if (names.includes("submit_development_plan")) {
         if (!invalid || !calls.some((call) => call.function.name === "submit_development_plan")) {

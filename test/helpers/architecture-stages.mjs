@@ -19,8 +19,8 @@ export function architectureStageSubmission({ tools, payload, candidate, moduleI
     const global = Object.fromEntries(Object.entries(expected).filter(([key]) => !moduleFields.includes(key)));
     global.instructions = blueprintInstructions;
     args = { global, modules: [{ id: moduleId, purpose: expected.rationale,
-      requirementIds: payload.requirements.map((item) => item.id), componentIds: expected.components.map((item) => item.id),
-      stepIds: expected.steps.map((item) => item.id), dependsOn: [],
+      requirementIds: payload.requirements.map((item) => item.id),
+      ...(payload.blueprintProtocol === "frozen-ids-v1" ? { componentIds: expected.components.map(item => item.id), stepIds: expected.steps.map(item => item.id) } : {}), dependsOn: [],
       inputs: expected.interaction.inputs, outputs: expected.interaction.results }] };
   } else if (name === "submit_architecture_module") {
     assert.equal(payload.blueprint.modules.length, 1, "多模块回归须显式提供各模块独立成果");

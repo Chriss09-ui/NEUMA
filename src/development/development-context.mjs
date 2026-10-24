@@ -1,5 +1,7 @@
 import { InputError } from "../requirements/core.mjs";
 import { createHash } from "node:crypto";
+import { modelContextValue } from "../runtime/model-context.mjs";
+import { deferredObligations, platformOverview } from "../architecture/architecture-model-context.mjs";
 
 const forbiddenSections = new Set(["__proto__", "prototype", "constructor"]);
 const sectionPattern = /^[A-Za-z_][A-Za-z0-9_]{0,79}$/;
@@ -160,7 +162,7 @@ export function compactDevelopmentContext(payload, maxChars = 16_000) {
     let result = describeDelivery({ ...base, ...summaries(payload, limit, count) });
     if (encoded(result).length <= maxChars) {
       // Put actual task material ahead of repeated schema guides; full evidence remains pageable.
-      for (const field of ["task", "feedback", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
+      for (const field of ["task", "feedback", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "deferredObligations", "platformOverview", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
         if (!Object.hasOwn(payload, field)) continue;
         const candidate = describeDelivery({ ...result, [field]: payload[field] });
         if (encoded(candidate).length <= maxChars) result = { ...candidate, [field]: structuredClone(payload[field]) };
@@ -169,6 +171,61 @@ export function compactDevelopmentContext(payload, maxChars = 16_000) {
     }
   }
   throw new InputError("上下文上限不足以保留任务目标和失败摘要，请扩大上限");
+}
+
+export function developmentNodeContext(payload, kind) {
+  const fields = ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "task", "feedback", "submissionFeedback", "issues", "remaining",
+    "requirements", "design", "verificationAssignments", "entrypoint", "runtime", "application", "checkpoint", "planningWorkspace"];
+  if (kind === "planner") fields.push("previousPlan", "historicalPlanningDraft", "caseFacts", "completedTasks", "planningFiles");
+  if (kind === "developer") fields.push("cases", "activationCases", "activationChecks");
+  if (kind === "reviewer") fields.push("plan", "planHash", "report", "codeHash", "caseFacts", "admissionFacts");
+  const result = Object.fromEntries(fields.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+  if (result.task && payload.feedback && encoded(result.task.feedback) === encoded(payload.feedback)) {
+    const { feedback: _duplicate, ...task } = result.task;
+    result.task = task;
+  }
+  result.platformOverview = platformOverview(payload);
+  if (payload.deferredVerifications) result.deferredObligations = deferredObligations(payload.deferredVerifications);
+  if (kind === "developer" && payload.handoffs) {
+    const dependencies = new Set([payload.task?.id, ...payload.task?.dependsOn ?? []]);
+    result.handoffs = payload.handoffs.filter(item => dependencies.has(item.taskId));
+  }
+  if (kind === "developer" && payload.task?.requirementIds?.length && payload.task?.acceptanceIds?.length) {
+    const requirements = new Set(payload.task.requirementIds), acceptance = new Set(payload.task.acceptanceIds);
+    result.requirements = payload.requirements?.filter(item => requirements.has(item.id));
+    result.cases = payload.cases?.filter(item => item.taskId === payload.task.id || acceptance.has(item.acceptanceId));
+    const design = payload.design;
+    if (design) {
+      const coverage = design.coverage?.filter(item => requirements.has(item.requirementId));
+      const components = new Set(coverage?.flatMap(item => item.componentIds) ?? []);
+      const steps = new Set(design.steps?.filter(item => components.has(item.componentId)).map(item => item.id));
+      let added = true;
+      while (added) {
+        added = false;
+        for (const step of design.steps ?? []) if (steps.has(step.id)) for (const id of step.dependsOn ?? []) if (!steps.has(id)) { steps.add(id); added = true; }
+      }
+      for (const step of design.steps ?? []) if (steps.has(step.id)) components.add(step.componentId);
+      result.design = { ...Object.fromEntries(["profile", "execution", "interaction", "connections", "capabilities", "state", "failureHandling", "unknowns"]
+        .filter(key => design[key] !== undefined).map(key => [key, design[key]])), coverage,
+        components: design.components?.filter(item => components.has(item.id)), steps: design.steps?.filter(item => steps.has(item.id)),
+        acceptance: design.acceptance?.filter(item => acceptance.has(item.id)) };
+    }
+    result.verificationAssignments = payload.verificationAssignments?.filter(item => acceptance.has(item.acceptanceId));
+  }
+  return result;
+}
+
+function initialDevelopmentContext(payload, maxChars, kind) {
+  if (!kind) return compactDevelopmentContext(payload, maxChars);
+  const projected = developmentNodeContext(payload, kind);
+  const contextNotice = notice + " summary也可能是当前任务的完整子集；其他任务与全量回归原文仍可读取。";
+  const sections = Object.keys(payload).filter(section => encoded(payload[section]) !== undefined).map(section => ({ section, path: `/${section}`,
+    totalChars: encoded(payload[section]).length, delivery: "summary" }));
+  const overhead = encoded({ contextTruncated: true, contextNotice, contextSections: sections }).length + 2;
+  const initial = compactDevelopmentContext(projected, maxChars - overhead);
+  return { ...initial, contextTruncated: true, contextNotice, contextSections: sections.map(item => ({ ...item,
+    delivery: !Object.hasOwn(initial, item.section) ? "paged"
+      : encoded(initial[item.section]) === encoded(payload[item.section]) ? "full" : "summary" })) };
 }
 
 const contextDigest = (value) => createHash("sha256").update(value).digest("hex");
@@ -189,8 +246,8 @@ function deliveredUserMessages(messages) {
 }
 
 /** A receipt refers to exact host messages still present in Pi's active context, never its lossy summary. */
-export function developmentContextMessage(payload, maxChars, { reference, messages } = {}) {
-  const initial = compactDevelopmentContext(payload, maxChars), sections = initial.contextSections
+export function developmentContextMessage(payload, maxChars, { reference, messages, kind } = {}) {
+  const initial = initialDevelopmentContext(payload, maxChars, kind), sections = initial.contextSections
     ?? Object.keys(payload).filter((section) => encoded(payload[section]) !== undefined)
       .map((section) => ({ section, path: `/${section}`, totalChars: encoded(payload[section]).length, delivery: "full" }));
   const bindingHash = reference?.bindingHash;
@@ -227,7 +284,7 @@ export function developmentContextMessage(payload, maxChars, { reference, messag
   const delivered = Object.keys(payload).filter((section) => !deliveryMetadata.has(section) && full.get(section) === "full")
     .map((section) => activeReused.has(section) ? receipts.get(section)
       : { section, contentHash: contextDigest(encoded(payload[section])), messageHash });
-  return { message, delivery: typeof bindingHash === "string" ? { version: 1, bindingHash, sections: delivered } : undefined };
+  return { message, kind, delivery: typeof bindingHash === "string" ? { version: 1, bindingHash, sections: delivered } : undefined };
 }
 
 export function restoreDevelopmentContext(messages, payload, maxChars, prepared) {
@@ -235,7 +292,7 @@ export function restoreDevelopmentContext(messages, payload, maxChars, prepared)
   if (!reused?.length) return messages;
   const completed = deliveredUserMessages(messages), receipts = new Map(prepared.delivery.sections.map((item) => [item.section, item]));
   if (reused.every((section) => completed.has(receipts.get(section)?.messageHash))) return messages;
-  const full = encoded(compactDevelopmentContext(payload, maxChars));
+  const full = encoded(initialDevelopmentContext(payload, maxChars, prepared.kind));
   const target = messages.findLastIndex((message) => message.role === "user" && (typeof message.content === "string"
     ? message.content : message.content?.length === 1 && message.content[0]?.type === "text" ? message.content[0].text : undefined) === prepared.message);
   // Request-local projection runs after native compaction and before each model request.
@@ -248,17 +305,18 @@ export function createContextReadTool(getPayload) {
   if (typeof getPayload !== "function") throw new InputError("上下文读取工具需要当前任务上下文入口");
   return {
     name: "read_development_context", label: "分页读取当前研发资料",
-    description: "只读当前轮输入的一个顶层字段。section 使用 contextSections 的字段名；offset/nextOffset 为 UTF-16 字符索引，读取完整原始计划、用例或证据，不访问文件。",
+    description: "只读当前轮完整资料。section 使用 contextSections 字段名；可用pointer直接读取JSON子字段，offset/nextOffset为UTF-16字符索引，不访问文件。",
     parameters: { type: "object", properties: {
       section: { type: "string", minLength: 1, maxLength: 80, pattern: "^[A-Za-z_][A-Za-z0-9_]*$", description: "原始输入顶层字段名，例如 report、feedback、plan、cases" },
+      pointer: { type: "string", maxLength: 500, description: "可选JSON Pointer，例如 /properties/cases；缺省读取整个section" },
       offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 8000 },
     }, required: ["section"], additionalProperties: false },
     executionMode: "sequential",
     execute: async (_id, params, signal) => {
       signal?.throwIfAborted();
       if (!params || typeof params !== "object" || Array.isArray(params)
-        || Object.keys(params).some((key) => !["section", "offset", "limit"].includes(key))) throw new InputError("上下文分页参数无效");
-      const { section, offset = 0, limit = 4000 } = params;
+        || Object.keys(params).some((key) => !["section", "pointer", "offset", "limit"].includes(key))) throw new InputError("上下文分页参数无效");
+      const { section, pointer = "", offset = 0, limit = 4000 } = params;
       validSection(section);
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 8000) {
         throw new InputError("上下文分页位置或长度无效；每页最多 8000 字符");
@@ -269,14 +327,14 @@ export function createContextReadTool(getPayload) {
         const sections = Object.keys(payload).filter((key) => sectionPattern.test(key) && !forbiddenSections.has(key));
         throw new InputError("当前轮上下文不存在这个顶层字段；可读取的section：" + JSON.stringify(sections));
       }
-      const source = encoded(payload[section]);
+      const source = encoded(modelContextValue(payload, section, pointer));
       if (source === undefined) throw new InputError("当前字段没有可读取的 JSON 内容");
       if (offset > source.length || dividesCharacter(source, offset)) throw new InputError("续读位置无效，请使用上一页返回的 nextOffset");
       let end = Math.min(source.length, offset + limit);
       if (dividesCharacter(source, end)) end--;
       if (end === offset && offset < source.length) throw new InputError("当前字符需要两个字符索引位置，请将分页长度至少设为 2");
       const truncated = end < source.length;
-      const page = { section, offset, text: source.slice(offset, end), truncated, nextOffset: truncated ? end : null, totalChars: source.length };
+      const page = { section, ...(pointer ? { pointer } : {}), offset, text: source.slice(offset, end), truncated, nextOffset: truncated ? end : null, totalChars: source.length };
       return { content: [{ type: "text", text: JSON.stringify(page) }], details: {} };
     },
   };

@@ -14,7 +14,7 @@ import { serviceErrorMessage } from "../services/service-errors.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
-import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT } from "./development-prompts.mjs";
+import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT, developmentNodePrompt } from "./development-prompts.mjs";
 import { compactDevelopmentContext, developmentContextMessage, restoreDevelopmentContext, createContextReadTool } from "./development-context.mjs";
 import { developmentCaseFacts } from "./development-case-facts.mjs";
 import { bindApplicationManifest, VALUE_SCHEMA_DESCRIPTION } from "../applications/application-contract.mjs";
@@ -410,8 +410,8 @@ export class DevelopmentController {
     handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
       reasoningMode: kind === "reviewer" ? "off" : "auto",
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
-      systemPrompt: { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[kind]
-        + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT) + (platform ? "\n" + renderPlatformRules(platform, { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities }) : "")
+      systemPrompt: developmentNodePrompt(kind)
+        + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT)
         + "\n" + renderPiSubmissionContract({ role: kind, submitName: name, tools: sessionTools, alternativeTools: blockerTool ? [blockerTool.name] : [], structuredResponse: true }),
       customTools: sessionTools, sessionStorage: persistent.options, onModelCall: charge,
       transformContext: (messages) => handle.contextMessage
@@ -490,6 +490,9 @@ export class DevelopmentController {
     handle.checkToolInputs?.();
     ctx.lastRole = handle.kind;
     handle.payload = clone({ ...payload, ...(handle.planningBlocker ? { planningBlockerContract: handle.planningBlocker } : {}) });
+    handle.payload.roleGuide = { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[handle.kind];
+    if (ctx.record.architecture.platformSnapshot) handle.payload.platformGuide = renderPlatformRules(ctx.record.architecture.platformSnapshot,
+      { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities });
     handle.payload.modelBudget = { limit: handle.limit, used: handle.counter.turns, remaining: Math.max(0, handle.limit - handle.counter.turns) };
     const accepted = handle.reference.pendingResult;
     if (accepted) {
@@ -517,8 +520,8 @@ export class DevelopmentController {
     Object.assign(handle, { accepting: true, submitted: false, result: undefined, turnsInPrompt: 0 });
     handle.session.setAutoCompactionEnabled?.(true);
     try {
-      const maxChars = Math.min(128_000, Math.max(4096, Math.floor((handle.session.model?.contextWindow ?? 32768) / 2)));
-      const prepared = developmentContextMessage(handle.payload, maxChars, { reference: handle.reference, messages: handle.session.messages });
+      const maxChars = Math.min(handle.kind === "developer" ? 24_000 : 64_000, Math.max(4096, Math.floor((handle.session.model?.contextWindow ?? 32768) / 2)));
+      const prepared = developmentContextMessage(handle.payload, maxChars, { reference: handle.reference, messages: handle.session.messages, kind: handle.kind });
       handle.contextMessage = prepared;
       handle.contextMaxChars = maxChars;
       handle.reference.contextDelivery = prepared.delivery;

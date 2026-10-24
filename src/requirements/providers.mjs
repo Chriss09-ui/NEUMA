@@ -5,7 +5,7 @@ import { readModelReply } from "./requirement-stream.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { readModelProfile } from "../runtime/model-profile.mjs";
 import { modelIdleTimeoutMs, withModelIdleTimeout } from "../runtime/model-idle-timeout.mjs";
-import { createPlatformSnapshot, renderPlatformRules, renderRequirementDeliveryFacts } from "../architecture/platform-contract.mjs";
+import { createPlatformSnapshot } from "../architecture/platform-contract.mjs";
 import { contentHash, normalizeTaskSpec, taskSpecDiagnostic, taskSpecSchema, TASK_DIMENSIONS, validateTaskEvidence } from "./task-spec.mjs";
 import { mergeConsultationIssues, PREFLIGHT_DIMENSION_STATUSES, preflightRequirementIds, preflightSchema, validateIssueDecisions, validatePreflight } from "./consultation.mjs";
 import { SYSTEM_REQUIREMENT_CHECKS } from "../agents/requirement-verification.mjs";
@@ -256,11 +256,11 @@ const REQUIREMENT_SYSTEM_PROMPT = `你是 NEUMA。NEUMA（纽玛）是用户正�
 - 每轮返回完整 draft，保留未修改的有效内容。只输出 JSON，不输出 Markdown、解释或代码块。`;
 
 function platformInstructions(platform) {
-  return platform?.deliveryRoutes ? `\n\n${renderPlatformRules(platform)}` : "";
+  return platform?.deliveryRoutes ? "\n平台事实只见任务包platform。按实际可用能力澄清需求，区分平台机制、业务研发、配置与实际验收；不凭模型记忆改写事实，不把技术核实交给用户，也不擅自缩减业务范围。" : "";
 }
 
 function requirementDeliveryFacts(platform) {
-  return platform?.deliveryRoutes ? `\n\n${renderRequirementDeliveryFacts(platform)}` : "";
+  return platformInstructions(platform);
 }
 
 function configValue(env, name) {
@@ -619,6 +619,17 @@ function draftConsultationContext(consultation) {
       issues: (consultation.handoff.issues ?? []).map(issue) } } : {}) };
 }
 
+export function requirementMessageContext({ message, lastQuestion, userMessages, evidenceMessages }) {
+  if (!evidenceMessages?.length) return { userMessages, lastQuestion, latestUserMessage: message };
+  const user = evidenceMessages.findLast(item => item.role === "user" && item.content === message && item.id);
+  const question = evidenceMessages.findLast(item => item.role === "assistant" && item.content === lastQuestion && item.id);
+  const extra = userMessages.filter(text => !evidenceMessages.some(item => item.role === "user" && item.content === text));
+  return { ...(user ? { latestUserMessageId: user.id } : { latestUserMessage: message }),
+    ...(question ? { lastQuestionMessageId: question.id } : { lastQuestion }),
+    ...(extra.length ? { userMessages: extra } : {}),
+    messageSource: "本轮消息与上一追问按ID读取evidenceMessages原文；同一句不再复制到多个历史字段。未收录的补充仍在原字段。" };
+}
+
 export function makeProviders(config = getProviderConfig(), fetchImpl = fetch, integrations = {}) {
   const generateDraft = async ({ message, previousDraft, lastQuestion, userMessages = [], signal,
     evidenceMessages, consultation, platform, taskSpecVersion }) => {
@@ -635,7 +646,7 @@ export function makeProviders(config = getProviderConfig(), fetchImpl = fetch, i
       messages: [
         { role: "system", content: REQUIREMENT_SYSTEM_PROMPT + (taskSpecVersion ? `\n\n${TASK_SPEC_PROMPT}${platformInstructions(platform)}` : "") },
         { role: "user", content: JSON.stringify({ currentDraft: previousDraft,
-          userMessages, lastQuestion, latestUserMessage: message,
+          ...requirementMessageContext({ message, lastQuestion, userMessages, evidenceMessages: taskSpecVersion ? evidenceMessages : undefined }),
           ...(taskSpecVersion ? { evidenceMessages, consultation: draftConsultationContext(consultation), platform, taskSpecVersion,
             taskSpecSchema: taskSpecSchema({ messageIds: Object.values(evidenceIds).flat() }),
             taskSpecEvidence: { allowedMessageIds: evidenceIds, rules: {

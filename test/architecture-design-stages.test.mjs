@@ -34,9 +34,73 @@ function fixture({ legacy = false } = {}) {
     acceptance: (index ? [base.acceptance[2]] : base.acceptance.slice(0, 2)).map((row) => ({ ...row, requirementIds: assignment.requirementIds })),
     unknowns: [],
   }));
-  const options = { blueprint, modules, candidateSchema, requirements };
-  return { ...options, options, moduleOptions: index => ({ blueprint, assignment: blueprint.modules[index], candidateSchema, requirements }) };
+  const options = { blueprint, modules, candidateSchema, requirements, legacyBlueprint: true };
+  return { ...options, options, moduleOptions: index => ({ ...options, assignment: blueprint.modules[index] }) };
 }
+
+function boundaryFixture() {
+  const f = fixture();
+  for (const assignment of f.blueprint.modules) { delete assignment.componentIds; delete assignment.stepIds; }
+  for (const module of f.modules) module.blueprintHash = designHash(f.blueprint);
+  f.modules[1].steps[0].dependsOn = [{ moduleId: "source", id: "read" }];
+  const options = { ...f.options, legacyBlueprint: false };
+  return { ...options, options, moduleOptions: index => ({ ...options, assignment: f.blueprint.modules[index], dependencyModules: f.modules.slice(0, index) }) };
+}
+
+test("新蓝图只声明模块边界，模块可补齐第四组件的执行步骤", () => {
+  const f = boundaryFixture(), schemas = createArchitectureStageSchemas(f);
+  assert.equal(Object.hasOwn(schemas.blueprint.properties.modules.items.properties, "componentIds"), false);
+  assert.equal(Object.hasOwn(schemas.blueprint.properties.modules.items.properties, "stepIds"), false);
+  assert.deepEqual(validateArchitectureBlueprint(f.blueprint, f), f.blueprint);
+  rejected(() => validateArchitectureBlueprint(changed(f.blueprint, value => { value.modules[0].stepIds = ["read"]; }), f), "blueprint.modules[0]");
+  const module = f.modules[0];
+  for (const id of ["concept", "calculate", "stability"]) module.components.push({ ...module.components[0], id });
+  for (const id of ["calculate", "stability"]) module.steps.push({ ...module.steps[0], id, componentId: id });
+  assert.throws(() => validateArchitectureModule(module, f.moduleOptions(0)), error => error.validationIssue?.reason === "component_unused");
+  module.steps.push({ ...module.steps[0], id: "classify_concept", componentId: "concept", dependsOn: ["read"] });
+  assert.deepEqual(validateArchitectureModule(module, f.moduleOptions(0)), module);
+  const assembled = assembleArchitectureCandidate(f.options);
+  assert.equal(assembled.candidate.steps.length, 5);
+  assert.doesNotThrow(() => validateDesign(assembled.candidate, { requirements: f.requirements }));
+});
+
+test("跨模块引用只接受已声明直接依赖的真实成果，本地引用不能猜上游编号", () => {
+  const f = boundaryFixture();
+  assert.deepEqual(validateArchitectureModule(f.modules[1], f.moduleOptions(1)), f.modules[1]);
+  for (const ref of ["read", { moduleId: "source", id: "missing" }, { moduleId: "stranger", id: "read" }, { moduleId: "output", id: "render" }])
+    rejected(() => validateArchitectureModule(changed(f.modules[1], module => { module.steps[0].dependsOn = [ref]; }), f.moduleOptions(1)), "dependsOn");
+  rejected(() => validateArchitectureModule(f.modules[1], { ...f.moduleOptions(1), dependencyModules: [] }), "dependencies");
+  rejected(() => validateArchitectureModule(changed(f.modules[0], module => { module.steps[0].dependsOn = ["read"]; }), f.moduleOptions(0)), "dependsOn");
+  rejected(() => validateArchitectureModule(changed(f.modules[1], module => { module.coverage[0].componentIds = [{ moduleId: "source", id: "missing" }]; }), f.moduleOptions(1)), "componentIds");
+  f.modules[1].coverage[0].componentIds.push({ moduleId: "source", id: "capture" });
+  assert.deepEqual(assembleArchitectureCandidate(f.options).candidate.coverage[1].componentIds, ["compose", "capture"]);
+});
+
+test("模块内部组件和步骤可以同名，拼装区分所有者并同步本地及跨模块引用", () => {
+  const f = boundaryFixture();
+  for (const module of f.modules) {
+    module.components[0].id = "common"; module.steps[0].id = "execute";
+    module.steps[0].componentId = "common"; module.coverage[0].componentIds = ["common"];
+  }
+  f.modules[1].steps[0].dependsOn = [{ moduleId: "source", id: "execute" }];
+  f.modules[1].coverage[0].componentIds.push({ moduleId: "source", id: "common" });
+  const before = structuredClone(f.options), { candidate } = assembleArchitectureCandidate(f.options);
+  assert.deepEqual(candidate.components.map(row => row.id), ["source__common", "output__common"]);
+  assert.deepEqual(candidate.steps.map(row => row.componentId), ["source__common", "output__common"]);
+  assert.deepEqual(candidate.steps[1].dependsOn, ["source__execute"]);
+  assert.deepEqual(candidate.coverage[1].componentIds, ["output__common", "source__common"]);
+  assert.deepEqual(f.options, before);
+  assert.deepEqual(assembleArchitectureCandidate({ ...f.options, modules: [...f.modules].reverse() }).candidate, candidate);
+  assert.doesNotThrow(() => validateDesign(candidate, { requirements: f.requirements }));
+  rejected(() => validateArchitectureModule(changed(f.modules[0], module => { module.components.push(module.components[0]); }), f.moduleOptions(0)), "components");
+});
+
+test("整合也不能新增未经蓝图授权的跨模块覆盖", () => {
+  const f = boundaryFixture(), assembled = assembleArchitectureCandidate(f.options);
+  rejected(() => applyArchitectureIntegration({ baseHash: designHash(assembled.candidate), updates: [
+    { path: "/coverage/0/componentIds", value: ["capture", "compose"] },
+  ] }, { ...f.options, ...assembled }), "coverage.componentIds");
+});
 
 test("阶段契约派生当前v3与旧候选字段，蓝图不要求模块详细设计", () => {
   for (const legacy of [false, true]) {

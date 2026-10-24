@@ -24,7 +24,7 @@ function fixture(controller, respond, { signal, stale = false } = {}) {
   const run = () => controller.run({ context, issues, config: {}, cwd: "/tmp", dataDir: "/tmp", signal,
     charge() { state.charges++; }, sessionFactory: async (options) => {
       assert.equal(options.reasoningMode, controller === controllers.fidelity ? "off" : "auto");
-      assert.deepEqual(options.customTools.map((tool) => tool.name), [controller.name]);
+      assert.deepEqual(options.customTools.map((tool) => tool.name), [controller.name, "read_model_context"]);
       assert.match(options.systemPrompt, /结构化结果也是本阶段正式提交通道/u);
       const tool = options.customTools[0], execute = tool.execute;
       state.tool = tool; state.value = controller.value(tool.parameters.properties.contextHash.const);
