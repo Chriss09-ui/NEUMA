@@ -63,11 +63,12 @@ test("删除已开始后拒绝新启动，关闭管理器也取消并等待尚�
   await assert.rejects(manager.start("other"), /关闭/);
 });
 
-test("已创建进程的启动可以立即停止，删除等待启动收尾后再清除运行记录", async (t) => {
+for (const thenProperty of [false, true]) test(`已创建进程的启动可以立即停止，删除等待启动收尾后再清除运行记录${thenProperty ? "（非函数 then 字段）" : ""}`, async (t) => {
   const { manager } = await lifecycleFixture(t);
   let entered, settled = false;
   const ready = new Promise((resolve) => { entered = resolve; });
   const child = new EventEmitter();
+  if (thenProperty) child.then = undefined;
   child.pid = 123456789; child.exitCode = null; child.signalCode = null;
   child.stdout = new EventEmitter(); child.stderr = { resume() {} };
   const signals = [];

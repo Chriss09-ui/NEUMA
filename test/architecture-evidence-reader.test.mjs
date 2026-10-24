@@ -653,3 +653,10 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
   assert.equal(reads.recent.length, 6); assert.ok(reads.recent.every((item) => /^[a-f0-9]{64}$/u.test(item.pathHash)));
   assert.doesNotMatch(JSON.stringify(reads), /receiptId|quote|\/instructions|\/acceptance|当前处理说明/u);
 });
+
+test("证据读取器拒绝损坏索引，保留未验证提交中的原始字段", () => {
+  assert.throws(() => reader({ priorFindings: { findings: { hidden: true } } }), /历史问题索引字段无效/);
+  assert.throws(() => reader({ context: { candidate: { acceptance: "damaged" } } }), /验收证据索引字段无效/);
+  const submission = { candidateHash: "a".repeat(64), acceptanceScopeChecks: [null, 7], issues: [null, "unvalidated"] };
+  assert.deepEqual(reader().resolveSubmission(submission), submission);
+});

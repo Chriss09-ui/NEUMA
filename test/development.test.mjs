@@ -4,6 +4,8 @@ import { chmod, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevelopmentController } from "../src/development/development.mjs";
+import { createAcceptanceLedger } from "../src/verification/acceptance-contract.mjs";
+import { readDevelopmentRunRecord } from "../src/development/development-record.mjs";
 import { DevelopmentStore } from "../src/development/development-store.mjs";
 import { DevelopmentWorkspace } from "../src/development/development-workspace.mjs";
 import { hashValue } from "../src/development/development-contract.mjs";
@@ -754,4 +756,29 @@ test("只有已经绑定独立评审的 workflow/custom 架构可以进入研发
     { ...architecture, issues: [developmentIssue("architecture")] },
   ]) await assert.rejects(controller.run(invalid), InputError);
   assert.equal(sessions.length, 0); assert.equal(await controller.get(architecture.agentId), null);
+});
+
+test("恢复边界保留真实研发记录原值，并拒绝损坏的交付清单和验收绑定", async (t) => {
+  const { controller, architecture } = await fixture(t);
+  const record = await controller.run(architecture);
+  assert.equal(record.status, "completed");
+  const original = structuredClone(record);
+  assert.equal(readDevelopmentRunRecord(record), record);
+  assert.deepEqual(record, original);
+
+  const damagedPackage = structuredClone(record);
+  damagedPackage.package.application = {};
+  assert.throws(() => readDevelopmentRunRecord(damagedPackage), InputError);
+  assert.deepEqual(record, original);
+
+  const damagedLedger = structuredClone(record);
+  damagedLedger.acceptanceLedger = createAcceptanceLedger({ architecture, plan: record.plan, codeHash: record.package.codeHash });
+  assert.ok(damagedLedger.acceptanceLedger.items.length);
+  assert.equal(readDevelopmentRunRecord(damagedLedger), damagedLedger);
+  damagedLedger.acceptanceLedger.items[0].evidence = { kind: "independent-review", bindingHash: 42 };
+  assert.throws(() => readDevelopmentRunRecord(damagedLedger), /研发检查点字段已损坏/);
+
+  const damagedReport = { ...structuredClone(record), feedback: { report: { status: "passed", results: [] } } };
+  assert.throws(() => readDevelopmentRunRecord(damagedReport), /研发检查点字段已损坏/);
+  assert.deepEqual(await controller.store.getRun(record.id), original);
 });
