@@ -288,6 +288,7 @@ async function readJson(request, maxBytes = 128_000) {
 
 export function createRequestHandler({ config = getProviderConfig(), providers: injectedProviders,
   dataDir = resolve(ROOT, ".neuma"), envPath = resolve(ROOT, ".env"),
+  cwd = ROOT,
   port = Number(process.env.PORT || 3000), instanceId = null,
   pickProjectFolder = createProjectFolderPicker(),
   projects = new ProjectManager({ dataDir, blockedPort: port,
@@ -297,8 +298,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
   modelConnectionTester = testModelConnection,
   agentModelConnectionTester = testAgentModelConnection,
   jevConnectionTester = testJevConnection,
-  projectAgent = new PiProjectAgent({ config, manager: projects, cwd: ROOT, dataDir }),
-  prototypeAgents = new PrototypeAgents({ config, cwd: ROOT, dataDir, enforceRequirementConfirmation: true }),
+  projectAgent = new PiProjectAgent({ config, manager: projects, cwd, dataDir }),
+  prototypeAgents = new PrototypeAgents({ config, cwd, dataDir, enforceRequirementConfirmation: true }),
   requirementSessions: injectedRequirementSessions,
   collaboration: injectedCollaboration, mainAgent: injectedMainAgent } = {}) {
   const requirementProviders = () => makeProviders(config, fetch, {

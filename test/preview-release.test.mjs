@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { checkPreviewRelease } from "../scripts/check-preview-release.mjs";
+import { REQUIRED_ENTRIES } from "../scripts/build.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "neuma-preview-release-test-"));
@@ -127,4 +128,30 @@ test("入口文件存在但发布清单遗漏完整源码目录时必须失败",
   const result = await checkPreviewRelease(root);
   assert.equal(result.ok, false);
   assert.deepEqual(result.failures, ["发布文件清单必须包含完整源码目录 src/"]);
+});
+
+test("编译安装包不要求源码package-lock，仍检查发布锁、worker和TS源码泄漏", async (t) => {
+  const { root, manifest, save } = await fixture(t);
+  manifest.neumaBuild = { format: 1, sourceHash: "a".repeat(64) };
+  manifest.scripts = { start: "node bin/neuma.cjs" };
+  await save();
+  for (const path of REQUIRED_ENTRIES) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), "synthetic artifact");
+  }
+  await rm(join(root, "package-lock.json"));
+  assert.deepEqual(await checkPreviewRelease(root), { ok: true, failures: [] });
+  await writeFile(join(root, "src/accidental.mts"), "export {};\n");
+  assert.ok((await checkPreviewRelease(root)).failures.some((value) => value.includes("包含源码")));
+  await rm(join(root, "src/accidental.mts"));
+  await rm(join(root, "src/services/node-service-worker.mjs"));
+  assert.ok((await checkPreviewRelease(root)).failures.some((value) => value.includes("node-service-worker")));
+});
+
+test("编译安装包不能继承开发编译生命周期", async (t) => {
+  const { root, manifest, save } = await fixture(t);
+  manifest.neumaBuild = { format: 1, sourceHash: "a".repeat(64) };
+  manifest.scripts = { prepare: "tsc" };
+  await save();
+  assert.ok((await checkPreviewRelease(root)).failures.some((value) => value.includes("安装生命周期")));
 });

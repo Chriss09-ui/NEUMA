@@ -128,6 +128,8 @@ cp .env.example .env
 npm start
 ```
 
+源码开发现已进入 TypeScript 渐进迁移。`npm start` 会先构建到 `dist/ts-build/package/` 再启动；开发数据、配置与 Agent 工作根仍指向源码仓库。现阶段只有首个基础模块迁为 TypeScript，其余 JavaScript 原样复制，浏览器地址与应用协议保持现有形式。
+
 启动后在网页“设置”中配置模型。服务端源码统一放在 `src/`，按功能分组；前端资源、测试和开发脚本分别在 `public/`、`test/` 和 `scripts/`。
 
 开发时可按层运行测试：
@@ -138,8 +140,14 @@ npm run test:integration   # 本机模拟模型的真实 SDK、隔离执行、�
 npm run test:browser       # 显式启用外部浏览器验收
 npm test                   # 原有全量入口，默认关闭外部浏览器
 npm run release:preview:check
-npm pack --dry-run --json --ignore-scripts
+npm run typecheck         # 严格检查已迁移的 TypeScript
+npm run build             # 生成同一目录布局的运行产物
+npm run package:pack      # 编译、检查并打包到 dist/npm/
+npm run test:package:smoke # 解包启动检查，复用开发依赖
+npm run test:package:install # 独立临时安装生产依赖并启动
 ```
+
+测试命令自动构建并运行产物目录中的测试，构建失败或产物过期会停止执行。请使用 `package:pack` 生成安装包；源码目录直接 `npm pack`／`npm publish` 会被保护入口拒绝。打包本身不会公开发布。
 
 前三个命令加 `-- --list` 可只查看文件清单。分类按文件维护在 `scripts/run-tests.mjs`；混有真实执行的文件归入集成组，新文件未登记时提示并默认加入集成组。模块和集成命令始终关闭外部浏览器。浏览器命令运行现有 3 个文件中的 4 项浏览器验收及附带的 2 项状态检查，保留 `NEUMA_TEST_BROWSER` 指定的程序；macOS 默认只尝试 Dia，当前无界面参数兼容性仍待验证，不能把未运行或失败的浏览器检查当作通过。模型协议测试使用本机模拟接口，不调用真实模型服务。
 

@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "module": "none", "moduleDetection": "legacy", "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": [] },
+  "include": ["public/application-frame-bridge.ts", "public/frame-globals.d.ts"]
+}

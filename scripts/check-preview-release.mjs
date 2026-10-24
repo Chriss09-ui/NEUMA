@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, readFile, realpath } from "node:fs/promises";
+import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -19,10 +19,11 @@ async function readJson(root, path, failures) {
   } catch { failures.push(`无法读取有效的 ${path}`); return null; }
 }
 
-export async function checkPreviewRelease(root) {
+export async function checkPreviewRelease(root, options = {}) {
   const failures = [];
   const manifest = await readJson(root, "package.json", failures);
-  const lock = await readJson(root, "package-lock.json", failures);
+  const artifact = options.artifact ?? Boolean(manifest?.neumaBuild);
+  const lock = artifact ? null : await readJson(root, "package-lock.json", failures);
   const shrinkwrap = await readJson(root, "npm-shrinkwrap.json", failures);
   if (manifest) {
     if (!Array.isArray(manifest.files) || !manifest.files.includes("src/"))
@@ -48,12 +49,32 @@ export async function checkPreviewRelease(root) {
       failures.push("包的 dependencies 必须明确声明");
     if (lock && (lock.name !== manifest.name || lock.version !== manifest.version
       || lock.packages?.[""]?.name !== manifest.name || lock.packages?.[""]?.version !== manifest.version
-      || ["dependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(lock.packages?.[""]?.[key], manifest[key]))))
+      || ["dependencies", "devDependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(lock.packages?.[""]?.[key], manifest[key]))))
       failures.push("包名、版本、依赖或安装范围与 package-lock.json 不一致");
   }
   if (lock && shrinkwrap && !isDeepStrictEqual(shrinkwrap, lock))
     failures.push("npm-shrinkwrap.json 与 package-lock.json 不一致");
-  for (const path of ENTRY_FILES) {
+  if (artifact) {
+    if (manifest?.neumaBuild?.format !== 1 || !/^[a-f0-9]{64}$/.test(manifest?.neumaBuild?.sourceHash ?? ""))
+      failures.push("缺少有效的编译产物标识");
+    if (!shrinkwrap || shrinkwrap.name !== manifest?.name || shrinkwrap.version !== manifest?.version
+      || ["dependencies", "devDependencies", "os", "cpu", "bin"].some((key) => !isDeepStrictEqual(shrinkwrap.packages?.[""]?.[key], manifest?.[key])))
+      failures.push("编译产物包信息与发布锁不一致");
+    if (Object.keys(manifest?.scripts ?? {}).some((key) => key !== "start")) failures.push("编译产物不能包含开发构建或安装生命周期脚本");
+    async function inspect(path) {
+      const info = await lstat(join(root, path));
+      if (info.isSymbolicLink()) { failures.push(`发布产物不允许链接：${path}`); return; }
+      if (info.isDirectory()) {
+        for (const name of await readdir(join(root, path))) await inspect(`${path}/${name}`);
+      } else if (/\.(?:ts|mts|cts)$/.test(path) || /(?:^|\/)\.env(?:\.|$)/.test(path)) failures.push(`发布产物包含源码或配置：${path}`);
+    }
+    for (const path of ["src", "public", "bin"]) {
+      try { await inspect(path); } catch { failures.push(`无法检查编译产物目录：${path}`); }
+    }
+  }
+  const entries = artifact ? [...ENTRY_FILES, "src/materials/material-parser-child.mjs", "src/services/node-service-worker.mjs",
+    "src/services/python-service-worker.py", "src/services/mcp-bridge.mjs", "public/application-frame-bridge.js", "public/style.css"] : ENTRY_FILES;
+  for (const path of entries) {
     try {
       const info = await lstat(join(root, path));
       if (!info.isFile() || info.size < 1) throw new Error();
@@ -64,7 +85,18 @@ export async function checkPreviewRelease(root) {
 }
 
 if (process.argv[1] && await realpath(resolve(process.argv[1])).catch(() => null) === fileURLToPath(import.meta.url)) {
-  const result = await checkPreviewRelease(dirname(dirname(fileURLToPath(import.meta.url))));
+  const sourceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const manifest = JSON.parse(await readFile(join(sourceRoot, "package.json"), "utf8"));
+  const source = await checkPreviewRelease(sourceRoot);
+  let result = source;
+  if (!manifest.neumaBuild) {
+    try {
+      const root = join(sourceRoot, "dist/ts-build/package");
+      await (await import("./build.mjs")).assertFreshBuild(root);
+      const artifact = await checkPreviewRelease(root, { artifact: true });
+      result = { ok: source.ok && artifact.ok, failures: [...source.failures, ...artifact.failures] };
+    } catch (error) { result = { ok: false, failures: [...source.failures, `编译产物不可用：${error.message}`] }; }
+  }
   if (!result.ok) {
     process.stderr.write("尚不能发布 Apple 芯片 Mac 试用版：\n" + result.failures.map((value) => `- ${value}`).join("\n") + "\n");
     process.exitCode = 1;

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, lstat, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 export const NATIVE_ARTIFACTS = [
   ...["linux-x64", "linux-arm64", "win32-x64", "win32-arm64"].map((target) =>
@@ -16,7 +17,7 @@ const CHECKS = ["installedTarball", "sdkLocalModel", "dataUpgrade", "migration",
 
 export async function checkRelease(root) {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  const lock = JSON.parse(await readFile(join(root, "package-lock.json"), "utf8"));
+  const lock = JSON.parse(await readFile(join(root, manifest.neumaBuild ? "npm-shrinkwrap.json" : "package-lock.json"), "utf8"));
   const failures = [];
   if (!Array.isArray(manifest.files) || !manifest.files.includes("src/"))
     failures.push("发布文件清单必须包含完整源码目录 src/");
@@ -25,7 +26,7 @@ export async function checkRelease(root) {
   catch { failures.push("缺少发布锁文件，请先运行 npm run package:prepare"); }
   if (shrinkwrap && JSON.stringify(shrinkwrap) !== JSON.stringify(lock)) failures.push("发布锁文件与 package-lock.json 不一致");
   if (lock.name !== manifest.name || lock.version !== manifest.version || lock.packages?.[""]?.version !== manifest.version
-    || JSON.stringify(lock.packages?.[""]?.dependencies) !== JSON.stringify(manifest.dependencies)) failures.push("包信息与依赖锁文件不一致");
+    || ["dependencies", "devDependencies"].some((key) => !isDeepStrictEqual(lock.packages?.[""]?.[key], manifest[key]))) failures.push("包信息与依赖锁文件不一致");
   const artifacts = {};
   for (const path of NATIVE_ARTIFACTS) {
     try {
@@ -54,7 +55,11 @@ export async function checkRelease(root) {
 
 if (process.argv[1] && await realpath(resolve(process.argv[1])).catch(() => null) === fileURLToPath(import.meta.url)) {
   try {
-    const result = await checkRelease(dirname(dirname(fileURLToPath(import.meta.url))));
+    const root = dirname(dirname(fileURLToPath(import.meta.url)));
+    const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    const target = manifest.neumaBuild ? root : join(root, "dist/ts-build/package");
+    if (!manifest.neumaBuild) await (await import("./build.mjs")).assertFreshBuild(target);
+    const result = await checkRelease(target);
     if (!result.ok) { process.stderr.write("尚不能发布三平台完整支持版：\n" + result.failures.map((value) => `- ${value}`).join("\n") + "\n"); process.exitCode = 1; }
     else process.stdout.write("发布检查通过；请在明确批准公开发布后移除 private 并上传。\n");
   } catch { process.stderr.write("发布配置无法读取，请检查清单和验收记录。\n"); process.exitCode = 1; }
