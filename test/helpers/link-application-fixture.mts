@@ -1,11 +1,16 @@
+import type { ValueSchema } from "../../src/contracts/application.mjs";
+import type { DevelopmentPlan, TestMock } from "../../src/contracts/development.mjs";
+import { fixtureChatRequest, fixtureText, fixturePort } from "./http-model.mjs";
+import type { RequirementDraft } from "../../src/contracts/requirements.mjs";
+import type { ArchitectureBase, ArchitectureDesign, ArchitectureAcceptance, RequirementItem } from "../../src/contracts/architecture.mjs";
 import { createServer } from "node:http";
 import { validDraft, validDesign, passingReview } from "./architecture.mjs";
 import { requirementItems } from "../../src/architecture/architecture-contract.mjs";
 
-const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
-const text = { type: "string" }, bool = { type: "boolean" };
+const object = (properties: Record<string, ValueSchema>, required = Object.keys(properties)): ValueSchema => ({ type: "object", properties, required, additionalProperties: false });
+const text: ValueSchema = { type: "string" }, bool: ValueSchema = { type: "boolean" };
 const itemSchema = object({ title: text, url: text, content: text, truncated: bool });
-const itemsSchema = { type: "array", items: itemSchema, maxItems: 20 };
+const itemsSchema: ValueSchema = { type: "array", items: itemSchema, maxItems: 20 };
 const outputSchema = object({ status: text, message: text, items: itemsSchema, artifact: text });
 export const LINK_APPLICATION_SOURCE = `export const actions = {
  async analyze(input, ctx) {
@@ -53,12 +58,12 @@ export function linkApplicationDraft() {
   const draft = validDraft("输入网页链接，读取并搜索相关公开资料，筛选结果并导出 CSV");
   for (const [key, value] of Object.entries({ name: "链接资料搜寻工具", scenario: "研究公开链接时按需使用",
     inputSource: "用户在应用页面输入公开 HTTP(S) 网页链接", task: "先读取来源页，再搜索相关公开资料，保留标题、网址、正文或摘要及截断说明",
-    deliverable: "NEUMA 内的交互页面，展示进度和可筛选结果，并可导出 CSV", successCriteria: "免费联网默认可用，读取失败真实说明，结果保留来源" })) draft[key] = { value, source: "user" };
+    deliverable: "NEUMA 内的交互页面，展示进度和可筛选结果，并可导出 CSV", successCriteria: "免费联网默认可用，读取失败真实说明，结果保留来源" })) draft[key as keyof Pick<RequirementDraft, "name" | "goal" | "scenario" | "inputSource" | "task" | "deliverable" | "successCriteria">] = { value, source: "user" };
   draft.interaction = { defaultEntry: "application", page: true, operations: ["读取并搜寻", "导出 CSV"], inputs: "公开网页链接", results: "可筛选资料列表及 CSV", persistentData: "链接草稿和任务结果" };
   draft.connections = [{ purpose: "search", description: "可选专属搜索服务，未配置时使用免费搜索", required: false }];
   return draft;
 }
-export function linkApplicationDesign(requirements = requirementItems(linkApplicationDraft())) {
+export function linkApplicationDesign(requirements = requirementItems(linkApplicationDraft())): Extract<ArchitectureDesign, { schemaVersion: 2 }> {
   return validDesign(requirements, { schemaVersion: 2, profile: "light", rationale: "业务步骤简单，页面与动作需进入研发交付。",
     instructions: "帮助用户搜寻链接资料，可以调用已交付动作 analyze 和 exportCsv；免费网页能力默认具备。只报告真实回执，搜索摘要不能冒充完整正文。",
     interaction: { defaultEntry: "application", page: true, operations: true, inputs: "用户网页链接", results: "资料及 CSV", persistentData: "页面草稿和任务记录" },
@@ -76,12 +81,12 @@ export function linkApplicationDesign(requirements = requirementItems(linkApplic
 const page = { title: "公开网页", url: "https://example.com/article", content: "真实协议测试使用的模拟正文", truncated: false };
 const related = { title: "相关资料", url: "https://example.com/related", content: "搜索结果摘要", truncated: true };
 export const LINK_APPLICATION_WEB = {
-  async fetch(input) { return { status: "ok", provider: "fixture", fetchedAt: new Date().toISOString(), results: [{ ...page, url: input.url }], gaps: [] }; },
+  async fetch(input: { url: string }) { return { status: "ok", provider: "fixture", fetchedAt: new Date().toISOString(), results: [{ ...page, url: input.url }], gaps: [] }; },
   async search() { return { status: "ok", provider: "fixture", fetchedAt: new Date().toISOString(), results: [related], gaps: [] }; },
 };
-export function linkApplicationPlan(requirements = requirementItems(linkApplicationDraft()), design = linkApplicationDesign(requirements)) {
-  const mock = (capability, args, result) => ({ capability, argsJson: JSON.stringify(args), resultJson: JSON.stringify(result) });
-  const caseOf = (id, actionId, input, mocks, path, expected) => ({ id: `case_${id}`, taskId: "application", acceptanceId: id, actionId, input: JSON.stringify(input), mocks, assertions: [{ path, expectedJson: JSON.stringify(expected) }] });
+export function linkApplicationPlan(requirements = requirementItems(linkApplicationDraft()), design: { acceptance: ArchitectureAcceptance[] } = linkApplicationDesign(requirements)): Extract<DevelopmentPlan, { schemaVersion: 2 }> {
+  const mock = (capability: string, args: { url?: string; refresh?: boolean; query?: string; file?: string; content?: string; }, result: { results?: never[]|{ title: string; url: string; content: string; truncated: boolean; }[]|{ title: string; url: string; content: string; truncated: boolean; }[]; saved?: boolean; }) => ({ capability, argsJson: JSON.stringify(args), resultJson: JSON.stringify(result) });
+  const caseOf = (id: string, actionId: string, input: { url?: string; refresh?: boolean; items?: never[]; }, mocks: { capability: string; argsJson: string; resultJson: string; }[], path: string, expected: string|{ title: string; url: string; content: string; truncated: boolean; }[]) => ({ id: `case_${id}`, taskId: "application", acceptanceId: id, actionId, input: JSON.stringify(input), mocks, assertions: [{ path, expectedJson: JSON.stringify(expected) }] });
   return { schemaVersion: 2, summary: "实现公开链接资料搜寻应用", runtime: "node-action", entrypoint: "actions.mjs",
     application: { protocolVersion: 2, runtime: "node-action", entrypoint: "actions.mjs", page: { entrypoint: "ui/index.html", resources: ["ui/index.html", "ui/app.css", "ui/app.js"].map(path => ({ path, sha256: "" })) },
       actions: [{ id: "analyze", title: "读取并搜寻", inputSchema: object({ url: text, refresh: bool }), outputSchema, connectionIds: [] },
@@ -100,7 +105,7 @@ export async function startLinkApplicationModel({ businessArchive = false, input
   const deliveredFiles = businessArchive ? { ...LINK_APPLICATION_FILES, "actions.mjs": LINK_APPLICATION_SOURCE + `
     actions.archive=async(input,ctx)=>{await ctx.connection.call({connectionId:'archive_api',operationId:'archive',input});return {status:'ok',message:'已归档',items:input.items,artifact:''}};
   ` } : LINK_APPLICATION_FILES;
-  const designOf = (requirements) => {
+  const designOf = (requirements: RequirementItem[]|undefined) => {
     const design = linkApplicationDesign(requirements);
     if (businessArchive) {
       design.connections.push({ id: "archive_api", purpose: "business", required: true, description: "将所选资料归档至业务接口",
@@ -110,7 +115,7 @@ export async function startLinkApplicationModel({ businessArchive = false, input
     if (inputRejection) design.acceptance.push({ id: "schema_rejection", kind: "boundary", requirementIds: ["inputSource"], input: "链接不是字符串", expected: "平台拒绝输入且不执行业务动作" });
     return design;
   };
-  const planOf = (requirements, design) => {
+  const planOf = (requirements: RequirementItem[] | undefined, design: { acceptance: ArchitectureAcceptance[] } = linkApplicationDesign(requirements)) => {
     const plan = linkApplicationPlan(requirements, design);
     if (businessArchive) {
       plan.application.actions.push({ id: "archive", title: "归档到业务服务", inputSchema: object({ items: itemsSchema }), outputSchema, connectionIds: ["archive_api"] });
@@ -122,39 +127,39 @@ export async function startLinkApplicationModel({ businessArchive = false, input
       assertions: [{ path: "", expectedJson: '{"rejected":true,"reason":"input_contract_rejected"}' }] });
     return plan;
   };
-  const requests = [], errors = [];
+  const requests: { name: string; tools: string[] }[] = [], errors: string[] = [];
   const model = createServer(async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks));
-      const textOf = (content) => typeof content === "string" ? content : (content ?? []).map(item => item.text ?? "").join("");
-      const payload = JSON.parse(textOf(body.messages.find(message => message.role === "user").content));
-      const names = (body.tools ?? []).map(tool => tool.function.name), calls = body.messages.flatMap(message => message.tool_calls ?? []);
+      const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8"));
+      const textOf = fixtureText;
+      const payload = JSON.parse(textOf(body.messages.find((message) => message.role === "user")!.content));
+      const names = (body.tools ?? []).map((tool) => tool.function.name), calls = body.messages.flatMap((message) => message.tool_calls ?? []);
       let name, args;
       if (names.includes("submit_architecture")) { name = "submit_architecture"; args = designOf(payload.requirements); }
       else if (names.includes("submit_architecture_review")) { name = "submit_architecture_review"; args = passingReview(payload.candidateHash); }
       else if (names.includes("submit_development_plan")) {
         const { cases, ...index } = planOf(payload.requirements, payload.design);
-        const files = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
-        const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
+        const files: Record<string, unknown> = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
+        const written = new Set(calls.filter((call) => call.function.name === "write").map((call) => JSON.parse(call.function.arguments).path));
         const path = Object.keys(files).find(path => !written.has(path));
         if (path) { name = "write"; args = { path, content: JSON.stringify(files[path], null, 2) }; }
         else { name = "submit_development_plan"; args = { indexPath: "index.json" }; }
       }
       else if (names.includes("submit_development_review")) { name = "submit_development_review"; args = { subjectHash: payload.subjectHash, verdict: "pass", issues: [], summary: "本机模拟模型评审；实际隔离用例已经执行，不代表真实业务模型质量" }; }
       else if (names.includes("submit_development_work")) {
-        const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
+        const written = new Set(calls.filter((call) => call.function.name === "write").map((call) => JSON.parse(call.function.arguments).path));
         const path = Object.keys(deliveredFiles).find(path => !written.has(path));
-        if (path) { name = "write"; args = { path, content: deliveredFiles[path] }; }
+        if (path) { name = "write"; args = { path, content: deliveredFiles[path as keyof typeof deliveredFiles] }; }
         else { name = "submit_development_work"; args = { summary: "页面与后端操作已实现，提交真实验收", changedFiles: Object.keys(LINK_APPLICATION_FILES), knownIssues: [], nextAction: "", continue: false }; }
       } else throw new Error("unsupported_fixture_role");
       requests.push({ name, tools: names });
       response.writeHead(200, { "content-type": "text/event-stream" });
-      const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: `fixture_${requests.length}`, object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+      const chunk = (delta: { role?: string; tool_calls?: { index: number; id: string; type: string; function: { name: string; arguments: string; }; }[]; }, finish_reason: string | null = null) => response.write(`data: ${JSON.stringify({ id: `fixture_${requests.length}`, object: "chat.completion.chunk", created: 1, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
       chunk({ role: "assistant", tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }); chunk({}, "tool_calls"); response.end("data: [DONE]\n\n");
-    } catch (error) { errors.push(error.message); if (!response.headersSent) response.writeHead(400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: "测试模型协议失败" } })); }
+    } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); if (!response.headersSent) response.writeHead(400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: "测试模型协议失败" } })); }
   });
-  await new Promise((resolve, reject) => { model.once("error", reject); model.listen(0, "127.0.0.1", resolve); });
-  return { model, requests, errors, config: { llmConfigured: true, model: "fixture-model", apiKey: "fixture-only", chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions` },
-    close: async () => { model.closeAllConnections(); if (model.listening) await new Promise(resolve => model.close(resolve)); } };
+  await new Promise<void>((resolve, reject) => { model.once("error", reject); model.listen(0, "127.0.0.1", resolve); });
+  return { model, requests, errors, config: { llmConfigured: true, model: "fixture-model", apiKey: "fixture-only", chatUrl: `http://127.0.0.1:${fixturePort(model)}/v1/chat/completions` },
+    close: async () => { model.closeAllConnections(); if (model.listening) await new Promise<void>(resolve => model.close(() => resolve())); } };
 }

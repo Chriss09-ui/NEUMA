@@ -1,15 +1,18 @@
+import type { testModelConnection } from "../../src/model-connection.mjs";
+import type { ModelConfig } from "../../src/contracts/model.mjs";
+interface ProbeFixture { label: string; testConnection: typeof testModelConnection; config: ModelConfig & { jevApiKey?: string }; apiKey: string; assertSafe: (error: unknown, reason: string) => boolean }
 import test from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { ProviderError } from "../../src/requirements/core.mjs";
 
-export function registerConnectionProbeTests({ label, testConnection, config, apiKey, assertSafe }) {
-  const probe = (options) => testConnection(config, {}, options);
+export function registerConnectionProbeTests({ label, testConnection, config, apiKey, assertSafe }: ProbeFixture) {
+  const probe = (options: Parameters<typeof testModelConnection>[2]) => testConnection(config, {}, options);
 
   test(`${label} HTTP 错误分类清楚，不读取失败正文并释放响应`, async () => {
     for (const [status, reason] of [[401, "authentication"], [403, "authentication"], [429, "rate_limit"],
       [404, "not_found"], [500, "service_unavailable"], [503, "service_unavailable"],
-      [400, "http_error"], [302, "redirect_rejected"]]) {
+      [400, "http_error"], [302, "redirect_rejected"]] as const) {
       let cancelled = false;
       const stream = new ReadableStream({
         start(controller) { controller.enqueue(new TextEncoder().encode(apiKey)); },
@@ -20,6 +23,7 @@ export function registerConnectionProbeTests({ label, testConnection, config, ap
       stream.getReader = () => { assert.fail("不能读取失败响应正文流"); };
       await assert.rejects(probe({ fetchImpl: async () => response }), (error) => {
         assertSafe(error, reason);
+        assert.ok(error instanceof ProviderError);
         assert.equal(error.diagnostic.httpStatus, status);
         return true;
       });
@@ -59,23 +63,23 @@ export function registerConnectionProbeTests({ label, testConnection, config, ap
       ["ETIMEDOUT", "connect_timeout"], ["UND_ERR_CONNECT_TIMEOUT", "connect_timeout"],
       ["UND_ERR_BODY_TIMEOUT", "timeout"], ["UND_ERR_HEADERS_TIMEOUT", "timeout"],
       ["ECONNRESET", "connection_reset"], ["UND_ERR_SOCKET", "connection_reset"],
-      [apiKey, "connection_failed"]]) {
+      [apiKey, "connection_failed"]] as const) {
       await assert.rejects(probe({ fetchImpl: async () => {
         throw Object.assign(new Error(`${config.chatUrl} ${apiKey}`), { cause: { code } });
       } }), (error) => assertSafe(error, reason));
     }
     await assert.rejects(probe({ fetchImpl: async () => {
-      throw new ProviderError(apiKey, { stage: config.chatUrl, reason: config.jevApiKey });
+      throw new ProviderError(apiKey, { stage: config.chatUrl!, reason: config.jevApiKey! });
     } }), (error) => assertSafe(error, "connection_failed"));
   });
 
   test(`${label} 总时限覆盖不响应的 fetch，向底层发出取消`, async () => {
-    let requestSignal;
+    let requestSignal: AbortSignal | undefined;
     await assert.rejects(probe({ timeoutMs: 15, fetchImpl: async (_url, init) => {
-      requestSignal = init.signal;
+      requestSignal = init!.signal ?? undefined;
       return new Promise(() => {});
     } }), (error) => assertSafe(error, "timeout"));
-    assert.equal(requestSignal.aborted, true);
+    assert.equal(requestSignal!.aborted, true);
   });
 
   test(`${label} 总时限覆盖停滞的响应正文并取消 reader`, async () => {
@@ -91,23 +95,24 @@ export function registerConnectionProbeTests({ label, testConnection, config, ap
     alreadyCancelled.abort(apiKey);
     await assert.rejects(probe({ signal: alreadyCancelled.signal,
       fetchImpl: async () => { assert.fail("取消之后不能请求"); } }), (error) => {
+      assert.ok(error instanceof Error);
       assert.equal(error.name, "AbortError");
       assert.equal(error.message.includes(apiKey), false);
       return true;
     });
     const controller = new AbortController();
-    let requestSignal;
-    let requestStarted;
-    const started = new Promise(resolve => { requestStarted = resolve; });
+    let requestSignal: AbortSignal | undefined;
+    let requestStarted: (() => void) | undefined;
+    const started = new Promise<void>(resolve => { requestStarted = resolve; });
     const pending = probe({ signal: controller.signal, fetchImpl: async (_url, init) => {
-      requestSignal = init.signal;
-      requestStarted();
+      requestSignal = init!.signal ?? undefined;
+      requestStarted!();
       return new Promise(() => {});
     } });
     await started;
     controller.abort(new Error(apiKey));
     await assert.rejects(pending, { name: "AbortError" });
-    assert.equal(requestSignal.aborted, true);
+    assert.equal(requestSignal!.aborted, true);
   });
 
   test(`${label} 读取正文期间可以外部取消，reader 不继续等待`, async () => {

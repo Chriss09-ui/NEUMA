@@ -1,4 +1,4 @@
-export function activeApplicationResult(source) {
+export function activeApplicationResult(source: { id: string; name: string; draft: unknown }) {
   const architectureRef = { version: 2, candidateHash: "a".repeat(64) };
   const developmentRef = { id: "dev_active", codeHash: "b".repeat(64), planHash: "c".repeat(64) };
   const agent = { ...source, mode: "designed", status: "ready", revision: 2, architectureRef, developmentRef,

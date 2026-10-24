@@ -1,3 +1,5 @@
+import type { RequirementDraft } from "../../src/contracts/requirements.mjs";
+import type { RequirementItem } from "../../src/contracts/architecture.mjs";
 import { emptyDraft } from "../../src/requirements/core.mjs";
 import { PLATFORM_CONTRACT_VERSION } from "../../src/architecture/platform-contract.mjs";
 
@@ -8,7 +10,7 @@ export function paperOverviewDraft() {
     inputSource: "用户提供公开论文链接或上传 PDF，两种输入都必须保留",
     task: "读取实际可获得的论文内容，按主要章节顺序总结并注明来源和读取范围",
     deliverable: "中文章节概览与 paper_overview.md", successCriteria: "主要章节按原文顺序覆盖，来源和实际读取范围可追溯，不编造未读取内容",
-  })) draft[key] = { value, source: "user" };
+  })) draft[key as keyof Pick<RequirementDraft, "name" | "goal" | "scenario" | "inputSource" | "task" | "deliverable" | "successCriteria">] = { value, source: "user" };
   draft.constraints = [{ text: "未成功读取的章节不能概括，读取失败和截断必须明确报告", source: "user" }];
   draft.capabilityDependencies = ["支持公开 HTTP(S) 论文链接", "支持文本 PDF 与扫描版 PDF"];
   draft.usage = { mode: "on_demand", detail: "用户提交论文后按需执行", source: "user" };
@@ -16,7 +18,7 @@ export function paperOverviewDraft() {
   return draft;
 }
 
-export function paperOverviewDesign(requirements, { webStatus = "available", pdfOnly = false } = {}) {
+export function paperOverviewDesign(requirements: RequirementItem[], { webStatus = "available", pdfOnly = false } = {}) {
   const components = [
     { id: "input_router", purpose: "确认输入并分流链接与 PDF", necessity: "否则无法选取合法读取路径",
       inputs: "论文链接或材料 ID", outputs: "读取路径与来源引用" },

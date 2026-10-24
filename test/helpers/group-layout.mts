@@ -1,45 +1,50 @@
+import type { initWorkspaceResize } from "../../public/panel-resize.js";
+import type { createSidebarHistory } from "../../public/sidebar-history.js";
+import type { renderAgentAvatar } from "../../public/agent-avatar.js";
+import type { renderGroupAvatar } from "../../public/group-avatar.js";
+interface LayoutElements { "group-chat-form": HTMLFormElement; "group-message": HTMLTextAreaElement; "group-messages": HTMLElement; "group-page-shell": HTMLElement; "group-panel": HTMLElement; "group-primary": HTMLElement; "group-mention-popup": HTMLElement; "group-send": HTMLButtonElement; "group-share-open": HTMLButtonElement; "group-title": HTMLElement; "group-upload": HTMLButtonElement; "page-group": HTMLElement }
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-function inspectGroupLayout({ markup, stylesheet, avatarAssets }, initResize, renderAvatar) {
+function inspectGroupLayout({ markup, stylesheet, avatarAssets }: { markup: string; stylesheet: string; avatarAssets: Record<string, string> }, initResize: typeof initWorkspaceResize<HTMLElement>, renderAvatar: typeof renderAgentAvatar<HTMLElement>) {
   const style = document.createElement("style");
   style.textContent = stylesheet + "\n#test-result { display: none; }\n*, *::before, *::after { animation: none !important; transition: none !important; }";
   document.head.append(style); document.body.insertAdjacentHTML("beforeend", markup);
-  const byId = (id) => document.getElementById(id);
-  for (const page of document.querySelectorAll(".page")) page.hidden = page.id !== "page-group";
+  const byId = <K extends keyof LayoutElements>(id: K) => document.getElementById(id) as LayoutElements[K];
+  for (const page of document.querySelectorAll<HTMLElement>(".page")) page.hidden = page.id !== "page-group";
   const page = byId("page-group"), shell = byId("group-page-shell"), primary = byId("group-primary");
-  const panel = byId("group-panel"), header = primary.querySelector("header"), conversation = primary.querySelector(".conversation");
-  const capsule = header.querySelector('[aria-controls="group-panel"]'), title = byId("group-title");
+  const panel = byId("group-panel"), header = primary!.querySelector<HTMLElement>("header")!, conversation = primary!.querySelector<HTMLElement>(".conversation")!;
+  const capsule = header!.querySelector<HTMLElement>('[aria-controls="group-panel"]')!, title = byId("group-title");
   const messages = byId("group-messages"), composer = byId("group-chat-form"), input = byId("group-message");
-  const settingsContent = panel.querySelector(".agent-detail-section:not([hidden])") ?? panel.querySelector("section:not([hidden])");
-  const plus = composer.querySelector(".agent-composer-add"), send = byId("group-send");
-  title.textContent = "研究协作小组"; capsule.title = title.textContent; send.disabled = false;
-  const storage = new Map();
+  const settingsContent = panel!.querySelector<HTMLElement>(".agent-detail-section:not([hidden])")! ?? panel!.querySelector<HTMLElement>("section:not([hidden])")!;
+  const plus = composer!.querySelector<HTMLElement>(".agent-composer-add")!, send = byId("group-send");
+  title!.textContent = "研究协作小组"; capsule!.title = title!.textContent; send!.disabled = false;
+  const storage = new Map<string, string>();
   const controls = initResize({ windowRef: { performance: window.performance, ResizeObserver, MutationObserver,
     addEventListener: window.addEventListener.bind(window), removeEventListener: window.removeEventListener.bind(window),
     getComputedStyle: window.getComputedStyle.bind(window),
-    localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } } });
-  const setSettings = (open) => {
-    shell.classList.toggle("settings-open", open); panel.hidden = !open;
-    capsule.setAttribute("aria-expanded", String(open)); controls.sidebar.refresh();
+    localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } } })!;
+  const setSettings = (open: boolean|undefined) => {
+    shell!.classList.toggle("settings-open", open); panel!.hidden = !open;
+    capsule!.setAttribute("aria-expanded", String(open)); controls.sidebar.refresh();
   };
-  const make = (className, text) => { const node = document.createElement("div"); node.className = className; node.textContent = text; return node; };
+  const make = (className: string, text: string|null) => { const node = document.createElement("div"); node.className = className; node.textContent = text; return node; };
   const blue = { id: "layout-blue", name: "材料阅读助手", profile: { icon: "star:0:1" }, color: "blue" };
   const mint = { id: "layout-mint", name: "跨资料研究校验与结果整理助手".repeat(7), profile: { icon: "star:3:0" }, color: "mint" };
-  const identity = (node, agent) => { node.dataset.agentId = agent.id; node.dataset.avatarColor = agent.color; return node; };
-  const avatar = (agent, className) => {
+  const identity = (node: HTMLSpanElement, agent: { id: string|undefined; color: string|undefined; }) => { node.dataset.agentId = agent.id; node.dataset.avatarColor = agent.color; return node; };
+  const avatar = (agent: typeof blue, className: string) => {
     const node = document.createElement("span"); node.className = className;
-    renderAvatar(node, agent, { motion: false, document: { createElement: (tag) => {
+    renderAvatar(node, agent, { motion: false, document: { createElement: (tag: string) => {
       const element = document.createElement(tag);
       if (tag === "img") Object.defineProperty(element, "src", { set: (value) => element.setAttribute("src",
         value === "/assets/avatars/core.png" ? avatarAssets.core : value) });
       return element;
     } } });
-    const root = node.querySelector(".star-avatar");
-    node.querySelector(".star-avatar-shell").style.setProperty("--avatar-mask", `url("${avatarAssets[root.dataset.shape]}")`);
+    const root = node.querySelector<HTMLElement>(".star-avatar")!;
+    node.querySelector<HTMLElement>(".star-avatar-shell")!.style.setProperty("--avatar-mask", `url("${avatarAssets[root!.dataset.shape!]}")`);
     return node;
   };
-  const agentMessage = (sender, recipient, long) => {
+  const agentMessage = (sender: typeof blue, recipient: typeof blue, long: boolean) => {
     const row = document.createElement("article"); row.className = "message assistant group-agent-message";
     const name = document.createElement("span"); name.className = "group-message-sender group-agent-identity"; name.textContent = sender.name;
     const body = make("bubble rich-text", ""), opening = document.createElement("p");
@@ -56,47 +61,47 @@ function inspectGroupLayout({ markup, stylesheet, avatarAssets }, initResize, re
     }
     row.append(avatar(sender, "group-message-avatar"), identity(name, sender), body); return row;
   };
-  const fillMessages = (long) => {
+  const fillMessages = (long: boolean) => {
     const date = document.createElement("time"); date.className = "conversation-date";
     date.dateTime = "2026-10-13T03:57:00.000Z"; date.textContent = "2026/10/13 11:57";
     const user = make("message user", ""); user.append(make("bubble", "请整理这次小组讨论的重点。"));
     const system = make("message assistant", ""); system.append(make("bubble", "小组已开始协作。"));
-    messages.replaceChildren(date, user, system, agentMessage(blue, mint, long), agentMessage(mint, blue, false)); messages.scrollTop = 0;
+    messages!.replaceChildren(date, user, system, agentMessage(blue, mint, long), agentMessage(mint, blue, false)); messages!.scrollTop = 0;
   };
-  const rect = (element) => {
-    const value = element.getBoundingClientRect();
+  const rect = (element: Element) => {
+    const value = element!.getBoundingClientRect();
     return { left: value.left, right: value.right, top: value.top, bottom: value.bottom, width: value.width, height: value.height };
   };
-  const visible = (element) => {
-    const css = getComputedStyle(element), bounds = element.getBoundingClientRect();
-    return !element.hidden && css.display !== "none" && css.visibility !== "hidden" && css.opacity !== "0" && bounds.width > 0 && bounds.height > 0;
+  const visible = (element: HTMLElement) => {
+    const css = getComputedStyle(element), bounds = element!.getBoundingClientRect();
+    return !element!.hidden && css.display !== "none" && css.visibility !== "hidden" && css.opacity !== "0" && bounds.width > 0 && bounds.height > 0;
   };
-  const textRects = (element) => {
-    const range = document.createRange(); range.selectNodeContents(element);
+  const textRects = (element: Node|null) => {
+    const range = document.createRange(); range.selectNodeContents(element!);
     return [...range.getClientRects()].filter((value) => value.width > 0).map((value) => ({ left: value.left, right: value.right,
       top: value.top, bottom: value.bottom, width: value.width, height: value.height }));
   };
   const swatch = document.createElement("span"); swatch.hidden = true; swatch.style.background = "var(--surface-2)";
   document.body.append(swatch); const bodyBackground = getComputedStyle(swatch).backgroundColor; swatch.remove();
-  const agentMessages = () => [...messages.querySelectorAll(".group-agent-message")].map((row) => {
-    const name = row.querySelector(".group-message-sender"), portrait = row.querySelector(".group-message-avatar"), body = row.querySelector(".bubble");
-    const mention = body.querySelector(".group-message-mention"), mentionAvatar = mention.querySelector(".group-mention-avatar");
-    const mentionName = mention.querySelector(".group-mention-name"), paragraph = body.firstElementChild, css = getComputedStyle(body);
+  const agentMessages = () => [...messages!.querySelectorAll<HTMLElement>(".group-agent-message")].map((row) => {
+    const name = row.querySelector<HTMLElement>(".group-message-sender")!, portrait = row.querySelector<HTMLElement>(".group-message-avatar")!, body = row.querySelector<HTMLElement>(".bubble")!;
+    const mention = body!.querySelector<HTMLElement>(".group-message-mention")!, mentionAvatar = mention!.querySelector<HTMLElement>(".group-mention-avatar")!;
+    const mentionName = mention!.querySelector<HTMLElement>(".group-mention-name")!, paragraph = body!.firstElementChild, css = getComputedStyle(body);
     return { ...rect(row), display: getComputedStyle(row).display, clientWidth: row.clientWidth, scrollWidth: row.scrollWidth,
-      sender: { ...rect(name), text: name.textContent, visible: visible(name), color: getComputedStyle(name).color, textRects: textRects(name) },
+      sender: { ...rect(name), text: name!.textContent, visible: visible(name), color: getComputedStyle(name).color, textRects: textRects(name) },
       avatar: { ...rect(portrait), visible: visible(portrait) },
       body: { ...rect(body), visible: visible(body), background: css.backgroundColor, expectedBackground: bodyBackground,
         paddingLeft: Number.parseFloat(css.paddingLeft), paddingTop: Number.parseFloat(css.paddingTop),
-        borderRadius: Number.parseFloat(css.borderTopLeftRadius), clientWidth: body.clientWidth, scrollWidth: body.scrollWidth },
+        borderRadius: Number.parseFloat(css.borderTopLeftRadius), clientWidth: body!.clientWidth, scrollWidth: body!.scrollWidth },
       mention: { ...rect(mention), display: getComputedStyle(mention).display, visible: visible(mention), color: getComputedStyle(mention).color,
-        name: mentionName.textContent, nameVisible: visible(mentionName), textRects: textRects(mentionName),
-        avatar: { ...rect(mentionAvatar), visible: visible(mentionAvatar) }, inlinePrefix: paragraph.tagName === "P"
-          && paragraph.firstChild === mention && mention.nextSibling?.nodeType === Node.TEXT_NODE && Boolean(mention.nextSibling.textContent.trim()) } };
+        name: mentionName!.textContent, nameVisible: visible(mentionName), textRects: textRects(mentionName),
+        avatar: { ...rect(mentionAvatar), visible: visible(mentionAvatar) }, inlinePrefix: paragraph!.tagName === "P"
+          && paragraph!.firstChild === mention && mention!.nextSibling?.nodeType === Node.TEXT_NODE && Boolean(mention!.nextSibling.textContent!.trim()) } };
   });
   const topBandText = () => {
-    const headerBounds = header.getBoundingClientRect(), capsuleBounds = capsule.getBoundingClientRect();
-    const top = messages.getBoundingClientRect().top;
-    return [...messages.querySelectorAll(".bubble")].flatMap((bubble) => {
+    const headerBounds = header!.getBoundingClientRect(), capsuleBounds = capsule!.getBoundingClientRect();
+    const top = messages!.getBoundingClientRect().top;
+    return [...messages!.querySelectorAll<HTMLElement>(".bubble")].flatMap((bubble) => {
       const range = document.createRange(); range.selectNodeContents(bubble); return [...range.getClientRects()];
     }).filter((bounds) => bounds.bottom > top && bounds.top < headerBounds.bottom
       && (bounds.left < capsuleBounds.left || bounds.right > capsuleBounds.right)).length;
@@ -106,29 +111,29 @@ function inspectGroupLayout({ markup, stylesheet, avatarAssets }, initResize, re
     documentHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
     documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
     header: { ...rect(header), position: getComputedStyle(header).position }, capsule: rect(capsule),
-    title: { clientWidth: title.clientWidth, scrollWidth: title.scrollWidth,
+    title: { clientWidth: title!.clientWidth, scrollWidth: title!.scrollWidth,
       textOverflow: getComputedStyle(title).textOverflow, whiteSpace: getComputedStyle(title).whiteSpace },
-    composer: rect(composer), compose: { plus: rect(plus), input: rect(input), send: rect(send), rows: input.rows,
+    composer: rect(composer), compose: { plus: rect(plus), input: rect(input), send: rect(send), rows: input!.rows,
       uploadVisible: visible(byId("group-upload")), shareVisible: visible(byId("group-share-open")),
       mentionInputVisible: visible(input), mentionPopupRole: byId("group-mention-popup").getAttribute("role") },
-    messages: { ...rect(messages), clientHeight: messages.clientHeight, scrollHeight: messages.scrollHeight, scrollTop: messages.scrollTop,
-      clientWidth: messages.clientWidth, scrollWidth: messages.scrollWidth },
-    date: { ...rect(messages.querySelector(".conversation-date")), text: messages.querySelector(".conversation-date").textContent },
-    firstBubble: rect(messages.querySelector(".message .bubble")),
+    messages: { ...rect(messages), clientHeight: messages!.clientHeight, scrollHeight: messages!.scrollHeight, scrollTop: messages!.scrollTop,
+      clientWidth: messages!.clientWidth, scrollWidth: messages!.scrollWidth },
+    date: { ...rect(messages!.querySelector<HTMLElement>(".conversation-date")!), text: messages!.querySelector<HTMLElement>(".conversation-date")!.textContent },
+    firstBubble: rect(messages!.querySelector<HTMLElement>(".message .bubble")!),
     topBandText: topBandText(),
     agentMessages: agentMessages(),
-    settings: { ...rect(panel), hidden: panel.hidden, content: { ...rect(settingsContent), clientHeight: settingsContent.clientHeight,
-      scrollHeight: settingsContent.scrollHeight, scrollTop: settingsContent.scrollTop } },
+    settings: { ...rect(panel), hidden: panel!.hidden, content: { ...rect(settingsContent), clientHeight: settingsContent!.clientHeight,
+      scrollHeight: settingsContent!.scrollHeight, scrollTop: settingsContent!.scrollTop } },
   });
-  fillMessages(true); const closed = snapshot(); messages.scrollTop = messages.scrollHeight;
+  fillMessages(true); const closed = snapshot(); messages!.scrollTop = messages!.scrollHeight;
   const scrolled = snapshot(); fillMessages(false); const short = snapshot();
   setSettings(true); fillMessages(true); const open = snapshot();
-  title.textContent = "一个用于验证群组胶囊保持紧凑而不挤占对话空间的超长名称".repeat(3);
-  capsule.title = title.textContent; const longTitle = snapshot(); title.textContent = "研究协作小组"; capsule.title = title.textContent;
+  title!.textContent = "一个用于验证群组胶囊保持紧凑而不挤占对话空间的超长名称".repeat(3);
+  capsule!.title = title!.textContent; const longTitle = snapshot(); title!.textContent = "研究协作小组"; capsule!.title = title!.textContent;
   const paragraphs = Array.from({ length: 80 }, (_, index) => make("muted-note", `群组设置 ${index + 1}：检查侧栏内容独立滚动。`));
-  settingsContent.append(...paragraphs); const settingsLong = snapshot(); settingsContent.scrollTop = settingsContent.scrollHeight;
-  const settingsScrolled = snapshot(); for (const paragraph of paragraphs) paragraph.remove(); settingsContent.scrollTop = 0;
-  input.style.height = "180px"; const expandedComposer = snapshot(); input.style.removeProperty("height");
+  settingsContent!.append(...paragraphs); const settingsLong = snapshot(); settingsContent!.scrollTop = settingsContent!.scrollHeight;
+  const settingsScrolled = snapshot(); for (const paragraph of paragraphs) paragraph.remove(); settingsContent!.scrollTop = 0;
+  input!.style.height = "180px"; const expandedComposer = snapshot(); input!.style.removeProperty("height");
   setSettings(false); const reopenedSpace = snapshot();
   for (const control of Object.values(controls)) control?.dispose();
   return { closed, scrolled, short, open, longTitle, settingsLong, settingsScrolled, expandedComposer, reopenedSpace };
@@ -139,15 +144,15 @@ export async function groupLayoutScript() {
     readFile(new URL(`../../public/${file}`, import.meta.url), "utf8")));
   const avatarAssets = Object.fromEntries(await Promise.all(["core", "cut", "disc"].map(async (name) => [name,
     `data:image/png;base64,${(await readFile(new URL(`../../public/assets/avatars/${name}${name === "core" ? "" : "-mask"}.png`, import.meta.url))).toString("base64")}`])));
-  const markup = html.match(/<body>([\s\S]*)<\/body>/)[1].replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
+  const markup = html!.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
   const data = JSON.stringify({ markup, stylesheet, avatarAssets }).replaceAll("<", "\\u003c");
-  const resize = resizeSource.replace(/^export /gm, "").replace(/^if \(typeof document[^\n]*initWorkspaceResize\(\);$/m, "");
-  const appearance = avatarSource.replace(/^export \{[^\n]*\} from [^\n]+;\n/m, "").replace(/^export /gm, "");
+  const resize = resizeSource!.replace(/^export /gm, "").replace(/^if \(typeof document[^\n]*initWorkspaceResize\(\);$/m, "");
+  const appearance = avatarSource!.replace(/^export \{[^\n]*\} from [^\n]+;\n/m, "").replace(/^export /gm, "");
   return `${resize}\n${appearance}\nreturn (${inspectGroupLayout.toString()})(${data}, initWorkspaceResize, renderAgentAvatar);`;
 }
 
-export function assertGroupLayout(facts) {
-  const close = (actual, expected, label) => assert.ok(Math.abs(actual - expected) <= 1, `${label}: ${actual} vs ${expected}`);
+export function assertGroupLayout(facts: ReturnType<typeof inspectGroupLayout>) {
+  const close = (actual: number, expected: number, label: string) => assert.ok(Math.abs(actual - expected) <= 1, `${label}: ${actual} vs ${expected}`);
   for (const [name, sample] of Object.entries(facts)) {
     close(sample.page.height, sample.viewport.height, `${name} 群组页高度`);
     assert.ok(sample.documentHeight <= sample.viewport.height + 1, `${name} 页面不应整体滚动`);
@@ -181,7 +186,7 @@ export function assertGroupLayout(facts) {
       assert.equal(message.display, "grid", `${label} 应按头像和正文两列布局`);
       assert.ok(message.sender.visible && message.avatar.visible && message.body.visible, `${label} 姓名、头像和正文应可见`);
       assert.ok(message.sender.bottom < message.body.top, `${label} 姓名应位于正文上方`);
-      close(message.sender.textRects[0].left, message.body.left + 14, `${label} 姓名与正文文字左侧对齐`);
+      close(message.sender.textRects[0]!.left, message.body.left + 14, `${label} 姓名与正文文字左侧对齐`);
       close(message.avatar.width, 28, `${label} 头像宽度`); close(message.avatar.height, 28, `${label} 头像高度`);
       close(message.avatar.right + 12, message.body.left, `${label} 头像应在正文左侧`);
       close(message.avatar.bottom, message.body.bottom, `${label} 头像应与正文底部对齐`);
@@ -195,12 +200,12 @@ export function assertGroupLayout(facts) {
       assert.equal(message.mention.display, "inline", `${label} 提及应随正文行内排版`);
       assert.ok(message.mention.inlinePrefix, `${label} 提及应位于首段正文前缀而非独立行`);
       close(message.mention.avatar.width, 18, `${label} 提及头像宽度`); close(message.mention.avatar.height, 18, `${label} 提及头像高度`);
-      assert.ok(message.mention.textRects.every((line) => line.left >= message.body.left + 13 && line.right <= message.body.right - 13),
+      assert.ok(message.mention.textRects.every((line: { left: number; right: number; }) => line.left >= message.body.left + 13 && line.right <= message.body.right - 13),
         `${label} 长提及名称应在正文内换行`);
     }
-    assert.notEqual(sample.agentMessages[0].sender.color, sample.agentMessages[1].sender.color, `${name} 发送者配色应能区分`);
-    assert.equal(sample.agentMessages[0].mention.color, sample.agentMessages[1].sender.color, `${name} 提及应使用接收者配色`);
-    assert.equal(sample.agentMessages[1].mention.color, sample.agentMessages[0].sender.color, `${name} 提及应使用接收者配色`);
+    assert.notEqual(sample.agentMessages[0]!.sender.color, sample.agentMessages[1]!.sender.color, `${name} 发送者配色应能区分`);
+    assert.equal(sample.agentMessages[0]!.mention.color, sample.agentMessages[1]!.sender.color, `${name} 提及应使用接收者配色`);
+    assert.equal(sample.agentMessages[1]!.mention.color, sample.agentMessages[0]!.sender.color, `${name} 提及应使用接收者配色`);
   }
   assert.ok(facts.closed.settings.hidden && facts.reopenedSpace.settings.hidden, "群设置默认关闭并能恢复聊天宽度");
   assert.ok(facts.closed.conversation.width > facts.open.conversation.width, "展开设置应收窄聊天列");

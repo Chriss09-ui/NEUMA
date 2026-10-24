@@ -1,3 +1,5 @@
+import type { RequirementDraft } from "../../src/contracts/requirements.mjs";
+import type { RequirementItem } from "../../src/contracts/architecture.mjs";
 import { emptyDraft } from "../../src/requirements/core.mjs";
 import { PLATFORM_CONTRACT_VERSION } from "../../src/architecture/platform-contract.mjs";
 
@@ -9,7 +11,7 @@ export function mathDemoDraft() {
     task: "解析输入，采用固定几何模板生成讲解、交互 HTML 和静态 SVG",
     deliverable: "下载 calculus_demo_<n>.html、calculus_demo_<n>.svg 与 calculus_demo_<n>_notes.md",
     successCriteria: "文件可读回；公式与输入一致；notes 可核对几何关系和关键点；运行验证据实标注",
-  })) draft[key] = { value, source: "user" };
+  })) draft[key as keyof Pick<RequirementDraft, "name" | "goal" | "scenario" | "inputSource" | "task" | "deliverable" | "successCriteria">] = { value, source: "user" };
   draft.constraints = [
     { text: "不联网；HTML 的 SVG、JS、样式全部内联，不加载外部资源", source: "user" },
     { text: "固定几何模板，不要求真实动态几何引擎或 GeoGebra/Desmos 嵌入", source: "user" },
@@ -21,7 +23,7 @@ export function mathDemoDraft() {
   return draft;
 }
 
-export function mathDemoDesign(requirements, { includeExcludedCapabilities = false } = {}) {
+export function mathDemoDesign(requirements: RequirementItem[], { includeExcludedCapabilities = false } = {}) {
   const components = [
     ["concept_classifier", "规范化公式并识别知识点", "否则无法选模板", "公式或知识点", "规范化公式与知识点"],
     ["formula_knowledge_base", "提取固定模板的几何关系", "否则讲解与图形没有共同依据", "规范化公式与知识点", "几何关系与关键点坐标"],
