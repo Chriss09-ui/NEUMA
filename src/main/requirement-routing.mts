@@ -1,3 +1,7 @@
+import type { ToolResult } from "../contracts/tools.mjs";
+import type { ModelConfig } from "../contracts/model.mjs";
+import type { PiSessionPort, SessionFactory, Progress } from "../runtime/pi-port.mjs";
+import { objectFields } from "../runtime/type-boundary.mjs";
 import { ProviderError } from "../requirements/core.mjs";
 import { classifyModelFailure } from "../runtime/pi-runtime.mjs";
 
@@ -10,18 +14,20 @@ const PARAMETERS = { type: "object", additionalProperties: false, properties: {
   quote: { type: "string", maxLength: 800 },
 }, required: ["route", "quote"] };
 
-export async function classifyRequirementInput({ config, cwd, dataDir, sessionFactory, message, requirement, signal, onProgress = () => {} }) {
+export async function classifyRequirementInput({ config, cwd, dataDir, sessionFactory, message, requirement, signal, onProgress = () => {} }: { config: ModelConfig; cwd: string; dataDir: string; sessionFactory: SessionFactory; message: string; requirement: { agentId: unknown; status: unknown; lastQuestion: unknown; draft: unknown }; signal?: AbortSignal; onProgress?: Progress }) {
   signal?.throwIfAborted();
-  let decision, turns = 0, session, unsubscribe = () => {}, failure;
+  let decision: "continue" | "new" | "outside" | undefined;
+  let turns = 0, session: PiSessionPort | undefined, unsubscribe = () => {}, failure: string | undefined;
   const abort = () => { void session?.abort?.(); };
   signal?.addEventListener("abort", abort, { once: true });
   try {
     session = await sessionFactory({ config, cwd, dataDir, systemPrompt: REQUIREMENT_ROUTING_PROMPT, maxOutputTokens: 1024,
       customTools: [{ name: "submit_requirement_route", label: "确认需求消息去向", description: "只读提交本轮是否继续当前需求，不执行操作。",
-        parameters: PARAMETERS, executionMode: "sequential", execute: async (_id, value) => {
+        parameters: PARAMETERS, executionMode: "sequential", execute: async (_id: string, input: unknown): Promise<ToolResult> => {
+          const value = objectFields(input);
           signal?.throwIfAborted();
           if (decision) throw new Error("本轮去向已提交");
-          if (!["continue", "new", "outside"].includes(value?.route) || typeof value.quote !== "string"
+          if (value.route !== "continue" && value.route !== "new" && value.route !== "outside" || typeof value.quote !== "string"
             || value.quote.length > 800 || value.route !== "continue" && (!value.quote.trim() || !message.includes(value.quote)))
             throw new Error("切换必须引用本轮用户明确要求所在的原话短句");
           decision = value.route;
@@ -40,7 +46,7 @@ export async function classifyRequirementInput({ config, cwd, dataDir, sessionFa
     } }));
     signal?.throwIfAborted();
     const last = session.messages?.findLast((item) => item.role === "assistant");
-    if (failure || ["error", "aborted", "length"].includes(last?.stopReason) || !decision)
+    if (failure || ["error", "aborted", "length"].includes(last?.stopReason ?? "") || !decision)
       throw new ProviderError("本轮消息去向尚未核实，当前需求已保留，请重试", { stage: "main", reason: failure ?? "requirement_routing_failed" });
     return decision;
   } finally { signal?.removeEventListener("abort", abort); unsubscribe(); session?.dispose?.(); }

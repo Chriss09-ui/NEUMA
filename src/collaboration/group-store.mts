@@ -1,3 +1,6 @@
+import { objectFields } from "../runtime/type-boundary.mjs";
+import { checkedGroupRecord } from "./group-record.mjs";
+import type { GroupRecord, GroupMessage, GroupEvent, GroupSender } from "../contracts/collaboration.mjs";
 import { randomUUID, createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, lstat, realpath, open, readdir, rename, rm } from "node:fs/promises";
@@ -9,19 +12,19 @@ export const GROUP_LIMITS = Object.freeze({ concurrentMembers: 2, negotiationRou
   publicReplyDepth: 2, publicReplyCount: 4, publicReplyTurns: 3, recordBytes: 32 * 1024 * 1024 });
 export const TERMINAL_TASKS = new Set(["completed", "partial", "failed", "cancelled", "interrupted"]);
 export const now = () => new Date().toISOString();
-export function id(value, label = "标识") {
+export function id(value: unknown, label = "标识") {
   if (typeof value !== "string" || !/^[\w-]{1,80}$/.test(value)) throw new InputError(`${label}无效`);
   return value;
 }
-export function text(value, label = "内容", limit = 12000, optional = false) {
+export function text(value: unknown, label = "内容", limit = 12000, optional = false) {
   if (optional && (value === undefined || value === null)) return "";
   if (!textWithinLimit(value, limit) || (!optional && !value.trim()) || value.includes("\0")) throw new InputError(`${label}需为${optional ? "不超过" : "1～"}${limit}字的文本`);
   return value.trim();
 }
-export function conflict(message) { const error = new InputError(message); error.reason = "collaboration_conflict"; return error; }
-export function fingerprint(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
-async function directory(path, create = false) {
-  if (create) { try { await mkdir(path, { mode: 0o700 }); } catch (error) { if (error.code !== "EEXIST") throw error; } }
+export function conflict(message: string) { const error = new InputError(message); error.reason = "collaboration_conflict"; return error; }
+export function fingerprint(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+async function directory(path: string, create = false) {
+  if (create) { try { await mkdir(path, { mode: 0o700 }); } catch (error) { if (objectFields(error).code !== "EEXIST") throw error; } }
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new InputError("群数据目录不能是链接");
   return realpath(path);
@@ -30,15 +33,16 @@ async function directory(path, create = false) {
 // The material service receives the same bounded filesystem interface as AgentStorage,
 // rooted in groups instead of any member's private directory.
 export class GroupStorage {
-  constructor({ dataDir }) {
+  root: string; ready: Promise<void>;
+  constructor({ dataDir }: { dataDir: string }) {
     this.root = resolve(dataDir, "groups");
     this.ready = this.initialize(dataDir); this.ready.catch(() => {});
   }
-  async initialize(dataDir) {
+  async initialize(dataDir: string) {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
     await directory(resolve(dataDir)); await directory(this.root, true);
   }
-  async directory(groupId, subpath = "", { create = false } = {}) {
+  async directory(groupId: string, subpath = "", { create = false } = {}) {
     id(groupId, "群"); await this.ready;
     const parts = subpath ? subpath.split("/") : [];
     if (parts.some((part) => !part || part === "." || part === ".." || part.includes("\\") || part.includes("\0"))) throw new InputError("群存储路径无效");
@@ -46,13 +50,13 @@ export class GroupStorage {
     for (const part of [groupId, ...parts]) current = await directory(join(current, part), create);
     return current;
   }
-  async path(groupId, file, create = false) {
+  async path(groupId: string, file: string, create = false) {
     if (typeof file !== "string") throw new InputError("群存储路径无效");
     const parts = file.split("/"), name = parts.pop();
     if (!name || name === "." || name === ".." || /[\\\0]/.test(name)) throw new InputError("群存储路径无效");
     return join(await this.directory(groupId, parts.join("/"), { create }), name);
   }
-  async readJson(groupId, file, { maxBytes = GROUP_LIMITS.recordBytes } = {}) {
+  async readJson(groupId: string, file: string, { maxBytes = GROUP_LIMITS.recordBytes } = {}): Promise<unknown> {
     let handle;
     try {
       const path = await this.path(groupId, file);
@@ -63,17 +67,17 @@ export class GroupStorage {
       if (bytes.length > maxBytes) throw new InputError("群数据超过大小限制");
       return JSON.parse(bytes.toString("utf8"));
     } catch (error) {
-      if (error.code === "ENOENT") return null;
+      if (objectFields(error).code === "ENOENT") return null;
       if (error instanceof SyntaxError) throw new InputError("群数据无法读取，请保留原文件");
       throw error;
     } finally { await handle?.close(); }
   }
-  async writeJson(groupId, file, value, { signal } = {}) {
+  async writeJson(groupId: string, file: string, value: unknown, { signal }: { signal?: AbortSignal | undefined } = {}) {
     const bytes = JSON.stringify(value);
     if (Buffer.byteLength(bytes) > GROUP_LIMITS.recordBytes) throw new InputError("群记录已达到容量限制，请创建新群；现有记录已保留");
     const path = await this.path(groupId, file, true);
     try { const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new InputError("群数据不能是链接"); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
+    catch (error) { if (objectFields(error).code !== "ENOENT") throw error; }
     const temporary = join(dirname(path), `.pending-${randomUUID()}.json`);
     try {
       const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -81,9 +85,9 @@ export class GroupStorage {
       signal?.throwIfAborted(); await rename(temporary, path);
     } finally { await rm(temporary, { force: true }); }
   }
-  async removeDirectory(groupId, subpath) {
+  async removeDirectory(groupId: string, subpath: string) {
     try { await rm(await this.directory(groupId, subpath), { recursive: true }); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
+    catch (error) { if (objectFields(error).code !== "ENOENT") throw error; }
   }
   async ids() {
     await this.ready; const result = [];
@@ -95,14 +99,14 @@ export class GroupStorage {
   }
 }
 
-export function event(record, type, details = {}) {
+export function event(record: GroupRecord, type: string, details: Partial<GroupEvent> = {}): GroupEvent {
   const value = { ...details, type, groupId: record.group.id, seq: ++record.group.lastSequence, createdAt: now() };
   record.events.push(value); record.group.updatedAt = value.createdAt; return value;
 }
-export function message(record, sender, content, { taskId = null, recipientId = null, replyTo = null, status = "complete", visibility, kind } = {}) {
+export function message(record: GroupRecord, sender: GroupSender, content: string, { taskId = null, recipientId = null, replyTo = null, status = "complete", visibility, kind }: Partial<Pick<GroupMessage, "taskId" | "recipientId" | "replyTo" | "status" | "visibility" | "kind">> = {}): GroupMessage {
   if (visibility !== undefined && !["public", "internal"].includes(visibility)) throw new InputError("群消息展示范围无效");
   if (kind !== undefined && !["negotiation", "coordination", "member_result", "delivery", "reply", "clarification", "status"].includes(kind)) throw new InputError("群消息类型无效");
-  const value = { id: randomUUID(), sender, content, taskId, recipientId, replyTo, status, createdAt: now() };
+  const value = { id: randomUUID(), sender, content, taskId, recipientId, replyTo, status, createdAt: now() } as GroupMessage;
   if (visibility !== undefined) value.visibility = visibility;
   if (kind !== undefined) value.kind = kind;
   value.seq = event(record, "message", { messageId: value.id, taskId, agentId: sender.type === "agent" ? sender.id : null }).seq;
@@ -110,16 +114,20 @@ export function message(record, sender, content, { taskId = null, recipientId = 
 }
 
 export class GroupStore {
-  constructor({ dataDir, storage = new GroupStorage({ dataDir }) }) {
+  storage: GroupStorage; records: Map<string, GroupRecord>; queues: Map<string, Promise<unknown>>;
+  creation: Promise<unknown>; ready: Promise<void>;
+  constructor({ dataDir, storage = new GroupStorage({ dataDir }) }: { dataDir: string; storage?: GroupStorage }) {
     this.storage = storage; this.records = new Map(); this.queues = new Map(); this.creation = Promise.resolve();
     this.ready = this.load(); this.ready.catch(() => {});
   }
   async load() {
     for (const groupId of await this.storage.ids()) {
-      const record = await this.storage.readJson(groupId, "group.json");
+      const raw = await this.storage.readJson(groupId, "group.json");
+      if (!raw) continue;
+      const record = checkedGroupRecord(raw);
       if (!record) continue;
       if (record.schemaVersion !== 1 || record.group?.id !== groupId || !Array.isArray(record.group.memberIds)
-        || !["tasks", "messages", "events", "artifacts", "mutations"].every((key) => Array.isArray(record[key]))
+        || !["tasks", "messages", "events", "artifacts", "mutations"].every((key) => Array.isArray(objectFields(record)[key]))
         || !Number.isSafeInteger(record.group.lastSequence)) throw new InputError("群记录格式无效，请保留原文件");
       if (record.deletedConversations !== undefined) {
         if (!Array.isArray(record.deletedConversations)) throw new InputError("群对话删除记录格式无效，请保留原文件");
@@ -149,9 +157,9 @@ export class GroupStore {
       this.records.set(groupId, record);
     }
   }
-  async get(groupId) { id(groupId, "群"); await this.ready; const value = this.records.get(groupId); if (!value) throw new InputError("没有找到这个群"); return structuredClone(value); }
+  async get(groupId: string) { id(groupId, "群"); await this.ready; const value = this.records.get(groupId); if (!value) throw new InputError("没有找到这个群"); return structuredClone(value); }
   async list() { await this.ready; return [...this.records.values()].map((value) => structuredClone(value.group)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); }
-  change(groupId, action) {
+  change<T>(groupId: string, action: (record: GroupRecord) => T | Promise<T>): Promise<T> {
     id(groupId, "群");
     const previous = this.queues.get(groupId) ?? Promise.resolve();
     const pending = previous.catch(() => {}).then(async () => {
@@ -163,7 +171,7 @@ export class GroupStore {
     void pending.finally(() => { if (this.queues.get(groupId) === pending) this.queues.delete(groupId); }).catch(() => {});
     return pending;
   }
-  create(input) {
+  create(input: { name: string; purpose: string; memberIds: string[]; mutationId: string }) {
     const pending = this.creation.catch(() => {}).then(async () => {
       await this.ready;
       const hash = fingerprint(input);
@@ -172,7 +180,7 @@ export class GroupStore {
       const timestamp = now();
       const group = { id: randomUUID(), name: input.name, purpose: input.purpose, memberIds: input.memberIds,
         archived: false, materialIds: [], version: 1, createdAt: timestamp, updatedAt: timestamp, lastSequence: 0, activeTaskId: null, creationId: input.mutationId, creationHash: hash };
-      const record = { schemaVersion: 1, group, tasks: [], messages: [], events: [], artifacts: [], mutations: [] };
+      const record: GroupRecord = { schemaVersion: 1, group, tasks: [], messages: [], events: [], artifacts: [], mutations: [] };
       event(record, "group", { version: 1 });
       await this.storage.writeJson(group.id, "group.json", record); this.records.set(group.id, record); return structuredClone(group);
     });

@@ -1,3 +1,19 @@
+import type { SkillSource, SkillSummary, SkillDiagnostic, SkillTrashRecord, SkillLocation } from "../contracts/skill.mjs";
+import type { UnknownRecord } from "../contracts/json.mjs";
+import type { Stats } from "node:fs";
+import { objectFields, isRecord, isArray, errorField } from "../runtime/type-boundary.mjs";
+function isTrashRecord(value: unknown): value is SkillTrashRecord {
+  const item = objectFields(value);
+  return isRecord(value) && ["id", "originalPath", "storedPath", "action", "trashedAt", "name", "status"].every(key => typeof item[key] === "string")
+    && typeof item.skillCount === "number" && (item.restoredAt === undefined || typeof item.restoredAt === "string");
+}
+interface SkillOptions { signal?: AbortSignal | undefined; refresh?: boolean }
+interface SkillEntry extends SkillSummary { _content: string | null; _revision: string | null }
+interface SkillCatalog { entries: Map<string, SkillEntry>; sources: SkillSource[]; checkedAt: string; warnings: string[] }
+interface ParsedSkill { skill: { name: string; description: string; filePath: string; baseDir: string; sourceInfo: unknown } | null; diagnostics: SkillDiagnostic[] }
+type TreeEntry = { path: string; size: number } & ({ type: "link"; _target: string } | { type: "file"; _mode: number } | { type: "directory" | "other" });
+interface ImportInput { path?: unknown; targetId?: unknown; name?: unknown; revision?: unknown }
+interface RemovalInput { locationId?: unknown; action?: unknown; revision?: unknown; confirm?: unknown }
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rename, rm, rmdir, symlink } from "node:fs/promises";
@@ -12,38 +28,38 @@ const ENTRY_LIMIT = 5000;
 const DIRECTORY_LIMIT = 30000;
 const TRASH_DIR = ".neuma-skill-trash";
 const SKIP_DIRS = new Set([".git", "node_modules", TRASH_DIR]);
-const hash = (value) => createHash("sha256").update(value).digest("hex");
-const inside = (root, path) => {
+const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+const inside = (root: string, path: string) => {
   const part = relative(root, path);
   return !isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`);
 };
-const check = (signal) => signal?.throwIfAborted();
-const fail = (message, conflict = false) => {
+const check = (signal?: AbortSignal) => signal?.throwIfAborted();
+const fail = (message: string, conflict = false) => {
   const error = new InputError(message);
-  if (conflict) error.code = "SKILL_CONFLICT";
+  if (conflict) Object.assign(error, { code: "SKILL_CONFLICT" });
   return error;
 };
-const exists = async (path) => {
+const exists = async (path: string) => {
   try { return await lstat(path); }
-  catch (error) { if (error.code === "ENOENT" || error.code === "ENOTDIR") return null; throw error; }
+  catch (error) { if (errorField(error, "code") === "ENOENT" || errorField(error, "code") === "ENOTDIR") return null; throw error; }
 };
-const diagnostic = (message, type = "warning") => ({ type, message });
+const diagnostic = (message: string, type = "warning") => ({ type, message });
 const credentials = /^(?:\.env(?:\..*)?|\.npmrc|\.netrc|credentials?(?:\..*)?|secrets?(?:\..*)?|auth(?:\..*)?|tokens?(?:\..*)?|passwords?(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore))$/i;
 
-function localPath(value, home) {
+function localPath(value: unknown, home: string) {
   if (typeof value !== "string" || !value.trim() || value.includes("\0")) throw fail("请提供完整的本地目录路径");
   const path = value.trim().startsWith("~/") ? join(home, value.trim().slice(2)) : value.trim();
   if (!isAbsolute(path)) throw fail("请使用完整路径，或以 ~/ 开头的路径");
   return resolve(path);
 }
 
-async function canonicalMissing(path) {
+async function canonicalMissing(path: string) {
   const missing = [];
   let current = resolve(path);
   while (true) {
     try { return join(await realpath(current), ...missing.reverse()); }
     catch (error) {
-      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+      if (errorField(error, "code") !== "ENOENT" && errorField(error, "code") !== "ENOTDIR") throw error;
       const parent = dirname(current);
       if (parent === current) throw error;
       missing.push(basename(current)); current = parent;
@@ -52,7 +68,7 @@ async function canonicalMissing(path) {
 }
 
 // Management metadata and staging directories must never follow a directory link.
-async function realDirectory(path, create = false) {
+async function realDirectory(path: string, create = false) {
   const absolute = resolve(path), parts = [];
   let current = absolute;
   while (dirname(current) !== current) { parts.push(current); current = dirname(current); }
@@ -61,7 +77,7 @@ async function realDirectory(path, create = false) {
     let info = await exists(part);
     if (!info && create) {
       try { await mkdir(part, { mode: 0o700 }); }
-      catch (error) { if (error.code !== "EEXIST") throw error; }
+      catch (error) { if (errorField(error, "code") !== "EEXIST") throw error; }
       info = await lstat(part);
     }
     if (!info) throw Object.assign(new Error("directory_missing"), { code: "ENOENT" });
@@ -70,7 +86,7 @@ async function realDirectory(path, create = false) {
   return absolute;
 }
 
-async function readBounded(path, limit, { singleLink = false, signal } = {}) {
+async function readBounded(path: string, limit: number, { singleLink = false, signal }: { singleLink?: boolean; signal?: AbortSignal | undefined } = {}) {
   check(signal);
   const before = await lstat(path);
   if (!before.isFile() || before.isSymbolicLink()) throw fail("文件必须是普通文件，不能读取链接或特殊文件");
@@ -94,15 +110,15 @@ async function readBounded(path, limit, { singleLink = false, signal } = {}) {
   } finally { await handle.close(); }
 }
 
-async function writeExclusive(path, content, mode = 0o600) {
+async function writeExclusive(path: string, content: string | Buffer, mode = 0o600) {
   const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
   try { await handle.writeFile(content); await handle.sync(); }
   finally { await handle.close(); }
 }
 
-async function publishDirectory(from, to, signal) {
+async function publishDirectory(from: string, to: string, signal?: AbortSignal) {
   try { await mkdir(to, { mode: 0o700 }); }
-  catch (error) { if (error.code === "EEXIST") throw fail("目标目录已存在，不能覆盖", true); throw error; }
+  catch (error) { if (errorField(error, "code") === "EEXIST") throw fail("目标目录已存在，不能覆盖", true); throw error; }
   const reservation = await lstat(to);
   let published = false;
   try {
@@ -119,14 +135,14 @@ async function publishDirectory(from, to, signal) {
   }
 }
 
-async function readJson(path) {
+async function readJson(path: string): Promise<unknown> {
   await realDirectory(dirname(path));
   if (!await exists(path)) return null;
   try { return JSON.parse((await readBounded(path, 4 * MAIN_LIMIT, { singleLink: true })).buffer.toString("utf8")); }
   catch (error) { if (error instanceof InputError) throw error; throw fail("Skill 管理记录无法读取，请保留文件并检查后重试"); }
 }
 
-async function atomicJson(path, value, signal) {
+async function atomicJson(path: string, value: unknown, signal?: AbortSignal) {
   await realDirectory(dirname(path), true);
   const info = await exists(path);
   if (info && (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)) throw fail("Skill 管理记录不能是链接或特殊文件");
@@ -141,30 +157,32 @@ async function atomicJson(path, value, signal) {
   } finally { await rm(temporary, { force: true }); }
 }
 
-function directoryName(value) {
+function directoryName(value: unknown) {
   if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.length > 120
     || [".", "..", TRASH_DIR, ".system"].includes(value) || /[\\/\0]/.test(value)) throw fail("导入目录名无效，请使用单个目录名称");
   return value;
 }
 
 export class SkillManager {
-  constructor({ dataDir, home = homedir(), getProjects = async () => [] }) {
+  dataDir: string; home: string; getProjects: () => Promise<unknown>; metadataDir: string; custom: { path: string }[]; trash: SkillTrashRecord[]; loaded: boolean; catalog: SkillCatalog | null; queue: Promise<unknown>; discoveredProtected: Set<string>; protectionWarnings: string[]; protectionIncomplete: boolean;
+
+  constructor({ dataDir, home = homedir(), getProjects = async () => [] }: { dataDir: string; home?: string; getProjects?: () => Promise<unknown> }) {
     this.dataDir = resolve(dataDir); this.home = resolve(home); this.getProjects = getProjects;
     this.metadataDir = join(this.dataDir, "skills");
     this.custom = []; this.trash = []; this.loaded = false; this.catalog = null; this.queue = Promise.resolve();
     this.discoveredProtected = new Set(); this.protectionWarnings = []; this.protectionIncomplete = false;
   }
 
-  _enqueue(task) {
+  _enqueue<T>(task: () => Promise<T> | T): Promise<T> {
     const pending = this.queue.then(async () => {
       try { return await task(); }
       catch (error) {
-        if (error instanceof InputError || error?.name === "AbortError") throw error;
-        const messages = { EACCES: "没有目录或文件的读写权限，请检查后重试", EPERM: "系统不允许此文件操作，请检查权限后重试",
+        if (error instanceof InputError || errorField(error, "name") === "AbortError") throw error;
+        const messages: Record<string, string> = { EACCES: "没有目录或文件的读写权限，请检查后重试", EPERM: "系统不允许此文件操作，请检查权限后重试",
           EROFS: "此目录位于只读文件系统，不能修改", ENOENT: "目录或文件已不存在，请刷新后重试", ENOTDIR: "目录路径已变更，请刷新后重试",
           ELOOP: "路径包含失效或循环链接，请检查后重试", EEXIST: "目标位置已存在，不能覆盖", ENOTEMPTY: "目标目录已有文件，不能覆盖",
           EXDEV: "回收目录必须位于同一磁盘，未移动源文件", ENOSPC: "磁盘空间不足，请释放空间后重试", EIO: "本地文件读写失败，请检查目录和回收记录" };
-        if (messages[error?.code]) throw fail(messages[error.code], ["ENOENT", "ENOTDIR", "EEXIST", "ENOTEMPTY"].includes(error.code));
+        if (messages[String(errorField(error, "code"))]) throw fail(messages[String(errorField(error, "code"))]!, ["ENOENT", "ENOTDIR", "EEXIST", "ENOTEMPTY"].includes(String(errorField(error, "code"))));
         throw error;
       }
     });
@@ -178,18 +196,19 @@ export class SkillManager {
     this.home = await canonicalMissing(this.home);
     this.metadataDir = join(this.dataDir, "skills");
     if (await exists(this.metadataDir)) {
-      const sources = await readJson(join(this.metadataDir, "sources.json"));
-      const trash = await readJson(join(this.metadataDir, "trash.json"));
-      if (sources && (sources.version !== 1 || !Array.isArray(sources.sources)
-        || sources.sources.some((item) => typeof item?.path !== "string" || !isAbsolute(item.path)))) throw fail("Skill 来源记录格式无效");
-      if (trash && (trash.version !== 1 || !Array.isArray(trash.entries))) throw fail("Skill 回收记录格式无效");
-      this.custom = sources?.sources ?? [];
-      this.trash = trash?.entries ?? [];
-      for (const item of this.trash) {
+      const sourceInput = await readJson(join(this.metadataDir, "sources.json")), sources = sourceInput ? objectFields(sourceInput) : null;
+      const trashInput = await readJson(join(this.metadataDir, "trash.json")), trash = trashInput ? objectFields(trashInput) : null;
+      if (sources && (sources.version !== 1 || !isArray(sources.sources)
+        || sources.sources.some((item) => typeof objectFields(item).path !== "string" || !isAbsolute(String(objectFields(item).path))))) throw fail("Skill 来源记录格式无效");
+      const entries = trash?.entries ?? [];
+      if (trash && trash.version !== 1 || !isArray(entries) || !entries.every(isTrashRecord)) throw fail("Skill 回收记录格式无效");
+      for (const item of entries) {
         if (!/^[a-f0-9-]{36}$/.test(item.id || "") || !["skill", "link"].includes(item.action)
           || typeof item.originalPath !== "string" || !isAbsolute(item.originalPath)
           || item.storedPath !== join(dirname(item.originalPath), TRASH_DIR, item.id)) throw fail("Skill 回收路径记录无效");
       }
+      this.custom = sources?.sources as { path: string }[] ?? [];
+      this.trash = entries;
     }
     this.loaded = true;
   }
@@ -201,16 +220,16 @@ export class SkillManager {
     return [...new Set([...lexical, ...await Promise.all(lexical.map((path) => canonicalMissing(path).catch(() => path))), ...this.discoveredProtected])];
   }
 
-  async _refreshProtection(sources, signal) {
+  async _refreshProtection(sources: SkillSource[], signal?: AbortSignal) {
     const roots = [...sources.filter((source) => source.readOnly).map((source) => source.path), join(this.home, ".codex/skills/.system")];
     const visited = new Set(); let count = 0;
     this.protectionWarnings = []; this.protectionIncomplete = false;
-    const remember = (path) => {
+    const remember = (path: string) => {
       if ([...this.discoveredProtected].some((root) => inside(root, path))) return;
       for (const root of this.discoveredProtected) if (inside(path, root)) this.discoveredProtected.delete(root);
       this.discoveredProtected.add(path);
     };
-    const walk = async (path, depth = 0) => {
+    const walk = async (path: string, depth = 0): Promise<void> => {
       check(signal);
       if (depth > 64 || count > DIRECTORY_LIMIT) {
         this.protectionIncomplete = true; this.protectionWarnings.push("只读来源超过扫描上限，暂不开放文件修改；请缩小自选扫描来源"); return;
@@ -218,7 +237,7 @@ export class SkillManager {
       let info, canonical;
       try { info = await lstat(path); canonical = await realpath(path); }
       catch (error) {
-        if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+        if (errorField(error, "code") !== "ENOENT" && errorField(error, "code") !== "ENOTDIR") {
           this.protectionIncomplete = true; this.protectionWarnings.push(`只读来源无法完整检查：${path}`);
         }
         return;
@@ -238,25 +257,27 @@ export class SkillManager {
     for (const path of roots) await walk(path);
   }
 
-  async _sources(signal) {
+  async _sources(signal?: AbortSignal): Promise<SkillSource[]> {
     await this._load();
     const seeds = [
       ["通用 Agent Skills", ".agents/skills", "user", false], ["Codex Skills", ".codex/skills", "user", false],
       ["Claude Skills", ".claude/skills", "user", false], ["Pi Skills", ".pi/agent/skills", "user", false],
       ["Codex 插件", ".codex/plugins/cache", "plugin", true], ["Claude 插件", ".claude/plugins/cache", "plugin", true],
-    ].map(([label, path, kind, readOnly]) => ({ label, path: join(this.home, path), kind, readOnly, custom: false }));
+    ] as [string, string, string, boolean][];
+    const sourceSeeds = seeds.map(([label, path, kind, readOnly]) => ({ label, path: join(this.home, path), kind, readOnly, custom: false }));
     let projects;
     try { projects = await this.getProjects(); } catch { projects = []; }
-    for (const project of Array.isArray(projects) ? projects : []) {
+    for (const raw of isArray(projects) ? projects : []) {
+      const project = objectFields(raw);
       const root = project?.root || project?.path;
       if (typeof root !== "string" || !isAbsolute(root)) continue;
       for (const host of [".agents", ".codex", ".claude", ".pi"]) {
-        seeds.push({ label: `${project.name || basename(root)} · ${host}`, path: join(root, host, "skills"), kind: "project", readOnly: false, custom: false });
+        sourceSeeds.push({ label: `${project.name || basename(root)} · ${host}`, path: join(root, host, "skills"), kind: "project", readOnly: false, custom: false });
       }
     }
-    seeds.push(...this.custom.map((item) => ({ label: basename(item.path), path: item.path, kind: "custom", readOnly: false, custom: true })));
-    const protectedRoots = await this._protected(), found = new Map();
-    for (const seed of seeds) {
+    sourceSeeds.push(...this.custom.map((item) => ({ label: basename(item.path), path: item.path, kind: "custom", readOnly: false, custom: true })));
+    const protectedRoots = await this._protected(), found = new Map<string, SkillSource>();
+    for (const seed of sourceSeeds) {
       if (found.has(seed.path)) continue;
       const info = await exists(seed.path).catch(() => null), canonical = await canonicalMissing(seed.path).catch(() => seed.path);
       const readOnly = seed.readOnly || protectedRoots.some((path) => inside(path, canonical) || inside(path, seed.path));
@@ -273,7 +294,7 @@ export class SkillManager {
     return [...found.values()];
   }
 
-  async _parse(buffer, originalPath, signal) {
+  async _parse(buffer: Buffer, originalPath: string, signal?: AbortSignal): Promise<ParsedSkill> {
     check(signal);
     const temporary = await mkdtemp(join(tmpdir(), "neuma-skill-parse-"));
     try {
@@ -289,15 +310,15 @@ export class SkillManager {
     } finally { await rm(temporary, { recursive: true, force: true }); }
   }
 
-  async _scan({ signal } = {}) {
+  async _scan({ signal }: SkillOptions = {}) {
     check(signal);
     const sources = await this._sources(signal), protectedRoots = await this._protected();
     const writableRoots = await Promise.all(sources.filter((source) => !source.readOnly).map((source) => canonicalMissing(source.path).catch(() => null)));
     const protectedPresent = (await Promise.all(protectedRoots.map(async (path) => await exists(path) ? path : null))).filter(Boolean);
-    const entities = new Map(), warnings = [...this.protectionWarnings]; let directoryCount = 0;
+    const entities = new Map<string, SkillEntry>(), warnings = [...this.protectionWarnings]; let directoryCount = 0;
     for (const source of sources) {
       if (!source.exists) continue;
-      const walk = async (path, depth = 0, linkPath = null, ancestors = new Set()) => {
+      const walk = async (path: string, depth = 0, linkPath: string | null = null, ancestors = new Set<string>()): Promise<void> => {
         check(signal);
         if (depth > 64 || ++directoryCount > DIRECTORY_LIMIT) { warnings.push(`扫描达到目录上限：${source.path}`); return; }
         let info, canonical;
@@ -319,7 +340,7 @@ export class SkillManager {
           const fileInfo = await lstat(canonicalFile).catch(() => null);
           let entity = entities.get(id);
           if (!entity) {
-            let parsed = { skill: null, diagnostics: [] }, content = null, revision = null;
+            let parsed: ParsedSkill = { skill: null, diagnostics: [] }, content: string | null = null, revision: string | null = null;
             try {
               const data = await readBounded(canonicalFile, MAIN_LIMIT, { signal });
               content = data.buffer.toString("utf8"); revision = hash(data.buffer);
@@ -339,8 +360,8 @@ export class SkillManager {
           }
           const aliasLink = linkPath || (mainInfo?.isSymbolicLink() ? join(canonical, "SKILL.md") : null);
           const currentRootReference = join(await realpath(dirname(path)), basename(path));
-          const canRemoveLink = Boolean(aliasLink && [currentRootReference, join(canonical, "SKILL.md")].includes(aliasLink)
-            && !source.readOnly && protectedRoots.every((root) => !inside(root, aliasLink)));
+          const canRemoveLink = Boolean(aliasLink && [currentRootReference, join(canonical, "SKILL.md")].includes(aliasLink!)
+            && !source.readOnly && protectedRoots.every((root) => !inside(root, aliasLink!)));
           entity.locations.push({ id: `location_${hash(`${source.id}:${file}`).slice(0, 24)}`, path: file,
             sourceId: source.id, label: source.label, isLink: Boolean(aliasLink), canRemoveLink, ...(aliasLink ? { linkPath: aliasLink } : {}) });
           if (!entity.sources.some((item) => item.id === source.id)) entity.sources.push({ id: source.id, label: source.label });
@@ -359,36 +380,36 @@ export class SkillManager {
         ? "只读来源尚未完整检查，暂不开放修改" : "实际目录尚未登记为可管理来源，可先登记目录或移除链接引用"; }
       item.canEdit = item.canEdit && owned && !item.readOnly && item._content !== null && Boolean(item._revision);
       item.canTrash = item.canTrash && owned && !item.readOnly
-        && !protectedPresent.some((root) => inside(item.baseDir, root));
+        && !protectedPresent.some((root) => inside(item.baseDir, root!));
     }
     const all = [...entities.values()].sort((a, b) => a.name.localeCompare(b.name) || a.baseDir.localeCompare(b.baseDir));
     this.catalog = { entries: new Map(all.map((item) => [item.id, item])), sources, checkedAt: new Date().toISOString(), warnings: [...new Set(warnings)] };
     return this._publicList();
   }
 
-  _summary(item) {
+  _summary(item: SkillEntry) {
     const { _content, _revision, ...summary } = item;
     return structuredClone(summary);
   }
 
   _publicList() {
-    return { skills: [...this.catalog.entries.values()].map((item) => this._summary(item)), sources: structuredClone(this.catalog.sources),
-      checkedAt: this.catalog.checkedAt, warnings: [...this.catalog.warnings] };
+    return { skills: [...this.catalog!.entries.values()].map((item) => this._summary(item)), sources: structuredClone(this.catalog!.sources),
+      checkedAt: this.catalog!.checkedAt, warnings: [...this.catalog!.warnings] };
   }
 
-  async _entry(id, signal) {
+  async _entry(id: unknown, signal?: AbortSignal) {
     if (typeof id !== "string") throw fail("Skill 标识无效");
     await this._scan({ signal });
-    const item = this.catalog.entries.get(id);
+    const item = this.catalog!.entries.get(id);
     if (!item) throw fail("Skill 已不存在或来源已移除，请刷新后重试", true);
     return item;
   }
 
-  async _tree(root, { signal, forImport = false } = {}) {
+  async _tree(root: string, { signal, forImport = false }: SkillOptions & { forImport?: boolean } = {}) {
     const canonical = await realpath(root), rootInfo = await lstat(root);
     if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw fail("Skill 根目录必须是真实目录");
-    const files = [], fingerprint = []; let total = 0;
-    const walk = async (path, depth = 0) => {
+    const files: TreeEntry[] = [], fingerprint: (string | number)[][] = []; let total = 0;
+    const walk = async (path: string, depth = 0): Promise<void> => {
       check(signal);
       if (depth > 64 || files.length >= ENTRY_LIMIT) throw fail("Skill 文件数量或目录层级超过上限");
       if (!inside(canonical, await realpath(path))) throw fail("Skill 目录已变更，请刷新后重试", true);
@@ -418,14 +439,14 @@ export class SkillManager {
     return { files, revision: hash(JSON.stringify([canonical, rootInfo.dev, rootInfo.ino, rootInfo.mtimeMs, fingerprint])), total };
   }
 
-  async _detail(item, signal) {
-    let files = [];
+  async _detail(item: SkillEntry, signal?: AbortSignal) {
+    let files: { path: string; type: string; size: number }[] = [];
     try { files = (await this._tree(item.baseDir, { signal })).files.map(({ path, type, size }) => ({ path, type, size })); }
     catch (error) { check(signal); item = { ...item, diagnostics: [...item.diagnostics, diagnostic(error instanceof InputError ? error.message : "配套文件无法读取")] }; }
     return { ...this._summary(item), content: item._content ?? "", revision: item._revision, files };
   }
 
-  async _owned(path, { link = false } = {}) {
+  async _owned(path: string, { link = false } = {}) {
     const canonical = link ? join(await realpath(dirname(path)), basename(path)) : await canonicalMissing(path);
     const protectedRoots = await this._protected();
     if (protectedRoots.some((root) => inside(root, canonical) || inside(root, path))) throw fail("系统内置和插件目录只读，不能修改");
@@ -444,12 +465,12 @@ export class SkillManager {
     throw fail("此路径不在已登记的可管理来源中");
   }
 
-  list(options = {}) { return this._enqueue(async () => options.refresh || !this.catalog ? this._scan(options) : this._publicList()); }
-  scan(options = {}) { return this._enqueue(() => this._scan(options)); }
+  list(options: SkillOptions = {}) { return this._enqueue(async () => options.refresh || !this.catalog ? this._scan(options) : this._publicList()); }
+  scan(options: SkillOptions = {}) { return this._enqueue(() => this._scan(options)); }
   sources() { return this._enqueue(() => this._sources()); }
-  detail(id, options = {}) { return this._enqueue(async () => this._detail(await this._entry(id, options.signal), options.signal)); }
+  detail(id: unknown, options: SkillOptions = {}) { return this._enqueue(async () => this._detail(await this._entry(id, options.signal), options.signal)); }
 
-  save(id, { content, revision }, { signal } = {}) {
+  save(id: unknown, { content, revision }: { content?: unknown; revision?: unknown }, { signal }: SkillOptions = {}) {
     return this._enqueue(async () => {
       if (typeof content !== "string" || Buffer.byteLength(content) > MAIN_LIMIT) throw fail("SKILL.md 必须是文本，且不超过 1 MiB");
       const item = await this._entry(id, signal);
@@ -477,10 +498,10 @@ export class SkillManager {
     });
   }
 
-  addSource({ path }, { signal } = {}) {
+  addSource({ path: inputPath }: { path?: unknown }, { signal }: SkillOptions = {}) {
     return this._enqueue(async () => {
       await this._load(); check(signal);
-      path = localPath(path, this.home);
+      const path = localPath(inputPath, this.home);
       const target = await realpath(path).catch(() => null), info = target ? await lstat(target) : null;
       if (!info?.isDirectory()) throw fail("来源目录不存在或无法读取");
       const current = await this._sources(signal);
@@ -492,7 +513,7 @@ export class SkillManager {
     });
   }
 
-  removeSource(id) {
+  removeSource(id: unknown) {
     return this._enqueue(async () => {
       const source = (await this._sources()).find((item) => item.id === id);
       if (!source?.custom) throw fail("只能移除自行添加的扫描来源，文件不会删除");
@@ -503,17 +524,17 @@ export class SkillManager {
     });
   }
 
-  async _previewImport({ path, targetId, name }, signal) {
+  async _previewImport({ path: inputPath, targetId, name: inputName }: ImportInput, signal?: AbortSignal) {
     check(signal);
     const sources = await this._sources(signal), target = sources.find((item) => item.id === targetId);
     if (!target?.canImport) throw fail("请选择可写的 Skill 来源目录");
-    path = localPath(path, this.home);
+    const path = localPath(inputPath, this.home);
     const source = await realpath(path).catch(() => null);
     if (!source || !(await lstat(source)).isDirectory()) throw fail("导入路径必须是本地 Skill 目录");
     const mainPath = join(source, "SKILL.md"), mainInfo = await exists(mainPath);
     if (!mainInfo?.isFile() || mainInfo.isSymbolicLink()) throw fail("导入目录必须包含普通的 SKILL.md 主文件");
     const data = await readBounded(mainPath, MAIN_LIMIT, { signal });
-    name = directoryName(name || basename(path));
+    const name = directoryName(inputName || basename(path));
     const targetRoot = await this._owned(target.path), targetPath = join(targetRoot, name);
     await this._owned(targetPath);
     if (inside(source, targetPath) || inside(targetPath, source)) throw fail("导入源目录和目标目录不能互相包含");
@@ -530,11 +551,11 @@ export class SkillManager {
       revision: hash(JSON.stringify([source, target.id, targetPath, tree.revision, hash(data.buffer)])), _tree: tree, _target: target };
   }
 
-  previewImport(input, { signal } = {}) {
+  previewImport(input: ImportInput, { signal }: SkillOptions = {}) {
     return this._enqueue(async () => { const { _tree, _target, ...preview } = await this._previewImport(input, signal); return preview; });
   }
 
-  importSkill(input, { signal } = {}) {
+  importSkill(input: ImportInput, { signal }: SkillOptions = {}) {
     return this._enqueue(async () => {
       const preview = await this._previewImport(input, signal);
       if (!input.revision || input.revision !== preview.revision) throw fail("导入目录或目标已变更，请重新预览", true);
@@ -565,10 +586,10 @@ export class SkillManager {
     });
   }
 
-  async _previewRemoval(id, { locationId, action = "skill" } = {}, signal) {
+  async _previewRemoval(id: unknown, { locationId, action = "skill" }: RemovalInput = {}, signal?: AbortSignal) {
     const item = await this._entry(id, signal);
-    if (!["skill", "link"].includes(action)) throw fail("移除操作无效");
-    let path, location = null, revision;
+    if (typeof action !== "string" || !["skill", "link"].includes(action)) throw fail("移除操作无效");
+    let path: string, location: SkillLocation | null | undefined = null, revision: string;
     if (action === "link") {
       location = item.locations.find((entry) => entry.id === locationId);
       if (!location?.canRemoveLink || !location.linkPath) throw fail("请选择可移除的目录链接引用");
@@ -581,29 +602,29 @@ export class SkillManager {
       path = await this._owned(item.baseDir);
       revision = (await this._tree(path, { signal })).revision;
     }
-    const affected = [...this.catalog.entries.values()].filter((entry) => action === "skill" ? inside(path, entry.baseDir)
+    const affected = [...this.catalog!.entries.values()].filter((entry) => action === "skill" ? inside(path, entry.baseDir)
       || entry.locations.some((alias) => alias.linkPath && inside(path, alias.linkPath))
-      : entry.locations.some((alias) => alias.linkPath === location.linkPath || inside(location.linkPath, alias.path)));
+      : entry.locations.some((alias) => alias.linkPath === location!.linkPath || inside(location!.linkPath!, alias.path)));
     const aliases = affected.flatMap((entry) => entry.locations.map((alias) => ({ ...alias, skillId: entry.id, name: entry.name })));
     return { revision: hash(JSON.stringify([action, path, revision, aliases.map((alias) => [alias.id, alias.path, alias.linkPath]).sort()])), path, skillCount: affected.length,
       skills: affected.map((entry) => ({ id: entry.id, name: entry.name, path: entry.baseDir })), aliases, action, locationId: location?.id ?? null };
   }
 
-  previewRemoval(id, options = {}, { signal } = {}) { return this._enqueue(() => this._previewRemoval(id, options, signal)); }
+  previewRemoval(id: unknown, options: RemovalInput = {}, { signal }: SkillOptions = {}) { return this._enqueue(() => this._previewRemoval(id, options, signal)); }
 
-  async _writeTrash(entries, signal) {
+  async _writeTrash(entries: SkillTrashRecord[], signal?: AbortSignal) {
     await atomicJson(join(this.metadataDir, "trash.json"), { version: 1, entries }, signal);
     this.trash = entries;
   }
 
-  trashSkill(id, { confirm, revision, locationId, action = "skill" }, { signal } = {}) {
+  trashSkill(id: unknown, { confirm, revision, locationId, action = "skill" }: RemovalInput, { signal }: SkillOptions = {}) {
     return this._enqueue(async () => {
       if (confirm !== true) throw fail("请先确认移除预览中的目录与影响范围");
       const preview = await this._previewRemoval(id, { locationId, action }, signal);
       if (!revision || revision !== preview.revision) throw fail("Skill 或链接已变更，请重新预览移除范围", true);
       const container = join(dirname(preview.path), TRASH_DIR);
       await realDirectory(container, true);
-      const entry = { id: randomUUID(), originalPath: preview.path, action, trashedAt: new Date().toISOString(),
+      const entry: SkillTrashRecord = { id: randomUUID(), storedPath: "", originalPath: preview.path, action: preview.action, trashedAt: new Date().toISOString(),
         name: preview.skills[0]?.name || basename(preview.path), skillCount: preview.skillCount, status: "prepared" };
       entry.storedPath = join(container, entry.id);
       await this._writeTrash([...this.trash, entry], signal);
@@ -639,7 +660,7 @@ export class SkillManager {
     });
   }
 
-  restore(id, { signal } = {}) {
+  restore(id: unknown, { signal }: SkillOptions = {}) {
     return this._enqueue(async () => {
       await this._load(); check(signal);
       const entry = this.trash.find((item) => item.id === id && item.status !== "restored");
@@ -655,7 +676,7 @@ export class SkillManager {
         const target = await readlink(entry.storedPath);
         check(signal);
         try { await symlink(target, entry.originalPath); }
-        catch (error) { if (error.code === "EEXIST") throw fail("原位置已有文件，恢复不会覆盖", true); throw error; }
+        catch (error) { if (errorField(error, "code") === "EEXIST") throw fail("原位置已有文件，恢复不会覆盖", true); throw error; }
       }
       const restored = { ...entry, status: "restored", restoredAt: new Date().toISOString() };
       try { await this._writeTrash(this.trash.map((item) => item.id === id ? restored : item)); }

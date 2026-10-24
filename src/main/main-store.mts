@@ -1,3 +1,6 @@
+import { objectFields } from "../runtime/type-boundary.mjs";
+import { checkedMainRecordShape } from "./main-record.mjs";
+import type { MainRecord } from "../contracts/main.mjs";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
@@ -9,24 +12,24 @@ import { assertRequirementDraftSize, REQUIREMENT_CONVERSATION_MAX_BYTES, REQUIRE
 const MAX_BYTES = REQUIREMENT_CONVERSATION_MAX_BYTES;
 const STATES = new Set(["running", "complete", "failed", "cancelled", "interrupted"]);
 
-export function mainId(value, label = "对话") {
+export function mainId(value: unknown, label = "对话") {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(value)) throw new InputError(`${label}标识无效`);
   return value;
 }
 
-export function mainConversationFailure(reason, message) {
+export function mainConversationFailure(reason: string, message?: string) {
   const error = new InputError(message ?? (reason === "conversation_deleted"
     ? "这份主对话已删除，请新建对话" : "这份主对话已在其他窗口更新，请刷新后重试"));
   error.reason = reason; return error;
 }
 
-async function directory(path) {
-  try { await mkdir(path, { mode: 0o700 }); } catch (error) { if (error.code !== "EEXIST") throw error; }
+async function directory(path: string) {
+  try { await mkdir(path, { mode: 0o700 }); } catch (error) { if (objectFields(error).code !== "EEXIST") throw error; }
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new InputError("主 Agent 存储目录必须是真实目录");
 }
 
-async function bytes(path) {
+async function bytes(path: string) {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > MAX_BYTES)
     throw new InputError("主 Agent 对话只允许 32 MiB 以内的普通文件");
@@ -40,7 +43,8 @@ async function bytes(path) {
   } finally { await handle.close(); }
 }
 
-function checked(value) {
+function checked(input: unknown): MainRecord {
+  const value = checkedMainRecordShape(input);
   if (!value || value.schemaVersion !== 1 || !Number.isSafeInteger(value.version) || value.version < 1
     || !textWithinLimit(value.title, 200) || !Array.isArray(value.messages) || !Array.isArray(value.requests)
     || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt))) throw new InputError("主 Agent 对话记录格式无效");
@@ -48,13 +52,13 @@ function checked(value) {
   if (value.creationMutationId !== undefined) mainId(value.creationMutationId, "创建请求");
   if (value.deletedAt !== undefined) {
     mainId(value.deletionMutationId, "删除请求");
-    if (!Number.isFinite(Date.parse(value.deletedAt)) || !Number.isSafeInteger(value.deletionExpectedVersion) || value.deletionExpectedVersion < 1
-      || value.version !== value.deletionExpectedVersion + 1 || value.messages.length || value.requests.length
+    if (!Number.isFinite(Date.parse(value.deletedAt)) || !Number.isSafeInteger(value.deletionExpectedVersion) || value.deletionExpectedVersion! < 1
+      || value.version !== value.deletionExpectedVersion! + 1 || value.messages.length || value.requests.length
       || Object.keys(value).some((key) => !["schemaVersion", "id", "title", "version", "messages", "requests", "createdAt", "updatedAt",
         "creationMutationId", "deletedAt", "deletionMutationId", "deletionExpectedVersion"].includes(key))) throw new InputError("主对话删除记录格式无效");
   }
   if (value.requirements !== undefined && !Array.isArray(value.requirements)) throw new InputError("主对话需求目录无效");
-  const requirementIds = new Set();
+  const requirementIds = new Set<string>();
   for (const requirement of value.requirements ?? []) {
     mainId(requirement.agentId, "Agent");
     if (requirementIds.has(requirement.agentId) || !["create", "edit"].includes(requirement.mode)
@@ -65,8 +69,8 @@ function checked(value) {
       || requirement.userMessages.reduce((total, message) => total + textLength(message), 0) > REQUIREMENT_HISTORY_MAX_CHARACTERS
       || !Number.isSafeInteger(requirement.version) || requirement.version < 1) throw new InputError("主对话需求记录无效");
     try { assertRequirementDraftSize(requirement.draft); }
-    catch (error) { throw Object.assign(new InputError(error.reason ? error.message : "主对话需求记录无效"),
-      error.reason ? { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes } : {}); }
+    catch (error) { throw Object.assign(new InputError(objectFields(error).reason ? String(objectFields(error).message) : "主对话需求记录无效"),
+      objectFields(error).reason ? { reason: objectFields(error).reason, bytes: objectFields(error).bytes, limitBytes: objectFields(error).limitBytes } : {}); }
     requirementIds.add(requirement.agentId);
     if (requirement.consultation !== undefined && (requirement.consultation.version !== 1
       || !Number.isSafeInteger(requirement.consultation.revision) || requirement.consultation.revision < 0
@@ -75,7 +79,7 @@ function checked(value) {
       throw new InputError("主对话需求协商记录无效");
   }
   if (value.requirement && !requirementIds.has(value.requirement.agentId)) throw new InputError("当前主对话需求不属于已保存草稿");
-  const ids = new Set();
+  const ids = new Set<string>();
   for (const message of value.messages) {
     mainId(message.id, "消息");
     if (ids.has(message.id) || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
@@ -91,7 +95,7 @@ function checked(value) {
     }
     ids.add(message.id);
   }
-  const mutations = new Set();
+  const mutations = new Set<string>();
   for (const request of value.requests) {
     mainId(request.mutationId, "请求");
     if (mutations.has(request.mutationId) || !/^[a-f0-9]{64}$/.test(request.hash) || !STATES.has(request.status)
@@ -105,7 +109,9 @@ function checked(value) {
 }
 
 export class MainStore {
-  constructor({ dataDir }) {
+  dataDir: string; root: string; recordsDir: string; records: Map<string, MainRecord>;
+  persistence: Promise<unknown>; ready: Promise<void>;
+  constructor({ dataDir }: { dataDir: string }) {
     if (typeof dataDir !== "string" || !dataDir || dataDir.includes("\0")) throw new InputError("主 Agent 存储目录无效");
     this.dataDir = resolve(dataDir); this.root = join(this.dataDir, "main"); this.recordsDir = join(this.root, "conversations");
     this.records = new Map(); this.persistence = Promise.resolve(); this.ready = this.load(); this.ready.catch(() => {});
@@ -124,7 +130,7 @@ export class MainStore {
       let interrupted = false;
       for (const request of record.requests.filter((item) => item.status === "running")) {
         request.status = "interrupted"; request.diagnostic = { stage: "main", reason: "interrupted" };
-        const message = record.messages.find((item) => item.id === request.assistantId);
+        const message = record.messages.find((item) => item.id === request.assistantId)!;
         message.status = "interrupted"; message.diagnostic = request.diagnostic; interrupted = true;
       }
       if (interrupted) { record.version++; record.updatedAt = new Date().toISOString(); await this.write(record); }
@@ -132,10 +138,10 @@ export class MainStore {
     }
   }
 
-  async write(record) {
+  async write(record: MainRecord) {
     await directory(this.recordsDir);
     const path = join(this.recordsDir, `${record.id}.json`), temporary = join(this.recordsDir, `.pending-${randomUUID()}.json`);
-    try { await bytes(path); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    try { await bytes(path); } catch (error) { if (objectFields(error).code !== "ENOENT") throw error; }
     try {
       const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       try { await handle.writeFile(JSON.stringify(record, null, 2), "utf8"); } finally { await handle.close(); }
@@ -143,17 +149,17 @@ export class MainStore {
     } finally { await rm(temporary, { force: true }); }
   }
 
-  queue(operation) {
+  queue<T>(operation: () => T | Promise<T>): Promise<T> {
     const task = this.persistence.then(async () => { await this.ready; return operation(); });
     this.persistence = task.catch(() => {}); return task;
   }
 
-  create({ mutationId, title = "新对话" } = {}) {
+  create({ mutationId, title = "新对话" }: { mutationId?: unknown; title?: unknown } = {}) {
     if (mutationId !== undefined) mainId(mutationId, "请求");
     if (typeof title !== "string" || !title.trim() || !textWithinLimit(title, 200)) throw new InputError("对话标题不能超过 200 字");
     return this.queue(async () => {
-      const existing = mutationId && [...this.records.values()].find((item) => item.creationMutationId === mutationId);
-      if (existing?.deletedAt) throw mainConversationFailure("conversation_deleted");
+      const existing = typeof mutationId === "string" && [...this.records.values()].find((item) => item.creationMutationId === mutationId);
+      if (existing && existing.deletedAt) throw mainConversationFailure("conversation_deleted");
       if (existing) return structuredClone(existing);
       const now = new Date().toISOString();
       const record = checked({ schemaVersion: 1, id: `main_${randomUUID()}`, title: title.trim(), version: 1,
@@ -162,30 +168,30 @@ export class MainStore {
     });
   }
 
-  async get(id) {
+  async get(id: string): Promise<MainRecord> {
     mainId(id); await this.ready; await this.persistence;
-    this.assertAvailable(id); return structuredClone(this.records.get(id));
+    this.assertAvailable(id); return structuredClone(this.records.get(id)!);
   }
 
-  assertAvailable(id) {
+  assertAvailable(id: string) {
     mainId(id);
     const record = this.records.get(id); if (!record) throw new InputError("主 Agent 对话不存在，请新建对话");
     if (record.deletedAt) throw mainConversationFailure("conversation_deleted");
   }
 
-  update(id, operation) {
+  update(id: string, operation: (record: MainRecord) => void): Promise<MainRecord> {
     mainId(id);
     return this.queue(async () => {
-      this.assertAvailable(id); const current = this.records.get(id);
+      this.assertAvailable(id); const current = this.records.get(id)!;
       const next = structuredClone(current); operation(next); next.version = current.version + 1; next.updatedAt = new Date().toISOString();
       const saved = checked(next); await this.write(saved); this.records.set(id, saved); return structuredClone(saved);
     });
   }
 
-  remove(id, { confirm, expectedVersion, mutationId } = {}, assertIdle = () => {}) {
+  remove(id: string, { confirm, expectedVersion, mutationId }: Record<string, unknown> = {}, assertIdle = () => {}) {
     mainId(id); mainId(mutationId, "删除请求");
     if (confirm !== true) throw new InputError("请确认删除这份主对话");
-    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new InputError("删除主对话需要当前记录版本，请刷新后重试");
+    if (typeof expectedVersion !== "number" || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new InputError("删除主对话需要当前记录版本，请刷新后重试");
     return this.queue(async () => {
       const current = this.records.get(id);
       if (!current) throw new InputError("主 Agent 对话不存在，请刷新后重试");
