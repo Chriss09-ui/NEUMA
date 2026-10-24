@@ -1,8 +1,29 @@
 import { objectFields } from "../runtime/type-boundary.mjs";
 import type { MaterialUpload } from "../materials/material-port.mjs";
 import type { Group, GroupArtifact, GroupTask, GroupMember, GroupRecord, GroupChild, WorkRequest, MemberCard, CollaborationLimits } from "../contracts/collaboration.mjs";
-import type { PrototypeAgents } from "../agents/agent-prototype.mjs";
-type CollaborationAgents = Pick<PrototypeAgents, "ready" | "capabilityCards" | "onLifecycle" | "activitySnapshot" | "executeCollaboration" | "attachmentRaw" | "file">;
+import type { CollaborationOptions, MaterialTool } from "../agents/prototype-port.mjs";
+import type { Progress } from "../runtime/pi-port.mjs";
+import type { RawMaterial, MaterialDescriptor } from "../contracts/material.mjs";
+export interface CollaborationAgents {
+  ready?: Promise<unknown>;
+  capabilityCards?(options?: { agentIds?: string[] }): Promise<{ agents: MemberCard[] }>;
+  onLifecycle?(listener: (event: { type: string; agentId: string }) => unknown): () => void;
+  activitySnapshot?(): Promise<Record<string, unknown>>;
+  executeCollaboration?(options: CollaborationOptions, progress?: Progress, optionsWithSignal?: { signal?: AbortSignal | undefined }): Promise<{ turns?: number; reply?: string }>;
+  attachmentRaw?(agentId: string, attachmentId: string): Promise<RawMaterial>;
+  file?(agentId: string, path: string): Promise<{ content: string; truncated?: boolean }>;
+}
+export interface CollaborationMaterials {
+  list(groupId: string): Promise<{ attachments: MaterialDescriptor[] }>;
+  resolve?(groupId: string, refs?: unknown): Promise<{ id: string }[]>;
+  tools?(groupId: string): MaterialTool[];
+  close(): Promise<unknown>;
+  upload?: MaterialStore["upload"];
+  get?: MaterialStore["get"];
+  raw?: MaterialStore["raw"];
+  preview?: MaterialStore["preview"];
+  image?: MaterialStore["image"];
+}
 export interface GroupWorker { controller: AbortController; taskId: string | null; promise?: Promise<void> | undefined; persistenceFailed?: boolean | undefined }
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -37,17 +58,17 @@ const rootTask = (record: GroupRecord, taskId: unknown) => {
 };
 
 export class CollaborationService {
-  agents: CollaborationAgents; store: GroupStore; limits: CollaborationLimits; materials: MaterialStore;
+  agents: CollaborationAgents; store: GroupStore; limits: CollaborationLimits; materials: CollaborationMaterials;
   workers: Map<string, GroupWorker>; closed: boolean; ready: Promise<unknown>;
   unsubscribeLifecycle: (() => void) | undefined;
-  constructor({ dataDir, agents, store = new GroupStore({ dataDir }), materials, limits = {} }: { dataDir: string; agents: CollaborationAgents; store?: GroupStore; materials?: MaterialStore; limits?: Partial<CollaborationLimits> }) {
+  constructor({ dataDir, agents, store = new GroupStore({ dataDir }), materials, limits = {} }: { dataDir: string; agents: CollaborationAgents; store?: GroupStore; materials?: CollaborationMaterials; limits?: Partial<CollaborationLimits> | undefined }) {
     this.agents = agents; this.store = store; this.limits = { ...GROUP_LIMITS, ...limits };
     this.materials = materials ?? new MaterialStore({ storage: store.storage });
     this.workers = new Map(); this.closed = false;
     this.ready = Promise.all([store.ready, agents.ready]); this.ready.catch(() => {});
     this.unsubscribeLifecycle = agents.onLifecycle?.((value) => this.invalidateAgent(value.agentId ?? objectFields(value).id, (objectFields(value).reason ?? value.type) as string));
   }
-  async cards(options?: { agentIds?: string[] }): Promise<MemberCard[]> { await this.ready; return (await this.agents.capabilityCards(options)).agents; }
+  async cards(options?: { agentIds?: string[] }): Promise<MemberCard[]> { await this.ready; return (await this.agents.capabilityCards!(options)).agents; }
   async groupMemberCards(groupId: string): Promise<MemberCard[]> {
     const record = await this.store.get(groupId), cards = await this.cards({ agentIds: record.group.memberIds });
     return memberCards(record, cards);
@@ -159,7 +180,7 @@ export class CollaborationService {
     const content = text(input.content, "消息"), mutationId = id(input.mutationId, "操作"), hash = taskAllowNetwork === undefined
       ? fingerprint({ ...input, source }) : `policy-v1:${fingerprint({ input, source, taskAllowNetwork })}`;
     const cards = await this.cards();
-    const attachments = await this.materials.resolve(groupId, input.attachmentIds ?? []);
+    const attachments = await this.materials.resolve!(groupId, input.attachmentIds ?? []);
     const restrictedTaskIds: string[] = [];
     const result = await this.store.change(groupId, (record) => {
       if (input.taskId && record.deletedConversations?.some((value) => value.id === input.taskId || value.taskIds.includes(String(input.taskId))))
@@ -322,7 +343,7 @@ export class CollaborationService {
   async idle(groupId: string) { for (;;) { const worker = this.workers.get(groupId); if (!worker) return; await worker.promise; } }
   async uploadMaterial(groupId: string, options: Parameters<MaterialStore["upload"]>[1]) {
     const record = await this.store.get(groupId); if (record.group.archived) throw new InputError("群已归档");
-    const result = await this.materials.upload(groupId, options);
+    const result = await this.materials.upload!(groupId, options);
     try {
       await this.store.change(groupId, (next) => {
         if (next.group.archived || this.closed) throw new InputError("群已停止接收材料");
@@ -337,7 +358,7 @@ export class CollaborationService {
   async requireMaterial(groupId: string, materialId: string) {
     const record = await this.store.get(groupId);
     if (!record.group.materialIds.includes(materialId)) throw new InputError("材料未分享给本群");
-    return this.materials.get(groupId, materialId);
+    return this.materials.get!(groupId, materialId);
   }
   async sharedMaterials(groupId: string) {
     const record = await this.store.get(groupId);
@@ -349,7 +370,7 @@ export class CollaborationService {
       return await this.store.change(groupId, async (record) => {
         const prior = this.replay(record, mutationId, hash); if (prior) return prior;
         if (record.group.archived || this.closed) throw new InputError("群已停止接收材料");
-        const result = await this.materials.upload(groupId, { name, mimeType, source, signal }); uploaded = result.attachment.id;
+        const result = await this.materials.upload!(groupId, { name, mimeType, source, signal }); uploaded = result.attachment.id;
         record.group.materialIds.push(uploaded!); event(record, "material", { materialId: uploaded });
         record.mutations.push({ id: mutationId, hash, result }); return result;
       });
@@ -363,17 +384,17 @@ export class CollaborationService {
       if (record.group.archived) throw new InputError("群已归档");
       const sourceAgentId = id(input.agentId, "Agent"); let result;
       if (input.attachmentId && !input.path) {
-        const raw = await this.agents.attachmentRaw(sourceAgentId, input.attachmentId as string);
+        const raw = await this.agents.attachmentRaw!(sourceAgentId, input.attachmentId as string);
         const handle = await open(raw.path, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
           const info = await handle.stat();
           if (!info.isFile() || info.nlink !== 1 || info.size !== raw.size) throw new InputError("原始材料已改变");
-          result = await this.materials.upload(groupId, { name: raw.name, mimeType: raw.mimeType, source: handle.createReadStream({ autoClose: false }), signal });
+          result = await this.materials.upload!(groupId, { name: raw.name, mimeType: raw.mimeType, source: handle.createReadStream({ autoClose: false }), signal });
           uploaded = result.attachment.id;
         } finally { await handle.close(); }
         record.group.materialIds.push(result.attachment.id); event(record, "material", { materialId: result.attachment.id });
       } else if (input.path && !input.attachmentId) {
-        const file = await this.agents.file(sourceAgentId, text(input.path, "文件", 1000));
+        const file = await this.agents.file!(sourceAgentId, text(input.path, "文件", 1000));
         if (file.truncated) throw new InputError("文件超过可分享的文本大小，请作为材料上传");
         const artifact = this.addArtifact(record, id(input.agentId, "Agent"), null, text(input.path, "文件", 1000), file.content);
         result = { artifact: publicArtifact(artifact) };
@@ -392,7 +413,7 @@ export class CollaborationService {
     const relativePath = text(path, "产物路径", 1000);
     const forbidden = /^(?:\..*|node_modules|venv|__pycache__|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*(?:secret|credential|token|password|api[_-]?key|access[_-]?key|private[_-]?key).*|.*\.(?:pem|key|p12|pfx))$/i;
     if (relativePath.startsWith("/") || relativePath.includes("\\") || relativePath.split("/").some((part) => !part || forbidden.test(part))) throw new InputError("请使用本次群任务目录内的相对产物路径，不能访问隐藏文件或凭据");
-    const file = await this.agents.file(agentId, `group-tasks/${id(groupId)}/${id(taskId)}/${id(agentId)}/${relativePath}`);
+    const file = await this.agents.file!(agentId, `group-tasks/${id(groupId)}/${id(taskId)}/${id(agentId)}/${relativePath}`);
     if (file.truncated) throw new InputError("产物过大，请拆分文件后分享");
     return this.store.change(groupId, (record) => {
       this.guard(record, taskId, agentId, generation);
@@ -412,7 +433,7 @@ export class CollaborationService {
         phase: task.phase, ownerId: task.ownerId, reason: task.reason, result: task.result.slice(0, 1200), requests: task.requests,
         updatedAt: task.updatedAt, children: task.children.map(({ id, title, assigneeId, status }) => ({ id, title, assigneeId, status })) })));
     }
-    return { agents: await this.cards(), groups, tasks, ...(await this.agents.activitySnapshot()) };
+    return { agents: await this.cards(), groups, tasks, ...(await this.agents.activitySnapshot!()) };
   }
   async close({ permanent = true } = {}) {
     this.closed = true;

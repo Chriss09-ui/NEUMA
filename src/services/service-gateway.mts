@@ -1,15 +1,24 @@
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { PrototypeAgents } from "../agents/agent-prototype.mjs";
-import type { ApplicationDescriptor } from "../applications/application-service.mjs";
+import type {ApplicationAction,ApplicationTask,TaskSource} from "../contracts/application.mjs";
+export interface GatewayDescriptor {deliveryVersion:string;agent?:unknown;manifest:{actions:Pick<ApplicationAction,"id"|"title"|"inputSchema"|"outputSchema">[]}}
+export interface GatewayTask {id:string;agentId:string;actionId:string;deliveryVersion:string;status:string;source:TaskSource;result?:unknown;error?:unknown;createdAt?:string;updatedAt?:string;progress?:unknown;artifacts?:{snapshotId?:string;path?:string;[key:string]:unknown}[];[key:string]:unknown}
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { JsonSchemaType, CallToolResult } from "@modelcontextprotocol/server";
 import { objectFields, errorField, isRecord, isInteger, isArray } from "../runtime/type-boundary.mjs";
 interface GatewayBase { schemaVersion: 1; agentId: string; actionIds: string[]; updatedAt?: string }
-interface GatewayGrant extends GatewayBase { enabled: true; port: number; tokenHash: string; grantId: string; deliveryVersion: string }
+export interface GatewayGrant extends GatewayBase { enabled: true; port: number; tokenHash: string; grantId: string; deliveryVersion: string }
 interface GatewayDisabled extends GatewayBase { enabled: false; port?: number | undefined; tokenHash?: string; grantId?: string; deliveryVersion?: string }
-type GatewayRecord = GatewayGrant | GatewayDisabled;
-type GatewayAgents = Pick<PrototypeAgents, "storage" | "applications" | "agents" | "removing" | "builds" | "readTaskArtifact" | "verifyGatewayAcceptance" | "invalidateGatewayAcceptance">;
+export type GatewayRecord = GatewayGrant | GatewayDisabled;
+export interface GatewayVerification {status:string;mode:string;checkedAt?:string;scope?:string;reason?:string;evidenceSaved?:boolean}
+export interface GatewaySubmission extends Record<string,unknown>{mutationId:string;actionId:string;deliveryVersion:string}
+export type GatewayAgents = {storage:Pick<PrototypeAgents["storage"],"ready"|"agentIds">&{readJson(...args:Parameters<PrototypeAgents["storage"]["readJson"]>):Promise<unknown>;writeJson(...args:Parameters<PrototypeAgents["storage"]["writeJson"]>):Promise<unknown>};readTaskArtifact?:(id:string,taskId:string,index:number,options:{offset:number;limit:number;signal?:AbortSignal})=>Promise<Omit<Awaited<ReturnType<PrototypeAgents["readTaskArtifact"]>>,"path">&{path?:string}>} & Partial<Pick<PrototypeAgents,"verifyGatewayAcceptance"|"invalidateGatewayAcceptance">> & {agents?:Map<string,{developmentRef?:{id:string};execution?:{kind?:string;codeHash:string}}>;removing?:{has(id:string):boolean};builds?:{has(id:string):boolean};applications:{
+  descriptor(id:string):Promise<GatewayDescriptor>;
+  submit(id:string,body:GatewaySubmission,options:{source:TaskSource}):Promise<{taskId:string;task?:GatewayTask|undefined}>;
+  cancel(id:string,taskId:string):Promise<{task:GatewayTask}>;
+  store:{get(id:string,taskId:string):Promise<GatewayTask>;list(id:string,options?:{scope:string}):Promise<GatewayTask[]>};
+}};
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
@@ -105,7 +114,7 @@ export class ServiceGateway {
     agentId(id); await this.ready; if (this.suspended) await this.resume();
     return this.serial(id, async () => {
       exact(input, ["actionIds", "deliveryVersion"]);
-      const descriptor: ApplicationDescriptor = await this.agents.applications.descriptor(id);
+      const descriptor: GatewayDescriptor = await this.agents.applications.descriptor(id);
       if (input.deliveryVersion !== descriptor.deliveryVersion) throw fail("delivery_changed", "交付版本已变化，请刷新后选择需要发布的操作", 409);
       if (!Array.isArray(input.actionIds) || !input.actionIds.length || input.actionIds.length > 80 || new Set(input.actionIds).size !== input.actionIds.length
         || input.actionIds.some((actionId) => !descriptor.manifest.actions.some((action) => action.id === actionId))) throw fail("invalid_gateway_actions", "请选择已交付并允许外部调用的操作");
@@ -147,7 +156,7 @@ export class ServiceGateway {
   }
   async currentGrant(id: string, grant: GatewayGrant) {
     const revision = this.grantRevisions.get(id) ?? 0;
-    let current: GatewayRecord, descriptor: ApplicationDescriptor;
+    let current: GatewayRecord, descriptor: GatewayDescriptor;
     try {
       current = await this.record(id);
       if (!current.enabled || current.grantId !== grant.grantId) throw fail("gateway_unauthorized", "接口授权已改变或已撤销", 401);
@@ -170,7 +179,7 @@ export class ServiceGateway {
     if (input.deliveryVersion !== grant.deliveryVersion) throw fail("delivery_changed", "请求的交付版本已变化，请刷新接口说明", 409);
     if (typeof input.actionId !== "string" || !grant.actionIds.includes(input.actionId)) throw fail("action_not_shared", "这个操作未被授权给外部调用", 403);
     if (typeof input.mutationId !== "string" || !/^[\w-]{8,100}$/.test(input.mutationId)) throw fail("invalid_request", "请提供稳定的任务请求编号，避免重复执行");
-    const result = await this.agents.applications.submit(id, { ...input, mutationId: hash(`${grant.grantId}:${input.mutationId}`) }, { source: { kind: "application", scope: "private", gatewayGrant: grant.grantId } });
+    const result = await this.agents.applications.submit(id, { ...input, mutationId: hash(`${grant.grantId}:${input.mutationId}`) } as GatewaySubmission, { source: { kind: "application", scope: "private", gatewayGrant: grant.grantId } });
     await this.currentGrant(id, grant);
     return { taskId: result.taskId, deliveryVersion: grant.deliveryVersion, status: result.task?.status ?? "queued" };
   }
@@ -216,7 +225,7 @@ export class ServiceGateway {
     return { taskId: input.taskId, deliveryVersion: grant.deliveryVersion, artifactIndex: input.artifactIndex,
       name: artifact.name, size: artifact.size, sha256: artifact.sha256, encoding: "base64", data: artifact.data, offset, nextOffset: artifact.nextOffset };
   }
-  async verify(id: string, grant: GatewayGrant, token: string) {
+  async verify(id:string,grant:GatewayGrant,token:string):Promise<GatewayVerification> {
     const view = this.view(grant), checkedAt = new Date().toISOString(), expectedActions = [...grant.actionIds].sort();
     let client;
     try {
@@ -238,7 +247,7 @@ export class ServiceGateway {
       return this.verificationFailed(id, grant, checkedAt);
     } finally { await client?.close().catch(() => {}); }
   }
-  async verificationFailed(id: string, grant: GatewayGrant, checkedAt = new Date().toISOString()) {
+  async verificationFailed(id:string,grant:GatewayGrant,checkedAt=new Date().toISOString()):Promise<GatewayVerification> {
     const evidence = { grantId: grant.grantId, actionIds: [...grant.actionIds], checkedAt,
       mode: "actual", status: "failed", reason: "gateway_verification_failed" };
     try { await this.agents.verifyGatewayAcceptance?.({ agentId: id, deliveryVersion: grant.deliveryVersion, evidence }); }
@@ -279,7 +288,7 @@ export class ServiceGateway {
     if (match && request.method === "POST" && match[2] === "cancel") return json(response, 200, await this.cancel(id, record, { ...await body(request), taskId: match[1] }));
     throw fail("gateway_not_found", "接口不存在", 404);
   }
-  async mcp(id: string, grant: GatewayGrant, descriptor: ApplicationDescriptor, request: IncomingMessage, response: ServerResponse) {
+  async mcp(id: string, grant: GatewayGrant, descriptor: GatewayDescriptor, request: IncomingMessage, response: ServerResponse) {
     const server = new McpServer({ name: `NEUMA-${id}`, version: "1.0.0" });
     const version = { type: "string" as const, const: grant.deliveryVersion! }, taskInput = fromJsonSchema<UnknownRecord>({ type: "object", properties: { taskId: { type: "string" }, deliveryVersion: version }, required: ["taskId", "deliveryVersion"], additionalProperties: false });
     const result = (value: UnknownRecord): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value });

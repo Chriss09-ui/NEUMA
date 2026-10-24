@@ -1,9 +1,10 @@
+import type {ProjectProcessSpawner} from "./project-port.mjs";
 import type { ProjectRecord, ProjectView, ProjectLaunch, ProjectSetup } from "../contracts/project.mjs";
 import type { ProjectRun, ProjectChild, ProjectSpawner, ProjectAnalyzer, ProjectInspectOptions, ProjectPending } from "./project-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import { errorField, objectFields, isArray, isRecord } from "../runtime/type-boundary.mjs";
 const spawnIsAsync = (value: ProjectChild | Promise<ProjectChild>): value is Promise<ProjectChild> => typeof objectFields(value).then === "function";
-interface ManagerOptions { dataDir?: string; spawnImpl?: typeof spawn; blockedPort?: number; analyzeProject?: ProjectAnalyzer | undefined; openBrowser?: (url: string) => Promise<void>; scanRuntime?: typeof scanLocalRuntime; platform?: NodeJS.Platform; projectSpawn?: typeof spawnProject; helperPath?: string }
+interface ManagerOptions { dataDir?: string; spawnImpl?: ProjectProcessSpawner; blockedPort?: number; analyzeProject?: ProjectAnalyzer | undefined; openBrowser?: (url:string)=>unknown|Promise<unknown>; scanRuntime?: typeof scanLocalRuntime; platform?: NodeJS.Platform; projectSpawn?: typeof spawnProject; helperPath?: string }
 interface PendingStart { cancelled: boolean; pending?: Promise<ProjectView> }
 import { access, mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -41,7 +42,8 @@ export function localUrl(value: unknown) {
   } catch { throw new InputError("预览地址必须是本机的 http 地址"); }
 }
 
-export function openProjectPage(value: unknown, { platform = process.platform, run = execFile } = {}) {
+type ProjectPageRunner=(command:string,args:readonly string[],options:import("node:child_process").ExecFileOptions,done:(error:Error|null)=>void)=>unknown;
+export function openProjectPage(value:unknown,{platform=process.platform,run=execFile}:{platform?:NodeJS.Platform;run?:ProjectPageRunner}={}) {
   const url = localUrl(value);
   if (!url) throw new InputError("项目页面尚未就绪");
   const commands: Partial<Record<NodeJS.Platform, [string, string[]]>> = { darwin: ["/usr/bin/open", [url]], linux: ["xdg-open", [url]],
@@ -139,7 +141,7 @@ async function staticPreview(project: ProjectRecord) {
 }
 
 export class ProjectManager {
-  dataDir: string | undefined; spawnImpl: typeof spawn; platform: NodeJS.Platform; projectSpawn: ProjectSpawner; blockedPort: number; records: ProjectRecord[] | null; runs: Map<string, ProjectRun>; pendingStarts: Map<string, PendingStart>; removing: Set<string>; queue: Promise<unknown>; analyzeProject: ProjectAnalyzer | undefined; inspections: Map<string, ProjectPending>; pendingAdds: Map<string, ProjectPending>; disposed: boolean; openBrowser: (url: string) => Promise<void>; scanRuntime: typeof scanLocalRuntime; failureStore: ProjectFailureStore | null; loading?: Promise<void> | null;
+  dataDir: string | undefined; spawnImpl: ProjectProcessSpawner; platform: NodeJS.Platform; projectSpawn: ProjectSpawner; blockedPort: number; records: ProjectRecord[] | null; runs: Map<string, ProjectRun>; pendingStarts: Map<string, PendingStart>; removing: Set<string>; queue: Promise<unknown>; analyzeProject: ProjectAnalyzer | undefined; inspections: Map<string, ProjectPending>; pendingAdds: Map<string, ProjectPending>; disposed: boolean; openBrowser: (url:string)=>unknown|Promise<unknown>; scanRuntime: typeof scanLocalRuntime; failureStore: ProjectFailureStore | null; loading?: Promise<void> | null;
 
   constructor({ dataDir, spawnImpl = spawn, blockedPort = 3000, analyzeProject, openBrowser = openProjectPage, scanRuntime = scanLocalRuntime,
     platform = process.platform, projectSpawn = spawnProject, helperPath }: ManagerOptions = {}) {

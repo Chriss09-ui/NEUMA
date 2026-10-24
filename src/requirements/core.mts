@@ -10,7 +10,7 @@ interface TurnResult { draft: RequirementDraft; status: string; question: string
   jev: { used: boolean; reason: string; selectedGap: string | null; model: string | null; appliedGap: string };
   diagnostic: { model: UnknownRecord; jev: { used: boolean; durationMs: number | null; answers: JevResult["answers"] | null; failure: ProviderDiagnostic | null }; review?: ReaskReview;
     decision: Omit<NextDecision, "status" | "question"> & { skipOptionalBoundary?: boolean; needsConfirmationClarification?: boolean } };
-  consultation?: Consultation; confirmationGate?: unknown; confirmation?: RequirementReceipt }
+  consultation?: Consultation; confirmationGate?: ReturnType<typeof consultationGate>; confirmation?: RequirementReceipt }
 import { emptyTaskSpec, mergeEvidence, normalizeTaskSpec, substantiveRequirementHash, validateTaskEvidence, validateTaskSpecTransition } from "./task-spec.mjs";
 import { consultationGate, evaluateConsultation, issueConfirmation, mergeConsultationIssues, newConsultation, separateSystemUnresolved } from "./consultation.mjs";
 import { normalizeVerificationContext } from "../applications/input-framing.mjs";
@@ -493,7 +493,7 @@ export async function processTurn(request: TurnRequest, { generateDraft, judgeJe
     }
   }
   const modelStartedAt = Date.now();
-  const modelResult = await generateDraft({ message, previousDraft, lastQuestion, userMessages, signal,
+  const modelResult = await generateDraft!({ message, previousDraft, lastQuestion, userMessages, signal,
     ...(enforceConsultation ? { evidenceMessages: consultation?.evidenceMessages, consultation, platform, taskSpecVersion: 1 } : {}) });
   signal?.throwIfAborted();
   const modelMs = Date.now() - modelStartedAt;

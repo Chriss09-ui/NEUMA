@@ -23,7 +23,7 @@ const measurementPaths = ["configVersion", "connectionCount", "fieldBytes.config
 
 // Only two host-owned fact types are projected. External JSON, credentials and
 // arbitrary evidence details never become authoritative model-visible values.
-export function projectRequirementFacts(systemChecks: SystemCheck[] = []): RequirementFact[] {
+export function projectRequirementFacts(systemChecks: Pick<SystemCheck, "id" | "evidence">[] = []): RequirementFact[] {
   const facts: RequirementFact[] = [], seen = new Set<string>();
   for (const check of systemChecks) for (const evidence of check.evidence ?? []) {
     if (evidence.source !== "platform" || evidence.reference !== "platform.runtime") continue;
@@ -56,7 +56,7 @@ export function projectRequirementFacts(systemChecks: SystemCheck[] = []): Requi
   return facts;
 }
 
-export function requirementProofScope(draft: RequirementDraft | null | undefined, platform: unknown, facts: RequirementFact[]) {
+export function requirementProofScope(draft: Partial<RequirementDraft> | null | undefined, platform: unknown, facts: RequirementFact[]) {
   const statements: { id: string; text: string }[] = [];
   const add = (id: string, value: unknown) => { if (value !== undefined && value !== null) statements.push({ id, text: typeof value === "string" ? value : JSON.stringify(value) }); };
   for (const key of ["goal", "scenario", "inputSource", "task", "deliverable", "successCriteria", "routingCondition", "constraints", "usage", "externalAction", "interaction", "connections"])

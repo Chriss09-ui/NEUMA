@@ -1,3 +1,4 @@
+import type { SessionEvent } from "./pi-port.mjs";
 import type { Dispatcher } from "undici-types";
 import type { ProjectRecord } from "../contracts/project.mjs";
 import type { AgentSession, AgentSessionEvent, ResourceLoader, LoadExtensionsResult, ExtensionFactory, EventBus, ExtensionRuntime, Extension, ProviderConfig, CreateModelRuntimeOptions, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -52,9 +53,9 @@ const projectSummary = (project: ProjectSummary) => ({ id: project.id, name: pro
   canStop: project.canStop, previewReady: Boolean(project.url), pageOpened: project.pageOpened,
   openingPage: project.openingPage, openError: project.openError, setup: project.setup, error: project.error });
 
-function retryProgress(event: AgentSessionEvent, state: RetryState, onProgress: Progress) {
+function retryProgress(event: SessionEvent, state: RetryState, onProgress: Progress) {
   if (event.type === "auto_retry_start") {
-    state.attempt = event.attempt;
+    state.attempt = event.attempt!;
     state.failure = classifyModelFailure(event.errorMessage);
     onProgress({ type: "status", phase: "tool", label: `模型接口连接异常，正在重连（${event.attempt}/5）…` });
   } else if (event.type === "auto_retry_end") {
@@ -136,17 +137,17 @@ export function createProjectTools(manager: ProjectManagerPort, turn: ProjectTur
   });
   return [
     tool("list_projects", "查看项目", "列出已登记项目和 NEUMA 管理的运行状态；查询外部启动或未运行项目时使用 get_runtime_status。", schema({}),
-      async () => (await manager.list()).map(projectSummary)),
+      async () => (await manager.list!()).map(projectSummary)),
     tool("list_project_failures", "查看失败记录", "查看本机保留的最近添加失败原因、阶段和时间，不重新添加或启动项目。",
       schema({ limit: { type: "integer", minimum: 1, maximum: 50, description: "读取最近几条，默认 10" } }),
-      async ({ limit = 10 }) => ({ failures: await manager.failures({ limit }) })),
+      async ({ limit = 10 }) => ({ failures: await manager.failures!({ limit }) })),
     tool("get_runtime_status", "查看运行状态", "查询本机当前运行情况，识别已登记项目中由 NEUMA 启动、外部运行、未发现运行和无法确认的项目。只读，不启动或停止。",
       schema({ state: { type: "string", enum: ["all", "running", "stopped", "unknown"], description: "可选状态筛选，默认 all；stopped 表示未发现运行" } }),
       async ({ state = "all" }, signal) => {
         if (!["all", "running", "stopped", "unknown"].includes(state as string)) throw new InputError("请选择有效的项目状态");
-        const snapshot = await manager.runtime({ signal });
+        const snapshot = await manager.runtime!({ signal });
         return { checkedAt: snapshot.checkedAt, summary: snapshot.summary, warnings: snapshot.warnings,
-          projects: snapshot.projects.filter((project) => state === "all" || project.runtime.state === state)
+          projects: snapshot.projects!.filter((project) => state === "all" || project.runtime.state === state)
             .map((project) => ({ ...projectSummary(project), runtime: project.runtime })) };
       }),
     tool("list_ports", "查看端口占用", "查询本机当前权限可见的 TCP 监听端口、占用进程和已关联项目，可按端口号或进程名搜索。只读；空结果不保证端口可用。",
@@ -155,18 +156,18 @@ export function createProjectTools(manager: ProjectManagerPort, turn: ProjectTur
       async ({ port, query = "" }, signal) => {
         if (port !== undefined && (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535)) throw new InputError("端口号应为 1 到 65535 的整数");
         if (typeof query !== "string" || query.length > 2000) throw new InputError("请输入有效的进程或项目名称");
-        const snapshot = await manager.runtime({ signal });
+        const snapshot = await manager.runtime!({ signal });
         const needle = query.trim().toLowerCase();
         return { checkedAt: snapshot.checkedAt, scope: "当前权限可见的 TCP 监听端口", warnings: snapshot.warnings,
-          ports: snapshot.ports.filter((item) => (port === undefined || item.port === port)
+          ports: snapshot.ports!.filter((item) => (port === undefined || item.port === port)
             && (!needle || `${item.processName} ${item.projects.map((project) => project.name).join(" ")}`.toLowerCase().includes(needle))) };
       }),
     tool("add_project", "添加并配置项目", "检查本轮用户提供的路径并自动配置；新项目只有配置成功后才登记，失败不加入列表，不启动。",
       schema({ path: string("用户原话中的完整路径"), name: string("可选名称"), description: string("可选用途") }, ["path"]),
       async (params, signal) => {
-        if (!turn.message.includes(params.path as string)) throw new InputError("添加路径必须由用户在本轮明确提供");
+        if (!turn.message!.includes(params.path as string)) throw new InputError("添加路径必须由用户在本轮明确提供");
         try {
-          const project = await manager.add(params, { signal, instructions: turn.message, onProgress: (event) => turn.onProgress?.(event) });
+          const project = await manager.add!(params, { signal, instructions: turn.message!, onProgress: (event) => turn.onProgress?.(event) });
           return projectSummary(project);
         } catch (error) {
           if (errorField(error, "code") !== "PROJECT_ADD_FAILED") throw error;
@@ -177,21 +178,21 @@ export function createProjectTools(manager: ProjectManagerPort, turn: ProjectTur
       }),
     tool("inspect_project", "自动配置项目", "重新检查已有项目的文件并自动保存启动配置；用于旧项目或启动问题，不执行项目代码。",
       schema({ id: string("已登记项目的 ID") }, ["id"]), async ({ id }, signal) =>
-        projectSummary(await manager.inspect(id, { signal, instructions: turn.message, onProgress: (event) => turn.onProgress?.(event) }))),
+        projectSummary(await manager.inspect!(id, { signal, instructions: turn.message!, onProgress: (event) => turn.onProgress?.(event) }))),
     tool("start_project", "启动项目", "按已保存的配置启动项目；没有配置时先用 inspect_project，返回真实运行状态。",
-      schema({ id: string("已登记项目的 ID") }, ["id"]), async ({ id }) => projectSummary(await manager.start(id))),
+      schema({ id: string("已登记项目的 ID") }, ["id"]), async ({ id }) => projectSummary(await manager.start!(id))),
     tool("stop_project", "停止项目", "停止 NEUMA 本次启动并管理的项目进程。", schema({ id: string("项目 ID") }, ["id"]),
-      async ({ id }) => projectSummary(await manager.stop(id))),
+      async ({ id }) => projectSummary(await manager.stop!(id))),
     tool("remove_project", "删除项目", "用户明确要求删除一个已确定的项目时使用。只删除登记，保留源码；先停止 NEUMA 管理的该项目进程和检查，不停止外部进程。",
       schema({ id: string("已确认要删除的项目 ID"), confirm: { type: "boolean", description: "用户已明确要求删除这个项目时为 true" },
         removeOnly: { type: "boolean", description: "停止失败后，用户在后续轮次明确同意仅移除记录、保留运行服务时才为 true" } }, ["id", "confirm"]),
       async ({ id, confirm, removeOnly = false }) => {
         if (confirm !== true) throw new InputError("请先确认用户要删除这个项目");
         if (removeOnly && turn.removalNeedsConfirmation?.has(id)) throw new InputError("请先询问用户，等待下一轮明确同意仅移除记录");
-        const project = (await manager.list()).find((project) => project.id === id);
+        const project = (await manager.list!()).find((project) => project.id === id);
         if (!project) throw new InputError("没有找到要删除的项目，请重新查看项目列表");
         try {
-          const result = await manager.remove(id, { removeOnly });
+          const result = await manager.remove!(id, { removeOnly });
           return { ...result, id, name: project.name, filesKept: true };
         } catch (error) {
           if (!(error instanceof InputError) || errorField(error, "code") !== "PROJECT_REMOVE_STOP_FAILED") throw error;
@@ -423,11 +424,19 @@ Mac/Linux 支持项目内已有的 .sh/.bash/.zsh/.command 启动脚本。先读
 如果缺少入口、存在多个无法区分的应用、必须先构建且没有可直接运行的脚本，或启动方式不受支持，status=needs_input，并在 summary 提出一个具体问题或说明缺口，不返回猜测的配置。
 必须调用 submit_launch_plan，不能只在文字回复里描述配置。`;
 
-export function createProjectAnalyzer({ config, dataDir, sessionFactory = createPiSession }: { config: ModelConfig; dataDir: string; sessionFactory?: SessionFactory }) {
-  const analyze = async (project: ProjectRecord, { signal, instructions = "", onProgress = () => {} }: { signal?: AbortSignal | undefined; instructions?: string | undefined; onProgress?: Progress | undefined } = {}) => {
+export function createProjectAnalyzer(options:{config:ModelConfig;dataDir:string;sessionFactory?:SessionFactory}):ReturnType<typeof projectAnalyzer>;
+export function createProjectAnalyzer(options:{config:ModelConfig;dataDir?:string;sessionFactory:SessionFactory}):ReturnType<typeof projectAnalyzer>;
+export function createProjectAnalyzer(options:{config:ModelConfig & {llmConfigured:false};dataDir?:string}):ReturnType<typeof projectAnalyzer>;
+export function createProjectAnalyzer(options:{config:ModelConfig;dataDir?:string;sessionFactory?:SessionFactory}) {return projectAnalyzer(options);}
+function projectAnalyzer({ config, dataDir, sessionFactory = createPiSession }: { config: ModelConfig; dataDir?: string; sessionFactory?: SessionFactory }) {
+  type InspectionProject=Pick<ProjectRecord,"root"|"path"|"name"|"kind"> & Partial<Pick<ProjectRecord,"description"|"setup"|"launch">>;
+  type InspectionOptions={signal?:AbortSignal|undefined;instructions?:string|undefined;onProgress?:Progress|undefined};
+  function analyze(project:ProjectRecord, options?:InspectionOptions):Promise<Partial<ProjectRecord> & {setup:import("../contracts/project.mjs").ProjectSetup}>;
+  function analyze(project:InspectionProject, options?:InspectionOptions):Promise<import("../projects/project-inspection.mjs").ProjectPlanResult>;
+  async function analyze(project:InspectionProject, {signal,instructions="",onProgress=()=>{}}:InspectionOptions={}):Promise<import("../projects/project-inspection.mjs").ProjectPlanResult> {
     if (!config.llmConfigured) throw new InputError("请先在设置中连接模型，再点击“自动识别启动方式”。");
     const combined = signal ?? new AbortController().signal;
-    const context: { reader: ReturnType<typeof createProjectReader>; session: PiSessionPort | null; plan: Awaited<ReturnType<typeof validateProjectPlan>> | null; signal: AbortSignal; onProgress: Progress; lastToolError: string | null } = { reader: createProjectReader(project.root), session: null, plan: null, signal: combined, onProgress, lastToolError: null };
+    const context: { reader: ReturnType<typeof createProjectReader>; session: PiSessionPort | null; plan: import("../projects/project-inspection.mjs").ProjectPlanResult | null; signal: AbortSignal; onProgress: Progress; lastToolError: string | null } = { reader: createProjectReader(project.root), session: null, plan: null, signal: combined, onProgress, lastToolError: null };
     const retry: RetryState = { attempt: 0, failed: false };
     let unsubscribe = () => {};
     const abort = () => { void context.session?.abort(); };
@@ -474,7 +483,7 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
     try {
       combined.throwIfAborted();
       onProgress({ type: "status", phase: "tool", label: "NEUMA 正在识别项目…" });
-      context.session = await sessionFactory({ config, cwd: project.root, dataDir, customTools, systemPrompt: INSPECTION_PROMPT });
+      context.session = await sessionFactory({ config, cwd: project.root, dataDir:dataDir!, customTools, systemPrompt: INSPECTION_PROMPT });
       combined.throwIfAborted();
       combined.addEventListener("abort", abort, { once: true });
       unsubscribe = context.session.subscribe?.((event) => retryProgress(event, retry, onProgress)) ?? (() => {});
@@ -504,7 +513,7 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
       combined.removeEventListener("abort", abort); context.onProgress = () => {};
       context.session?.dispose();
     }
-  };
+  }
   return analyze;
 }
 
@@ -560,7 +569,7 @@ export class PiProjectAgent {
       item.session ??= await this.sessionFactory({ config: this.config, manager: this.manager,
         turn: item.turn, cwd: this.cwd, dataDir: this.dataDir });
       checkCancellation();
-      unsubscribe = item.session.subscribe((event) => {
+      unsubscribe = item.session.subscribe!((event) => {
         if (item!.cancelled) return;
         retryProgress(event, retry, onProgress);
         if (event.type === "tool_execution_end" && item!.turn.failedOperation) { void item!.session!.abort(); return; }
@@ -571,7 +580,7 @@ export class PiProjectAgent {
         if (event.type === "tool_execution_start") {
           const labels: Record<string, string> = { list_projects: "正在查看项目…", list_project_failures: "正在查看添加失败记录…", get_runtime_status: "正在查看本机项目运行状态…", list_ports: "正在查询端口占用…",
             add_project: "正在添加并配置项目…", inspect_project: "正在识别启动方式…", start_project: "正在启动项目…", stop_project: "正在停止项目…", remove_project: "正在删除项目记录，保留本地文件…" };
-          onProgress({ type: "status", phase: "tool", label: labels[event.toolName] || "正在处理项目…" });
+          onProgress({ type: "status", phase: "tool", label: labels[event.toolName!] || "正在处理项目…" });
         }
         if (event.type === "tool_execution_end") onProgress({ type: "status", phase: "thinking" });
       });
@@ -580,7 +589,7 @@ export class PiProjectAgent {
       checkCancellation();
       if (item.turn.failedOperation) {
         failed = true;
-        const projects = await this.manager.list();
+        const projects = await this.manager.list!();
         checkCancellation();
         return { reply: objectFields(item.turn.failedOperation.setup).summary,
           sessionId, engine: "pi", actions: item.turn.actions, projects };
@@ -590,9 +599,9 @@ export class PiProjectAgent {
         retry.failure ??= classifyModelFailure(last?.errorMessage);
         throw new Error("pi_response_failed");
       }
-      const reply = item.session.getLastAssistantText();
+      const reply = item.session.getLastAssistantText!();
       if (!reply?.trim()) throw new Error("pi_empty_response");
-      const projects = await this.manager.list();
+      const projects = await this.manager.list!();
       checkCancellation();
       return { reply, sessionId, engine: "pi", actions: item.turn.actions, projects };
     } catch (error) {

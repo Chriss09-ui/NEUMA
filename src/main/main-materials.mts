@@ -1,7 +1,22 @@
 import { objectFields } from "../runtime/type-boundary.mjs";
+import type { MaterialDescriptor, ParsedMaterial } from "../contracts/material.mjs";
+import type { MaterialStoragePort } from "../materials/material-port.mjs";
 import type { MaterialUpload } from "../materials/material-port.mjs";
 import type { CollaborationService } from "../collaboration/groups.mjs";
 import type { EvidenceMessage } from "../contracts/requirements.mjs";
+interface MainMaterialDescriptor { id: string; name: string; size: number; kind: string; sha256?: string; mimeType?: string }
+interface MainMaterialStorage { ready?: Promise<unknown>; path?(conversationId: string, file: string): Promise<string> }
+export interface MainMaterialPort {
+  upload?: MaterialStore["upload"]; list?: MaterialStore["list"]; tools?: MaterialStore["tools"]; raw?: MaterialStore["raw"]; preview?: MaterialStore["preview"];
+  resolve?(conversationId: string, refs: string[]): Promise<MainMaterialDescriptor[]>;
+  parsed?(conversationId: string, descriptor: MainMaterialDescriptor, signal?: AbortSignal): Promise<Pick<ParsedMaterial, "text" | "status" | "pageCount" | "truncated" | "warnings">>;
+  close?(): Promise<unknown>;
+}
+type MainMaterialsOptions = { collaboration?: Partial<Pick<CollaborationService, "importMaterial">> } & (
+  { dataDir: string; storage?: MaterialStoragePort & MainMaterialStorage; materials?: undefined }
+  | { dataDir: string; storage?: MainMaterialStorage; materials: MainMaterialPort }
+  | { dataDir?: string; storage: MainMaterialStorage; materials: MainMaterialPort }
+);
 interface MaterialOperation { controller: AbortController; done: Promise<void>; finish(): void }
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -23,11 +38,11 @@ function refsOf(values: unknown) {
 }
 
 export class MainMaterials {
-  storage: GroupStorage; materials: MaterialStore; collaboration: Pick<CollaborationService, "importMaterial"> | undefined;
-  operations: Set<MaterialOperation>; closing: Promise<PromiseSettledResult<unknown>[]> | null; epoch: number; ready: Promise<void>;
-  constructor({ dataDir, collaboration, storage = new GroupStorage({ dataDir: join(dataDir, "main-materials") }), materials }: { dataDir: string; collaboration?: Pick<CollaborationService, "importMaterial">; storage?: GroupStorage; materials?: MaterialStore }) {
+  storage: MainMaterialStorage; materials: MainMaterialPort; collaboration: Partial<Pick<CollaborationService, "importMaterial">> | undefined;
+  operations: Set<MaterialOperation>; closing: Promise<PromiseSettledResult<unknown>[]> | null; epoch: number; ready: Promise<unknown>;
+  constructor({ dataDir, collaboration, storage = new GroupStorage({ dataDir: join(dataDir!, "main-materials") }), materials }: MainMaterialsOptions) {
     this.storage = storage;
-    this.materials = materials ?? new MaterialStore({ storage });
+    this.materials = materials ?? new MaterialStore({ storage: storage as MaterialStoragePort });
     this.collaboration = collaboration;
     this.operations = new Set(); this.closing = null; this.epoch = 0;
     this.ready = Promise.resolve(storage.ready); this.ready.catch(() => {});
@@ -35,22 +50,22 @@ export class MainMaterials {
 
   async upload(conversationId: string, options: MaterialUpload) {
     id(conversationId, "主对话"); await this.ready; await this.closing;
-    return this.materials.upload(conversationId, options);
+    return this.materials.upload!(conversationId, options);
   }
 
   async list(conversationId: string) {
     id(conversationId, "主对话"); await this.ready;
-    return this.materials.list(conversationId);
+    return this.materials.list!(conversationId);
   }
 
   async resolve(conversationId: string, attachmentIds: unknown = []) {
     id(conversationId, "主对话"); const refs = refsOf(attachmentIds); await this.ready;
-    return this.materials.resolve(conversationId, refs);
+    return this.materials.resolve!(conversationId, refs);
   }
 
   tools(conversationId: string) {
     id(conversationId, "主对话");
-    return this.materials.tools(conversationId).map((tool) => ({ ...tool, name: names[tool.name]!,
+    return this.materials.tools!(conversationId).map((tool) => ({ ...tool, name: names[tool.name]!,
       description: tool.description.replaceAll("当前 Agent", "当前主对话") }));
   }
 
@@ -61,7 +76,7 @@ export class MainMaterials {
       signal?.throwIfAborted();
       const facts: Record<string, unknown> = { materialId: descriptor.id, name: descriptor.name, bytes: descriptor.size, kind: descriptor.kind };
       try {
-        const parsed = await this.materials.parsed(conversationId, descriptor, signal);
+        const parsed = await this.materials.parsed!(conversationId, descriptor, signal);
         let characters = 0;
         for (const _character of parsed.text) characters++;
         Object.assign(facts, { extractedCharacters: characters, extractionComplete: !parsed.truncated,
@@ -95,10 +110,10 @@ export class MainMaterials {
         activeSignal.throwIfAborted();
         const sourceId = materialId(descriptor.id), name = materialName(descriptor.name);
         if (name !== descriptor.name || !Number.isSafeInteger(descriptor.size) || descriptor.size < 1
-          || descriptor.size > MAX_MATERIAL_BYTES || !/^[a-f0-9]{64}$/.test(descriptor.sha256))
+          || descriptor.size > MAX_MATERIAL_BYTES || !/^[a-f0-9]{64}$/.test(descriptor.sha256!))
           throw new InputError("主对话材料记录无效，请重新上传");
-        const raw = await this.materials.raw(conversationId, sourceId);
-        const expectedPath = await this.storage.path(conversationId, `attachments/${sourceId}/original/${name}`);
+        const raw = await this.materials.raw!(conversationId, sourceId);
+        const expectedPath = await this.storage.path!(conversationId, `attachments/${sourceId}/original/${name}`);
         if (raw.path !== expectedPath || raw.name !== name || raw.size !== descriptor.size || raw.mimeType !== descriptor.mimeType)
           throw new InputError("只能传递当前主对话自己的材料原件");
         const handle = await open(expectedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -141,7 +156,7 @@ export class MainMaterials {
     this.epoch++;
     const operations = [...this.operations];
     for (const operation of operations) operation.controller.abort();
-    const closing = Promise.allSettled([this.materials.close(), ...operations.map((operation) => operation.done)]);
+    const closing = Promise.allSettled([this.materials.close!(), ...operations.map((operation) => operation.done)]);
     this.closing = closing;
     void closing.finally(() => { if (this.closing === closing) this.closing = null; });
     return closing;

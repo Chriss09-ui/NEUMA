@@ -33,7 +33,7 @@ const replyReferences = (value: Record<string, unknown>) => {
   if (replyRequest && replyRecipientId !== replyRequest.recipientId) throw new InputError("引用成员与接话目标必须一致");
   return { ...(replyRecipientId ? { replyRecipientId } : {}), ...(replyRequest ? { replyRequest } : {}) };
 };
-export const groupTaskAllowsNetwork = (record: Pick<GroupRecord, "tasks"> & { messages: { taskId: string | null; content: string; sender: { type: string } }[] }, task: GroupTask) => task.taskAllowNetwork !== false && groupConversationTasks(record, task).every((value) => value.taskAllowNetwork !== false)
+export const groupTaskAllowsNetwork = (record: { tasks?: Pick<GroupTask, "id" | "conversationId" | "goal" | "taskAllowNetwork">[]; messages: { taskId?: string | null; content: string; sender: { type: string } }[] }, task: Pick<GroupTask, "id" | "conversationId" | "goal" | "taskAllowNetwork">) => task.taskAllowNetwork !== false && groupConversationTasks(record, task).every((value) => value.taskAllowNetwork !== false)
   && networkAllowed(task.goal, ...groupConversationTasks(record, task).map((value) => value.goal), ...groupConversationMessages(record, task)
     .filter((value) => ["user", "main"].includes(value.sender?.type)).map((value) => value.content));
 export const groupTurnMessages = (record: GroupRecord, task: GroupTask) => groupConversationMessages(record, task, publicGroupMessages(record))
@@ -151,7 +151,7 @@ const checkCapability = (member: MemberCard | undefined, request: WorkRequest) =
   return capability;
 };
 
-export function groupTools(service: CollaborationService, { groupId, taskId, agentId, generation, job, signal, capture }: GroupToolContext & { job: GroupJob; capture: (value: TurnSubmission) => void }): NeumaTool[] {
+export function groupTools(service: CollaborationService, { groupId, taskId, agentId, generation, job, signal, capture }: GroupToolContext & { job: Pick<GroupJob, "kind" | "childId"> & Partial<Pick<GroupJob, "id" | "messageId">>; capture: (value: TurnSubmission) => void }): NeumaTool[] {
   let receipt: { id: string; hash: string } | null | undefined;
   const completeReads = new Map<string, string | null>(), readProgress = new Map<string, { version: string | null; nextOffset: number | null }>();
   const memberTool = memberCapabilityTool(service, { groupId, taskId, agentId, generation, signal, onRead: (page) => {
@@ -210,7 +210,7 @@ export function groupTools(service: CollaborationService, { groupId, taskId, age
       const posted = message(record, sender, text(question, "问题", 4000), { taskId, recipientId: target, visibility: "internal", kind: "coordination" });
       const child = childFor(task); if (child) child.pendingQuestions.push(posted.id);
       task.questions ??= []; task.questions.push({ id: posted.id, askerId: agentId, recipientId: target, childId: child?.id ?? null,
-        parentQuestionId: job.kind === "question" ? job.messageId : null, status: "waiting" });
+        parentQuestionId: job.kind === "question" ? job.messageId! : null, status: "waiting" });
       service.queue(task, target, { kind: "question", messageId: posted.id }); return { questionId: posted.id, queued: true };
     })),
     tool("request_group_help", "请求本群成员承担一个明确的协助子任务；接收者自愿接受、需输入或 declined。显式能力须先完整读卡并引用当前版本。", { agentId: identifier, title: string(500), description: string(), required: { type: "boolean" }, ...requestProperties }, ["agentId", "title", "description"], async ({ agentId: rawTarget, title, description, required = true, ...fields }) => {
@@ -310,11 +310,11 @@ export function groupTools(service: CollaborationService, { groupId, taskId, age
       } },
   ];
   const rename: Record<string, string> = { list_materials: "list_group_materials", read_material: "read_group_material", read_material_image: "read_group_material_image" };
-  return [...tools, ...service.materials.tools(groupId).map((value) => ({ ...value, name: rename[value.name]!, description: value.description.replaceAll("当前 Agent", "当前群"),
+  return [...tools, ...service.materials.tools!(groupId).map((value) => ({ ...value, name: rename[value.name]!, description: value.description.replaceAll("当前 Agent", "当前群"),
     ...(value.name === "read_material" ? { resolveFile: async (id: string, callSignal?: AbortSignal) => {
       callSignal?.throwIfAborted(); signal.throwIfAborted();
       service.guard(await service.store.get(groupId), taskId, agentId, generation);
-      await service.requireMaterial(groupId, id); return service.materials.raw(groupId, id);
+      await service.requireMaterial(groupId, id); return service.materials.raw!(groupId, id);
     } } : {}),
     execute: async (...args: Parameters<NeumaTool["execute"]>) => {
       signal.throwIfAborted(); const record = await service.store.get(groupId); service.guard(record, taskId, agentId, generation);

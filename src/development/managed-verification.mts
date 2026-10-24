@@ -36,7 +36,7 @@ const matches = (actual: unknown, assertion: { path: string; value: unknown }) =
 export { matches as matchesDevelopmentAssertion };
 
 export async function verifyManagedApplication({ services, executor, agentId, snapshot, application: applicationInput, cases,
-  validateResources = true, stateful = false, signal }: { services: ManagedVerificationRunner; executor: Pick<DevelopmentExecutor, "run">; agentId: string; snapshot: DevelopmentSnapshot; application?: unknown; cases: DevelopmentCase[]; validateResources?: boolean; stateful?: boolean; signal?: AbortSignal | undefined }): Promise<ManagedVerificationReport> {
+  validateResources = true, stateful = false, signal }: { services: ManagedVerificationRunner; executor?: Partial<Pick<DevelopmentExecutor, "run">>; agentId: string; snapshot: Pick<DevelopmentSnapshot, "path" | "hash" | "files">; application?: unknown; cases: DevelopmentCase[]; validateResources?: boolean; stateful?: boolean; signal?: AbortSignal | undefined }): Promise<ManagedVerificationReport> {
   let application: DevelopmentApplication & { service: DevelopmentService };
   const report: ManagedVerificationReport = { status: "not_run", codeHash: snapshot?.hash ?? null, results: [], stateful,
     evidenceMode: "mock_capabilities", connectionVerified: false, browserVerified: false,
@@ -89,7 +89,7 @@ export async function verifyManagedApplication({ services, executor, agentId, sn
           || !snapshot.files.some((file) => file.path === item.entrypoint)
           || application.page.resources.some((resource) => resource.path === item.entrypoint)
           || item.entrypoint === application.entrypoint) throw new Error("invalid_node_check");
-        run = await executor.run({ codeDir: snapshot.path, entrypoint: item.entrypoint!, input: item.input, signal });
+        run = await executor!.run!({ codeDir: snapshot.path, entrypoint: item.entrypoint!, input: item.input, signal });
       } else {
         const action = application.service.operations.find((entry) => entry.id === item.actionId);
         if (!action || Object.hasOwn(item, "entrypoint") || !Array.isArray(item.mocks)) throw new Error("invalid_action_case");

@@ -14,6 +14,21 @@ interface EvidenceIndex { sources: { source: string; path: string }[]; candidate
 interface ReadPage extends UnknownRecord { found: boolean; contextHash: string; receiptId?: string; reference?: EvidenceReference;
   quoteHash?: string; candidateHash?: unknown; total?: number; offset?: number; nextOffset?: number | null; offsetUnit?: string }
 interface ReferenceHint extends UnknownRecord { issuePath: unknown; reference: { receiptId: string }; source: EvidenceSource; path: string; quote: string }
+/** Resolution preserves uninspected input fields and types only the selectors this reader expands. */
+type ResolvedReference<T> = T extends { receiptId: string } ? EvidenceReference
+  : T extends { source: string; path: string } ? T & { quote: string } : T;
+type ResolvedReferences<T> = T extends unknown[] ? ResolvedReference<T[number]>[] : T;
+type ResolvedCandidatePaths<T> = T extends unknown[] ? (T[number] extends infer R ? R extends { receiptId: string } ? string : R : never)[] : T;
+type ResolvedFinding<T, K extends "id" | "findingId"> = T extends { findingRef: unknown } ? Omit<T, "findingRef"> & Record<K, unknown> : T;
+type ResolvedIssue<T> = ResolvedFinding<{ [K in keyof T]: K extends "references" ? ResolvedReferences<T[K]>
+  : K extends "candidatePaths" ? ResolvedCandidatePaths<T[K]> : T[K] }, "id">;
+type ResolvedIssues<T> = T extends unknown[] ? ResolvedIssue<T[number]>[] : T;
+type ResolvedFindings<T> = T extends unknown[] ? ResolvedFinding<T[number], "findingId">[] : T;
+type ResolvedScope<T> = T extends { adapterRulePath: string } | { scopeReceiptId: string }
+  ? Omit<T, "adapterRulePath" | "scopeReceiptId"> & { adapterId: string; scope: string; criterionQuote: string; adapterQuote: string } : T;
+type ResolvedScopes<T> = T extends unknown[] ? ResolvedScope<T[number]>[] : T;
+export type ResolvedReviewSubmission<T> = { [K in keyof T]: K extends "issues" ? ResolvedIssues<T[K]>
+  : K extends "priorFindingDecisions" ? ResolvedFindings<T[K]> : K extends "acceptanceScopeChecks" ? ResolvedScopes<T[K]> : T[K] };
 const sourceName = (value: unknown): value is EvidenceSource => typeof value === "string" && SOURCES.some((source) => source === value);
 const rows = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
@@ -383,7 +398,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       }
       return result;
     },
-    resolveSubmission(value: unknown): unknown {
+    resolveSubmission<T>(value: T): ResolvedReviewSubmission<T> {
       const rawResult = structuredClone(value), result = objectFields(rawResult);
       const problems: unknown[] = []; let firstMessage: string | undefined;
       const collect = (original: unknown, resolve: () => unknown): unknown => {
@@ -465,6 +480,6 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
           referenceSelection: true,
         });
       }
-      return rawResult;
+      return rawResult as ResolvedReviewSubmission<T>;
     } };
 }

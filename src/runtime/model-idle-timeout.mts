@@ -1,6 +1,11 @@
 import { objectFields } from "./type-boundary.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
-export type FetchPort = typeof globalThis.fetch;
+export interface ModelResponseTransport {
+  ok: boolean; status?: number | undefined; statusText?: string | undefined; headers?: Headers | undefined;
+  body?: { getReader?(): ReadableStreamDefaultReader<Uint8Array>; cancel(reason?: unknown): Promise<unknown> } | null | undefined;
+  text?(): Promise<string>;
+}
+export type FetchPort<R = Response> = (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => Promise<R>;
 export interface IdleTimeoutDiagnostic { phase: string; idleTimeoutMs: number; elapsedMs: number; firstResponseMs: number | null; lastDataMs: number | null; chunkCount: number; receivedBytes: number }
 const nativeResponse = (value: unknown): boolean => value instanceof Response;
 export const DEFAULT_MODEL_IDLE_TIMEOUT_MS = 90_000;
@@ -13,13 +18,13 @@ export function modelIdleTimeoutMs(config: ModelConfig = {}) {
 }
 
 /** Watch transport inactivity, never the total duration or model response contents. */
-export function withModelIdleTimeout(fetchImpl: FetchPort, { idleTimeoutMs = DEFAULT_MODEL_IDLE_TIMEOUT_MS, onDiagnostic }: { idleTimeoutMs?: number; onDiagnostic?: (diagnostic: IdleTimeoutDiagnostic) => unknown | Promise<unknown> } = {}): FetchPort {
+export function withModelIdleTimeout<R extends ModelResponseTransport>(fetchImpl: FetchPort<R>, { idleTimeoutMs = DEFAULT_MODEL_IDLE_TIMEOUT_MS, onDiagnostic }: { idleTimeoutMs?: number; onDiagnostic?: (diagnostic: IdleTimeoutDiagnostic) => unknown | Promise<unknown> } = {}): FetchPort<R | Response> {
   modelIdleTimeoutMs({ llmIdleTimeoutMs: idleTimeoutMs });
   return async (input, init = {}) => {
     const external = init.signal ?? objectFields(input).signal as AbortSignal | null | undefined;
     external?.throwIfAborted();
     const controller = new AbortController(), started = performance.now();
-    let timer: ReturnType<typeof setTimeout> | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined, unreadErrorResponse: Response | undefined, streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined, unreadErrorResponse: ModelResponseTransport | undefined, streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
     let finished = false, firstResponseMs: number | null = null, lastDataMs: number | null = null;
     let chunkCount = 0, receivedBytes = 0;
     const cleanup = () => { clearTimeout(timer); external?.removeEventListener("abort", cancelled); };
@@ -74,7 +79,7 @@ export function withModelIdleTimeout(fetchImpl: FetchPort, { idleTimeoutMs = DEF
         if (!response.body && !nativeResponse(response) && typeof response.text === "function") {
           return new Proxy(response, { get(target, key) {
             if (key === "text") return async () => {
-              try { return await wait(() => target.text()); } finally { finish(); }
+              try { return await wait(() => target.text!()); } finally { finish(); }
             };
             const value = Reflect.get(target, key);
             return typeof value === "function" ? value.bind(target) : value;
@@ -82,12 +87,12 @@ export function withModelIdleTimeout(fetchImpl: FetchPort, { idleTimeoutMs = DEF
         }
         finish(); return response;
       }
-      if (!lazyErrorBody) reader = response.body!.getReader();
+      if (!lazyErrorBody) reader = response.body!.getReader!();
       const body = new ReadableStream<Uint8Array>({
         start(value) { streamController = value; },
         async pull(value) {
           try {
-            if (!reader) { reader = response.body!.getReader(); reset(); }
+            if (!reader) { reader = response.body!.getReader!(); reset(); }
             const next = await wait(() => reader!.read());
             if (next.done) { finish(); value.close(); return; }
             if (next.value.byteLength > 0) {
@@ -99,7 +104,7 @@ export function withModelIdleTimeout(fetchImpl: FetchPort, { idleTimeoutMs = DEF
         },
         cancel(reason) { stop(reason); },
       }, { highWaterMark: 0 });
-      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+      return new Response(body, { status: response.status!, statusText: response.statusText!, headers: response.headers! });
     } catch (error) {
       stop(error); throw error;
     }

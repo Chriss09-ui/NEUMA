@@ -27,6 +27,7 @@ export interface IssueDecision { issueId: string; status: "open" | "resolved" | 
 export interface PreflightAssessment { verdict: "sufficient" | "needs_input" | "blocked"; direction: string; adequacy: string;
   dimensionChecks: { dimension: TaskSpecV1["items"][number]["dimension"]; status: "sufficient" | "not_applicable" | "unknown"; reason: string; requirementIds: string[] }[];
   issues: RequirementIssue[] }
+export type ConsultationHandoff = Pick<RequirementHandoff, "id" | "issues" | "resolved"> & Partial<Pick<RequirementHandoff, "requirementHash" | "architectureVersion">>;
 export interface RequirementHandoff { id: string; requirementHash: string; architectureVersion: number; issues: RequirementIssue[]; resolved?: boolean }
 export interface RequirementNote { id: string; kind: "system_unresolved"; issueId: string; sourceRequirementHash: string; assessmentId: string; text: string }
 export interface RequirementReceipt { version: 1; requestId: string; requirementHash: string; platformHash: string; assessmentId: string; draftHash: string; confirmedAt: string }
@@ -35,7 +36,7 @@ export interface SavedAssessment extends Partial<PreflightAssessment> { id: stri
   deferredIssues?: DeferredIssue[]; derivations?: RequirementDerivation[]; diagnostic?: unknown; systemProgress?: SystemProgress[] }
 export interface DeferredIssue extends RequirementIssue { stageDecision: { stage: string; reason: string; checks: string[]; assessmentId?: string; derivationIds?: string[] }; verification: SystemCheck[] }
 export interface Consultation { version: number; revision: number; evidenceMessages: EvidenceMessage[]; assessments: SavedAssessment[]; issues: RequirementIssue[]; receipts: RequirementReceipt[];
-  handoff?: RequirementHandoff; notes?: RequirementNote[]; displayedHash?: string }
+  handoff?: ConsultationHandoff; notes?: RequirementNote[]; displayedHash?: string }
 export type CalculationFormula = { ref: string } | { value: string } | { op: string; args: CalculationFormula[] };
 export interface CalculationRequest { issueId: string; requirementIds: string[]; premises: { id: string; value: string; unit: string; source: { kind: "requirement" | "platform"; reference: string; detail: string } }[];
   expressions: { id: string; unit: string; formula: CalculationFormula }[] }

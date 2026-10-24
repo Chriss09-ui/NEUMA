@@ -3,8 +3,8 @@ import type { ApplicationAction } from "../contracts/application.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { FixtureNode, FixtureBudget, ResolvedTestJson, DevelopmentCase, DevelopmentPlan, FixtureMetadata } from "../contracts/development.mjs";
 import { isPlainRecord, isInteger, objectFields } from "../runtime/type-boundary.mjs";
-interface FixtureOptions { maxBytes?: number | undefined; signal?: AbortSignal | undefined; textWorkBudget?: FixtureBudget | undefined }
-interface CaseOptions { maxInputBytes?: number | undefined; signal?: AbortSignal | undefined; textWorkBudget?: FixtureBudget | undefined; fixtureBudget?: FixtureBudget | undefined }
+interface FixtureOptions { maxBytes?: number | undefined; signal?: Pick<AbortSignal, "throwIfAborted"> | undefined; textWorkBudget?: FixtureBudget | undefined }
+interface CaseOptions { maxInputBytes?: number | undefined; signal?: Pick<AbortSignal, "throwIfAborted"> | undefined; textWorkBudget?: FixtureBudget | undefined; fixtureBudget?: FixtureBudget | undefined }
 import { createHash } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { validateActionInput } from "../applications/application-contract.mjs";

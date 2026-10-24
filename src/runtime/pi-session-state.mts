@@ -170,7 +170,7 @@ function argumentShape(value: unknown, schema: ToolSchema) {
 
 // Raw argument strings live only until normalization finishes. Diagnostics contain schema names,
 // types and bounded sizes, never submitted strings, unknown property names or provider payloads.
-export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, halt }: Pick<PiSessionOptions, "onToolDiagnostic" | "toolErrorResult" | "rawInputValidators" | "transformContext"> & { customTools: NonNullable<PiSessionOptions["customTools"]>; halt(error: unknown): void }) {
+export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, halt }: Pick<PiSessionOptions, "onToolDiagnostic" | "toolErrorResult" | "rawInputValidators" | "transformContext"> & { customTools: (Pick<NonNullable<PiSessionOptions["customTools"]>[number], "name"> & Partial<Pick<NonNullable<PiSessionOptions["customTools"]>[number], "parameters">>)[]; halt(error: unknown): void }) {
   const tools = new Map(customTools.map((tool) => [tool.name, tool]));
   const rawValidators = new Map(Object.entries(rawInputValidators ?? {}));
   if ([...rawValidators].some(([name, validate]) => !tools.has(name) || typeof validate !== "function"))

@@ -1,3 +1,4 @@
+import type { SessionMessage } from "../runtime/pi-port.mjs";
 import type { ArchitectureRecord, ArchitectureReview } from "../contracts/architecture.mjs";
 import type { DevelopmentArchitecture, DevelopmentPlan, DevelopmentTask, DevelopmentWork, DevelopmentReview, SavedDevelopmentReview } from "../contracts/development.mjs";
 import type { AcceptanceLedger } from "../contracts/verification.mjs";
@@ -22,10 +23,10 @@ export type DevelopmentCandidateDesign = import("../contracts/architecture.mjs")
 export interface PassedDevelopmentArchitecture extends DevelopmentArchitecture {
   agentId: string; name: string; version: number; contractVersion: number; status: string; candidateHash: string;
   requirements: import("../contracts/architecture.mjs").RequirementItem[]; draft?: import("../contracts/requirements.mjs").RequirementDraft; design: DevelopmentCandidateDesign;
-  review?: ArchitectureReview; issues?: { blocking: boolean }[]; sourceFingerprint?: string; platformHash?: string; evidence?: unknown[];
+  review?: Pick<ArchitectureReview, "candidateHash" | "verdict">; issues?: { blocking: boolean }[]; sourceFingerprint?: string; platformHash?: string; evidence?: unknown[];
   developmentRevision?: unknown; platformSnapshot?: unknown; platformContractVersion?: number;
 }
-export interface DevelopmentEvidence { id: string; status: string; codeHash: string | null; summary?: string | undefined;
+export interface DevelopmentEvidence { browserVerified?: boolean; evidenceMode?: string; id: string; status: string; codeHash: string | null; summary?: string | undefined;
   planHash?: string | null; mode?: string; taskId?: string | null; results: { caseId: string; status: string; [key: string]: unknown }[]; architectureRef?: ArchitectureReference }
 export interface ArchitectureReference { version: number; candidateHash: string }
 export interface DevelopmentFeedback { passed?: boolean; report?: DevelopmentEvidence | PlanningBlockerReport; review?: DevelopmentReview; rejectedPlan?: DevelopmentPlan; reason?: string; codeHash?: string }
@@ -54,14 +55,14 @@ export interface DevelopmentRunRecord extends SubmissionRecord {
   planDraftChecks?: ({ turn?: number; status?: string; hash: string | null } & UnknownRecord)[]; execution?: unknown; runtimeCheck?: unknown;
 }
 export type DevelopmentRole = "planner" | "developer" | "reviewer";
-export interface DevelopmentSession extends PiSessionPort { sessionFile?: string | undefined; modelCallAccounting?: boolean; model?: { contextWindow?: number }; readonly messages: ContextEvent["messages"] }
+export interface DevelopmentSession extends PiSessionPort { sessionFile?: string | undefined; modelCallAccounting?: boolean; model?: { contextWindow?: number } }
 export interface DevelopmentHandle<Result = unknown> {
   kind: DevelopmentRole; submitName: string; accepting: boolean; submitted: boolean; result: Result | undefined; counter: { turns: number }; limit: number; failed: boolean;
   turnsInPrompt: number; disposed: boolean; submissionCalls: Map<string, { value: unknown; recorded: boolean }>; planningBlocker?: unknown;
   checkToolInputs?: () => void; charge: (options?: { purpose?: string; retryAttempt?: number }) => Promise<void>;
   reference: DevelopmentSessionReference; validate: (value: unknown) => Result | Promise<Result>; session: DevelopmentSession; unsubscribe?: () => void;
   payload: DevelopmentContextPayload; contextMessage?: PreparedDevelopmentContext; contextMaxChars: number; structuredSubmissionTools: NeumaTool[];
-  lastAssistant?: ContextEvent["messages"][number] | undefined; retries?: number; failure?: { message: string; reason: string };
+  lastAssistant?: SessionMessage | undefined; retries?: number; failure?: { message: string; reason: string };
 }
 export interface DevelopmentContext { controller: AbortController; signal: AbortSignal; onProgress: (value: UnknownRecord) => void; handles: Set<DevelopmentHandle>;
   writes: Promise<void>; record: DevelopmentRunRecord; done: Promise<void>; finish(): void; planningWorkspace?: { empty: boolean; codeHash: string }; lastRole?: string }

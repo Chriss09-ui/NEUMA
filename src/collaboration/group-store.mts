@@ -99,11 +99,13 @@ export class GroupStorage {
   }
 }
 
-export function event(record: GroupRecord, type: string, details: Partial<GroupEvent> = {}): GroupEvent {
+interface GroupEventRecord { group: { id: string; lastSequence: number; updatedAt?: string }; events: GroupEvent[] }
+interface GroupMessageRecord extends GroupEventRecord { messages: GroupMessage[] }
+export function event(record: GroupEventRecord, type: string, details: Partial<GroupEvent> = {}): GroupEvent {
   const value = { ...details, type, groupId: record.group.id, seq: ++record.group.lastSequence, createdAt: now() };
   record.events.push(value); record.group.updatedAt = value.createdAt; return value;
 }
-export function message(record: GroupRecord, sender: GroupSender, content: string, { taskId = null, recipientId = null, replyTo = null, status = "complete", visibility, kind }: Partial<Pick<GroupMessage, "taskId" | "recipientId" | "replyTo" | "status" | "visibility" | "kind">> = {}): GroupMessage {
+export function message(record: GroupMessageRecord, sender: GroupSender, content: string, { taskId = null, recipientId = null, replyTo = null, status = "complete", visibility, kind }: Partial<Pick<GroupMessage, "taskId" | "recipientId" | "replyTo" | "status" | "visibility" | "kind">> = {}): GroupMessage {
   if (visibility !== undefined && !["public", "internal"].includes(visibility)) throw new InputError("群消息展示范围无效");
   if (kind !== undefined && !["negotiation", "coordination", "member_result", "delivery", "reply", "clarification", "status"].includes(kind)) throw new InputError("群消息类型无效");
   const value = { id: randomUUID(), sender, content, taskId, recipientId, replyTo, status, createdAt: now() } as GroupMessage;

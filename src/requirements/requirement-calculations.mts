@@ -2,7 +2,7 @@ import type { RequirementDraft, RequirementIssue, SystemCheck, RequirementDeriva
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import { objectFields, isArray } from "../runtime/type-boundary.mjs";
-export interface CalculationContext { draft?: Partial<RequirementDraft> | undefined; platform?: unknown; platformHash?: string | undefined; issues?: (Pick<RequirementIssue, "id" | "requirementIds"> & { owner?: string })[] | undefined; requirementIds?: string[] | undefined; signal?: AbortSignal | undefined; verification?: SystemCheck[] | undefined; legacy?: boolean; originalBinding?: Pick<RequirementDerivation, "requirementHash" | "platformHash" | "factBindings"> }
+export interface CalculationContext { draft?: Partial<RequirementDraft> | undefined; platform?: unknown; platformHash?: string | undefined; issues?: (Pick<RequirementIssue, "id" | "requirementIds"> & { owner?: string })[] | undefined; requirementIds?: string[] | undefined; signal?: Pick<AbortSignal, "throwIfAborted"> | undefined; verification?: Pick<SystemCheck, "id" | "evidence">[] | undefined; legacy?: boolean; originalBinding?: Pick<RequirementDerivation, "requirementHash" | "platformHash" | "factBindings"> }
 interface CalculationSchema { [key: string]: unknown; properties?: Record<string, CalculationSchema | boolean>; items?: CalculationSchema | boolean; anyOf?: (CalculationSchema | boolean)[] }
 type Rejection = { path: string; expectedFields: string[]; missingFields: string[]; unexpectedFields: boolean };
 import { contentHash, substantiveRequirementHash } from "./task-spec.mjs";

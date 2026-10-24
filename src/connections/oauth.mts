@@ -1,3 +1,5 @@
+import type { ExecFileOptions } from "node:child_process";
+export type OAuthBrowserRunner = (command: string, args: readonly string[], options: ExecFileOptions, done: (error: Error | null) => void) => unknown;
 import type { Server } from "node:http";
 import type { OAuthConfiguration, OAuthTokens } from "../contracts/connection.mjs";
 import { objectFields, errorField } from "../runtime/type-boundary.mjs";
@@ -12,7 +14,7 @@ import { readResponse } from "./http-adapter.mjs";
 import { discoverOAuthProtectedResourceMetadata, discoverAuthorizationServerMetadata, registerClient } from "@modelcontextprotocol/client";
 
 const fail = (reason: string, message: string) => Object.assign(new Error(message), { reason });
-export async function openOAuthBrowser(value: string, { platform = process.platform, run = execFile } = {}) {
+export async function openOAuthBrowser(value: string, { platform = process.platform, run = execFile }: { platform?: NodeJS.Platform; run?: OAuthBrowserRunner } = {}) {
   const url = oauthEndpoint(value);
   if (platform !== "darwin") throw fail("browser_open_unavailable", "请在系统浏览器中打开登录地址");
   await new Promise<void>((resolve, reject) => run("/usr/bin/open", [url], { timeout: 10000, env: { PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8" },

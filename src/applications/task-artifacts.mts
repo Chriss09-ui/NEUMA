@@ -1,6 +1,6 @@
 import type { AgentStorage } from "../agents/agent-storage.mjs";
 import type { TaskArtifact } from "../contracts/application.mjs";
-interface ArtifactInput { storage: Pick<AgentStorage, "path" | "removeFile">; id: string; taskId: string }
+interface ArtifactInput { storage: Pick<AgentStorage, "path">; id: string; taskId: string }
 import { constants } from "node:fs";
 import { open, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";

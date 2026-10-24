@@ -90,6 +90,8 @@ export class DevelopmentStore {
     return task;
   }
 
+  create<T extends DevelopmentInput>(value: T): Promise<Omit<T, "revision" | "createdAt" | "updatedAt"> & { revision: number; createdAt: string; updatedAt: string }>;
+  create(value: unknown): Promise<DevelopmentRecord>;
   create(value: unknown) {
     const snapshot = checkedRecord(value);
     return this.queue(async () => {
@@ -103,6 +105,8 @@ export class DevelopmentStore {
     });
   }
 
+  save<T extends DevelopmentRecord>(value: T, options?: { expectedRevision?: unknown }): Promise<Omit<T, "revision" | "createdAt" | "updatedAt"> & { revision: number; createdAt: string; updatedAt: string }>;
+  save(value: unknown, options?: { expectedRevision?: unknown }): Promise<DevelopmentRecord>;
   save(value: unknown, { expectedRevision = objectFields(value).revision }: { expectedRevision?: unknown } = {}) {
     const snapshot = checkedRecord(value);
     if (expectedRevision !== undefined && (!isInteger(expectedRevision) || expectedRevision < 1)) throw new InputError("研发记录的预期版本无效");

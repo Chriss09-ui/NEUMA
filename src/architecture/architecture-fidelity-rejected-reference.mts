@@ -1,4 +1,4 @@
-import type { PiSessionPort } from "../runtime/pi-port.mjs";
+import type { PiSessionPort, SessionMessage } from "../runtime/pi-port.mjs";
 import { objectFields, isInteger, isArray } from "../runtime/type-boundary.mjs";
 import { architectureTurnBudgetSpent, designHash, validateReview } from "./architecture-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
@@ -47,7 +47,7 @@ function localBudgetStop(input: unknown) {
     && usage.cost && Object.values(objectFields(usage.cost)).every((value) => value === 0);
 }
 
-function textMessage(message: Extract<PiSessionPort["messages"][number], { role: "user" }>) {
+function textMessage(message: SessionMessage) {
   return typeof message.content === "string" ? message.content : message.content?.length === 1 && message.content[0]?.type === "text" ? message.content[0].text : null;
 }
 

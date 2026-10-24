@@ -18,7 +18,7 @@ interface RequirementRecord extends UnknownRecord {
 interface RequirementAgentsPort {
   getRequirements?(): Promise<{ requirements: { id: string; draft: unknown }[] }>;
   getRequirementConsultation?(id: string): unknown | Promise<unknown>;
-  saveRequirements(id: string, input: { name: unknown; draft: unknown }, metadata: { confirmation: unknown; requestId: unknown; consultation: unknown }): unknown | Promise<unknown>;
+  saveRequirements?(id: string, input: { name: unknown; draft: unknown }, metadata: { confirmation: unknown; requestId: unknown; consultation: unknown }): unknown | Promise<unknown>;
 }
 
 const conflict = () => Object.assign(new InputError("这份需求已在另一窗口更新，请重新打开后继续"), { reason: "requirement_conflict" });
@@ -121,7 +121,7 @@ export class RequirementSessions {
       const confirmation = issueConfirmation(normalizeDraft(record.draft), checkedConsultation(record.consultation), { requestId: record.confirmedRequestId ?? undefined });
       // Bind before saving, so a disconnected response cannot duplicate one confirmation under another Agent ID.
       if (!record.boundAgentId) { record.boundAgentId = agentId; checkRecordSize(record); await this.storage.writeJson(sessionId, "session.json", record); }
-      return agents.saveRequirements(agentId, { name: value.name, draft: record.draft },
+      return agents.saveRequirements!(agentId, { name: value.name, draft: record.draft },
         { confirmation, requestId: record.confirmedRequestId, consultation: record.consultation });
     });
   }

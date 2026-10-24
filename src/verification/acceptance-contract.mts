@@ -27,6 +27,13 @@ export const ACCEPTANCE_ADAPTERS: Readonly<Record<AcceptanceAdapterId, Readonly<
   conversation: Object.freeze({ stage: "runtime", owner: "conversation", scope: "actual-conversation" }),
 });
 
+function freezeAdapterGuide<const T extends Record<AcceptanceAdapterId, object>>(details: T) {
+  return Object.freeze(Object.fromEntries(Object.entries(details).map(([id, value]) => [id, Object.freeze({
+    ...ACCEPTANCE_ADAPTERS[id as AcceptanceAdapterId], ...value,
+    splitRule: "一条验收跨越多个验证范围时拆成多条验收，可共同引用原要求；保留原验证阶段和完整业务义务，不能用宿主探针替代业务证明。",
+  })]))) as { readonly [K in keyof T]: Readonly<AdapterInfo & T[K] & { splitRule: string }> };
+}
+
 export const ACCEPTANCE_ADAPTER_GUIDE = Object.freeze({
   version: 2,
   composition: Object.freeze({
@@ -54,7 +61,7 @@ export const ACCEPTANCE_ADAPTER_GUIDE = Object.freeze({
       excludedProof: Object.freeze(["HTTP/MCP完整传输信封和网关请求字节边界", "未执行输入及未来全部输入", "真实外部业务账号与第三方服务"]),
     }),
   }),
-  adapters: Object.freeze(Object.fromEntries(Object.entries({
+  adapters: freezeAdapterGuide({
     action: {
       executionFacts: Object.freeze({ generatedCode: "action", dependencyReturns: "strict-frozen-values-or-error-results",
         strictMockConsumption: true, realFiles: "not-proven", realState: "not-proven", taskAdmission: "not-created", evidence: "isolated-action-with-mocked-dependencies",
@@ -125,8 +132,7 @@ export const ACCEPTANCE_ADAPTER_GUIDE = Object.freeze({
       proves: "核对绑定当前交付版本的本次真实工作对话、回复和工具调用证据。",
       doesNotProve: "不证明未来全部对话或未触发的情形；没有本次实际证据时保留运行期待验，不能提前宣称通过。",
     },
-  }).map(([id, value]) => [id, Object.freeze({ ...ACCEPTANCE_ADAPTERS[id as AcceptanceAdapterId], ...value,
-    splitRule: "一条验收跨越多个验证范围时拆成多条验收，可共同引用原要求；保留原验证阶段和完整业务义务，不能用宿主探针替代业务证明。" })]))),
+  }),
 });
 
 export const ACCEPTANCE_VERIFICATION_SCHEMA = {
@@ -150,8 +156,8 @@ const agentReference = (value: unknown): value is string => typeof value === "st
 const evidenceReference = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(value);
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
-export function validateAcceptanceVerification(acceptance: { verification?: unknown } | null | undefined, { required = false } = {}): AcceptanceVerification {
-  const input = acceptance?.verification;
+export function validateAcceptanceVerification(acceptance:unknown, { required = false } = {}): AcceptanceVerification {
+  const input = objectFields(acceptance).verification;
   const value = objectFields(input);
   if (input === undefined) {
     if (required) fail("每项新验收必须明确阶段、负责方及验证适配器");

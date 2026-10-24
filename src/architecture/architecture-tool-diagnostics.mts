@@ -38,7 +38,7 @@ export function architectureToolValidation(value: unknown, schema: ToolSchema, {
 }
 
 // This explains rejected candidates. It never accepts, repairs or changes the formal validation order.
-export function diagnoseArchitectureReferences(input: unknown, { requirements = [], capabilities = CAPABILITIES, evidence = [], schema, limit = 40 }: { requirements?: RequirementItem[]; capabilities?: readonly Capability[]; evidence?: EvidenceItem[]; schema?: ToolSchema; limit?: number } = {}) {
+export function diagnoseArchitectureReferences(input: unknown, { requirements = [], capabilities = CAPABILITIES, evidence = [], schema, limit = 40 }: { requirements?: Pick<RequirementItem, "id">[]; capabilities?: readonly Pick<Capability, "id" | "status">[]; evidence?: Pick<EvidenceItem, "id">[]; schema?: ToolSchema; limit?: number } = {}) {
   const value = objectFields(input);
   const issues: ReferenceIssue[] = [], seen = new Set<string>();
   let total = 0, retainedCharacters = 0;

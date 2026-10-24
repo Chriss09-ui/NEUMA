@@ -3,8 +3,8 @@ import type { ArchitectureReference } from "../development/development-controlle
 import type { StoredArchitectureRecord } from "./architecture-controller-port.mjs";
 import { objectFields, isRecord, isInteger, isArray } from "../runtime/type-boundary.mjs";
 export type DevelopmentRevisionArchitecture = Pick<StoredArchitectureRecord, "agentId" | "version" | "candidateHash" | "status">
-  & Partial<Pick<StoredArchitectureRecord, "delivery" | "sourceFingerprint" | "platformHash" | "runtimeCapabilities" | "confirmedRequirementContext" | "deferredVerifications" | "revisionSource">>
-  & { design: unknown; review?: unknown; requirements?: unknown; developmentRef?: unknown; developmentRevision?: unknown };
+  & Partial<Pick<StoredArchitectureRecord, "delivery" | "sourceFingerprint" | "platformHash" | "revisionSource">>
+  & {runtimeCapabilities?:unknown;confirmedRequirementContext?:unknown;deferredVerifications?:unknown;design: unknown; review?: unknown; requirements?: unknown; developmentRef?: unknown; developmentRevision?: unknown };
 /** Historical material has an identity, but does not grant resumable execution state or validated plans. */
 export interface HistoricalDevelopmentRun extends UnknownRecord {
   id: string; agentId: string; architectureRef: ArchitectureReference; architecture?: unknown;

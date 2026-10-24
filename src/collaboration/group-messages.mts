@@ -1,7 +1,21 @@
-import type { GroupRecord, GroupTask, GroupMessage } from "../contracts/collaboration.mjs";
+import type { GroupEvent, GroupSender } from "../contracts/collaboration.mjs";
+export interface GroupMessageProjection {
+  id: string; content: string; sender: GroupSender; taskId?: string | null | undefined;
+  visibility?: string | undefined; kind?: string | undefined;
+}
+interface GroupTaskProjection {
+  id: string; ownerId?: string | null | undefined; result?: string | undefined; reason?: string | undefined;
+  children?: { assigneeId?: string | null | undefined; result?: string | undefined; reason?: string | undefined }[] | undefined;
+  questions?: { answerId?: string | undefined; recipientId?: string | undefined; result?: string | undefined; reason?: string | undefined }[] | undefined;
+  participants?: { name?: string | undefined }[] | undefined;
+  intents?: { agentId: string; participate?: boolean | undefined; contribution?: string | undefined; willingToIntegrate?: boolean | undefined }[] | undefined;
+}
+interface GroupProjection<Message extends GroupMessageProjection> {
+  tasks?: GroupTaskProjection[] | undefined; messages?: Message[] | undefined; events?: Partial<GroupEvent>[] | undefined;
+}
 const legacyNoOwner = "两轮协商后尚未确定整合者，请点名一位成员承担整合，或调整成员后创建新任务";
 
-function isRecordedResult(task: GroupTask, value: GroupMessage) {
+function isRecordedResult(task: GroupTaskProjection, value: GroupMessageProjection) {
   if (value.sender?.type !== "agent") return false;
   if (value.sender.id === task.ownerId && value.content && [task.result, task.reason].includes(value.content)) return true;
   if ((task.children ?? []).some((child) => child.assigneeId === value.sender.id && value.content && [child.result, child.reason].includes(value.content))) return true;
@@ -9,7 +23,7 @@ function isRecordedResult(task: GroupTask, value: GroupMessage) {
     && value.content && [question.result, question.reason].includes(value.content));
 }
 
-function isLegacyCoordination(task: GroupTask, value: GroupMessage) {
+function isLegacyCoordination(task: GroupTaskProjection, value: GroupMessageProjection) {
   if (value.sender?.type === "system") return (task.participants ?? []).some((member) => value.content === `${member.name} 未能提交认领，其他成员可以继续协商。`
     || value.content === `成员已确定分工，本任务由 ${member.name} 整合成果。`);
   if (value.sender?.type !== "agent") return false;
@@ -19,7 +33,7 @@ function isLegacyCoordination(task: GroupTask, value: GroupMessage) {
 
 // Old records have no visibility field. Use actual execution events rather than
 // guessing from prose; unknown messages and completed deliveries stay visible.
-export function publicGroupMessages(record: Pick<GroupRecord, "tasks" | "messages" | "events">): GroupMessage[] {
+export function publicGroupMessages<Message extends GroupMessageProjection>(record: GroupProjection<Message>): (Message | (Message & { content: string; visibility: string; kind: string }))[] {
   const tasks = new Map((record.tasks ?? []).map((task) => [task.id, task]));
   const negotiating = new Set(), negotiationMessages = new Set(), executionMessages = new Set(), deliveries = new Set(), phases = new Map();
   const events = record.events ?? [];
