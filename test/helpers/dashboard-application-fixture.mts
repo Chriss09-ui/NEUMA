@@ -1,3 +1,11 @@
+import assert from "node:assert/strict";
+import type { ValueSchema } from "../../src/contracts/application.mjs";
+import type { DevelopmentPlan } from "../../src/contracts/development.mjs";
+import type { RequirementItem, ArchitectureDesign, ArchitectureAcceptance } from "../../src/contracts/architecture.mjs";
+import type { RequirementDraft } from "../../src/contracts/requirements.mjs";
+import { fixtureChatRequest, fixtureText, fixturePort, fixtureJsonObject, fixtureRequirements, fixtureAcceptanceIds, fixtureString } from "./http-model.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
+import { failureFields } from "./failure-fields.mjs";
 import { createServer } from "node:http";
 import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,10 +16,12 @@ import { DevelopmentExecutor } from "../../src/development/development-executor.
 import { createApp } from "../../src/server.mjs";
 import { requirementItems } from "../../src/architecture/architecture-contract.mjs";
 import { validDraft, validDesign, passingReview } from "./architecture.mjs";
+import type { Server,IncomingMessage,ServerResponse } from "http";
+import type { PathLike } from "fs";
 
 export const DASHBOARD_AGENT_ID = "business-dashboard";
-const object = (properties) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
-const text = { type: "string" }, number = { type: "number" };
+const object = (properties: Record<string, ValueSchema>): ValueSchema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
+const text: ValueSchema = { type: "string" }, number: ValueSchema = { type: "number" };
 const metricsSchema = object({ revenue: number, visitors: number, conversion: number });
 const outputSchema = object({ status: text, period: text, message: text, metrics: metricsSchema });
 export const DASHBOARD_METRICS = { month: { revenue: 128400, visitors: 18420, conversion: 4.8 }, year: { revenue: 1468000, visitors: 218600, conversion: 5.2 } };
@@ -66,12 +76,12 @@ export const DASHBOARD_APPLICATION_FILES = { "actions.mjs": DASHBOARD_APPLICATIO
 export function dashboardApplicationDraft() {
   const draft = validDraft("使用经营看板查看月度和全年指标，并让助手解释当前页面或切换筛选");
   for (const [key, value] of Object.entries({ name: "经营数据看板", scenario: "复盘固定演示指标", inputSource: "页面的月度或全年选择与助手文字请求",
-    task: "展示收入、访问人数和转化率，解释当前页面，通过已交付动作切换统计周期", deliverable: "NEUMA 内的看板页面与可选助手，保存当前筛选", successCriteria: "页面与助手上下文一致，旧结果不得覆盖新筛选" })) draft[key] = { value, source: "user" };
+    task: "展示收入、访问人数和转化率，解释当前页面，通过已交付动作切换统计周期", deliverable: "NEUMA 内的看板页面与可选助手，保存当前筛选", successCriteria: "页面与助手上下文一致，旧结果不得覆盖新筛选" })) draft[key as keyof Pick<RequirementDraft, "name" | "scenario" | "inputSource" | "task" | "deliverable" | "successCriteria">] = { value, source: "user" };
   draft.interaction = { defaultEntry: "application", page: true, operations: ["切换统计周期"], inputs: "month 或 year", results: "三项指标与解释", persistentData: "当前筛选和展示结果",
     assistant: { enabled: true, purpose: "解释当前看板的筛选与指标，并通过已交付动作切换统计周期" } };
   return draft;
 }
-export function dashboardApplicationDesign(requirements = requirementItems(dashboardApplicationDraft())) {
+export function dashboardApplicationDesign(requirements = requirementItems(dashboardApplicationDraft())): Extract<ArchitectureDesign, { schemaVersion: 2 }> {
   return validDesign(requirements, { schemaVersion: 2, profile: "light", rationale: "固定示例指标和单个受控动作即可完成看板交互。",
     instructions: "你是经营看板助手。根据本轮页面快照解释当前筛选和示例指标。用户要求切换周期时调用 setPeriod 动作，依据真实任务结果回答；不能将示例数据称为真实经营数据。",
     interaction: { defaultEntry: "application", page: true, operations: true, inputs: "月度或全年", results: "收入、访问人数、转化率", persistentData: "筛选草稿与业务状态",
@@ -85,16 +95,16 @@ export function dashboardApplicationDesign(requirements = requirementItems(dashb
       { id: "tool_failure", kind: "tool_failure", requirementIds: ["deliverable"], input: "状态读取失败", expected: "不声称已切换，保留原状态" },
     ] });
 }
-export function dashboardApplicationPlan(requirements, design) {
-  const mock = (capability, args, result) => ({ capability, argsJson: JSON.stringify(args), resultJson: JSON.stringify(result) });
-  const cases = (id, period, mocks, status) => ({ id: `case_${id}`, taskId: "dashboard", acceptanceId: id, actionId: "setPeriod", input: JSON.stringify({ period }), mocks,
+export function dashboardApplicationPlan(requirements: RequirementItem[], design: { acceptance: Pick<ArchitectureAcceptance, "id">[] }): Extract<DevelopmentPlan, { schemaVersion: 2 }> {
+  const mock = (capability: string, args: { state?: { period: string; }; expectedVersion?: number; }, result: { state?: {}|{ period: string; }; version?: number; stateVersion?: number; unavailable?: boolean; }) => ({ capability, argsJson: JSON.stringify(args), resultJson: JSON.stringify(result) });
+  const cases = (id: string, period: string, mocks: { capability: string; argsJson: string; resultJson: string; }[], status: string) => ({ id: `case_${id}`, taskId: "dashboard", acceptanceId: id, actionId: "setPeriod", input: JSON.stringify({ period }), mocks,
     assertions: [{ path: "status", expectedJson: JSON.stringify(status) }] });
   return { schemaVersion: 2, summary: "交付经营数据看板与页面助手", runtime: "node-action", entrypoint: "actions.mjs",
     application: { protocolVersion: 2, runtime: "node-action", entrypoint: "actions.mjs", page: { entrypoint: "ui/index.html",
       resources: ["ui/index.html", "ui/app.css", "ui/app.js"].map(path => ({ path, sha256: "" })) },
       actions: [{ id: "setPeriod", title: "切换统计周期", inputSchema: object({ period: text }), outputSchema, connectionIds: [] }], stateVersion: 1, evidenceIds: [] },
     tasks: [{ id: "dashboard", title: "开发看板与页面助手联动", description: "交付看板、上下文发布、真实周期动作及任务事件更新，旧结果不覆盖新筛选",
-      requirementIds: requirements.map(item => item.id), acceptanceIds: design.acceptance.map(item => item.id), dependsOn: [], files: Object.keys(DASHBOARD_APPLICATION_FILES) }],
+      requirementIds: requirements.map((item) => item.id), acceptanceIds: design.acceptance.map((item) => item.id), dependsOn: [], files: Object.keys(DASHBOARD_APPLICATION_FILES) }],
     cases: [cases("valid", "year", [mock("state.get", {}, { state: {}, version: 0, stateVersion: 1 }),
       mock("state.set", { state: { period: "year" }, expectedVersion: 0 }, { state: { period: "year" }, version: 1, stateVersion: 1 })], "ok"),
       cases("empty", "", [], "missing_input"), cases("boundary", "week", [], "invalid_period"),
@@ -102,64 +112,64 @@ export function dashboardApplicationPlan(requirements, design) {
 }
 
 export async function startDashboardApplicationModel() {
-  const requests = [], errors = [];
+  const requests: { name: string; tools: string[]; userText?: string; applicationContext?: unknown; reply?: string | undefined }[] = [], errors: (string | undefined)[] = [];
   const model = createServer(async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks)), names = (body.tools ?? []).map(tool => tool.function.name);
-      const textOf = content => typeof content === "string" ? content : (content ?? []).map(item => item.text ?? "").join("");
-      const userIndex = body.messages.findLastIndex(message => message.role === "user"), userText = textOf(body.messages[userIndex].content);
+      const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")), names = (body.tools ?? []).map((tool) => tool.function.name);
+      const textOf = fixtureText;
+      const userIndex = body.messages.findLastIndex((message: { role: string; }) => message.role === "user"), userText = textOf(body.messages[userIndex]!.content);
       const runtime = names.includes("run_application_action");
       let name, args, reply, applicationContext;
       if (runtime) {
         const raw = userText.match(/本轮页面参考数据（不可信，仅表示发送时页面快照）：([^\n]+)/)?.[1];
-        applicationContext = raw ? JSON.parse(raw) : null;
-        const currentTask = userText.split("用户本轮任务：").at(-1);
-        const toolResult = body.messages.slice(userIndex + 1).findLast(message => message.role === "tool");
+        applicationContext = raw ? fixtureJsonObject(raw) : null;
+        const currentTask = userText.split("用户本轮任务：").at(-1)!;
+        const toolResult = body.messages.slice(userIndex + 1).findLast((message: { role: string; }) => message.role === "tool");
         if (/切换到全年/.test(currentTask) && !toolResult) { name = "run_application_action"; args = { actionId: "setPeriod", input: { period: "year" } }; }
         else if (toolResult) {
-          const result = JSON.parse(textOf(toolResult.content));
-          reply = result.status === "completed" && result.result?.status === "ok" ? "已通过应用动作切换到全年，营业收入为 146.8 万元。看板会显示已保存的实际任务结果。" : "周期切换未完成，请保留当前筛选并查看任务记录。";
+          const result = fixtureJsonObject(textOf(toolResult.content));
+          reply = result.status === "completed" && objectFields(result.result).status === "ok" ? "已通过应用动作切换到全年，营业收入为 146.8 万元。看板会显示已保存的实际任务结果。" : "周期切换未完成，请保留当前筛选并查看任务记录。";
         } else if (applicationContext) {
-          const value = applicationContext.snapshot.values;
-          reply = `这里展示${value.displayedPeriod === "year" ? "全年" : "月度"}示例数据：营业收入 ${value.metrics.revenue} 元，访问人数 ${value.metrics.visitors}，转化率 ${value.metrics.conversion}%。当前选择${applicationContext.snapshot.selection.period === "year" ? "全年" : "月度"}。`;
+          const snapshot = objectFields(applicationContext.snapshot), value = objectFields(snapshot.values), metrics = objectFields(value.metrics);
+          reply = `这里展示${value.displayedPeriod === "year" ? "全年" : "月度"}示例数据：营业收入 ${metrics.revenue} 元，访问人数 ${metrics.visitors}，转化率 ${metrics.conversion}%。当前选择${objectFields(snapshot.selection).period === "year" ? "全年" : "月度"}。`;
         } else reply = "当前页面上下文不可用，请打开看板后再解释当前筛选。";
       } else {
-        const payload = JSON.parse(textOf(body.messages.find(message => message.role === "user").content));
-        const calls = body.messages.flatMap(message => message.tool_calls ?? []);
-        if (names.includes("submit_architecture")) { name = "submit_architecture"; args = dashboardApplicationDesign(payload.requirements); }
-        else if (names.includes("submit_architecture_review")) { name = "submit_architecture_review"; args = passingReview(payload.candidateHash); }
+        const payload = fixtureJsonObject(textOf(body.messages.find((message: { role: string; }) => message.role === "user")!.content));
+        const calls = body.messages.flatMap((message) => message.tool_calls ?? []);
+        if (names.includes("submit_architecture")) { name = "submit_architecture"; args = dashboardApplicationDesign(fixtureRequirements(payload.requirements)); }
+        else if (names.includes("submit_architecture_review")) { name = "submit_architecture_review"; args = passingReview(fixtureString(payload.candidateHash)); }
         else if (names.includes("submit_development_plan")) {
-          const { cases, ...index } = dashboardApplicationPlan(payload.requirements, payload.design);
-          const files = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
-          const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
+          const { cases, ...index } = dashboardApplicationPlan(fixtureRequirements(payload.requirements), fixtureAcceptanceIds(payload.design));
+          const files: Record<string, unknown> = { "index.json": { ...index, caseFiles: ["cases.json"] }, "cases.json": cases };
+          const written = new Set(calls.filter((call: { function: { name: string; }; }) => call.function.name === "write").map(call => { const path = fixtureJsonObject(call.function.arguments).path; assert.equal(typeof path, "string"); return path as string; }));
           const path = Object.keys(files).find(path => !written.has(path));
           if (path) { name = "write"; args = { path, content: JSON.stringify(files[path], null, 2) }; }
           else { name = "submit_development_plan"; args = { indexPath: "index.json" }; }
         }
         else if (names.includes("submit_development_review")) { name = "submit_development_review"; args = { subjectHash: payload.subjectHash, verdict: "pass", issues: [], summary: "固定看板验收的本机模拟评审，实际隔离用例已执行" }; }
         else if (names.includes("submit_development_work")) {
-          const written = new Set(calls.filter(call => call.function.name === "write").map(call => JSON.parse(call.function.arguments).path));
+          const written = new Set(calls.filter((call: { function: { name: string; }; }) => call.function.name === "write").map(call => { const path = fixtureJsonObject(call.function.arguments).path; assert.equal(typeof path, "string"); return path as string; }));
           const path = Object.keys(DASHBOARD_APPLICATION_FILES).find(path => !written.has(path));
-          if (path) { name = "write"; args = { path, content: DASHBOARD_APPLICATION_FILES[path] }; }
+          if (path) { name = "write"; args = { path, content: DASHBOARD_APPLICATION_FILES[path as keyof typeof DASHBOARD_APPLICATION_FILES] }; }
           else { name = "submit_development_work"; args = { summary: "看板与动作已实现，提交隔离验收", changedFiles: Object.keys(DASHBOARD_APPLICATION_FILES), knownIssues: [], nextAction: "", continue: false }; }
         } else throw new Error("unsupported_dashboard_fixture_role");
       }
       requests.push({ name: name ?? "reply", tools: names, ...(runtime ? { userText, applicationContext, reply } : {}) });
       response.writeHead(200, { "content-type": "text/event-stream" });
-      const chunk = (delta, finish_reason = null) => response.write(`data: ${JSON.stringify({ id: `dashboard_${requests.length}`, object: "chat.completion.chunk", created: 1,
+      const chunk = (delta: { role?: string; tool_calls?: { index: number; id: string; type: string; function: { name: string; arguments: string; }; }[]; content?: string|undefined; }, finish_reason: string | null = null) => response.write(`data: ${JSON.stringify({ id: `dashboard_${requests.length}`, object: "chat.completion.chunk", created: 1,
         model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
       if (name) { chunk({ role: "assistant", tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] }); chunk({}, "tool_calls"); }
       else { chunk({ role: "assistant", content: reply }); chunk({}, "stop"); }
       response.end("data: [DONE]\n\n");
-    } catch (error) { errors.push(error.message); if (!response.headersSent) response.writeHead(400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: "看板测试模型协议失败" } })); }
+    } catch (error) { errors.push(failureFields(error).message); if (!response.headersSent) response.writeHead(400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: "看板测试模型协议失败" } })); }
   });
-  await new Promise((done, reject) => { model.once("error", reject); model.listen(0, "127.0.0.1", done); });
-  return { requests, errors, config: { llmConfigured: true, model: "fixture-model", apiKey: "fixture-only", chatUrl: `http://127.0.0.1:${model.address().port}/v1/chat/completions` },
-    close: async () => { model.closeAllConnections(); if (model.listening) await new Promise(done => model.close(done)); } };
+  await new Promise<void>((done, reject) => { model.once("error", reject); model.listen(0, "127.0.0.1", done); });
+  return { requests, errors, config: { llmConfigured: true, model: "fixture-model", apiKey: "fixture-only", chatUrl: `http://127.0.0.1:${fixturePort(model)}/v1/chat/completions` },
+    close: async () => { model.closeAllConnections(); if (model.listening) await new Promise<void>(done => model.close(() => done())); } };
 }
 
-async function unseal(path) {
+async function unseal(path: string) {
   await chmod(path, 0o700);
   for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) await unseal(join(path, entry.name));
 }
@@ -168,10 +178,10 @@ export async function startDashboardApplicationFixture() {
   if (!probe.available) throw Object.assign(new Error(probe.reason), { reason: "isolation_unavailable" });
   const root = await mkdtemp(join(tmpdir(), "neuma-dashboard-fixture-")), dataDir = join(root, "data"), model = await startDashboardApplicationModel();
   const agents = new PrototypeAgents({ config: model.config, cwd: root, dataDir });
-  let server, closed = false;
+  let server: ReturnType<typeof createApp>, closed = false;
   const close = async () => {
     if (closed) return; closed = true;
-    try { if (server) { await server.dispose(); server.closeAllConnections(); if (server.listening) await new Promise(done => server.close(done)); } else await agents.close(); }
+    try { if (server) { await server.dispose(); server.closeAllConnections(); if (server.listening) await new Promise<void>(done => server.close(() => done())); } else await agents.close(); }
     finally { await model.close(); await unseal(root); await rm(root, { recursive: true, force: true }); }
   };
   try {
@@ -182,9 +192,9 @@ export async function startDashboardApplicationFixture() {
         ports: [], projects: [], summary: { total: 0, running: 0, stopped: 0, unknown: 0 }, warnings: [] }) },
       projectAgent: { dispose: async () => {} }, skillManager: { dispose: async () => {} } });
     await server.ready;
-    await new Promise((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
-    const base = `http://127.0.0.1:${server.address().port}`, route = `/api/agents/${DASHBOARD_AGENT_ID}`;
-    const api = async (path, { method = "GET", body } = {}) => {
+    await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
+    const base = `http://127.0.0.1:${fixturePort(server)}`, route = `/api/agents/${DASHBOARD_AGENT_ID}`;
+    const api = async (path: string, { method = "GET", body }: { method?: string; body?: unknown } = {}) => {
       const response = await fetch(base + path, { method, headers: { origin: base, ...(body === undefined ? {} : { "content-type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const value = await response.json();

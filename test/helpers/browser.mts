@@ -5,8 +5,9 @@ import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { TestContext } from "node:test";
 
-export async function testBrowser(t, { platform = process.platform, env = process.env, checkExecutable = access } = {}) {
+export async function testBrowser(t: Pick<TestContext, "skip">, { platform = process.platform, env = process.env, checkExecutable = access }: {platform?: string; env?: NodeJS.ProcessEnv; checkExecutable?: (path: string, mode: number) => Promise<unknown>} = {}) {
   if (!env.NEUMA_TEST_BROWSER && env.NEUMA_REQUIRE_BROWSER_TESTS !== "1") {
     t.skip("外部浏览器测试默认关闭；可用 NEUMA_REQUIRE_BROWSER_TESTS=1 手动启用");
     return null;
@@ -19,13 +20,13 @@ export async function testBrowser(t, { platform = process.platform, env = proces
   ];
   for (const candidate of candidates) {
     try { await checkExecutable(candidate, constants.X_OK); return candidate; }
-    catch (error) { if (!["ENOENT", "ENOTDIR", "EACCES"].includes(error.code)) throw error; }
+    catch (error) { if (!["ENOENT", "ENOTDIR", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
   }
   const reason = `未找到 ${platform === "darwin" ? "Dia" : "Chromium/Edge"}；可用 NEUMA_TEST_BROWSER 指定浏览器可执行文件`;
   assert.fail(reason);
 }
 
-export async function browserResult(t, browser, script, { windowSize } = {}) {
+export async function browserResult(t: TestContext, browser: string, script: string, { windowSize }: { windowSize?: { width: number; height: number } } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-browser-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const page = join(root, "test.html");
@@ -45,11 +46,11 @@ try {
     "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
     "--host-resolver-rules=MAP * ~NOTFOUND", `--user-data-dir=${join(root, "profile")}`,
     "--timeout=5000", "--dump-dom", pathToFileURL(page).href];
-  const encoded = await new Promise((resolve, reject) => {
+  const encoded = await new Promise<string>((resolve, reject) => {
     const grouped = process.platform !== "win32";
     const child = spawn(browser, args, { detached: grouped, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", bytes = 0, result, failure, cleanupTimer, stopping = false;
-    const stop = (error, value) => {
+    let stdout = "", bytes = 0, result: string | undefined, failure: unknown, cleanupTimer: string|number|NodeJS.Timeout|undefined, stopping = false;
+    const stop = (error: unknown, value?: string) => {
       if (stopping) return;
       stopping = true; failure = error; result = value; clearTimeout(timer);
       cleanupTimer = setTimeout(() => {
@@ -59,7 +60,7 @@ try {
       // Chromium browsers may keep background processes after dump-dom; close only this test's process group.
       if (!child.pid) return;
       try { if (grouped) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); }
-      catch (error) { if (error.code !== "ESRCH") { failure = error; child.kill("SIGKILL"); } }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") { failure = error; child.kill("SIGKILL"); } }
     };
     const timer = setTimeout(() => stop(new Error("浏览器未在15秒内返回测试结果")), 15_000);
     child.stdout.setEncoding("utf8");
