@@ -233,3 +233,27 @@ test("candidate removal leaves active configuration intact while active revocati
   const another = "c".repeat(64); await store.save("alpha", { id: "data" }, requirements, { profile: another }); const shared = await store.snapshot("alpha", { profile: another });
   await store.remove("alpha", "data"); await assert.rejects(store.assertActive(shared, "data"), { reason: "connection_revoked" });
 });
+
+test("nested connection records are checked without rewriting valid legacy fields or damaged bytes", async (t) => {
+  const { store, dataDir } = await fixture(t);
+  const valid = { schemaVersion: 1, agentId: "alpha", version: 1, connections: { model: { id: "model", currentVersion: 1,
+    generation: "fixture", versions: { 1: { id: "model", kind: "model", version: 1, generation: "fixture", authType: "none" } } } } };
+  const file = join(dataDir, "agents/alpha/private/connections.json");
+  await store.storage.writeJson("alpha", "private/connections.json", valid);
+  assert.deepEqual(await store.readRoot("alpha"), valid);
+  for (const corrupt of [
+    (record) => { record.connections.model.versions = []; },
+    (record) => { record.connections.model.versions[1].oauth = { scopes: [42] }; },
+    (record) => { record.connections.model.versions[1].values = []; },
+    (record) => { record.connections.model.versions[1].discovery = { tools: [{ name: "tool", inputSchema: [], contractHash: "fixture" }] }; },
+    (record) => { record.connections.model.versions[1].configurationChoices = { region: [{ label: "Region", value: 42 }] }; },
+    (record) => { record.profiles = { candidate: { schemaVersion: 1, agentId: "alpha", version: 1, connections: null } }; },
+    (record) => { record.revokedGenerations = { fixture: "yes" }; },
+  ]) {
+    const damaged = structuredClone(valid); corrupt(damaged);
+    await store.storage.writeJson("alpha", "private/connections.json", damaged);
+    const bytes = await readFile(file, "utf8");
+    await assert.rejects(store.list("alpha"), { reason: "invalid_connection_record" });
+    assert.equal(await readFile(file, "utf8"), bytes);
+  }
+});

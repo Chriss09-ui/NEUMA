@@ -79,3 +79,22 @@ test("explicit continuation retries an interrupted idempotent step without reset
   const resumed = await workflow.resume({ id: first.id });
   assert.equal(resumed.status, "completed"); assert.equal(calls, 2); assert.equal(resumed.steps[0].items[0].attempts, 2);
 });
+
+test("damaged nested workflow checkpoints cannot resume actions or rewrite the journal", async (t) => {
+  let calls = 0;
+  const { workflow, rootDir } = await setup(t, async () => { calls++; return { status: "passed", output: null }; });
+  const first = await workflow.start({ ...options, input: {}, definition: { schemaVersion: 1, entryActionId: "whole",
+    steps: [{ id: "confirm", actionId: "run", dependsOn: [], idempotent: true, waitForInput: { prompt: "确认", inputSchema: { type: "string" } } }], outputs: ["confirm"] } });
+  const file = join(rootDir, first.id, "record.json"), valid = JSON.parse(await readFile(file, "utf8"));
+  for (const corrupt of [
+    (record) => { record.steps[0].items = [{ index: 0, status: "pending", attempts: "bad", resultRef: null }]; },
+    (record) => { record.steps[0].responseRef = { sha256: [], path: "results/fixture.json" }; },
+    (record) => { record.waiting.index = "bad"; },
+    (record) => { record.resultRefs = { confirm: { sha256: "fixture", path: 42 } }; },
+  ]) {
+    const damaged = structuredClone(valid); corrupt(damaged);
+    const bytes = JSON.stringify(damaged, null, 2); await writeFile(file, bytes);
+    await assert.rejects(workflow.resume({ id: first.id, input: "confirmed" }), { reason: "workflow_definition_changed" });
+    assert.equal(await readFile(file, "utf8"), bytes); assert.equal(calls, 0);
+  }
+});

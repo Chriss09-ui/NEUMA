@@ -165,3 +165,19 @@ test("真实Pi收到应用骨架入口诊断后原会话读索引修正，原用
   const assembled = (await artifacts.preview("agent", "run", "index.json")).plan;
   assert.deepEqual(assembled.cases, cases); assert.doesNotThrow(() => validatePlan(assembled, { architecture }));
 });
+
+
+test("嵌套Docker构建步骤诊断使用原始清单字段路径", () => {
+  const { plan } = fixture("javascript", "docker");
+  plan.application.service.docker.buildSteps = "invalid steps";
+  const result = diagnose(plan);
+  assert.ok(result.issues.some(issue => issue.path === "plan.application.service.docker.buildSteps"));
+  assert.equal(result.issues.some(issue => issue.path.includes("objectFields")), false);
+});
+
+test("页面资源摘要探针不因宿主临时文件名误报合法资源", () => {
+  const { plan } = fixture("javascript");
+  plan.application.page = { entrypoint: "ui/index.html", resources: [{ path: "ui/index.html", sha256: "" }, { path: "ui/style.css", sha256: "" }] };
+  const result = diagnose(plan);
+  assert.deepEqual(result.issues.filter(issue => issue.path.startsWith("plan.application.page")), []);
+});

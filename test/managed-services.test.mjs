@@ -104,3 +104,44 @@ test("stopped backend can restore only an activated delivery and close permits s
   const restored = await manager.restore(); assert.equal(restored.length, 1); assert.equal(restored[0].status, "ready");
   await manager.stop(identity); assert.equal((await manager.restore()).length, 0);
 });
+
+
+test("Node service worker remains runnable as a standalone file", { timeout: 10000 }, async (t) => {
+  const { copyFile } = await import("node:fs/promises");
+  const { spawn } = await import("node:child_process");
+  const { createInterface } = await import("node:readline");
+  const { once } = await import("node:events");
+  const directory = await mkdtemp(join(tmpdir(), "neuma-standalone-worker-"));
+  const worker = join(directory, "worker.mjs"), action = join(directory, "action.mjs");
+  await copyFile(new URL("../src/services/node-service-worker.mjs", import.meta.url), worker);
+  await writeFile(action, "export const actions={echo:async(input,ctx)=>({input,stored:await ctx.state.get({key:'fixture'})})};");
+  const child = spawn(process.execPath, [worker, action], { cwd: directory, env: {}, stdio: ["pipe", "pipe", "pipe"] });
+  const closed = once(child, "close"), lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  let stderr = ""; child.stderr.setEncoding("utf8"); child.stderr.on("data", (value) => { stderr += value; });
+  t.after(async () => { child.stdin.end(); await closed; await rm(directory, { recursive: true, force: true }); });
+  const receive = async () => { const next = await lines.next(); assert.equal(next.done, false, stderr); return JSON.parse(next.value); };
+  assert.deepEqual(await receive(), { type: "ready", protocolVersion: 1 });
+  child.stdin.write(JSON.stringify({ type: "run", protocolVersion: 1, requestId: "standalone", actionId: "echo", input: { value: 7 } }) + "\n");
+  const call = await receive();
+  assert.equal(call.type, "call"); assert.equal(call.capability, "state.get"); assert.deepEqual(call.args, { key: "fixture" });
+  child.stdin.write(JSON.stringify({ type: "reply", requestId: "standalone", id: call.id, ok: true, value: "fixture-value" }) + "\n");
+  assert.deepEqual(await receive(), { type: "result", requestId: "standalone", ok: true, value: { input: { value: 7 }, stored: "fixture-value" } });
+});
+
+
+test("damaged service catalogs remain untouched and cannot select workers", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-damaged-service-catalog-"));
+  const manager = new ManagedServiceManager({ rootDir: directory });
+  t.after(async () => { await manager.close({ permanent: true }); await rm(directory, { recursive: true, force: true }); });
+  const file = join(directory, "catalog.json");
+  for (const invalid of [
+    { schemaVersion: 1, deliveries: {}, active: {}, desired: [] },
+    { schemaVersion: 1, deliveries: {}, active: { agent: { deliveryVersion: "one" } }, desired: {} },
+    { schemaVersion: 1, deliveries: {}, active: {}, desired: { worker: { agentId: "agent", deliveryVersion: 2 } } },
+    { schemaVersion: 1, deliveries: { broken: { agentId: "agent", deliveryVersion: "one" } }, active: {}, desired: {} },
+  ]) {
+    const bytes = JSON.stringify(invalid, null, 2); await writeFile(file, bytes);
+    await assert.rejects(manager.catalog(), { reason: "invalid_service_record" });
+    assert.equal(await readFile(file, "utf8"), bytes); assert.equal(manager.workers.size, 0);
+  }
+});

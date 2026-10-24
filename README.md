@@ -128,7 +128,7 @@ cp .env.example .env
 npm start
 ```
 
-源码开发现已进入 TypeScript 渐进迁移。`npm start` 会先构建到 `dist/ts-build/package/` 再启动；开发数据、配置与 Agent 工作根仍指向源码仓库。底层契约、存储和模型运行适配已迁为 TypeScript，其余未迁移 JavaScript 仍按原字节复制，浏览器地址与应用协议保持现有形式。
+源码开发现已进入 TypeScript 渐进迁移。`npm start` 会先构建到 `dist/ts-build/package/` 再启动；开发数据、配置与 Agent 工作根仍指向源码仓库。需求、架构、研发控制器，以及服务、连接、群协作、项目、材料、技能和主 Agent 已迁为 TypeScript；前端、安装及维护脚本继续按迁移计划分批处理。运行产物仍使用原文件名，浏览器地址与应用协议保持现有形式。
 
 启动后在网页“设置”中配置模型。服务端源码统一放在 `src/`，按功能分组；前端资源、测试和开发脚本分别在 `public/`、`test/` 和 `scripts/`。
 

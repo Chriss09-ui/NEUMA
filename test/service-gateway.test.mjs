@@ -394,3 +394,41 @@ for (const waitFor of ["record", "descriptor"]) for (const change of ["grant", "
     assert.equal(result.actions, undefined);
   });
 }
+
+test("stdio bridge cancellation reaches the upstream SDK request signal", { timeout: 10000 }, async (t) => {
+  const { PassThrough } = await import("node:stream");
+  const { ReadBuffer, serializeMessage } = await import("@modelcontextprotocol/client");
+  const { startMcpBridge } = await import("../src/services/mcp-bridge.mjs");
+  const { gateway } = await fixture(t), grant = await gateway.configure("alpha", { actionIds: ["analyze"], deliveryVersion: "delivery-one" });
+  const input = new PassThrough(), output = new PassThrough();
+  let entered, aborted, upstreamRequestId;
+  const started = new Promise((resolve) => { entered = resolve; }), cancelled = new Promise((resolve) => { aborted = resolve; });
+  const bridge = await startMcpBridge({ url: grant.mcpUrl, token: grant.token, input, output,
+    fetchImpl: async (url, options) => {
+      const message = typeof options?.body === "string" ? JSON.parse(options.body) : null;
+      if (message?.method === "notifications/cancelled" && message.params.requestId === upstreamRequestId) {
+        aborted(); return new Response(null, { status: 202 });
+      }
+      if (message?.method !== "tools/call") return fetch(url, options);
+      upstreamRequestId = message.id; entered();
+      return new Promise((_resolve, reject) => {
+        const abort = () => { aborted(); reject(options.signal.reason); };
+        if (options.signal.aborted) abort(); else options.signal.addEventListener("abort", abort, { once: true });
+      });
+    } });
+  const buffer = new ReadBuffer(), transport = {
+    async start() { output.on("data", (chunk) => { buffer.append(chunk); for (let message; (message = buffer.readMessage());) this.onmessage?.(message); }); },
+    async send(message) { input.write(serializeMessage(message)); },
+    async close() { input.end(); output.end(); this.onclose?.(); },
+  };
+  const client = new Client({ name: "bridge-cancellation-fixture", version: "1" });
+  t.after(async () => { await client.close(); await bridge.close(); });
+  await client.connect(transport);
+  const controller = new AbortController();
+  const request = client.callTool({ name: "run_analyze", arguments: { input: { text: "cancelled" }, mutationId: "cancelled-request", deliveryVersion: "delivery-one" } }, { signal: controller.signal });
+  const rejection = assert.rejects(request);
+  await started; controller.abort(); await rejection;
+  let timeout;
+  try { await Promise.race([cancelled, new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("upstream request was not cancelled")), 1500); })]); }
+  finally { clearTimeout(timeout); }
+});

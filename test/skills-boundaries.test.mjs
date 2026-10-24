@@ -292,3 +292,17 @@ test("独立技能管理的磁盘资源不会进入真实 Pi 工作会话资源�
   assert.equal(session.resourceLoader.getSystemPrompt(), "Controlled test instructions.");
   assert.equal(session.resourceLoader.getSystemPrompt().includes(marker), false);
 });
+
+test("损坏的回收记录在读取字段前拒绝，原文件和源目录保持不变", async (t) => {
+  const { root, dataDir, manager } = await fixture(t);
+  const originalPath = join(root, "removed"), id = "00000000-0000-0000-0000-000000000000";
+  await mkdir(originalPath); await writeFile(join(originalPath, "keep.txt"), "keep");
+  const file = join(dataDir, "skills", "trash.json"); await mkdir(join(dataDir, "skills"), { recursive: true });
+  const entry = { id, originalPath, storedPath: join(root, ".neuma-skill-trash", id), action: "skill", trashedAt: "fixture",
+    name: "fixture", skillCount: 1, status: "prepared" };
+  for (const damaged of [null, { ...entry, name: {} }, { ...entry, skillCount: [] }, { ...entry, restoredAt: false }]) {
+    const bytes = JSON.stringify({ version: 1, entries: [damaged] }, null, 2); await writeFile(file, bytes);
+    await assert.rejects(manager.list(), /Skill 回收记录格式无效/);
+    assert.equal(await readFile(file, "utf8"), bytes); assert.equal(await readFile(join(originalPath, "keep.txt"), "utf8"), "keep");
+  }
+});

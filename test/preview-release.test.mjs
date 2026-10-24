@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { checkPreviewRelease } from "../scripts/check-preview-release.mjs";
@@ -39,6 +39,18 @@ async function fixture(t) {
 test("明确的 Apple 芯片 Mac 试用包通过，不需要三平台验收记录", async (t) => {
   const { root } = await fixture(t);
   assert.deepEqual(await checkPreviewRelease(root), { ok: true, failures: [] });
+});
+
+test("源码检查接受已迁移的TypeScript入口，产物检查仍要求真实JavaScript入口", async (t) => {
+  const { root } = await fixture(t);
+  for (const path of ["src/app-metadata", "src/server"])
+    await rename(join(root, `${path}.mjs`), join(root, `${path}.mts`));
+  assert.deepEqual(await checkPreviewRelease(root), { ok: true, failures: [] });
+  const artifact = await checkPreviewRelease(root, { artifact: true });
+  assert.equal(artifact.ok, false);
+  for (const path of ["src/app-metadata.mjs", "src/server.mjs"])
+    assert.ok(artifact.failures.includes(`缺少可读的入口文件：${path}`));
+  assert.ok(artifact.failures.some(value => value.includes("src/server.mts")));
 });
 
 test("发布清单允许已批准的文档与资源路径", async (t) => {
