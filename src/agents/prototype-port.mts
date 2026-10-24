@@ -1,3 +1,4 @@
+import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { RequirementDraft } from "../contracts/requirements.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
@@ -30,7 +31,7 @@ export type MaterialTool = NeumaTool & { resolveFile?: (id: string, signal?: Abo
 export interface CapabilityInput { capability: string; args: unknown; signal?: AbortSignal | undefined }
 export interface PrototypeOptions { config: ModelConfig; cwd: string; dataDir: string; sessionFactory?: SessionFactory; fidelitySessionFactory?: SessionFactory;
   architecture?: ArchitectureDesigner; development?: DevelopmentController; storage?: AgentStorage; materials?: MaterialStore; connections?: AgentConnectionStore;
-  connectionOptions?: Omit<ConstructorParameters<typeof AgentConnectionStore>[0], "dataDir" | "storage">; web?: WebCapabilities; applications?: ApplicationService;
+  connectionOptions?: Omit<ConstructorParameters<typeof AgentConnectionStore>[0], "dataDir" | "storage">; web?: WebCapabilityPort; applications?: ApplicationService;
   services?: ManagedServiceManager; enforceRequirementConfirmation?: boolean }
 export interface PromptInput { agentId: string; sessionId: string; message?: string; history?: unknown; attachments?: unknown; applicationContext?: unknown; source?: unknown; scope?: unknown }
 export interface PromptOptions { signal?: AbortSignal | undefined; activityScope?: { kind: string; conversationId: string }; taskAllowNetwork?: boolean }

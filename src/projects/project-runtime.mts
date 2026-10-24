@@ -1,9 +1,13 @@
+import type {ExecFileOptions} from "node:child_process";
+type RuntimeRunCommand=(file:string,args:readonly string[],options:ExecFileOptions & {env:NodeJS.ProcessEnv},done:(error:Error|null,stdout?:string|Buffer,stderr?:string|Buffer)=>void)=>unknown;
+interface RuntimeChild {pid?:number|null|undefined;exitCode?:number|null;signalCode?:NodeJS.Signals|number|null;jobManaged?:boolean;managedPids?:number[]}
+interface RuntimeRun {status:string;background?:boolean;ownsService?:boolean;child?:RuntimeChild|null;launcher?:RuntimeChild;server?:{listening:boolean;address():{port:number}|string|null}|null}
 import type { RuntimeSnapshot, ProcessInfo, PortInfo, ProjectRecord } from "../contracts/project.mjs";
 import type { ProjectRun } from "./project-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import { errorField, objectFields, isInteger, isArray } from "../runtime/type-boundary.mjs";
 interface ProcFs { readFile(path: string, encoding: string, maxBytes?: number, options?: { signal?: AbortSignal | undefined; deadline?: number }): Promise<string>; readdir(path: string, limit: number): Promise<string[] & { truncated?: boolean }>; readlink(path: string): Promise<string> }
-interface ScanOptions { signal?: AbortSignal | undefined; run?: typeof execFile; platform?: NodeJS.Platform; helperPath?: string | undefined; procLimits?: Partial<typeof PROC_LIMITS> | undefined; procRoot?: string; procFs?: ProcFs }
+interface ScanOptions { signal?: AbortSignal | undefined; run?: RuntimeRunCommand; platform?: NodeJS.Platform; helperPath?: string | undefined; procLimits?: Partial<typeof PROC_LIMITS> | undefined; procRoot?: string; procFs?: ProcFs }
 interface CommandResult { error: unknown; stdout: string; stderr: string }
 interface LsofRecord { pid: number | null; name?: string; files: Record<string, string>[] }
 import { execFile } from "node:child_process";
@@ -46,7 +50,7 @@ async function readProcEntries(path: string, limit: number) {
   return result;
 }
 
-function command(run: typeof execFile, executable: string, args: string[], signal: AbortSignal | undefined, env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }): Promise<CommandResult> {
+function command(run: RuntimeRunCommand, executable: string, args: string[], signal: AbortSignal | undefined, env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "C", LC_ALL: "C" }): Promise<CommandResult> {
   signal?.throwIfAborted();
   return new Promise((done) => {
     try {
@@ -143,7 +147,7 @@ async function scanLinux({ signal, procRoot, procFs, procLimits }: ScanOptions &
   return { checkedAt, ports, processes, warnings, complete: warnings.length === 0 };
 }
 
-async function scanWindows({ signal, run, helperPath }: ScanOptions & { run: typeof execFile }): Promise<RuntimeSnapshot> {
+async function scanWindows({ signal, run, helperPath }: ScanOptions & { run: RuntimeRunCommand }): Promise<RuntimeSnapshot> {
   const checkedAt = new Date().toISOString(), warnings = [];
   try {
     const helper = await requireProjectHelper({ platform: "win32", helperPath });
@@ -268,7 +272,7 @@ function processTree(pid: number, processes: ProcessInfo[]) {
   return pids;
 }
 
-export function projectRuntimeSnapshot<T extends Pick<ProjectRecord, "id" | "name" | "root" | "kind" | "launch">>(projects: T[], runs: Map<string, ProjectRun>, snapshot: RuntimeSnapshot) {
+export function projectRuntimeSnapshot<T extends Pick<ProjectRecord, "id" | "name" | "root" | "kind"> & Partial<Pick<ProjectRecord,"launch">>>(projects: T[], runs: ReadonlyMap<string, RuntimeRun>, snapshot: RuntimeSnapshot) {
   const processes = snapshot.processes || [], ports = snapshot.ports || [];
   const listenerPids = new Set(ports.map((item) => item.pid));
   const ownership = new Map<number, string>(), uncertain = new Set<string>(), managed = new Map<string, { pids: Set<number>; serverPort: number | null }>();

@@ -133,7 +133,7 @@ export function createArchitectureStageSchemas({ candidateSchema, requirements =
     partProperties.steps!.items!.properties!.dependsOn!.items = reference;
     partProperties.coverage!.items!.properties!.componentIds!.items = reference;
   }
-  const module = object({ moduleId: identifier, blueprintHash: hash, instructions: text(3000), ...partProperties },
+  const module = object({ moduleId: identifier, blueprintHash: hash, instructions: text(3000), ...partProperties } as Record<string, StageSchema> & { moduleId: typeof identifier; blueprintHash: typeof hash; instructions: ReturnType<typeof text> },
     ["moduleId", "blueprintHash", "instructions", ...source.required.filter((key) => PART_FIELDS.some(field => field === key))]);
   const integration = object({ baseHash: hash, updates: { type: "array", minItems: 0, maxItems: 24, items: object({
     path: { type: "string", minLength: 1, maxLength: 500 }, value: {},

@@ -1,3 +1,4 @@
+import type { ModelResponseTransport } from "../runtime/model-idle-timeout.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { ProviderError } from "./core.mjs";
 
@@ -25,9 +26,9 @@ function validateChoice(value: unknown) {
 }
 
 // Read through one cancellable reader so cancellation also interrupts a stalled body.
-async function readBody(response: Response, signal: AbortSignal | undefined, consume: (chunk: string, end: boolean) => boolean | void) {
+async function readBody(response: ModelResponseTransport, signal: AbortSignal | undefined, consume: (chunk: string, end: boolean) => boolean | void) {
   if (!response.body) throw streamError("incomplete_stream");
-  const reader = response.body.getReader();
+  const reader = response.body.getReader!();
   let rejectAbort: (reason: unknown) => void = () => {};
   const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
   const abort = () => {
@@ -56,8 +57,8 @@ async function readBody(response: Response, signal: AbortSignal | undefined, con
   }
 }
 
-export async function readModelReply(response: Response, { signal, onDelta = () => {} }: { signal?: AbortSignal; onDelta?: (text: string) => void } = {}) {
-  const contentType = response.headers.get("content-type") ?? "";
+export async function readModelReply(response: ModelResponseTransport, { signal, onDelta = () => {} }: { signal?: AbortSignal; onDelta?: (text: string) => void } = {}) {
+  const contentType = response.headers!.get("content-type") ?? "";
   if (/application\/(?:[\w.+-]+\+)?json\b/i.test(contentType)) {
     let content = "";
     await readBody(response, signal, (chunk) => {

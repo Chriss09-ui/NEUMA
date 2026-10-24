@@ -1,8 +1,8 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { RequirementIssue, SystemCheck } from "../contracts/requirements.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
-interface SystemVerifierPorts { services?: { environment(): Promise<unknown> }; connections?: { snapshot(agentId: string): Promise<unknown> } }
-interface SystemVerificationInput { issues?: RequirementIssue[]; platform?: unknown; verificationContext?: unknown; signal?: AbortSignal | undefined }
+interface SystemVerifierPorts { services?: { environment?(): unknown | Promise<unknown> } | undefined; connections?: { snapshot?(agentId: string): Promise<unknown> } | undefined }
+interface SystemVerificationInput { issues?: { id: string; owner?: string; checks?: string[] | undefined }[]; platform?: unknown; verificationContext?: unknown; signal?: AbortSignal | undefined }
 import { INPUT_FRAMING_FACTS, measureConnectionFraming, normalizeVerificationContext } from "../applications/input-framing.mjs";
 
 export const SYSTEM_REQUIREMENT_CHECKS = Object.freeze([
@@ -107,7 +107,7 @@ export function createRequirementSystemVerifier({ services, connections }: Syste
       }
       if (checks.some((reference) => reference.startsWith("runtime.")) && !environmentRead) {
         environmentRead = true;
-        try { if (typeof services?.environment === "function") environment = await abortable(Promise.resolve().then(() => services.environment()), signal); }
+        try { if (typeof services?.environment === "function") environment = await abortable(Promise.resolve().then(() => services.environment!()), signal); }
         catch { signal?.throwIfAborted(); }
       }
       if (checks.includes("platform.runtime") && platform.version === 4 && !connectionMeasurement) {
@@ -116,7 +116,7 @@ export function createRequirementSystemVerifier({ services, connections }: Syste
           scope: "未测得当前连接封装，不能假定空配置或固定余量；这里只说明测量缺失，不否认平台通道。" };
         if (context && typeof connections?.snapshot === "function") {
           try {
-            const snapshot = await abortable(Promise.resolve().then(() => connections.snapshot(context.agentId)), signal);
+            const snapshot = await abortable(Promise.resolve().then(() => connections.snapshot!(context.agentId)), signal);
             connectionMeasurement = measureConnectionFraming(snapshot, context.agentId);
           } catch { signal?.throwIfAborted(); connectionMeasurement = { status: "unknown", reason: "snapshot_read_failed" }; }
         }

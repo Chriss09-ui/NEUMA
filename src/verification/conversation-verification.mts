@@ -1,8 +1,8 @@
 import type { JsonValue } from "../contracts/json.mjs";
 import type { AcceptanceItem, ConversationDecision } from "../contracts/verification.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
-import type { SessionFactory, PiSessionPort, NeumaTool } from "../runtime/pi-port.mjs";
-interface VerificationOptions { sessionFactory?: SessionFactory; config: ModelConfig; cwd: string; dataDir: string; acceptance: AcceptanceItem[];
+import type { VerificationSessionFactory, VerificationSessionPort, NeumaTool } from "../runtime/pi-port.mjs";
+interface VerificationOptions { sessionFactory?: VerificationSessionFactory; config?: ModelConfig; cwd?: string; dataDir?: string; acceptance: AcceptanceItem[];
   message: string; reply: string; toolEvidence?: unknown; signal?: AbortSignal | undefined }
 type ConversationObservation = { message: string; reply: string; toolEvidence: JsonValue }
 import { Ajv } from "ajv";
@@ -91,7 +91,7 @@ export async function verifyConversationTurn({ sessionFactory = createPiSession,
   const contextCharacters = Math.min(256000, Math.max(16000, Math.floor((knownModelLimits(config)?.contextWindow ?? 32768) / 2)));
   if (prompt.length + CONVERSATION_VERIFICATION_PROMPT.length > contextCharacters) return pending("observation_too_large");
   const schema = submissionSchema(frozen.map((item) => item.id)), validate = ajv.compile<{ results: ConversationDecision[] }>(schema);
-  let session: (PiSessionPort & { modelCallAccounting?: boolean }) | undefined, decision: ConversationDecision[] | undefined, structuredSubmissionFeedback: string | undefined, calls = 0, budgetExceeded = false, accepting = true;
+  let session: (VerificationSessionPort & { modelCallAccounting?: boolean }) | undefined, decision: ConversationDecision[] | undefined, structuredSubmissionFeedback: string | undefined, calls = 0, budgetExceeded = false, accepting = true;
   const charge = () => {
     signal?.throwIfAborted();
     if (calls >= MAX_MODEL_CALLS) { budgetExceeded = true; throw new InputError("对话验收模型额度已用完"); }
@@ -121,8 +121,8 @@ export async function verifyConversationTurn({ sessionFactory = createPiSession,
   const abort = () => { try { Promise.resolve(session?.abort?.()).catch(() => {}); } catch { /* Cancellation still propagates through the caller signal. */ } };
   try {
     signal?.addEventListener("abort", abort, { once: true });
-    session = await sessionFactory({ config, cwd, dataDir, systemPrompt: rolePrompt, customTools: [tool],
-      maxOutputTokens: reasoningModelOutputBudget(config, 4096), reasoningMode: "off", onModelCall: charge,
+    session = await sessionFactory({ config: config!, cwd: cwd!, dataDir: dataDir!, systemPrompt: rolePrompt, customTools: [tool],
+      maxOutputTokens: reasoningModelOutputBudget(config!, 4096), reasoningMode: "off", onModelCall: charge,
       rawInputValidators: { [tool.name]: ({ args }) => validate(args) ? { valid: true }
         : { valid: false, reason: "对话验收提交参数类型无效；须按公开结构提交，不执行隐式类型转换。" } },
       toolErrorResult: ({ toolName }) => toolName === tool.name ? { content: [{ type: "text", text: JSON.stringify({ submitted: false,

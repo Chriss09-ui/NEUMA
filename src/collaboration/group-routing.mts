@@ -30,7 +30,7 @@ export function routingTool(capture: (route: GroupRoute) => void): NeumaTool {
     } };
 }
 
-export function routedMemberIds(route: GroupRoute, participants: GroupMember[], history: GroupMessage[], sourceMessageId: string) {
+export function routedMemberIds(route: GroupRoute, participants: Pick<GroupMember, "id">[], history: {id?: string|undefined; taskId?: string|null|undefined; sender: {type:string;id?:string|undefined}}[], sourceMessageId: string) {
   const ids = participants.map((member) => member.id);
   if (route.mode === "all") return ids;
   if (route.mode === "named") {

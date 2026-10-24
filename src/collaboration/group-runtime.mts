@@ -94,7 +94,7 @@ async function routeReply(service: CollaborationService, groupId: string, taskId
     const payload = { goal: task.goal, conversationId: groupConversationId(task), triggeringMessage: source, recentMessages: history,
       members: (await service.groupMemberCards(groupId)).map(({ id, name, ready }) => ({ id, name, ready })),
       instruction: "只确定这条消息希望谁亲自回复；default/all/others/named/clarify。all 不能手写子集，不能把借用模型的成员排除。不要生成成员答复。" };
-    await service.agents.executeCollaboration({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion,
+    await service.agents.executeCollaboration!({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion,
       role: "routing", taskAllowNetwork: false, sessionId: randomUUID(), allowBusinessTools: false, maxTurns: 3,
       scope: { groupId, taskId }, systemContext: GROUP_ROUTING_SYSTEM, message: JSON.stringify(boundedContext(payload)),
       customTools: [routingTool((value) => { route = value; }), contextTool(payload)] }, () => {}, { signal });
@@ -197,7 +197,7 @@ async function negotiate(service: CollaborationService, groupId: string, taskId:
           triggeringMessage: currentRecord.messages.findLast((value) => value.taskId === taskId && ["user", "main"].includes(value.sender?.type)) ?? null,
           instruction: "先判断是直接对话还是需要真实执行的任务。回复对象已由平台 replyRouting 固定，成员不能用 replyAudience 改名单。普通问候、介绍、可直接回答的问题，用 conversation 提交以我/你说话的本人 reply，不造工作或声称业务完成；确实缺信息用 replyStatus:needs_input 提出具体问题。即便其他人也被点名，你也只写自己本人的答复；不要替同伴解释、推测未就绪、回“用户喊你”或说自己不叫人。对另一成员明确提问、交接或要求确认时，填写 replyRequest:{recipientId,kind:question|handoff|confirmation}，平台会安排他本人公开回复；只有提及则只填 replyRecipientId。任务才自愿提出互补贡献，愿意整合可支持自己；第二轮结合意向形成一致选择。" };
         const taskAllowNetwork = groupTaskAllowsNetwork(currentRecord, currentTask);
-        await service.agents.executeCollaboration({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion, taskAllowNetwork, sessionId: randomUUID(), allowBusinessTools: false, maxTurns: 3,
+        await service.agents.executeCollaboration!({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion, taskAllowNetwork, sessionId: randomUUID(), allowBusinessTools: false, maxTurns: 3,
           scope: { groupId, taskId }, systemContext: `${GROUP_SYSTEM}\n这是第 ${round} 轮交互判断与认领协商，仅可读取成员能力卡、分页读取本轮资料并使用 submit_group_intent 提交意向或直接对话回复，不能执行业务。成员卡的 callable 不表示认领轮拥有业务权限。`,
           message: JSON.stringify(boundedContext(payload)),
           customTools: [intentTool((value) => { intent = value; }), contextTool(payload), memberCapabilityTool(service, { groupId, taskId, agentId: member.id, generation, signal })] }, () => {}, { signal });
@@ -398,7 +398,7 @@ async function executeJob(service: CollaborationService, groupId: string, taskId
         members: prompt.members, triggeringMessage: input, replyRouting: input.replyRouting,
         recentMessages: groupConversationMessages(record, task, publicGroupMessages(record)).filter((value) => value.seq <= input.seq),
         instruction: "判断 triggeringMessage 这条最新原话：点名打招呼、介绍或普通问答用 conversation，直接提交你本人的 reply；不要把它当作原业务的补充，也不要替同伴传话。确实修改或继续原业务的指令才用 task。此处只读判断，不能执行或声称已执行业务。" };
-      const output = await service.agents.executeCollaboration({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion,
+      const output = await service.agents.executeCollaboration!({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion,
         taskAllowNetwork: false, sessionId: randomUUID(), scope: { groupId, taskId }, maxTurns: Math.min(3, reserved), allowBusinessTools: false,
         systemContext: GROUP_SYSTEM, message: JSON.stringify(boundedContext(context)),
         customTools: [intentTool((value) => { intent = value; }), contextTool(context),
@@ -425,7 +425,7 @@ async function executeJob(service: CollaborationService, groupId: string, taskId
     }
     if (reserved <= intentTurns) throw new InputError("本轮已达到自动协作次数限制");
     turns = reserved;
-    const output = await service.agents.executeCollaboration({ agentId: job.agentId, revision: member.revision, capabilityVersion: member.capabilityVersion, taskAllowNetwork: groupTaskAllowsNetwork(record, task),
+    const output = await service.agents.executeCollaboration!({ agentId: job.agentId, revision: member.revision, capabilityVersion: member.capabilityVersion, taskAllowNetwork: groupTaskAllowsNetwork(record, task),
       sessionId: randomUUID(), scope: { groupId, taskId }, maxTurns: reserved - intentTurns, systemContext: GROUP_SYSTEM, allowBusinessTools: job.kind !== "claim",
       message: JSON.stringify(boundedContext(prompt)), customTools: [...groupTools(service, { groupId, taskId, agentId: job.agentId, generation, job, signal, capture: (value) => { submitted = value; } }), contextTool(prompt)] }, () => {}, { signal });
     turns = intentTurns + Math.max(1, output.turns ?? 1);
@@ -492,7 +492,7 @@ async function answerPublicReplyQueue(service: CollaborationService, groupId: st
         triggeringMessage: record.messages.find((value) => value.id === request.sourceMessageId),
         replyRequest: request, recentMessages: groupConversationMessages(record, task, publicGroupMessages(record)),
         instruction: "这是对你本人的公开提问、交接或确认请求。直接用我/你回应来源成员，提交 submit_group_reply。收到确认后结束；必要的新问题才请求下一位。没有业务工具，不能冒充已执行实际工作。" };
-      const output = await service.agents.executeCollaboration({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion,
+      const output = await service.agents.executeCollaboration!({ agentId: member.id, revision: member.revision, capabilityVersion: member.capabilityVersion,
         taskAllowNetwork: false, sessionId: randomUUID(), scope: { groupId, taskId }, allowBusinessTools: false,
         maxTurns: request.reservedTurns, systemContext: PUBLIC_REPLY_SYSTEM, message: JSON.stringify(boundedContext(prompt)),
         customTools: [replyTool((value) => { submitted = value; }), contextTool(prompt)] }, () => {}, { signal });

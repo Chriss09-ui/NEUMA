@@ -1,3 +1,6 @@
+import type {ExecFileOptions} from "node:child_process";
+type FolderRun=(file:string,args:readonly string[],options:ExecFileOptions & {env:NodeJS.ProcessEnv})=>Promise<{stdout:string}>;
+type FolderInspect=(path:string)=>Promise<{isDirectory():boolean}>;
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -15,7 +18,7 @@ on error number -128
 end try`;
 
 export function createProjectFolderPicker({ platform = process.platform, run = runFile, inspect = stat, helperPath,
-  helper = requireProjectHelper }: { platform?: NodeJS.Platform; run?: typeof runFile; inspect?: typeof stat; helperPath?: string; helper?: typeof requireProjectHelper } = {}) {
+  helper = requireProjectHelper }: { platform?: NodeJS.Platform; run?: FolderRun; inspect?: FolderInspect; helperPath?: string; helper?: typeof requireProjectHelper } = {}) {
   let selecting = false;
   return async ({ signal, prompt = "选择要添加到 NEUMA 的项目文件夹" }: { signal?: AbortSignal | undefined; prompt?: string } = {}) => {
     signal?.throwIfAborted();

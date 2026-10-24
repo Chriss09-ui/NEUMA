@@ -1,8 +1,14 @@
 import { checkedConsultation } from "../requirements/consultation-storage.mjs";
 import type { MainRequirement, MainRecord, MainSavedRequirement } from "../contracts/main.mjs";
 import type { Providers } from "../requirements/requirement-provider-port.mjs";
-import type { PrototypeAgents } from "../agents/agent-prototype.mjs";
-type MainRequirementAgents = Pick<PrototypeAgents, "getRequirements" | "get" | "getRequirementConsultation" | "getRequirementHandoff" | "saveRequirements">;
+import type { Consultation, RequirementHandoff } from "../contracts/requirements.mjs";
+export interface MainRequirementAgents {
+  getRequirements?(): Promise<{ requirements: MainSavedRequirement[] }>;
+  get?(agentId: string): Promise<{ name: string; draft?: unknown } | null>;
+  getRequirementConsultation?(agentId: string): Promise<Consultation | null>;
+  getRequirementHandoff?(agentId: string): Promise<RequirementHandoff | null>;
+  saveRequirements?(agentId: string, input: unknown, options?: { confirmation?: unknown; requestId?: unknown; consultation?: unknown }): Promise<{ requirement?: MainSavedRequirement | null; [key: string]: unknown }>;
+}
 type TurnOptions = NonNullable<Parameters<typeof processTurn>[2]>;
 type AdvanceOptions = Pick<TurnOptions, "signal" | "onProgress" | "requestId" | "platform" | "research"> & { agents?: MainRequirementAgents; evidenceMessages?: Parameters<typeof processTurn>[0]["evidenceMessages"] };
 import { createHash } from "node:crypto";
@@ -35,7 +41,7 @@ export function requirementContext(requirement: MainRequirement | null | undefin
     ...(savedRequirement ? { savedRequirement: structuredClone(savedRequirement), requirement: structuredClone(savedRequirement) } : {}) };
 }
 
-export function rememberRequirement(record: MainRecord, requirement: MainRequirement) {
+export function rememberRequirement(record: Pick<MainRecord, "requirement" | "requirements" | "context">, requirement: MainRequirement) {
   record.requirements ??= [];
   const index = record.requirements.findIndex((value) => value.agentId === requirement.agentId);
   if (index < 0) record.requirements.push(structuredClone(requirement));
@@ -44,7 +50,7 @@ export function rememberRequirement(record: MainRecord, requirement: MainRequire
   record.context = requirementContext(requirement);
 }
 
-export async function prepareRequirement({ record, conversationId, mutationId, agentId, mode = "continue" }: { record: MainRecord; conversationId: string; mutationId: string; agentId?: string | undefined; mode?: string }, agents: MainRequirementAgents): Promise<MainRequirement> {
+export async function prepareRequirement({ record, conversationId, mutationId, agentId, mode = "continue" }: { record: Pick<MainRecord, "requirement" | "requirements">; conversationId: string; mutationId: string; agentId?: string | undefined; mode?: string }, agents: MainRequirementAgents): Promise<MainRequirement> {
   if (!["new", "continue", "edit"].includes(mode)) throw new InputError("请选择新建、继续或修改需求");
   if (mode === "new" && agentId) throw new InputError("新建需求不能覆盖已有 Agent");
   const existing = agentId ? (record.requirements ?? []).find((value) => value.agentId === agentId) : record.requirement;
@@ -60,7 +66,7 @@ export async function prepareRequirement({ record, conversationId, mutationId, a
   const targetId = agentId ?? (refresh ? existing.agentId : undefined);
   let draft = emptyDraft(), savedRequirement: MainSavedRequirement | undefined;
   if (targetId) {
-    const result = await agents.getRequirements();
+    const result = await agents.getRequirements!();
     savedRequirement = result.requirements.find((value) => value.id === targetId);
     if (!savedRequirement) {
       const agent = await agents.get?.(targetId);
@@ -96,7 +102,7 @@ export async function advanceRequirement(requirement: MainRequirement, message: 
     updatedAt: new Date().toISOString() };
   let action, source;
   if (result.confirmed) {
-    const saved = await agents!.saveRequirements(next.agentId, { name: next.draft.name.value || "我的 Agent", draft: next.draft },
+    const saved = await agents!.saveRequirements!(next.agentId, { name: next.draft.name.value || "我的 Agent", draft: next.draft },
       { confirmation: result.confirmation, requestId: result.confirmation!.requestId, consultation: result.consultation });
     if (!saved?.requirement || saved.requirement.id !== next.agentId) throw new InputError("需求未能保存到对应 Agent，请重试；不会创建重复 Agent");
     next.savedRequirement = structuredClone(saved.requirement);

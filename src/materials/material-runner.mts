@@ -1,7 +1,7 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import type { MaterialRequest } from "./material-port.mjs";
+import type { ChildProcessWithoutNullStreams, SpawnOptions } from "node:child_process";
 import { objectFields } from "../runtime/type-boundary.mjs";
-interface Task { request: MaterialRequest; signal?: AbortSignal | undefined; resolve(value: unknown): void; reject(error: unknown): void; started: boolean; abort(): void; stop(error: Error): void; done: Promise<void>; finish(): void }
+export type MaterialSpawner = (command: string, args: readonly string[], options: SpawnOptions & { stdio: ["pipe", "pipe", "pipe"] }) => ChildProcessWithoutNullStreams;
+interface Task { request: unknown; signal?: AbortSignal | undefined; resolve(value: unknown): void; reject(error: unknown): void; started: boolean; abort(): void; stop(error: Error): void; done: Promise<void>; finish(): void }
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { MAX_PARSER_RESPONSE, materialFailure } from "./material-formats.mjs";
@@ -10,13 +10,13 @@ const parserEntry = fileURLToPath(new URL("./material-parser-child.mjs", import.
 const cancelled = () => new DOMException("材料读取已停止", "AbortError");
 
 export class MaterialRunner {
-  concurrency: number; timeoutMs: number; entry: string; spawnProcess: typeof spawn; queue: Task[]; active: Set<Task>; closing: Promise<void[]> | null;
-  constructor({ concurrency = 2, timeoutMs = 60_000, entry = parserEntry, spawnProcess = spawn } = {}) {
+  concurrency: number; timeoutMs: number; entry: string; spawnProcess: MaterialSpawner; queue: Task[]; active: Set<Task>; closing: Promise<void[]> | null;
+  constructor({ concurrency = 2, timeoutMs = 60_000, entry = parserEntry, spawnProcess = spawn }: { concurrency?: number; timeoutMs?: number; entry?: string; spawnProcess?: MaterialSpawner } = {}) {
     this.concurrency = concurrency; this.timeoutMs = timeoutMs; this.entry = entry; this.spawnProcess = spawnProcess;
     this.queue = []; this.active = new Set(); this.closing = null;
   }
 
-  run(request: MaterialRequest, { signal }: { signal?: AbortSignal | undefined } = {}): Promise<unknown> {
+  run(request: unknown, { signal }: { signal?: AbortSignal | undefined } = {}): Promise<unknown> {
     if (signal?.aborted) return Promise.reject(cancelled());
     return new Promise((resolve, reject) => {
       const task: Task = { request, signal, resolve, reject, started: false, abort: () => {}, stop: () => {}, done: Promise.resolve(), finish: () => {} };

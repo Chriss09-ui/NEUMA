@@ -138,7 +138,7 @@ const validTestAuthorization = (input: unknown): input is TestAuthorization => {
   && Number.isFinite(Date.parse(value.authorizedAt)) && new Date(value.authorizedAt).toISOString() === value.authorizedAt; };
 
 // Maintenance-only: an explicit user request after a fix, never issued by the build endpoint.
-export function createArchitectureReviewTestRetry(input: unknown, authorization: unknown): ReviewRetryCheckpoint {
+export function createArchitectureReviewTestRetry(input: unknown, authorization?: unknown): ReviewRetryCheckpoint {
   const record = objectFields(input);
   const previous = readArchitectureReviewRetry(record), progress = readReviewProgressCheckpoint(record);
   const revision = readArchitectureReviewRevision(record);

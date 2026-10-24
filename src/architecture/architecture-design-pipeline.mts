@@ -11,7 +11,7 @@ interface DesignStageState { key: string; modelCalls: number; sessionStartCalls:
 export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
   revisionHash: string | null; assignmentHash: string | null; assemblyVersion?: 2; blueprint: DesignStageState; modules: DesignStageState[]; integration: DesignStageState; hash: string;
   repair?: { stage: DesignStage; key: string; additionalCalls: number; sourceVersion: number; sourceHash: string } }
-export type DesignPipelineContext = ArchitectureContext & StageSchemaOptions & { requirements: RequirementItem[]; draft?: unknown; requirement?: unknown; previousDesign?: unknown };
+export type DesignPipelineContext = Omit<ArchitectureContext, "draft"> & StageSchemaOptions & { requirements: RequirementItem[]; draft?: unknown; requirement?: unknown; previousDesign?: unknown };
 interface RevisionIssue { blocking?: boolean; candidatePaths?: string[]; candidateFields?: string[] }
 interface DesignRevision { candidate: ArchitectureDesign | CandidateDraft; issues: RevisionIssue[]; candidateHash?: unknown }
 export interface DesignStageRole {

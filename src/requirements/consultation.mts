@@ -28,7 +28,7 @@ export function consultationEvidenceHash(consultation: Consultation | null | und
   return contentHash((consultation?.evidenceMessages ?? []).filter((entry) => ["user", "measurement"].includes(entry.role)));
 }
 
-export function mergeConsultationIssues(previous: RequirementIssue[] = [], handoff?: RequirementHandoff | null): RequirementIssue[] {
+export function mergeConsultationIssues(previous: RequirementIssue[] = [], handoff?: Pick<RequirementHandoff, "id" | "issues" | "resolved"> | null): RequirementIssue[] {
   const issues = new Map(previous.map((issue) => [issue.id, copy(issue)]));
   if (handoff && !handoff.resolved) for (const issue of handoff.issues ?? []) {
     const prior = issues.get(issue.id);
@@ -440,7 +440,7 @@ export function validateRequirementReceipt(draft: unknown, input: unknown) {
     && receipt.requirementHash === substantiveRequirementHash(draft) && typeof receipt.assessmentId === "string" && ID.test(receipt.assessmentId));
 }
 
-export function claimRequirementHandoff<T extends RequirementState>(requirement: T, handoff: RequirementHandoff) {
+export function claimRequirementHandoff<T extends Pick<RequirementState, "draft" | "status" | "confirmed" | "version"> & Partial<Pick<RequirementState, "consultation" | "question" | "lastQuestion" | "confirmationQuestion">>>(requirement: T, handoff: RequirementHandoff) {
   if (!handoff || !ID.test(handoff.id) || handoff.requirementHash !== substantiveRequirementHash(requirement.draft)
     || !Number.isInteger(handoff.architectureVersion) || handoff.architectureVersion < 1 || !Array.isArray(handoff.issues)
     || !handoff.issues.length) throw new Error("需求交接已过期或格式无效，请刷新后重试");

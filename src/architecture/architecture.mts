@@ -1,3 +1,4 @@
+import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import { feedbackLedger, feedbackFindings } from "./architecture-feedback-port.mjs";
 import type { ArchitectureOptions, ArchitectureRoleOptions, ArchitectureDesignOptions, StoredArchitectureRecord, Definition, ModuleProposal, ModuleConsultation, ArchitectureDiagnostic, ArchitectureRoleDiagnostic, HandoffResult } from "./architecture-controller-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
@@ -5,9 +6,8 @@ import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import type { ArchitectureDesign, ArchitectureReview, ArchitectureIssue, RequirementItem, ArchitectureContext, ArchitectureEvidenceContext, ReviewDiagnosticIssue, ReviewDiagnostic, EvidenceItem, Capability, ArchitectureDecision } from "../contracts/architecture.mjs";
 import type { RequirementDraft, Consultation, RequirementIssue, EvidenceMessage } from "../contracts/requirements.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
-import type { SessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress, PiSessionOptions, RawToolInput } from "../runtime/pi-port.mjs";
+import type { AssistantSessionMessage, SessionMessage, SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress, PiSessionOptions, RawToolInput } from "../runtime/pi-port.mjs";
 import type { AgentStoragePort } from "../runtime/storage-port.mjs";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { checkedStoredArchitectureRecord, checkedArchitectureDiagnostic } from "./architecture-storage-boundary.mjs";
 import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
 import { InputError, ProviderError } from "../requirements/core.mjs";
@@ -159,9 +159,10 @@ class ArchitectureError extends ProviderError {}
 
 const ARCHITECTURE_THOUGHT_ROLES = new Set(["designer", "reviewer", "specialist"]);
 
-export function architectureThoughtProgress(event: AgentSessionEvent, role: string) {
+export function architectureThoughtProgress(input: unknown, role: string) {
+  const event = objectFields(input);
   if (!ARCHITECTURE_THOUGHT_ROLES.has(role)) return null;
-  const update = event?.type === "message_update" ? event.assistantMessageEvent : null;
+  const update = event?.type === "message_update" ? objectFields(event.assistantMessageEvent) : null;
   if (!update) return null;
   if (update.type === "thinking_start") return { type: "architecture_thought", role, break: true };
   if (update.type !== "thinking_delta" || typeof update.delta !== "string") return null;
@@ -715,8 +716,8 @@ interface StagedOptions { record: StoredArchitectureRecord; context: Architectur
 type RevisionContext = { requirements: RequirementItem[]; platformContext: { platformContractVersion: number; platformSnapshot: ReturnType<typeof createPlatformSnapshot>; platformHash: string }; deferred: Awaited<ReturnType<typeof architectureVerificationContext>>; confirmedRequirementContext: Awaited<ReturnType<typeof architectureConfirmedContext>>; runtimeCapabilities: ReturnType<typeof runtimeCapabilityContract>; evidenceHistory: StoredArchitectureRecord[] };
 
 export class ArchitectureDesigner {
-  config: ModelConfig; cwd: string; dataDir: string; sessionFactory: SessionFactory; handoffSessionFactory: SessionFactory; fidelitySessionFactory: SessionFactory;
-  research: ReturnType<typeof createTechnicalResearch>; web: WebCapabilities; storage: AgentStoragePort;
+  config: ModelConfig; cwd: string; dataDir: string; sessionFactory: SessionFactory; handoffSessionFactory: VerificationSessionFactory; fidelitySessionFactory: VerificationSessionFactory;
+  research: NonNullable<ArchitectureOptions["research"]>; web: WebCapabilityPort; storage: AgentStoragePort;
   records: Map<string, StoredArchitectureRecord>; persistence: Promise<unknown>; ready: Promise<void>;
   constructor({ config, cwd, dataDir, sessionFactory = createPiSession, handoffSessionFactory = sessionFactory, fidelitySessionFactory = sessionFactory, research = createTechnicalResearch(), storage = new AgentStorage({ dataDir }), web = new WebCapabilities() }: ArchitectureOptions) {
     this.config = config; this.cwd = cwd; this.dataDir = dataDir; this.sessionFactory = sessionFactory; this.research = research;
@@ -936,6 +937,7 @@ export class ArchitectureDesigner {
   }
 
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;
+  async role<T>(options: ArchitectureRoleOptions<T> & {allowHandoff?:false}):Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T>): Promise<T | HandoffResult>;
   async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, onFidelity, onDiagnostics, editableDesign,
     onMainReviewValidated, onMainReviewBudget, resumeMainReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
@@ -1005,7 +1007,7 @@ export class ArchitectureDesigner {
     let modelStopReason: string | undefined, outputTokens = 0, outputUsageReceipts = 0;
     const requestedMaxOutputTokens = maxOutputTokens ?? architectureModelOutputBudget(this.config, role);
     const readProgress = { calls: 0, requests: 0, found: 0, missing: 0, empty: 0, more: 0, repeated: 0 };
-    let localRevisions = 0, submissionContinuations = 0, stagedDrafts = 0, draftSubmissions = 0, structuredSubmissions = 0, currentPromptAssistant: Extract<PiSessionPort["messages"][number], { role: "assistant" }> | null = null, savedPartChanges = 0;
+    let localRevisions = 0, submissionContinuations = 0, stagedDrafts = 0, draftSubmissions = 0, structuredSubmissions = 0, currentPromptAssistant: AssistantSessionMessage | null = null, savedPartChanges = 0;
     const readHistory: UnknownRecord[] = [], seenReads = new Set<string>(), unsubmittedDraftDiagnostics: NonNullable<ReturnType<ReturnType<typeof createArchitectureUnsubmittedDraft>["diagnostic"]>>[] = [];
     const modelContractHash = designHash({ model: this.config.model ?? null, schema: parameters,
       ...(role === "reviewer" ? { protocolVersion: ARCHITECTURE_REVIEW_PROTOCOL_VERSION } : {}) });
@@ -1101,7 +1103,7 @@ export class ArchitectureDesigner {
       ...(scopeFailure?.fidelityDiagnostic ? { fidelityDiagnostic: structuredClone(scopeFailure.fidelityDiagnostic) } : {}),
       ...(onMainReviewValidated ? { mainReviewCheckpointEligible: !truncated && !failed } : {}),
       ...(fidelityDecision ? { requirementFidelity: { contextHash: fidelityDecision.contextHash, verdict: fidelityDecision.verdict, modelCalls: fidelityDecision.modelCalls } } : {}) });
-    const abort = () => { void session?.abort().catch(() => {}); };
+    const abort = () => { void session?.abort()!.catch(() => {}); };
     const charge = (event: { retryAttempt?: number; purpose?: string } = {}) => {
       signal?.throwIfAborted();
       assertProgressWritable();
@@ -1486,7 +1488,7 @@ export class ArchitectureDesigner {
       if (resumeStage && payload.stageRepair && role === "specialist" && submissionRepair) {
         const previousFailure = session.messages?.findLast(message => message.role === "toolResult" && message.toolName === submitName);
         if (previousFailure?.role === "toolResult" && previousFailure.isError) {
-          const previousCall = session.messages.filter((message): message is Extract<PiSessionPort["messages"][number], { role: "assistant" }> => message.role === "assistant" && message.stopReason === "toolUse")
+          const previousCall = session.messages!.filter((message): message is AssistantSessionMessage => message.role === "assistant" && message.stopReason === "toolUse")
             .flatMap(message => message.content ?? []).findLast(part => part.type === "toolCall"
               && part.name === submitName && part.id === previousFailure.toolCallId);
           if (previousCall?.type === "toolCall") {
@@ -1503,23 +1505,23 @@ export class ArchitectureDesigner {
         const thought = architectureThoughtProgress(event, role);
         if (thought) onProgress?.(thought);
         if (event.type === "message_end" && event.message?.role === "assistant") {
-          if (["stop", "length", "toolUse", "error", "aborted"].includes(event.message.stopReason)) modelStopReason = event.message.stopReason;
+          if (["stop", "length", "toolUse", "error", "aborted"].includes(event.message.stopReason!)) modelStopReason = event.message.stopReason!;
           const output = event.message.usage?.output;
-          if (Number.isSafeInteger(output) && output > 0 && Number.isSafeInteger(outputTokens + output)) {
-            outputTokens += output; outputUsageReceipts++;
+          if (Number.isSafeInteger(output) && output! > 0 && Number.isSafeInteger(outputTokens + output!)) {
+            outputTokens += output!; outputUsageReceipts++;
           }
         }
         if ((event.type === "message_end" || event.type === "turn_end") && event.message?.role === "assistant") currentPromptAssistant = event.message;
         if ((event.type === "tool_execution_start" || event.type === "tool_execution_end") && event.toolName === submitName) {
-          attempted(event.toolCallId);
+          attempted(event.toolCallId!);
           if (event.type === "tool_execution_end" && event.isError) {
-            for (const content of event.result?.content ?? []) if (content.type === "text") rejected(content.text, true);
+            for (const content of event.result?.content ?? []) if (content.type === "text") rejected(content.text!, true);
           }
         }
         if (event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "length") truncated = true;
         if (event.type === "auto_retry_end" && !event.success) { failed = true; retryError = event.finalError || retryError; }
         if (event.type === "auto_retry_start") {
-          retries = Number.isInteger(event.attempt) && event.attempt >= 0 && event.attempt <= 5 ? event.attempt : retries;
+          retries = Number.isInteger(event.attempt) && event.attempt! >= 0 && event.attempt! <= 5 ? event.attempt! : retries;
           retryError = event.errorMessage || retryError;
           onProgress?.({ type: "status", phase: role, label: "模型请求未完成，正在重试…" });
         }

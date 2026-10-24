@@ -164,9 +164,9 @@ function directoryName(value: unknown) {
 }
 
 export class SkillManager {
-  dataDir: string; home: string; getProjects: () => Promise<unknown>; metadataDir: string; custom: { path: string }[]; trash: SkillTrashRecord[]; loaded: boolean; catalog: SkillCatalog | null; queue: Promise<unknown>; discoveredProtected: Set<string>; protectionWarnings: string[]; protectionIncomplete: boolean;
+  dataDir: string; home: string; getProjects: () => unknown | Promise<unknown>; metadataDir: string; custom: { path: string }[]; trash: SkillTrashRecord[]; loaded: boolean; catalog: SkillCatalog | null; queue: Promise<unknown>; discoveredProtected: Set<string>; protectionWarnings: string[]; protectionIncomplete: boolean;
 
-  constructor({ dataDir, home = homedir(), getProjects = async () => [] }: { dataDir: string; home?: string; getProjects?: () => Promise<unknown> }) {
+  constructor({ dataDir, home = homedir(), getProjects = async () => [] }: { dataDir: string; home?: string; getProjects?: () => unknown | Promise<unknown> }) {
     this.dataDir = resolve(dataDir); this.home = resolve(home); this.getProjects = getProjects;
     this.metadataDir = join(this.dataDir, "skills");
     this.custom = []; this.trash = []; this.loaded = false; this.catalog = null; this.queue = Promise.resolve();

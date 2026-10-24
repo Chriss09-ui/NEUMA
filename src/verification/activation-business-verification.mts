@@ -9,11 +9,11 @@ import { objectFields, errorField } from "../runtime/type-boundary.mjs";
 interface HostInput { capability: string; args: unknown; signal?: AbortSignal | undefined }
 export type ActivationBusinessHostFactory = (options: { storage: AgentStorage; store: ApplicationTaskStore; agentId: string; workspaceRoot: string;
   scopeId: string; taskId: string; stateVersion: number; signal?: AbortSignal | undefined }) => Promise<(input: HostInput) => Promise<unknown>> | ((input: HostInput) => Promise<unknown>);
-interface ActivationCaseResult { caseId: string; caseHash: string; source: string; actionId: string | null; status: string;
+export interface ActivationCaseResult { caseId: string; caseHash: string; source: string; actionId: string | null; status: string;
   calls: { capability: string; argsHash: string; mocked: boolean }[]; artifacts: { path: string; size: unknown; sha256: unknown; downloadedSha256: string }[];
   acceptanceId?: string; developmentAcceptanceId?: string; reason?: string; admission?: unknown; actionExecuted?: boolean; scopeId?: string;
   workflow?: unknown; actual?: unknown; assertionsHash?: string; assertionCount?: number; failedAssertionPaths?: string[] }
-interface ActivationBusinessReport { schemaVersion: number; mode: string; scope: string; acceptanceId: string; bindingHash: string; codeHash: string | null;
+export interface ActivationBusinessReport { schemaVersion: number; mode: string; scope: string; acceptanceId: string; bindingHash: string; codeHash: string | null;
   planHash: string; results: ActivationCaseResult[]; status: AcceptanceStatus; executionScope?: string; reason?: string }
 import { randomUUID, createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -59,8 +59,9 @@ function runner(services: unknown, rootDir: string) {
     sandboxPath: services.sandboxPath, dockerPath: services.docker.dockerPath, runtimeStore: services.runtimeStore, fetchImpl: services.fetchImpl });
 }
 
+export type ActivationBusinessPlan = Pick<DevelopmentPlan,"schemaVersion"|"runtime"|"entrypoint"|"application"|"cases"|"activationCases"|"activationChecks">;
 export async function verifyActivationBusiness({ executor, services, agentId, snapshot, plan, acceptanceId, bindingHash,
-  createHost, signal, temporaryDir = tmpdir() }: { executor: Pick<DevelopmentExecutor, "runAction">; services?: unknown; agentId: string; snapshot: DevelopmentSnapshot; plan: DevelopmentPlan; acceptanceId: string; bindingHash: string; createHost?: ActivationBusinessHostFactory | undefined; signal?: AbortSignal | undefined; temporaryDir?: string }) {
+  createHost, signal, temporaryDir = tmpdir() }: { executor: Pick<DevelopmentExecutor, "runAction">; services?: unknown; agentId: string; snapshot:Pick<DevelopmentSnapshot,"path"|"hash"|"files">; plan: ActivationBusinessPlan; acceptanceId: string; bindingHash: string; createHost?: ActivationBusinessHostFactory | undefined; signal?: AbortSignal | undefined; temporaryDir?: string }) {
   const report: ActivationBusinessReport = { schemaVersion: 1, mode: "actual", scope, acceptanceId, bindingHash, codeHash: snapshot?.hash ?? null,
     planHash: acceptanceEvidenceHash(plan), results: [], status: "not_run" };
   let directory: string | undefined, serviceRunner: ManagedServiceManager | null | undefined;

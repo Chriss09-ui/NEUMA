@@ -2,7 +2,7 @@ import type { DependencyLock, ServiceManifest } from "../contracts/service.mjs";
 import type { ProgressOptions, RuntimeEnvironment, ReadyEnvironment, InstalledDependencies } from "./service-port.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 interface RuntimeLock { version: string; url: string; sha256: string; maxBytes?: number; release?: string; platform?: string; arch?: string }
-interface RuntimeOptions { rootDir?: string; nodePath?: string; platform?: NodeJS.Platform; arch?: string; fetchImpl?: typeof fetch; pythonLock?: RuntimeLock; sandboxPath?: string }
+interface RuntimeOptions { rootDir?: string | undefined; nodePath?: string; platform?: NodeJS.Platform; arch?: string; fetchImpl?: typeof fetch; pythonLock?: RuntimeLock; sandboxPath?: string }
 import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
@@ -128,7 +128,7 @@ export class ServiceRuntimeStore {
       const environment = await this.environment("python"); if (!environment.available) throw new ServiceError(environment.reason); await onProgress({ status: "ready", version: environment.version }); return environment;
     } finally { await rm(staging, { recursive: true, force: true }); }
   }
-  async prepareDependencies(manifest: ServiceManifest, environment: ReadyEnvironment | null, { signal, onProgress = () => {} }: ProgressOptions = {}): Promise<InstalledDependencies> {
+  async prepareDependencies(manifest: Pick<ServiceManifest, "language" | "host" | "dependencies">, environment: ReadyEnvironment | null, { signal, onProgress = () => {} }: ProgressOptions = {}): Promise<InstalledDependencies> {
     const key = serviceHash({ language: manifest.language, host: manifest.host, packages: manifest.dependencies.packages });
     const parent = await privateDirectory(join(this.rootDir, "dependencies")), final = join(parent, key);
     const stored = await readJSON(join(final, "lock.json")), existing = stored ? objectFields(stored) : null;
@@ -140,7 +140,7 @@ export class ServiceRuntimeStore {
     const pending = this.installDependencies(manifest, environment, { parent, final, key, signal, onProgress }); this.pending.set(key, pending);
     try { return await pending; } finally { this.pending.delete(key); }
   }
-  async installDependencies(manifest: ServiceManifest, environment: ReadyEnvironment | null, { parent, final, key, signal, onProgress }: ProgressOptions & { parent: string; final: string; key: string }): Promise<InstalledDependencies> {
+  async installDependencies(manifest: Pick<ServiceManifest, "language" | "host" | "dependencies">, environment: ReadyEnvironment | null, { parent, final, key, signal, onProgress }: ProgressOptions & { parent: string; final: string; key: string }): Promise<InstalledDependencies> {
     const stage = await privateDirectory(join(parent, `install-${randomUUID()}`)), packages = await privateDirectory(join(stage, "packages"));
     try {
       for (const pkg of manifest.dependencies.packages) {

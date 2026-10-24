@@ -4,7 +4,7 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema, DiagnosticHint } from "../contracts/tools.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { RequirementItem } from "../contracts/architecture.mjs";
-import type { PiSessionPort, PiSessionOptions, SessionFactory, SessionStorage, NeumaTool } from "../runtime/pi-port.mjs";
+import type { AssistantSessionMessage, SessionMessage, PiSessionPort, PiSessionOptions, VerificationSessionFactory, VerificationSessionPort, SessionStorage, NeumaTool } from "../runtime/pi-port.mjs";
 import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
 interface FidelityContext extends UnknownRecord { requirements: RequirementItem[]; candidate?: unknown }
 interface FidelityCheck { requirementId: string; admissionPreserved: boolean; deliveryPreserved: boolean; newUnconfirmedRestriction: boolean }
@@ -15,9 +15,10 @@ interface FidelityWireValue extends Omit<FidelityValue, "restrictions"> { restri
 interface FidelityIssue extends DiagnosticHint { path: string; reason: string; remedy?: string | undefined; referenceId?: string; limitBytes?: number }
 interface ReferenceRequest { requirementId: string; candidateMissing: boolean; candidatePath: string; index: number; source: string; quoteAtSelectedSource: string }
 interface FidelityFeedback { valid: boolean; stage: "schema" | "semantic"; total: number; truncated: boolean; issues: FidelityIssue[]; referenceHints?: ReturnType<typeof referenceFeedback> }
-interface FidelityDiagnostic extends UnknownRecord { schemaVersion: 1; contextHash: string; modelCalls: number; submissionAttempts: number; schemaRejections: number; semanticRejections: number; lastSubmission?: FidelityFeedback }
-interface FidelityState { contextHash: string; schemaHash: string; sessionFile: string; sessionBindingHash: string; calls: number; diagnostic: UnknownRecord; contextVersion?: "full-v2" }
-interface FidelityOptions { context: unknown; sessionFactory?: SessionFactory; config: ModelConfig; cwd: string; dataDir: string; charge?: (event: Partial<Parameters<NonNullable<PiSessionOptions["onModelCall"]>>[0]>) => unknown | Promise<unknown>; signal?: AbortSignal | undefined; sessionStorage?: SessionStorage; progress?: FidelityState | null; onProgress?: (state: FidelityState) => unknown | Promise<unknown>; historyUnavailable?: boolean }
+export interface FidelityDiagnostic extends UnknownRecord { stopReason: string; resultAvailable: boolean; requestedMaxOutputTokens: number; contextVersion?: string; history?: { status: string; reason: string }; schemaVersion: 1; contextHash: string; modelCalls: number; submissionAttempts: number; schemaRejections: number; semanticRejections: number; lastSubmission?: FidelityFeedback }
+export interface FidelityState { contextHash: string; schemaHash: string; sessionFile: string; sessionBindingHash: string; calls: number; diagnostic: UnknownRecord; contextVersion?: "full-v2" }
+export type FidelitySnapshot = Omit<FidelityState, "diagnostic"> & { diagnostic: FidelityDiagnostic };
+export interface FidelityOptions { context: unknown; sessionFactory?: VerificationSessionFactory; config: ModelConfig; cwd: string; dataDir: string; charge?: ((event: Partial<Parameters<NonNullable<PiSessionOptions["onModelCall"]>>[0]>) => unknown | Promise<unknown>) | undefined; signal?: AbortSignal | undefined; sessionStorage?: SessionStorage | undefined; progress?: FidelityState | null | undefined; onProgress?: ((state: FidelitySnapshot) => unknown | Promise<unknown>) | undefined; historyUnavailable?: boolean | undefined }
 interface FidelitySchema extends ToolSchema { properties: { restrictions: ToolSchema & { maxItems: number; items: ToolSchema & { properties?: Record<string, ToolSchema> } }; [key: string]: ToolSchema } }
 interface FidelityContract { validate: ValidateFunction<FidelityValue>; wireValidate: ValidateFunction<FidelityWireValue>; schema: FidelitySchema; canonicalSchema: FidelitySchema; normalize: (value: FidelityWireValue) => { value: FidelityValue; issues: { path: string; reason: string }[] }; current: FidelityContext; ids: string[] }
 function fidelityContext(value: unknown): FidelityContext {
@@ -222,14 +223,14 @@ function at(value: unknown, path: unknown): { found: false } | { found: true; va
   return { found: true, value };
 }
 
-function completedFidelityCall(messages: PiSessionPort["messages"], name: string) {
+function completedFidelityCall(messages: NonNullable<PiSessionPort["messages"]>, name: string) {
   const receipts: { index: number; id: string }[] = [];
   for (const [index, message] of messages.entries()) {
     if (message.role !== "toolResult" || message.toolName !== name || message.isError !== false
       || !Array.isArray(message.content) || message.content.length !== 1 || message.content[0]?.type !== "text") continue;
     try {
       const receipt = JSON.parse(message.content[0].text);
-      if (Object.keys(receipt).length === 1 && receipt.submitted === true) receipts.push({ index, id: message.toolCallId });
+      if (Object.keys(receipt).length === 1 && receipt.submitted === true) receipts.push({ index, id: message.toolCallId! });
     } catch { /* Only the actual successful host receipt authorizes result recovery. */ }
   }
   if (receipts.length !== 1) return null;
@@ -338,10 +339,10 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
     throw Object.assign(new InputError("范围复核历史绑定不一致，不能建立替代会话"), { reason: "scope_evaluation_incomplete" });
   if (!progress && sessionStorage?.file !== undefined)
     throw Object.assign(new InputError("范围复核恢复缺少已用次数，不能重置预算"), { reason: "scope_evaluation_incomplete" });
-  let session: PiSessionPort | undefined, persistent: Awaited<ReturnType<typeof piSessionManager>> | undefined, result: FidelityValue | undefined, calls = progress?.calls ?? 0, active = true, incomplete = false, historicalReceipt = false,
+  let session: VerificationSessionPort | undefined, persistent: Awaited<ReturnType<typeof piSessionManager>> | undefined, result: FidelityValue | undefined, calls = progress?.calls ?? 0, active = true, incomplete = false, historicalReceipt = false,
     lastSubmission = progress?.diagnostic?.lastSubmission as FidelityFeedback | undefined, stopReason = "submission_missing", unsubscribe = () => {};
   let completedSubmissionAvailable = progress?.diagnostic?.resultAvailable === true;
-  let truncated = false, modelFailed = false, responseAborted = false, retryPending = false, retryFailed = false, lastAssistantStop: string | undefined, currentPromptAssistant: Extract<PiSessionPort["messages"][number], { role: "assistant" }> | null | undefined;
+  let truncated = false, modelFailed = false, responseAborted = false, retryPending = false, retryFailed = false, lastAssistantStop: string | undefined, currentPromptAssistant: AssistantSessionMessage | null | undefined;
   const attempts = new Set<string>(), rejections = new Set<string>();
   const priorAttempts = progress?.diagnostic?.submissionAttempts as number ?? 0;
   let schemaRejections = progress?.diagnostic?.schemaRejections as number ?? 0, semanticRejections = progress?.diagnostic?.semanticRejections as number ?? 0;
@@ -445,7 +446,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
         currentPromptAssistant = event.message;
         lastAssistantStop = event.message.stopReason;
         if (event.message.stopReason === "length") { truncated = true; stopReason = "output_limit"; }
-        if (["error", "aborted"].includes(event.message.stopReason)) { modelFailed = true; stopReason = "model_error"; }
+        if (["error", "aborted"].includes(event.message.stopReason!)) { modelFailed = true; stopReason = "model_error"; }
         if (event.message.stopReason === "aborted") responseAborted = true;
       }
       if (event.type === "auto_retry_start") retryPending = true;
@@ -483,7 +484,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
       signal?.throwIfAborted();
       const last = currentPromptAssistant ?? session.messages?.slice(messageCount).findLast((message) => message.role === "assistant");
       if (truncated || last?.stopReason === "length") { stopReason = "output_limit"; throw new InputError("范围复核响应被截断"); }
-      if (modelFailed || ["error", "aborted"].includes(last?.role === "assistant" ? last.stopReason : "")) { stopReason = "model_error"; throw new InputError("范围复核模型响应失败"); }
+      if (modelFailed || ["error", "aborted"].includes(last?.role === "assistant" ? last.stopReason! : "")) { stopReason = "model_error"; throw new InputError("范围复核模型响应失败"); }
       const structured = !result && !incomplete ? readPiStructuredSubmission(last, { tools: [tool] }) : null;
       if (structured) {
         try { await structured.tool.execute(`structured_fidelity_${prompt}`, structured.args); }

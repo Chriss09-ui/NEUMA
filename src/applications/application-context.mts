@@ -1,12 +1,15 @@
 import { objectFields } from "../runtime/type-boundary.mjs";
-import type { ApplicationManifest } from "../contracts/application.mjs";
 import type { JsonValue } from "../contracts/json.mjs";
 export interface ApplicationContext {
   instanceId: string; deliveryVersion: string; revision: number;
   snapshot: { viewId: string; title: string; summary: string; selection: JsonValue; values: JsonValue };
 }
+export interface ApplicationContextManifest {
+  page?: unknown;
+  actions?: { id: unknown; title: unknown; inputSchema: unknown; outputSchema: unknown; connectionIds: unknown }[] | undefined;
+}
 export interface ApplicationContextDescriptor {
-  manifest?: ApplicationManifest | null | undefined;
+  manifest?: ApplicationContextManifest | null | undefined;
   architecture?: { draft?: unknown; design?: { interaction?: { defaultEntry?: string | undefined; assistant?: { enabled?: boolean | undefined; purpose?: string | undefined } | undefined } | undefined } | null | undefined } | null | undefined;
   agent?: { draft?: unknown } | null | undefined;
 }
@@ -69,7 +72,7 @@ export function applicationInteraction(descriptor: ApplicationContextDescriptor 
   };
 }
 
-export function applicationActionCatalog(manifest: ApplicationManifest | null | undefined) {
+export function applicationActionCatalog(manifest: ApplicationContextManifest | null | undefined) {
   return (manifest?.actions ?? []).map(({ id, title, inputSchema, outputSchema, connectionIds }) =>
     ({ id, title, inputSchema, outputSchema, connectionIds }));
 }

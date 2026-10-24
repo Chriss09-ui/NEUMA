@@ -1,3 +1,4 @@
+import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
@@ -16,11 +17,15 @@ import type { DevelopmentRunRecord, DevelopmentContext, DevelopmentHandle, Devel
 import type { ManagedServiceManager } from "../services/managed-service-manager.mjs";
 import { readDevelopmentRunRecord } from "./development-record.mjs";
 import { objectFields, errorField, isInteger } from "../runtime/type-boundary.mjs";
+export interface DevelopmentExecutorPort extends Partial<Pick<DevelopmentExecutor, "runAction" | "run">> {
+  probe(options?: Parameters<DevelopmentExecutor["probe"]>[0]): Promise<{ available: boolean; reason?: string }>;
+  verify?(options: Parameters<DevelopmentExecutor["verify"]>[0]): Promise<Omit<DevelopmentEvidence, "id"> & { summary: string }>;
+}
 interface ControllerOptions { config: ModelConfig; cwd: string; dataDir: string; storage?: AgentStoragePort; sessionFactory?: SessionFactory;
-  store?: DevelopmentStore; workspace?: DevelopmentWorkspace; executor?: Pick<DevelopmentExecutor, "probe" | "verify" | "run"> & Partial<Pick<DevelopmentExecutor, "runAction">>;
-  services?: ManagedServiceManager | undefined; getArchitecture?: ((id: string) => Promise<unknown>) | undefined; web?: WebCapabilities;
-  limits?: Partial<typeof DEFAULT_LIMITS> }
-interface ActivationResult { delivery: string; summary: string; repair?: Omit<DevelopmentEvidence, "id" | "codeHash"> & { codeHash?: string | null }; acceptanceLedger?: AcceptanceLedger; runtimeCheck?: unknown }
+  store?: DevelopmentStore; workspace?: DevelopmentWorkspace; executor?: DevelopmentExecutorPort;
+  services?: ManagedServiceManager | undefined; getArchitecture?: ((id: string) => Promise<unknown>) | undefined; web?: WebCapabilityPort;
+  limits?: Partial<DevelopmentLimits> }
+interface ActivationResult { delivery: string; summary?: string; repair?: Omit<DevelopmentEvidence, "id" | "codeHash"> & { codeHash?: string | null }; acceptanceLedger?: AcceptanceLedger; runtimeCheck?: unknown }
 interface RunOptions { signal?: AbortSignal | undefined; onProgress?: (value: UnknownRecord) => void; resume?: boolean;
   activate?: (record: DevelopmentRunRecord, signal: AbortSignal) => Promise<ActivationResult> }
 type RoleOptions<T> = { kind: DevelopmentRole; tools?: RegisteredTool[]; validate: (value: unknown) => T | Promise<T>; counter: { turns: number }; limit: number; scope: unknown };
@@ -58,6 +63,7 @@ import { createAcceptanceLedger, recordDevelopmentAcceptance, recordIndependentA
 const LABELS: Record<string, string> = { intake: "正在接收设计与准备工作区…", planning: "正在拆分并检查研发任务…",
   implementing: "正在开发当前任务…", verifying: "正在运行测试与独立验收…", packaging: "正在整理经过验证的交付物…" };
 const DEFAULT_LIMITS = Object.freeze({ corrections: 6, planRevisions: 1, taskRepairs: 2, integrationRepairs: 2, developerTurns: 40, reviewerTurns: 12 });
+type DevelopmentLimits = { [K in keyof typeof DEFAULT_LIMITS]: number };
 const toolResult = (value: unknown): ToolResult & { details: {} } => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
 const clone = <T,>(value: T): T => structuredClone(value);
 
@@ -143,8 +149,8 @@ function workspaceStoragePort(value: unknown): AgentStoragePort | undefined {
 export class DevelopmentController {
   config!: ModelConfig; cwd!: string; dataDir!: string; sessionFactory!: SessionFactory; getArchitecture?: ((id: string) => Promise<unknown>) | undefined;
   storage: AgentStoragePort; store: DevelopmentStore; workspace: DevelopmentWorkspace; artifacts: DevelopmentArtifacts;
-  executor: Pick<DevelopmentExecutor, "probe" | "verify" | "run"> & Partial<Pick<DevelopmentExecutor, "runAction">>; services: ManagedServiceManager | undefined; web: WebCapabilities;
-  limits: typeof DEFAULT_LIMITS; active = new Map<string, DevelopmentContext>();
+  executor: DevelopmentExecutorPort; services: ManagedServiceManager | undefined; web: WebCapabilityPort;
+  limits: DevelopmentLimits; active = new Map<string, DevelopmentContext>();
   constructor({ config, cwd, dataDir, storage, sessionFactory = createPiSession, store, workspace, executor, services, getArchitecture, web, limits = {} }: ControllerOptions) {
     Object.assign(this, { config, cwd, dataDir, sessionFactory, getArchitecture });
     this.storage = storage ?? store?.storage ?? workspaceStoragePort(workspace?.storage) ?? new AgentStorage({ dataDir });
@@ -497,17 +503,17 @@ export class DevelopmentController {
       if ((event.type === "message_end" || event.type === "turn_end") && event.message?.role === "assistant")
         handle.lastAssistant = event.message;
       if (event.type === "tool_execution_start" && event.toolName === name) {
-        handle.submissionCalls.set(event.toolCallId, { value: event.args, recorded: false });
+        handle.submissionCalls.set(event.toolCallId!, { value: event.args, recorded: false });
       }
       if (event.type === "tool_execution_end" && event.toolName === name) {
-        const call = handle.submissionCalls.get(event.toolCallId);
+        const call = handle.submissionCalls.get(event.toolCallId!);
         if (event.isError && !call?.recorded && handle.accepting && !ctx.signal.aborted)
-          void noteSubmission(event.toolCallId, call?.value, { status: "rejected", stage: "sdk" })
+          void noteSubmission(event.toolCallId!, call?.value, { status: "rejected", stage: "sdk" })
             .catch(() => { handle.failed = true; void handle.session.abort?.(); });
-        handle.submissionCalls.delete(event.toolCallId);
+        handle.submissionCalls.delete(event.toolCallId!);
       }
       if (event.type === "auto_retry_start") {
-        if (Number.isInteger(event.attempt) && event.attempt >= 0 && event.attempt <= 5) handle.retries = event.attempt;
+        if (Number.isInteger(event.attempt) && event.attempt! >= 0 && event.attempt! <= 5) handle.retries = event.attempt!;
         handle.failure = classifyModelFailure(event.errorMessage);
       }
       if (event.type === "auto_retry_end" && !event.success) {
@@ -806,7 +812,7 @@ export class DevelopmentController {
       if (!this.services) return Promise.resolve({ status: "not_run", codeHash: options.snapshot?.hash, results: [], summary: "受管服务运行器尚未接入" });
       return verifyManagedApplication({ ...options, services: this.services, executor: this.executor, agentId: ctx.record.agentId });
     }
-    return this.executor.verify(options);
+    return this.executor.verify!(options);
   }
 
   async task(ctx: DevelopmentContext, task: TaskProgress) {

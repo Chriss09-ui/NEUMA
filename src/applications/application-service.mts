@@ -4,18 +4,26 @@ import type { DevelopmentDeliveryRecord } from "../development/development-contr
 import { readDevelopmentDeliveryRecord } from "../development/development-record.mjs";
 import type { PrototypeAgents } from "../agents/agent-prototype.mjs";
 import type { ApplicationManifest, ApplicationAction, TaskSource } from "../contracts/application.mjs";
-import type { ApplicationContext } from "./application-context.mjs";
+import type { ApplicationContextDescriptor, ApplicationContext } from "./application-context.mjs";
 import type { RegisteredTool, NeumaTool } from "../runtime/pi-port.mjs";
 import type { DevelopmentSnapshot } from "../development/development-workspace.mjs";
 import type { ActionRunOptions } from "../development/development-executor.mjs";
-import type { WorkflowRecord, WorkflowResolution } from "../services/service-port.mjs";
+import type { ServiceResult, WorkflowRecord, WorkflowResolution } from "../services/service-port.mjs";
 type TaskView = ReturnType<ApplicationTaskStore["view"]>;
 export interface ApplicationDescriptor {
-  agent: AgentDefinition;
-  architecture: Awaited<ReturnType<PrototypeAgents["getArchitecture"]>>;
+  agent: Pick<AgentDefinition,"id"|"revision"|"draft"|"developmentRef">;
+  architecture: Exclude<ApplicationContextDescriptor["architecture"] & Parameters<PrototypeAgents["applicationCapabilities"]>[0]["descriptor"]["architecture"],undefined>;
   record: DevelopmentDeliveryRecord;
-  snapshot: DevelopmentSnapshot; manifest: ApplicationManifest; deliveryVersion: string;
+  snapshot: Pick<DevelopmentSnapshot,"path">; manifest: ApplicationManifest; deliveryVersion: string;
 }
+export interface ApplicationAgents extends Pick<PrototypeAgents,"ready"|"storage"|"scheduler"|"closing"|"getArchitecture"|"getActiveArchitecture"|"getActiveRuntime"|"approvedDefinition"|"applicationCapabilities"> {
+  agents:Pick<PrototypeAgents["agents"],"get">;removing:{has(id:string):boolean};builds:{has(id:string):boolean};
+  onLifecycle(listener:(event:{type:string;agentId:string})=>unknown):()=>unknown;
+  connections:Pick<PrototypeAgents["connections"],"snapshot">&{assertActive(snapshot:Awaited<ReturnType<PrototypeAgents["connections"]["snapshot"]>>,id:string):Promise<unknown>};
+  development:{store:Pick<PrototypeAgents["development"]["store"],"getRun">;workspace:Pick<PrototypeAgents["development"]["workspace"],"validateSnapshot">;executor:{runAction?:(options:ActionRunOptions)=>Promise<ServiceResult>}};
+  services:Pick<PrototypeAgents["services"],"run">;
+}
+export type ApplicationResourcesPort=Pick<ApplicationResources,"open"|"close"|"closeAll">&{assertInstance(agentId:string,instanceId:string,version:string):unknown;closeAgent(id:string):unknown};
 interface SubmitOptions { source?: TaskSource; scope?: string; signal?: AbortSignal | undefined; heldLease?: boolean;
   workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; allowNetwork?: boolean; validatedApplicationContext?: unknown }
 interface TaskSubmissionResult { taskId: string; task: TaskView }
@@ -43,11 +51,11 @@ import { normalizeApplicationContext, applicationContextBinding, applicationInte
 const cleanError = (error: unknown) => error instanceof InputError ? error.message : "应用操作未完成，请检查输入、连接和运行环境后重试";
 
 export class ApplicationService {
-  agents: PrototypeAgents; store: ApplicationTaskStore; resources: ApplicationResources;
+  agents: ApplicationAgents; store: ApplicationTaskStore; resources: ApplicationResourcesPort;
   running: Map<string, RunningTask>; submitting: Set<Submission>; stateWrites: Set<StateWrite>;
   epoch: number; closing: Promise<void> | null; ready: Promise<void>; workflows: WorkflowController<{ item: RunningTask }>;
   workflowReady: Promise<unknown>; unsubscribe: () => void;
-  constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources() }: { agents: PrototypeAgents; store?: ApplicationTaskStore; resources?: ApplicationResources }) {
+  constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources() }: { agents: ApplicationAgents; store?: ApplicationTaskStore; resources?: ApplicationResourcesPort }) {
     this.agents = agents; this.store = store; this.resources = resources;
     this.running = new Map(); this.submitting = new Set(); this.stateWrites = new Set(); this.epoch = 0; this.closing = null; this.ready = store.ready;
     this.workflows = new WorkflowController<{ item: RunningTask }>({ rootDir: join(objectFields(agents).dataDir as string ?? agents.storage.dataDir!, "workflows"),

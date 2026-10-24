@@ -5,12 +5,18 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { LookupAddress } from "node:dns";
 import { objectFields, isArray, isRecord, isInteger, errorField } from "./type-boundary.mjs";
 interface PublicResponse { status: number; headers: Headers; text?: () => Promise<string>; body?: ReadableStream<Uint8Array> | null }
-interface PublicRequestOptions { method?: string; signal?: AbortSignal | undefined; lookup?: typeof dnsLookup; maxBytes?: number }
+export type WebLookupPort = (hostname: string, options: { all: true; verbatim: true }) => Promise<LookupAddress[]>;
+export type WebFetchPort = (url: string, options: RequestInit) => Promise<Response>;
+interface PublicRequestOptions { method?: string; signal?: AbortSignal | undefined; lookup?: WebLookupPort; maxBytes?: number }
 interface WebPage { title: string; url: string; content: string; contentType: string; provider: string; fetchedAt: string; truncated: boolean; truncationReason: string | null }
 interface Attempt { provider: string; dedicated: boolean; reason: string }
 interface WebResult { status: string; provider?: string | undefined; fetchedAt: string; results: WebPage[]; gaps?: string[]; cached?: boolean; fallback?: boolean; attempts?: Attempt[]; reason?: string; message?: string }
 export interface WebRunOptions { agentId?: string; scope?: string; connectionSnapshot?: ConnectionSnapshot | undefined; signal?: AbortSignal | undefined; allowNetwork?: boolean; refresh?: boolean }
-interface WebOptions { connectionStore?: Pick<AgentConnectionStore, "resolveKind" | "assertActive" | "recordResult">; fetchImpl?: typeof fetch; lookup?: typeof dnsLookup; requestPublic?: (url: string, options: PublicRequestOptions) => Promise<PublicResponse>; now?: () => number }
+export interface WebCapabilityPort {
+  search?(input: unknown, options?: WebRunOptions): Promise<unknown>;
+  fetch?(input: unknown, options?: WebRunOptions): Promise<unknown>;
+}
+interface WebOptions { connectionStore?: Pick<AgentConnectionStore, "resolveKind" | "assertActive" | "recordResult">; fetchImpl?: WebFetchPort; lookup?: WebLookupPort; requestPublic?: (url: string, options: PublicRequestOptions) => Promise<PublicResponse>; now?: () => number }
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { request as httpRequest } from "node:http";
@@ -70,7 +76,7 @@ function publicIp(address: string) {
   return false;
 }
 
-export async function validatePublicUrl(value: string, { lookup = dnsLookup, signal }: { lookup?: typeof dnsLookup; signal?: AbortSignal | undefined } = {}) {
+export async function validatePublicUrl(value: string, { lookup = dnsLookup, signal }: { lookup?: WebLookupPort; signal?: AbortSignal | undefined } = {}) {
   abort(signal);
   let url;
   try { url = new URL(value); } catch { throw fail("invalid_url", "网页地址无效，请提供公开 HTTP(S) 网址"); }
@@ -133,7 +139,7 @@ async function limitedText(response: PublicResponse) {
   } finally { await reader.cancel().catch(() => {}); }
 }
 
-export async function connectionJsonRequest(url: string, { fetchImpl = fetch, signal, method = "POST", headers = {}, body }: { fetchImpl?: typeof fetch; signal?: AbortSignal | undefined; method?: string; headers?: Record<string, string>; body?: unknown } = {}): Promise<unknown> {
+export async function connectionJsonRequest(url: string, { fetchImpl = fetch, signal, method = "POST", headers = {}, body }: { fetchImpl?: WebFetchPort; signal?: AbortSignal | undefined; method?: string; headers?: Record<string, string>; body?: unknown } = {}): Promise<unknown> {
   const activeSignal = timeoutSignal(signal); abort(activeSignal);
   let response;
   try { response = await fetchImpl(url, { method, headers: { accept: "application/json", ...headers },
@@ -174,7 +180,7 @@ function exaPages(value: unknown, kind: string, fetchedAt: string): WebPage[] {
 }
 
 export class WebCapabilities {
-  declare connectionStore: WebOptions["connectionStore"]; declare fetchImpl: typeof fetch; declare lookup: typeof dnsLookup; declare now: () => number; requestPublic: NonNullable<WebOptions["requestPublic"]>; cache: Map<string, { at: number; result: WebResult }>;
+  declare connectionStore: WebOptions["connectionStore"]; declare fetchImpl: WebFetchPort; declare lookup: WebLookupPort; declare now: () => number; requestPublic: NonNullable<WebOptions["requestPublic"]>; cache: Map<string, { at: number; result: WebResult }>;
 
   constructor({ connectionStore, fetchImpl = fetch, lookup = dnsLookup, requestPublic, now = () => Date.now() }: WebOptions = {}) {
     Object.assign(this, { connectionStore, fetchImpl, lookup, now }); this.cache = new Map();
@@ -274,7 +280,7 @@ export class WebCapabilities {
   fetch(input: unknown, options?: WebRunOptions) { return this.run("fetch", input, options); }
 }
 
-export function createWebTools(options: WebRunOptions & { web?: WebCapabilities }): NeumaTool[] {
+export function createWebTools(options: WebRunOptions & { web?: WebCapabilityPort }): NeumaTool[] {
   const { web = new WebCapabilities(), ...context } = options;
   return PUBLIC_WEB_CAPABILITIES.map(({ id, scope }) => {
     const kind = id === "web_search" ? "search" : "fetch";
@@ -285,7 +291,7 @@ export function createWebTools(options: WebRunOptions & { web?: WebCapabilities 
       ...(kind === "search" ? { maxResults: { type: "integer", minimum: 1, maximum: 10 } } : {}) },
       required: [kind === "search" ? "query" : "url"], additionalProperties: false }, executionMode: "sequential",
     execute: async (_id, input, signal) => {
-      const result = await web[kind](input, { ...context, signal: signal && context.signal ? AbortSignal.any([signal, context.signal]) : signal ?? context.signal });
+      const result = await web[kind]!(input, { ...context, signal: signal && context.signal ? AbortSignal.any([signal, context.signal]) : signal ?? context.signal });
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} };
     } };
   });

@@ -2,6 +2,7 @@ import type { ProviderConfig, Providers, TurnInput, JudgeInput, ReaskInput, Pref
 import type { RequirementDraft, RequirementIssue, EvidenceMessage, RequirementDerivation, SystemCheck, IssueDecision, Consultation, PreflightResponse, DeferredIssue } from "../contracts/requirements.mjs";
 import type { TaskSpecV1 } from "../contracts/versions.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
+import type { FetchPort, ModelResponseTransport } from "../runtime/model-idle-timeout.mjs";
 import { objectFields, isRecord, isArray, errorField } from "../runtime/type-boundary.mjs";
 interface ChatMessage { role: string; content: string }
 interface ChatBody { model: string; messages: ChatMessage[]; stream?: boolean; max_tokens?: number; max_completion_tokens?: number; response_format?: { type: string }; thinking?: { type: string } }
@@ -354,7 +355,7 @@ function retryableTransport(input: unknown, signal: AbortSignal) {
     || (error?.name === "TypeError" && error.message === "fetch failed" && !code);
 }
 
-function retryAfterMs(response?: Response) {
+function retryAfterMs(response?: ModelResponseTransport) {
   const value = response?.headers?.get?.("retry-after")?.trim();
   if (!value) return null;
   if (/^\d+$/.test(value)) return Number(value) * 1000;
@@ -380,7 +381,7 @@ function httpFailure(status: number, label: string, attempt: number) {
     label, "http_error", { attempts: attempt, httpStatus: status });
 }
 
-async function pauseBeforeRetry(attempt: number, signal: AbortSignal, response?: Response) {
+async function pauseBeforeRetry(attempt: number, signal: AbortSignal, response?: ModelResponseTransport) {
   try {
     signal.throwIfAborted();
     const waitMs = Math.max(300 * 3 ** (attempt - 1), retryAfterMs(response) ?? 0);
@@ -394,7 +395,7 @@ async function pauseBeforeRetry(attempt: number, signal: AbortSignal, response?:
   }
 }
 
-async function postJson(url: string, body: unknown, apiKey: string, timeoutMs: number, fetchImpl: typeof fetch, label: string, retryTransient = false, externalSignal?: AbortSignal): Promise<unknown> {
+async function postJson(url: string, body: unknown, apiKey: string, timeoutMs: number, fetchImpl: FetchPort<ModelResponseTransport>, label: string, retryTransient = false, externalSignal?: AbortSignal): Promise<unknown> {
   const signal = externalSignal ?? new AbortController().signal;
   const request = withModelIdleTimeout(fetchImpl, { idleTimeoutMs: timeoutMs });
   if (externalSignal?.aborted) throw new DOMException("操作已取消", "AbortError");
@@ -419,15 +420,15 @@ async function postJson(url: string, body: unknown, apiKey: string, timeoutMs: n
     if (externalSignal?.aborted) throw new DOMException("操作已取消", "AbortError");
     if (!response.ok) {
       try { void response.body?.cancel().catch(() => {}); } catch { /* Disposal must not block a later attempt. */ }
-      if (attempt < maxAttempts && retryableStatus(response.status)
+      if (attempt < maxAttempts && retryableStatus(response.status!)
         && !signal.aborted) {
         if (await pauseBeforeRetry(attempt, signal, response)) continue;
       }
-      throw httpFailure(response.status, label, attempt);
+      throw httpFailure(response.status!, label, attempt);
     }
     let content;
     try {
-      content = await response.text();
+      content = await response.text!();
     } catch (error) {
       if (attempt < maxAttempts && retryableTransport(error, signal)
         && await pauseBeforeRetry(attempt, signal)) {
@@ -638,7 +639,7 @@ function draftConsultationContext(consultation: Consultation | null | undefined)
       issues: (consultation.handoff.issues ?? []).map(issue) } } : {}) };
 }
 
-export function requirementMessageContext({ message, lastQuestion, userMessages, evidenceMessages }: Pick<TurnInput, "message" | "lastQuestion" | "userMessages" | "evidenceMessages">) {
+export function requirementMessageContext({ message, lastQuestion, userMessages, evidenceMessages }: Pick<TurnInput, "message" | "lastQuestion" | "evidenceMessages"> & { userMessages: string[] }) {
   if (!evidenceMessages?.length) return { userMessages, lastQuestion, latestUserMessage: message };
   const user = evidenceMessages.findLast(item => item.role === "user" && item.content === message && item.id);
   const question = evidenceMessages.findLast(item => item.role === "assistant" && item.content === lastQuestion && item.id);
@@ -649,7 +650,7 @@ export function requirementMessageContext({ message, lastQuestion, userMessages,
     messageSource: "本轮消息与上一追问按ID读取evidenceMessages原文；同一句不再复制到多个历史字段。未收录的补充仍在原字段。" };
 }
 
-export function makeProviders(config: ProviderConfig = getProviderConfig(), fetchImpl: typeof fetch = fetch, integrations: ProviderIntegrations = {}): Providers {
+export function makeProviders(config: Partial<ProviderConfig> = getProviderConfig(), fetchImpl: FetchPort<ModelResponseTransport> = fetch, integrations: ProviderIntegrations = {}): Providers {
   const generateDraft = async ({ message, previousDraft, lastQuestion, userMessages = [], signal,
     evidenceMessages, consultation, platform, taskSpecVersion }: TurnInput) => {
     if (!config.llmConfigured) {
@@ -661,7 +662,7 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
       && Object.hasOwn(evidenceIds, entry.role) && typeof entry.content === "string") evidenceIds[entry.role]!.push(entry.id);
     for (const role of Object.keys(evidenceIds)) evidenceIds[role] = [...new Set(evidenceIds[role])];
     const body: ChatBody = {
-      model: config.model,
+      model: config.model!,
       messages: [
         { role: "system", content: REQUIREMENT_SYSTEM_PROMPT + (taskSpecVersion ? `\n\n${TASK_SPEC_PROMPT}${platformInstructions(platform)}` : "") },
         { role: "user", content: JSON.stringify({ currentDraft: previousDraft,
@@ -679,13 +680,13 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
           } : {}) }) },
       ],
     };
-    if (isMimoEndpoint(config.chatUrl)) {
+    if (isMimoEndpoint(config.chatUrl!)) {
       body.max_completion_tokens = modelOutputBudget(config, 8192);
       body.response_format = { type: "json_object" };
       body.thinking = { type: "disabled" };
     } else body.max_tokens = modelOutputBudget(config, 8192);
-    const requestDraft = async (requestBody = body) => parseModelContent(await postJson(config.chatUrl, requestBody,
-      config.apiKey, modelIdleTimeoutMs(config), fetchImpl, "兼容模型", true, signal));
+    const requestDraft = async (requestBody = body) => parseModelContent(await postJson(config.chatUrl!, requestBody,
+      config.apiKey!, modelIdleTimeoutMs(config), fetchImpl, "兼容模型", true, signal));
     const initial = await requestDraft();
     if (!taskSpecVersion || objectFields(initial.draft).taskSpec === undefined) return initial;
     let initialSpec;
@@ -730,7 +731,7 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
     if (signal?.aborted) throw new DOMException("操作已取消", "AbortError");
     if (!Object.hasOwn(POINT_REQUIREMENTS, answeredPoint)) return null;
     const payload = await postJson("https://api.typesafe.ai/v1/systemone", {
-      model: config.jevModel,
+      model: config.jevModel!,
       state: {
         matched_point: answeredPoint,
         matched_requirement: POINT_REQUIREMENTS[answeredPoint],
@@ -750,7 +751,7 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
       throw providerError("没有可复核的需求点", "兼容模型", "invalid_reask");
     }
     const body: ChatBody = {
-      model: config.model,
+      model: config.model!,
       messages: [
         { role: "system", content: REASK_SYSTEM_PROMPT },
         { role: "user", content: JSON.stringify({
@@ -766,12 +767,12 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
         }) },
       ],
     };
-    if (isMimoEndpoint(config.chatUrl)) {
+    if (isMimoEndpoint(config.chatUrl!)) {
       body.max_completion_tokens = modelOutputBudget(config, 1024);
       body.response_format = { type: "json_object" };
       body.thinking = { type: "disabled" };
     } else body.max_tokens = modelOutputBudget(config, 1024);
-    return parseModelContent(await postJson(config.chatUrl, body, config.apiKey, modelIdleTimeoutMs(config),
+    return parseModelContent(await postJson(config.chatUrl!, body, config.apiKey!, modelIdleTimeoutMs(config),
       fetchImpl, "兼容模型", true, signal));
   } : null;
 
@@ -785,14 +786,14 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
     const signal = externalSignal ?? new AbortController().signal;
     const request = withModelIdleTimeout(fetchImpl, { idleTimeoutMs: timeoutMs });
     const body: ChatBody = {
-      model: config.model,
+      model: config.model!,
       stream: true,
       messages: [
         { role: "system", content: REPLY_SYSTEM_PROMPT },
         { role: "user", content: JSON.stringify({ validatedSummary: summary }) },
       ],
     };
-    if (isMimoEndpoint(config.chatUrl)) {
+    if (isMimoEndpoint(config.chatUrl!)) {
       body.max_completion_tokens = modelOutputBudget(config, 2048);
       body.thinking = { type: "disabled" };
     } else body.max_tokens = modelOutputBudget(config, 2048);
@@ -800,7 +801,7 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
     let delivered = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const response = await request(config.chatUrl, {
+        const response = await request(config.chatUrl!, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "text/event-stream",
             authorization: `Bearer ${config.apiKey}` },
@@ -810,9 +811,9 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
         signal.throwIfAborted();
         if (!response.ok) {
           void response.body?.cancel().catch(() => {});
-          if (attempt < 3 && retryableStatus(response.status)
+          if (attempt < 3 && retryableStatus(response.status!)
             && await pauseBeforeRetry(attempt, signal, response)) continue;
-          throw httpFailure(response.status, "兼容模型", attempt);
+          throw httpFailure(response.status!, "兼容模型", attempt);
         }
         return await readModelReply(response, { signal, onDelta: (text) => {
           delivered = true;
@@ -903,12 +904,12 @@ export function makeProviders(config: ProviderConfig = getProviderConfig(), fetc
     const model = async (context: ChatMessage[]) => {
       if (modelCalls >= 6) throw Object.assign(new Error("需求预评估预算已用完，请重试"), { reason: "budget_exhausted" });
       modelCalls++; signal?.throwIfAborted();
-      const body: ChatBody = { model: config.model, messages: context };
-      if (isMimoEndpoint(config.chatUrl)) {
+      const body: ChatBody = { model: config.model!, messages: context };
+      if (isMimoEndpoint(config.chatUrl!)) {
         body.max_completion_tokens = modelOutputBudget(config, 8192);
         body.response_format = { type: "json_object" }; body.thinking = { type: "disabled" };
       } else body.max_tokens = modelOutputBudget(config, 8192);
-      try { return parseModelContent(await postJson(config.chatUrl, body, config.apiKey, modelIdleTimeoutMs(config),
+      try { return parseModelContent(await postJson(config.chatUrl!, body, config.apiKey!, modelIdleTimeoutMs(config),
         fetchImpl, "兼容模型", true, signal)); }
       catch (error) { note(typeof context[0]?.content === "string" && context[0]!.content.startsWith(ISSUE_REVIEW_PROMPT) ? "issue_review" : "assessment",
         ["invalid_json", "invalid_model_json"].includes(String(objectFields(errorField(error, "diagnostic")).reason)) ? "model_invalid_json" : "model_api_failed"); throw attachDiagnostic(error); }

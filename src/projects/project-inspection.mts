@@ -1,4 +1,4 @@
-import type { ProjectRecord, ProjectCommand } from "../contracts/project.mjs";
+import type { ProjectRecord, ProjectCommand, ProjectLaunch, ProjectSetup } from "../contracts/project.mjs";
 import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
 import { access, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -144,7 +144,10 @@ function localPlanUrl(value: unknown) {
   } catch { throw new InputError("自动识别的页面或健康检查地址必须是不含凭据的本机 HTTP 地址"); }
 }
 
-export async function validateProjectPlan(project: Pick<ProjectRecord, "root" | "kind" | "launch">, input: unknown, { platform = process.platform, accessImpl = access } = {}) {
+export interface ProjectPlanResult { root?: string; kind?: string; entry?: string | null | undefined; launch?: ProjectLaunch | null | undefined; setup: ProjectSetup }
+export function validateProjectPlan(project: Pick<ProjectRecord, "root" | "kind" | "launch">, input: unknown, options?: { platform?: NodeJS.Platform; accessImpl?: typeof access }): Promise<Partial<ProjectRecord> & { setup: ProjectSetup }>;
+export function validateProjectPlan(project: Pick<ProjectRecord, "root" | "kind"> & Partial<Pick<ProjectRecord, "launch">>, input: unknown, options?: { platform?: NodeJS.Platform; accessImpl?: typeof access }): Promise<ProjectPlanResult>;
+export async function validateProjectPlan(project: Pick<ProjectRecord, "root" | "kind"> & Partial<Pick<ProjectRecord, "launch">>, input: unknown, { platform = process.platform, accessImpl = access } = {}): Promise<ProjectPlanResult> {
   const plan = objectFields(input);
   const summary = typeof plan.summary === "string" ? plan.summary.trim().slice(0, 240) : "";
   if (!summary) throw new InputError("请说明实际识别到的启动方式或缺口");

@@ -1,11 +1,19 @@
+import type { SessionMessage } from "../runtime/pi-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { DevelopmentCandidateDesign } from "./development-controller-types.mjs";
 import type { DevelopmentTask, DevelopmentCase } from "../contracts/development.mjs";
 import type { NeumaTool } from "../runtime/pi-port.mjs";
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 import { objectFields, isRecord, isInteger, isArray } from "../runtime/type-boundary.mjs";
-export interface DevelopmentContextPayload extends UnknownRecord { task?: (Partial<DevelopmentTask> & { feedback?: unknown }) | null; handoffs?: { taskId: string }[];
-  requirements?: { id: string }[] | undefined; cases?: DevelopmentCase[] | undefined; design?: { [K in keyof DevelopmentCandidateDesign]?: DevelopmentCandidateDesign[K] | undefined }; verificationAssignments?: { acceptanceId: string }[] | undefined }
+interface ContextTask { id?: string; dependsOn?: string[]; requirementIds?: string[]; acceptanceIds?: string[]; feedback?: unknown;
+  status?: unknown; attempts?: unknown; repairs?: unknown; turns?: unknown; integration?: unknown; title?: unknown; description?: unknown; goal?: unknown; summary?: unknown; nextAction?: unknown }
+interface ContextDesign { profile?: unknown; rationale?: unknown; execution?: unknown; decisions?: unknown; interaction?: unknown; connections?: unknown; capabilities?: unknown; state?: unknown; failureHandling?: unknown; unknowns?: unknown;
+  coverage?: { requirementId: string; componentIds: string[] }[] | undefined; components?: { id: string }[] | undefined;
+  steps?: { id: string; componentId: string; dependsOn?: string[] }[] | undefined; acceptance?: { id: string }[] | undefined }
+export interface DevelopmentContextPayload extends UnknownRecord { task?: ContextTask | null; handoffs?: { taskId: string }[];
+  requirements?: { id: string }[] | undefined; cases?: { id?: string; taskId?: string; acceptanceId?: string }[] | undefined;
+  design?: ContextDesign; verificationAssignments?: { acceptanceId: string }[] | undefined }
+
 interface ContextSection { section: string; path: string; totalChars: number; delivery?: string }
 interface ContextReceipt { section: string; contentHash: string; messageHash: string }
 export interface ContextDelivery { version: number; bindingHash: string; sections: ContextReceipt[] }
@@ -148,8 +156,8 @@ function summaries(payload: DevelopmentContextPayload, limit: number, count: num
 }
 
 /** Keep durable evidence separate from the initial prompt; all excerpts are explicitly incomplete. */
-export function compactDevelopmentContext(payload: DevelopmentContextPayload, maxChars = 16_000): ProjectedContext {
-  checkedPayload(payload);
+export function compactDevelopmentContext(input: unknown, maxChars = 16_000): ProjectedContext {
+  const payload = checkedPayload(input);
   if (!Number.isSafeInteger(maxChars) || maxChars < 256) throw new InputError("上下文长度上限必须为至少 256 的安全整数");
   const source = encoded(payload);
   if (source.length <= maxChars) {
@@ -211,7 +219,7 @@ export function developmentNodeContext(payload: DevelopmentContextPayload, kind:
   if (kind === "developer" && payload.task?.requirementIds?.length && payload.task?.acceptanceIds?.length) {
     const requirements = new Set(payload.task.requirementIds), acceptance = new Set(payload.task.acceptanceIds);
     result.requirements = payload.requirements?.filter(item => requirements.has(item.id));
-    result.cases = payload.cases?.filter(item => item.taskId === payload.task!.id || acceptance.has(item.acceptanceId));
+    result.cases = payload.cases?.filter(item => item.taskId === payload.task!.id || acceptance.has(item.acceptanceId!));
     const design = payload.design;
     if (design) {
       const coverage = design.coverage?.filter(item => requirements.has(item.requirementId));
@@ -228,7 +236,7 @@ export function developmentNodeContext(payload: DevelopmentContextPayload, kind:
         components: design.components?.filter(item => components.has(item.id)), steps: design.steps?.filter(item => steps.has(item.id)),
         acceptance: design.acceptance?.filter(item => acceptance.has(item.id)) };
     }
-    result.verificationAssignments = payload.verificationAssignments?.filter(item => acceptance.has(item.acceptanceId));
+    result.verificationAssignments = payload.verificationAssignments?.filter(item => acceptance.has(item.acceptanceId!));
   }
   return result;
 }
@@ -249,7 +257,7 @@ function initialDevelopmentContext(payload: DevelopmentContextPayload, maxChars:
 const contextDigest = (value: string) => createHash("sha256").update(value).digest("hex");
 const deliveryMetadata = new Set(["contextTruncated", "contextNotice", "contextSections", "contextReuse", "architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "task", "remaining"]);
 
-function deliveredUserMessages(messages: ContextMessages | undefined) {
+function deliveredUserMessages(messages: SessionMessage[] | undefined) {
   const completed = new Map<string, string>();
   let current: string | undefined, text: string | undefined;
   for (const message of Array.isArray(messages) ? messages : []) {
@@ -258,13 +266,13 @@ function deliveredUserMessages(messages: ContextMessages | undefined) {
       text = typeof content === "string" ? content : Array.isArray(content) && content.length === 1
         && content[0]?.type === "text" ? content[0].text : undefined;
       current = typeof text === "string" ? contextDigest(text) : undefined;
-    } else if (current && message.role === "assistant" && ["stop", "toolUse"].includes(message.stopReason)) completed.set(current, text!);
+    } else if (current && message.role === "assistant" && ["stop", "toolUse"].includes(message.stopReason!)) completed.set(current, text!);
   }
   return completed;
 }
 
 /** A receipt refers to exact host messages still present in Pi's active context, never its lossy summary. */
-export function developmentContextMessage(payload: DevelopmentContextPayload, maxChars: number, { reference, messages, kind }: { reference?: ContextReference | undefined; messages?: ContextMessages | undefined; kind?: string } = {}): PreparedDevelopmentContext {
+export function developmentContextMessage(payload: DevelopmentContextPayload, maxChars: number, { reference, messages, kind }: { reference?: ContextReference | undefined; messages?: SessionMessage[] | undefined; kind?: string } = {}): PreparedDevelopmentContext {
   const initial = initialDevelopmentContext(payload, maxChars, kind), sections = initial.contextSections
     ?? Object.keys(payload).filter((section) => encoded(payload[section]) !== undefined)
       .map((section) => ({ section, path: `/${section}`, totalChars: encoded(payload[section]).length, delivery: "full" }));
@@ -305,7 +313,9 @@ export function developmentContextMessage(payload: DevelopmentContextPayload, ma
   return { message, kind, delivery: typeof bindingHash === "string" ? { version: 1, bindingHash, sections: delivered } : undefined };
 }
 
-export function restoreDevelopmentContext(messages: ContextMessages, payload: DevelopmentContextPayload, maxChars: number, prepared?: PreparedDevelopmentContext | undefined): ContextMessages {
+export function restoreDevelopmentContext(messages: ContextMessages, payload: DevelopmentContextPayload, maxChars: number, prepared?: PreparedDevelopmentContext | undefined): ContextMessages;
+export function restoreDevelopmentContext(messages: SessionMessage[], payload: DevelopmentContextPayload, maxChars: number, prepared?: PreparedDevelopmentContext | undefined): SessionMessage[];
+export function restoreDevelopmentContext(messages: SessionMessage[], payload: DevelopmentContextPayload, maxChars: number, prepared?: PreparedDevelopmentContext | undefined): (SessionMessage & {timestamp?: number})[] {
   const reused = prepared && objectFields(objectFields(JSON.parse(prepared.message)).contextReuse).sections;
   if (reused === undefined || reused === null) return messages;
   if (!isArray(reused) || reused.some(section => typeof section !== "string")) throw new InputError("研发上下文复用记录格式无效");

@@ -1,3 +1,5 @@
+import type { LegacyArchitectureConnection } from "../contracts/architecture.mjs";
+import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { RequirementDraft, Consultation } from "../contracts/requirements.mjs";
@@ -294,7 +296,7 @@ function subscribe(session: PiSessionPort, onProgress: Progress, state: Partial<
     if (state.cancelled) return;
     if (event.type === "turn_end") state.turns = (state.turns ?? 0) + 1;
     if (event.type === "auto_retry_start") {
-      if (Number.isInteger(event.attempt) && event.attempt >= 0 && event.attempt <= 5) state.retries = event.attempt;
+      if (Number.isInteger(event.attempt) && event.attempt! >= 0 && event.attempt! <= 5) state.retries = event.attempt!;
       state.failure = classifyModelFailure(event.errorMessage);
       onProgress({ type: "status", phase: "tool", label: `模型请求未完成，正在重试（${state.retries ?? 0}/5）…` });
     }
@@ -308,7 +310,7 @@ function subscribe(session: PiSessionPort, onProgress: Progress, state: Partial<
     if (event.type === "tool_execution_start") {
       const labels: Record<string, string> = { submit_agent_definition: "正在整理工作指令…", list_workspace_files: "正在查看任务文件…", read_workspace_file: "正在阅读任务材料…", write_workspace_file: "正在保存任务产物…",
         list_materials: "正在查看上传材料…", read_material: "正在解析和阅读材料…", read_material_image: "正在查看材料图片…" };
-      onProgress({ type: "status", phase: "tool", label: labels[event.toolName] || "正在处理任务…" });
+      onProgress({ type: "status", phase: "tool", label: labels[event.toolName!] || "正在处理任务…" });
     }
     if (event.type === "tool_execution_end") onProgress({ type: "status", phase: "thinking" });
   }) ?? (() => {});
@@ -325,7 +327,7 @@ function requireSuccess(session: PiSessionPort, state: Partial<PrototypeSession>
 
 export class PrototypeAgents {
   config: ModelConfig; cwd: string; dataDir: string; sessionFactory: SessionFactory;
-  storage: AgentStorage; materials: MaterialStore; connections: AgentConnectionStore; services: ManagedServiceManager; web: WebCapabilities;
+  storage: AgentStorage; materials: MaterialStore; connections: AgentConnectionStore; services: ManagedServiceManager; web: WebCapabilityPort;
   dataMigrations: ServiceDataMigrations; library: AgentLibrary; architecture: ArchitectureDesigner; development: DevelopmentController;
   enforceRequirementConfirmation: boolean; applications: ApplicationService; gateway: ServiceGateway;
   agents: Map<string, AgentDefinition>; sessions: Map<string, PrototypeSession>; collaborationSessions: Map<string, PrototypeSession>;
@@ -700,7 +702,7 @@ export class PrototypeAgents {
     const smoke = managed ? { status: (await this.services.probe({ language: record.package!.application!.service!.language,
       host: record.package!.application!.service!.host, signal })).available ? "passed" : "not_run" }
       : application ? { status: (await this.development.executor.probe({ signal })).available ? "passed" : "not_run" }
-      : await this.development.executor.run({ codeDir: snapshot.path, entrypoint: record.package!.entrypoint,
+      : await this.development.executor.run!({ codeDir: snapshot.path, entrypoint: record.package!.entrypoint,
         input: record.plan!.cases[0]!.input, signal });
     signal.throwIfAborted();
     if (smoke.status === "failed") return { delivery: "blocked", summary: "交付启动检查失败，需要修复。",
@@ -999,7 +1001,7 @@ export class PrototypeAgents {
         const snapshot = await this.development.workspace.validateSnapshot(record.package!.snapshot, record.agentId);
         const usesFiles = agent.toolIds!.some((id) => ["read_workspace_file", "write_workspace_file"].includes(id)) || record.architecture.design.state.mode === "persistent";
         const mayWrite = agent.toolIds!.includes("write_workspace_file") || record.architecture.design.state.mode === "persistent";
-        const result = await this.development.executor.run({ codeDir: snapshot.path, entrypoint: record.package!.entrypoint, input,
+        const result = await this.development.executor.run!({ codeDir: snapshot.path, entrypoint: record.package!.entrypoint, input,
           ...(usesFiles ? { workspaceDir: root, workspaceReadOnly: !mayWrite } : {}), signal });
         if (result.reason === "workspace_file_too_large") throw new InputError("运行目录存在超过 20 MiB 的文件，请移出或缩小文件后重试");
         if (result.status !== "passed") throw new InputError("程序执行未完成，请检查任务输入或继续研发；未把失败结果标为成功");
@@ -1146,7 +1148,7 @@ export class PrototypeAgents {
     };
   }
 
-  async applicationCapabilities({ task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, signal, check }: { task: Pick<ApplicationTask, "id" | "agentId" | "source" | "input" | "allowNetwork">; descriptor: ApplicationDescriptor; action: ApplicationAction; connectionSnapshot: ConnectionSnapshot; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; signal: AbortSignal; check: () => unknown | Promise<unknown> }): Promise<(input: CapabilityInput) => Promise<unknown>> {
+  async applicationCapabilities({ task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, signal, check }: { task: Pick<ApplicationTask, "id" | "agentId" | "source" | "input" | "allowNetwork">; descriptor: { agent: Pick<AgentDefinition, "draft">; manifest: { stateVersion: number }; architecture?: { design?: { connections?: (ConnectionDefinition | LegacyArchitectureConnection)[] } | null | undefined } | null }; action: Pick<ApplicationAction, "connectionIds">; connectionSnapshot: ConnectionSnapshot; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; signal: AbortSignal; check: () => unknown | Promise<unknown> }): Promise<(input: CapabilityInput) => Promise<unknown>> {
     const root = workspaceRoot ?? await this.workspace(task.agentId);
     const guardWrite = async (file: unknown) => {
       if (task.source.scope !== "private") return;
@@ -1169,8 +1171,8 @@ export class PrototypeAgents {
       await check();
       const activeSignal = callSignal ? AbortSignal.any([signal, callSignal]) : signal;
       activeSignal.throwIfAborted();
-      if (capability === "web.search") return this.web.search(args, { ...webOptions, signal: activeSignal });
-      if (capability === "web.fetch") return this.web.fetch(args, { ...webOptions, signal: activeSignal });
+      if (capability === "web.search") return this.web.search!(args, { ...webOptions, signal: activeSignal });
+      if (capability === "web.fetch") return this.web.fetch!(args, { ...webOptions, signal: activeSignal });
       if (capability === "connection.call") {
         if (!webOptions.allowNetwork) throw new InputError("本轮要求不联网，未调用业务接口");
         if (typeof args.connectionId !== "string" || !action.connectionIds.includes(args.connectionId)) throw new InputError("动作没有声明这个连接依赖");
@@ -1606,7 +1608,7 @@ export class PrototypeAgents {
       await item.session!.prompt(request, images.length ? { images } : undefined);
       checkCancellation();
       requireSuccess(item.session!, item);
-      const reply = item.session!.getLastAssistantText();
+      const reply = item.session!.getLastAssistantText!();
       if (typeof reply !== "string" || !reply.trim()) throw modelError();
       await this.recordWorkingModel(connectionSnapshot);
       checkCancellation();

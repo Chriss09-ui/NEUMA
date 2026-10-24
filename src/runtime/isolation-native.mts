@@ -1,4 +1,4 @@
-import type { ChildProcess } from "node:child_process";
+import type { IsolationProcess, IsolationSpawner } from "./process-port.mjs";
 import { errorField, objectFields, isInteger } from "./type-boundary.mjs";
 export interface NativeIsolationOptions { helperPath: string; temporaryDir: string; platform: string; nodePath: string; codeDir: string; writableDir: string; readableDir?: string | null | undefined; workingDir: string; entrypoint: string; timeoutMs: number; maxOutputBytes: number; bootstrap?: string }
 import { spawn } from "node:child_process";
@@ -72,10 +72,10 @@ export async function readIsolationStatus(path: string, helperExitCode: number |
   } catch { return null; }
 }
 
-export async function cleanupWindowsIsolation({ helperPath, journalPath, spawnImpl = spawn }: { helperPath: string; journalPath: string; spawnImpl?: typeof spawn }): Promise<boolean> {
+export async function cleanupWindowsIsolation({ helperPath, journalPath, spawnImpl = spawn }: { helperPath: string; journalPath: string; spawnImpl?: IsolationSpawner }): Promise<boolean> {
   try { await lstat(journalPath); } catch (error) { return errorField(error, "code") === "ENOENT"; }
   return new Promise((resolveResult) => {
-    let child: ChildProcess, timer: NodeJS.Timeout | undefined, done = false;
+    let child: IsolationProcess, timer: NodeJS.Timeout | undefined, done = false;
     const finish = (ok: boolean) => { if (done) return; done = true; clearTimeout(timer); resolveResult(ok); };
     try {
       child = spawnImpl(helperPath, ["--cleanup", journalPath], { windowsHide: true, shell: false, stdio: "ignore" });
@@ -86,7 +86,7 @@ export async function cleanupWindowsIsolation({ helperPath, journalPath, spawnIm
   });
 }
 
-export async function recoverWindowsIsolation({ helperPath, temporaryDir, spawnImpl = spawn }: { helperPath: string; temporaryDir: string; spawnImpl?: typeof spawn }) {
+export async function recoverWindowsIsolation({ helperPath, temporaryDir, spawnImpl = spawn }: { helperPath: string; temporaryDir: string; spawnImpl?: IsolationSpawner }) {
   let entries;
   try { entries = await readdir(temporaryDir, { withFileTypes: true }); } catch { return false; }
   const pending = entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && /^neuma-isolation-control-[a-zA-Z0-9]+$/.test(entry.name));

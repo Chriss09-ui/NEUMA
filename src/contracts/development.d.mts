@@ -38,10 +38,10 @@ export interface DevelopmentReview { subjectVersion?: number; subjectHash: strin
   issues: { id: string; blocking: boolean; kind: "code" | "plan" | "architecture" | "environment"; description: string; remedy: string }[] }
 export interface DevelopmentWork { summary: string; changedFiles: string[]; knownIssues: string[]; nextAction: string; continue: boolean }
 export interface DevelopmentArchitecture {
-  draft?: RequirementDraft; deferredVerifications?: { issues?: { requirementId: string; stage?: string }[] } | null | undefined;
+  draft?: {taskSpec?:RequirementDraft["taskSpec"];interaction?:Pick<NonNullable<RequirementDraft["interaction"]>,"operations">}; deferredVerifications?: { issues?: { requirementId: string; stage?: string }[] } | null | undefined;
   agentId?: string; version?: number; candidateHash?: string; sourceFingerprint?: string; platformHash?: string;
   requirements?: { id: string }[];
-  design?: { schemaVersion?: number; execution?: { language: string; hosting: string }; interaction?: { page: boolean; operations?: boolean };
+  design?: { schemaVersion?: number; execution?: { language: string; hosting: string }; interaction?: { page?:boolean; operations?:boolean };
     connections?: { id: string }[]; acceptance?: { id: string; requirementIds?: string[]; verification?: unknown }[] };
   runtimeCapabilities?: unknown; confirmedRequirementContext?: unknown;
 }

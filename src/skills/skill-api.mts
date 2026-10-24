@@ -1,22 +1,23 @@
 import type { SkillManager } from "./skill-manager.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
-interface RouteOptions { method: string; path: string; manager: SkillManager; readBody(limit?: number): Promise<UnknownRecord>; pickFolder(options: { purpose: "source" | "import"; signal?: AbortSignal | undefined }): Promise<unknown>; signal?: AbortSignal | undefined }
+export type SkillRoutePort = Partial<{ [K in "list" | "scan" | "sources" | "addSource" | "removeSource" | "previewImport" | "importSkill" | "listTrash" | "restore" | "detail" | "save" | "previewRemoval" | "trashSkill" | "dispose"]: (...args: Parameters<SkillManager[K]>) => unknown | Promise<unknown> }>;
+interface RouteOptions { method: string; path: string; manager: SkillRoutePort; readBody(limit?: number): Promise<UnknownRecord>; pickFolder(options: { purpose: "source" | "import"; signal?: AbortSignal | undefined }): Promise<unknown>; signal?: AbortSignal | undefined }
 import { InputError } from "../requirements/core.mjs";
 
 export async function routeSkills({ method, path, manager, readBody, pickFolder, signal }: RouteOptions) {
   const options = { signal };
-  if (method === "GET" && path === "/api/skills") return { value: await manager.list(options) };
+  if (method === "GET" && path === "/api/skills") return { value: await manager.list!(options) };
   if (method === "POST" && path === "/api/skills/scan") {
     await readBody();
-    return { value: await manager.scan(options) };
+    return { value: await manager.scan!(options) };
   }
-  if (method === "GET" && path === "/api/skills/sources") return { value: { sources: await manager.sources() } };
+  if (method === "GET" && path === "/api/skills/sources") return { value: { sources: await manager.sources!() } };
   if (method === "POST" && path === "/api/skills/sources")
-    return { value: { sources: await manager.addSource(await readBody(), options) } };
+    return { value: { sources: await manager.addSource!(await readBody(), options) } };
   const source = path.match(/^\/api\/skills\/sources\/([\w-]+)\/remove$/);
   if (method === "POST" && source) {
     await readBody();
-    return { value: { sources: await manager.removeSource(source[1]) } };
+    return { value: { sources: await manager.removeSource!(source[1]) } };
   }
   if (method === "POST" && path === "/api/skills/pick-folder") {
     const { purpose } = await readBody();
@@ -24,26 +25,26 @@ export async function routeSkills({ method, path, manager, readBody, pickFolder,
     return { value: await pickFolder({ purpose, signal }) };
   }
   if (method === "POST" && path === "/api/skills/import/preview")
-    return { value: await manager.previewImport(await readBody(), options) };
+    return { value: await manager.previewImport!(await readBody(), options) };
   if (method === "POST" && path === "/api/skills/import")
-    return { value: await manager.importSkill(await readBody(), options) };
-  if (method === "GET" && path === "/api/skills/trash") return { value: { entries: await manager.listTrash() } };
+    return { value: await manager.importSkill!(await readBody(), options) };
+  if (method === "GET" && path === "/api/skills/trash") return { value: { entries: await manager.listTrash!() } };
   const restore = path.match(/^\/api\/skills\/trash\/([\w-]+)\/restore$/);
   if (method === "POST" && restore) {
     await readBody();
-    return { value: await manager.restore(restore[1], options) };
+    return { value: await manager.restore!(restore[1], options) };
   }
   const skill = path.match(/^\/api\/skills\/([\w-]+)(?:\/(save|trash)(?:\/(preview))?)?$/);
   if (skill) {
     const [, id, action, preview] = skill;
-    if (method === "GET" && !action) return { value: await manager.detail(id, options) };
+    if (method === "GET" && !action) return { value: await manager.detail!(id, options) };
     if (method === "POST" && action === "save" && !preview)
-      return { value: await manager.save(id, await readBody(6 * 1024 * 1024 + 8192), options) };
+      return { value: await manager.save!(id, await readBody(6 * 1024 * 1024 + 8192), options) };
     if (method === "POST" && action === "trash") {
       const body = await readBody();
-      if (preview) return { value: await manager.previewRemoval(id, body, options) };
+      if (preview) return { value: await manager.previewRemoval!(id, body, options) };
       if (body.confirm !== true) throw new InputError("请确认将这个 skill 移至回收站");
-      return { value: await manager.trashSkill(id, body, options) };
+      return { value: await manager.trashSkill!(id, body, options) };
     }
   }
   return null;

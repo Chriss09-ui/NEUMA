@@ -1,3 +1,4 @@
+type DockerCommand = (...args: Parameters<typeof commandResult>) => Promise<{ code: number | null; stdout?: string }>;
 import type { ServiceManifest } from "../contracts/service.mjs";
 import type { ProgressOptions, InstalledDependencies, DockerDelivery, IsolationProbe } from "./service-port.mjs";
 import { errorField, objectFields } from "../runtime/type-boundary.mjs";
@@ -18,18 +19,18 @@ const SECCOMP = Object.freeze({ defaultAction: "SCMP_ACT_ALLOW", syscalls: [
   { names: ["socket"], action: "SCMP_ACT_ERRNO", errnoRet: 1, args: [{ index: 0, value: 1, op: "SCMP_CMP_NE" }] }
 ] });
 export class DockerServiceRuntime {
-  declare dockerPath: string; declare ownerId: string | undefined; declare command: typeof commandResult;
-  constructor({ dockerPath = "docker", ownerId, command = commandResult }: { dockerPath?: string; ownerId?: string; command?: typeof commandResult } = {}) { Object.assign(this, { dockerPath, ownerId, command }); }
+  declare dockerPath: string; declare ownerId: string | undefined; declare command: DockerCommand;
+  constructor({ dockerPath = "docker", ownerId, command = commandResult }: { dockerPath?: string; ownerId?: string; command?: DockerCommand } = {}) { Object.assign(this, { dockerPath, ownerId, command }); }
   async probe({ signal }: { signal?: AbortSignal | undefined } = {}): Promise<IsolationProbe> {
     try {
       const result = await this.command(this.dockerPath, ["info", "--format", "{{json .}}"], { signal, timeoutMs: 10000 });
       if (result.code !== 0) return { available: false, host: "docker", reason: "docker_not_running" };
-      const info = JSON.parse(result.stdout);
+      const info = JSON.parse(result.stdout!);
       if (info.OSType !== "linux" || !["aarch64", "arm64"].includes(info.Architecture)) return { available: false, host: "docker", reason: "unsupported_docker_platform" };
       return { available: true, host: "docker", kind: "docker-linux-arm64", version: info.ServerVersion, verified: false };
     } catch (error) { return { available: false, host: "docker", reason: String(errorField(error, "reason") ?? "docker_unavailable") }; }
   }
-  async build({ directory, codeDir, dependencies, manifest, signal, onProgress = () => {} }: ProgressOptions & { directory: string; codeDir: string; dependencies: InstalledDependencies; manifest: ServiceManifest }): Promise<DockerDelivery> {
+  async build({ directory, codeDir, dependencies, manifest, signal, onProgress = () => {} }: ProgressOptions & { directory: string; codeDir: string; dependencies: Pick<InstalledDependencies, "path">; manifest: ServiceManifest }): Promise<DockerDelivery> {
     const status = await this.probe({ signal }); if (!status.available) throw new ServiceError(status.reason ?? "docker_unavailable");
     const context = await privateDirectory(join(directory, "docker-context"));
     await cp(codeDir, join(context, "code"), { recursive: true, force: false, errorOnExist: false });
@@ -59,9 +60,9 @@ export class DockerServiceRuntime {
     const built = await this.command(this.dockerPath, ["build", "--network=none", "--label", `neuma.owner=${this.ownerId}`, "--tag", tag, context], { signal, timeoutMs: 600000, maxBytes: 1024 * 1024 });
     if (built.code !== 0) throw new ServiceError("docker_build_failed");
     const inspected = await this.command(this.dockerPath, ["image", "inspect", "--format", "{{.Id}}", tag], { signal });
-    if (inspected.code !== 0 || !/^sha256:[a-f0-9]{64}$/.test(inspected.stdout.trim())) throw new ServiceError("docker_image_missing");
+    if (inspected.code !== 0 || !/^sha256:[a-f0-9]{64}$/.test(inspected.stdout!.trim())) throw new ServiceError("docker_image_missing");
     const seccompPath = join(directory, "docker-seccomp.json"); await writeFile(seccompPath, JSON.stringify(SECCOMP), { mode: 0o600 });
-    const docker: DockerDelivery = { imageId: inspected.stdout.trim(), seccompPath, buildHash: serviceHash(source) };
+    const docker: DockerDelivery = { imageId: inspected.stdout!.trim(), seccompPath, buildHash: serviceHash(source) };
     docker.isolation = await this.verifyImage({ manifest, docker, signal });
     return docker;
   }
@@ -77,7 +78,7 @@ export class DockerServiceRuntime {
     args.push("--entrypoint", manifest.language === "javascript" ? "node" : "python3", docker.imageId, ...(manifest.language === "javascript" ? ["-e", source] : ["-I", "-S", "-B", "-c", source]));
     try {
       const result = await this.command(this.dockerPath, args, { signal, timeoutMs: 15000 });
-      let checks; try { checks = JSON.parse(result.stdout); } catch {}
+      let checks; try { checks = JSON.parse(result.stdout!); } catch {}
       if (result.code !== 0 || !checks || ["scratch", "code", "network", "subprocess"].some((key) => checks[key] !== true)) throw new ServiceError("docker_isolation_failed");
       return { available: true, checks, kind: "docker-linux-arm64", resourceEnforcement: "container-hard-limits" };
     } finally { await this.stop(name); }
@@ -86,7 +87,7 @@ export class DockerServiceRuntime {
   async cleanupOwned() {
     try {
       const result = await this.command(this.dockerPath, ["ps", "--all", "--quiet", "--filter", `label=neuma.owner=${this.ownerId}`]);
-      if (result.code === 0) for (const id of result.stdout.trim().split(/\s+/).filter((id) => /^[a-f0-9]{12,64}$/.test(id))) await this.stop(id);
+      if (result.code === 0) for (const id of result.stdout!.trim().split(/\s+/).filter((id) => /^[a-f0-9]{12,64}$/.test(id))) await this.stop(id);
     } catch { /* Missing Docker must not disable ordinary services. */ }
   }
 }

@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { textWithinLimit } from "../runtime/text-length.mjs";
 import { assertRequirementDraftSize, REQUIREMENT_SIZE_GUIDE, TASK_SPEC_LIMITS } from "./requirement-limits.mjs";
 
-export const TASK_DIMENSIONS = Object.freeze(["input_scale", "processing", "delivery", "workflow", "data_lifecycle", "external_conditions"]);
+export const TASK_DIMENSIONS = Object.freeze(["input_scale", "processing", "delivery", "workflow", "data_lifecycle", "external_conditions"] as const);
 const SOURCES = new Set(["user", "accepted", "measured", "inferred", "unknown"]);
 const APPLICABILITY = Object.freeze(["applies", "not_applicable", "unknown"]);
 const LIMITS = TASK_SPEC_LIMITS;

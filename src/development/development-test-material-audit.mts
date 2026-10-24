@@ -1,7 +1,7 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { FixtureBudget } from "../contracts/development.mjs";
 import { objectFields, isRecord, isInteger } from "../runtime/type-boundary.mjs";
-interface MaterialAuditOptions { signal?: AbortSignal | undefined; budget?: FixtureBudget | undefined; maxWorkBytes?: number | undefined }
+interface MaterialAuditOptions { signal?: Pick<AbortSignal, "throwIfAborted"> | undefined; budget?: FixtureBudget | undefined; maxWorkBytes?: number | undefined }
 interface MaterialAuditInput { materialChecks?: unknown }
 interface MaterialAuditResolved { input?: unknown; inputAvailable?: boolean; mocks?: { capability: unknown; args: unknown; value: unknown }[] }
 interface MaterialAuditIssue { path: string; reason: string; remedy: string; measurement?: { measure: string; encoding?: string; actual: string | number; expected: string | number } }

@@ -12,25 +12,50 @@ export interface RawToolInput { toolName: string; toolCallId: string; args: unkn
 export interface RawDecision { valid: boolean; reason?: string }
 export interface ModelRequestRejection { reason: string; requestSent: boolean; source: string; causeReason: unknown; purpose: string; retryAttempt: number; used?: number; limit?: number }
 export type Progress = (event: UnknownRecord) => void;
+export type SessionContentPart = { type: "text"; text: string }
+  | { type: "toolCall"; id: string; name: string; arguments: unknown }
+  | { type: "thinking"; thinking: string }
+  | { type: "image"; data: string; mimeType: string };
+/** Only lifecycle/error/text/tool receipt fields consumed by the host cross the injection port. */
+export interface SessionMessage { role: string; content?: string | SessionContentPart[] | undefined; stopReason?: string | undefined; errorMessage?: string | undefined;
+  toolName?: string | undefined; toolCallId?: string | undefined; isError?: boolean | undefined; usage?: { output?: number | undefined } | undefined }
+export type AssistantSessionMessage = Omit<SessionMessage, "role" | "content"> & { role: "assistant"; content?: SessionContentPart[] | undefined };
+type EventMessage<M> = M extends { role: infer R extends string } ? R extends "assistant" ? AssistantSessionMessage : SessionMessage & { role: R } : never;
+/** Streaming crosses the host port with just the fields read by its controllers. */
+interface SessionEventFields {
+  message?: EventMessage<Extract<AgentSessionEvent, { message: unknown }>["message"]> | undefined;
+  assistantMessageEvent?: { type: string; delta?: string | undefined } | undefined;
+  errorMessage?: string | undefined; finalError?: string | undefined; toolName?: string | undefined; toolCallId?: string | undefined;
+  args?: unknown; isError?: boolean | undefined; success?: boolean | undefined; attempt?: number | undefined;
+  maxAttempts?: number | undefined; delayMs?: number | undefined; willRetry?: boolean | undefined;
+}
+export type SessionEvent = SessionEventFields & (
+  { type: "tool_execution_end"; result?: { content?: { type: string; text?: string | undefined }[] | undefined } | undefined }
+  | { type: Exclude<AgentSessionEvent["type"], "tool_execution_end">; result?: unknown }
+);
 /** Injection uses the methods consumed by NEUMA, without private SDK fields or constructors. */
 export interface PiSessionPort {
   prompt(text: string, options?: Pick<PromptOptions, "images">): Promise<unknown>;
-  abort(): Promise<void>; dispose(): void;
-  subscribe(listener: (event: AgentSessionEvent) => void): () => void;
-  setAutoCompactionEnabled(enabled: boolean): void;
-  getLastAssistantText(): string | undefined;
-  readonly messages: AgentSession["messages"];
+  abort(): void | Promise<void>; dispose(): void;
+  subscribe?(listener: (event: SessionEvent) => void): () => void;
+  setAutoCompactionEnabled?(enabled: boolean): void;
+  getLastAssistantText?(): string | undefined;
+  readonly messages?: SessionMessage[];
   modelCallAccounting?: boolean;
   readonly modelRequestRejection?: ModelRequestRejection;
   sessionBindingHash?: string;
   readonly sessionFile?: string | undefined;
 }
+/** Independent verification only consumes prompt and probes the remaining lifecycle/history hooks. */
+export type VerificationSessionPort = Pick<PiSessionPort, "prompt"> & Partial<Pick<PiSessionPort,
+  "abort" | "dispose" | "subscribe" | "setAutoCompactionEnabled" | "messages" | "modelCallAccounting" | "sessionBindingHash" | "sessionFile">>;
+export type VerificationSessionFactory = (options: PiSessionOptions) => VerificationSessionPort | Promise<VerificationSessionPort>;
 export interface PiSessionOptions {
   config: ModelConfig; cwd: string; dataDir: string; manager?: ProjectManagerPort; turn?: ProjectTurn; customTools?: RegisteredTool[];
   systemPrompt?: string; maxOutputTokens?: number; reasoningMode?: "off" | "auto";
   sessionStorage?: SessionStorage;
   beforeModelRequest?: (event: { signal?: AbortSignal | null | undefined }) => unknown | Promise<unknown>;
-  onModelCall?: (event: { signal?: AbortSignal | undefined; purpose?: string; retryAttempt?: number }) => unknown | Promise<unknown>;
+  onModelCall?: (event?: { signal?: AbortSignal | undefined; purpose?: string; retryAttempt?: number }) => unknown | Promise<unknown>;
   onToolDiagnostic?: (event: UnknownRecord) => unknown | Promise<unknown>;
   toolErrorResult?: (input: RawToolInput) => (ToolResult & { details: JsonValue }) | undefined | Promise<(ToolResult & { details: JsonValue }) | undefined>;
   rawInputValidators?: Record<string, (input: RawToolInput) => RawDecision | Promise<RawDecision>>;
@@ -40,20 +65,20 @@ export interface PiSessionOptions {
 export type SessionFactory = (options: PiSessionOptions) => PiSessionPort | Promise<PiSessionPort>;
 export type NeumaPiSession = AgentSession & { modelCallAccounting: boolean; modelProfile: ResolvedModelProfile; modelProfileHash: string; readonly modelRequestRejection?: ModelRequestRejection; sessionBindingHash?: string };
 export interface ProjectSummary extends UnknownRecord {
-  id: string; name: string; description: unknown; path: unknown; kind: unknown; status: unknown; canLaunch: unknown; canStop: unknown;
+  id?: string | undefined; name?: string | undefined; description?: unknown; path?: unknown; kind?: unknown; status?: unknown; canLaunch?: unknown; canStop?: unknown;
   url?: unknown; pageOpened?: unknown; openingPage?: unknown; openError?: unknown; setup?: unknown; error?: unknown;
 }
 export interface ProjectManagerPort {
-  list(): Promise<ProjectSummary[]>;
-  failures(input: { limit: unknown }): Promise<unknown>;
-  runtime(options: { signal?: AbortSignal | undefined }): Promise<{ checkedAt: unknown; summary: unknown; warnings: unknown; projects: (ProjectSummary & { runtime: { state: string } })[]; ports: { port: number; processName: string; projects: { name: string }[] }[] }>;
-  add(input: UnknownRecord, options: { signal?: AbortSignal | undefined; instructions: string; onProgress: Progress }): Promise<ProjectSummary>;
-  inspect(id: unknown, options: { signal?: AbortSignal | undefined; instructions: string; onProgress: Progress }): Promise<ProjectSummary>;
-  start(id: unknown): Promise<ProjectSummary>; stop(id: unknown): Promise<ProjectSummary>;
-  remove(id: unknown, options: { removeOnly: unknown }): Promise<UnknownRecord>;
+  list?(): Promise<ProjectSummary[]>;
+  failures?(input: { limit: unknown }): Promise<unknown>;
+  runtime?(options: { signal?: AbortSignal | undefined }): Promise<{ checkedAt: unknown; summary?: unknown; warnings: unknown; projects?: (ProjectSummary & { runtime: { state: string } })[]; ports?: { port: number; processName: string; projects: { name: string }[] }[] }>;
+  add?(input: UnknownRecord, options: { signal?: AbortSignal | undefined; instructions?: string; onProgress?: Progress }): Promise<ProjectSummary>;
+  inspect?(id: unknown, options: { signal?: AbortSignal | undefined; instructions?: string; onProgress?: Progress }): Promise<ProjectSummary>;
+  start?(id: unknown): Promise<ProjectSummary>; stop?(id: unknown): Promise<ProjectSummary>;
+  remove?(id: unknown, options: { removeOnly: unknown }): Promise<UnknownRecord>;
 }
 export interface ProjectTurn {
-  message: string; onProgress?: Progress | null;
+  message?: string; onProgress?: Progress | null;
   actions: { tool: string; project: unknown }[];
   failedOperation?: UnknownRecord | null;
   removalNeedsConfirmation?: Set<unknown>;

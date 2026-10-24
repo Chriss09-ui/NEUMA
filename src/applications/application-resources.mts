@@ -1,6 +1,6 @@
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { ApplicationManifest } from "../contracts/application.mjs";
+import type { ApplicationPage } from "../contracts/application.mjs";
 import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -34,8 +34,9 @@ async function resourceBytes(root: string, resource: { path: string; sha256: str
   } finally { await handle.close(); }
 }
 
-interface ResourceOptions { agentId: string; deliveryVersion: string; manifest: ApplicationManifest; codeDir: string; parentOrigin: string; signal?: AbortSignal | undefined }
-interface ResourceInstance { instanceId: string; agentId: string; deliveryVersion: string; manifest: ApplicationManifest; server: Server; origin: string }
+interface ResourceManifest { page?: Pick<ApplicationPage, "entrypoint" | "resources"> | null }
+interface ResourceOptions<M extends ResourceManifest = ResourceManifest> { agentId: string; deliveryVersion: string; manifest: M; codeDir: string; parentOrigin: string; signal?: AbortSignal | undefined }
+interface ResourceInstance { instanceId: string; agentId: string; deliveryVersion: string; manifest: ResourceManifest; server: Server; origin: string }
 export class ApplicationResources {
   bridgeSource: string | undefined; maxInstances: number; instances: Map<string, ResourceInstance>;
   pending: number; epoch: number; generations: Map<string, number>;
@@ -43,7 +44,7 @@ export class ApplicationResources {
     this.bridgeSource = bridgeSource; this.maxInstances = maxInstances; this.instances = new Map();
     this.pending = 0; this.epoch = 0; this.generations = new Map();
   }
-  async open(options: ResourceOptions) {
+  async open<M extends ResourceManifest>(options: ResourceOptions<M>) {
     if (this.instances.size + this.pending >= this.maxInstances) throw new InputError("打开的应用窗口过多，请先关闭其他应用");
     const epoch = this.epoch, generation = this.generations.get(options.agentId);
     options.signal?.throwIfAborted(); this.pending++;
@@ -56,7 +57,7 @@ export class ApplicationResources {
       return result;
     } finally { this.pending--; }
   }
-  async openReserved({ agentId, deliveryVersion, manifest, codeDir, parentOrigin }: ResourceOptions) {
+  async openReserved<M extends ResourceManifest>({ agentId, deliveryVersion, manifest, codeDir, parentOrigin }: ResourceOptions<M>) {
     let parent;
     try { parent = new URL(parentOrigin); } catch { throw new InputError("应用宿主来源无效"); }
     if (parent.origin !== parentOrigin || parent.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(parent.hostname)) throw new InputError("应用只能在本机 NEUMA 内打开");

@@ -13,7 +13,7 @@ function matchesArguments(value: unknown, schema: object) {
 }
 
 /** Explicit submit-only controllers describe their registered terminal tools without changing execution. */
-export function renderPiSubmissionContract({ role, submitName, tools, alternativeTools = [], structuredResponse = false }: { role: string; submitName: string; tools: SubmissionTool[]; alternativeTools?: string[]; structuredResponse?: boolean }) {
+export function renderPiSubmissionContract({ role, submitName, tools, alternativeTools = [], structuredResponse = false }: { role: string; submitName: string; tools: Pick<SubmissionTool, "name">[]; alternativeTools?: string[]; structuredResponse?: boolean }) {
   const names = isArray(tools) ? tools.map((tool) => tool?.name) : [];
   if (typeof role !== "string" || !identifier.test(role) || typeof submitName !== "string" || !identifier.test(submitName)
     || !isArray(alternativeTools) || names.filter((name) => name === submitName).length !== 1

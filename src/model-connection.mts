@@ -230,8 +230,8 @@ export async function testAgentModelConnection(config: ModelConfig = {}, body: u
       });
     const activeSession = await Promise.race([creating, aborted]);
     signal.throwIfAborted();
-    activeSession.setAutoCompactionEnabled(false);
-    unsubscribe = activeSession.subscribe((event) => {
+    activeSession.setAutoCompactionEnabled!(false);
+    unsubscribe = activeSession.subscribe!((event) => {
       if (event.type === "turn_start") {
         retryWithdrawn = false;
         if (++turns > 4) { turnLimit = true; controller.abort(); }
@@ -240,7 +240,7 @@ export async function testAgentModelConnection(config: ModelConfig = {}, body: u
         turns--;
         retryWithdrawn = true;
       }
-      if (event.type === "message_update" && ["text_delta", "toolcall_delta"].includes(event.assistantMessageEvent?.type)) streaming = true;
+      if (event.type === "message_update" && ["text_delta", "toolcall_delta"].includes(event.assistantMessageEvent?.type!)) streaming = true;
       if (event.type === "auto_retry_end" && !event.success) finalError = event.finalError || "";
     });
     await Promise.race([activeSession.prompt("请开始构建连接测试。"), aborted]);
@@ -252,7 +252,7 @@ export async function testAgentModelConnection(config: ModelConfig = {}, body: u
       throw probeError(mapped.message, mapped.reason);
     }
     if (last?.stopReason === "length") throw probeError("构建能力测试的模型输出被截断", "output_limit");
-    if (invalidTool || toolsCalled !== 1 || activeSession.getLastAssistantText()?.trim() !== `OK ${receipt}`)
+    if (invalidTool || toolsCalled !== 1 || activeSession.getLastAssistantText!()?.trim() !== `OK ${receipt}`)
       throw probeError("模型未完成工具调用与结果回传，暂不能确认构建能力", "tool_round_trip");
     if (!streaming) throw probeError("模型未返回可验证的流式结果", "missing_stream");
     return { ok: true, model: effective.model, latencyMs: Math.max(0, Math.round(performance.now() - started)),

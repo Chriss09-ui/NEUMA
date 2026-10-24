@@ -1,8 +1,9 @@
+import type {ProjectProcessSpawner} from "./project-port.mjs";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { ProjectChild } from "./project-port.mjs";
 import { errorField, objectFields, isInteger, isArray } from "../runtime/type-boundary.mjs";
 export interface HelperOptions { platform?: NodeJS.Platform; arch?: string; helperPath?: string | undefined }
-interface SpawnProjectOptions extends HelperOptions { spawnImpl?: typeof spawn; nodePath?: string; stopTimeoutMs?: number; killTimeoutMs?: number }
+interface SpawnProjectOptions extends HelperOptions { spawnImpl?: ProjectProcessSpawner; nodePath?: string; stopTimeoutMs?: number; killTimeoutMs?: number }
 import { spawn } from "node:child_process";
 import { access, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -63,7 +64,7 @@ export function validateBatchArguments(args: unknown[]) {
   }
 }
 
-function supervisedChild(supervisor: ChildProcess, { stopTimeoutMs = 3000, killTimeoutMs = 1000 } = {}) {
+function supervisedChild(supervisor:ProjectChild, { stopTimeoutMs = 3000, killTimeoutMs = 1000 } = {}) {
   const child: ProjectChild & { stdout: PassThrough; stderr: PassThrough } = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), pid: null as number | null, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null, kill: (_signal?: NodeJS.Signals | number) => false });
   // A spawn failure can arrive before an asynchronous caller installs its error handler.
   child.on("error", () => {});
@@ -75,7 +76,7 @@ function supervisedChild(supervisor: ChildProcess, { stopTimeoutMs = 3000, killT
   const forceSupervisor = () => {
     if (finished || forced) return;
     forced = true;
-    try { supervisor.kill("SIGKILL"); } catch { /* A close event is still required; kill success is not termination proof. */ }
+    try { supervisor.kill!("SIGKILL"); } catch { /* A close event is still required; kill success is not termination proof. */ }
   };
   const finish = (code: number | null, signal: NodeJS.Signals | null) => {
     if (finished) return;
@@ -105,25 +106,25 @@ function supervisedChild(supervisor: ChildProcess, { stopTimeoutMs = 3000, killT
         if (finished) return;
         deadline = setTimeout(() => { cleanup(); reject(stopError()); }, killTimeoutMs);
       }, stopTimeoutMs);
-      child.kill();
+      child.kill!();
     });
     return stopPromise;
   };
   supervisor.stdout?.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
-    if (buffer.length > 256 * 1024) { child.emit("error", new InputError("项目管理辅助程序响应过大。")); child.kill(); return; }
+    if (buffer.length > 256 * 1024) { child.emit("error", new InputError("项目管理辅助程序响应过大。")); child.kill!(); return; }
     let index;
     while ((index = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
       let frame: Record<string, unknown>;
-      try { frame = objectFields(JSON.parse(line)); } catch { child.emit("error", new InputError("项目管理辅助程序返回了无效状态。")); child.kill(); continue; }
+      try { frame = objectFields(JSON.parse(line)); } catch { child.emit("error", new InputError("项目管理辅助程序返回了无效状态。")); child.kill!(); continue; }
       if (frame.event === "started" && isInteger(frame.pid) && frame.pid > 0) { child.pid = frame.pid; child.managedPids = [frame.pid]; child.emit("spawn"); }
       else if (frame.event === "members" && isArray(frame.pids)) child.managedPids = frame.pids.filter((pid): pid is number => isInteger(pid) && pid > 0);
       else if (frame.event === "stdout" && typeof frame.data === "string") child.stdout.write(Buffer.from(frame.data, "base64"));
       else if (frame.event === "stderr" && typeof frame.data === "string") child.stderr.write(Buffer.from(frame.data, "base64"));
       else if (frame.event === "launcherExit" && !launcherExited) { launcherExited = true; child.emit("launcherExit", frame.code); }
       else if (frame.event === "treeEmpty") treeEmpty = true;
-      else if (frame.event === "error") { child.emit("error", new InputError("项目启动进程未能创建，请检查本地运行环境。")); child.kill(); }
+      else if (frame.event === "error") { child.emit("error", new InputError("项目启动进程未能创建，请检查本地运行环境。")); child.kill!(); }
     }
   });
   supervisor.stderr?.resume();
@@ -135,7 +136,7 @@ function supervisedChild(supervisor: ChildProcess, { stopTimeoutMs = 3000, killT
 export function spawnProject(command: string, args: string[], options: SpawnOptions = {}, { spawnImpl = spawn, platform = process.platform, helperPath, nodePath = process.execPath,
   stopTimeoutMs = 3000, killTimeoutMs = 1000 }: SpawnProjectOptions = {}): ProjectChild | Promise<ProjectChild> {
   if (platform !== "win32") {
-    const child: ChildProcess & { neumaClosed?: boolean } = spawnImpl(command === "node" ? nodePath : command, args, options);
+    const child:ProjectChild = spawnImpl(command === "node" ? nodePath : command, args, options);
     child.once("close", () => { child.neumaClosed = true; });
     return child;
   }

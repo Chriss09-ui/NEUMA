@@ -1,9 +1,10 @@
+import type {ProjectProcessSpawner} from "./project-port.mjs";
 import type { ProjectRecord, ProjectCommand, ProjectLaunch } from "../contracts/project.mjs";
 import type { ProjectRun, ProjectChild, ProjectSpawner } from "./project-port.mjs";
 import { errorField, objectFields } from "../runtime/type-boundary.mjs";
 const spawnIsAsync = (value: ProjectChild | Promise<ProjectChild>): value is Promise<ProjectChild> => typeof objectFields(value).then === "function";
 type ScriptProject = Pick<ProjectRecord, "root"> & { launch: ProjectLaunch };
-interface ScriptOptions { spawnImpl?: typeof spawn; env?: NodeJS.ProcessEnv | undefined; blockedPort?: number; onReady?: (run: ProjectRun) => void | Promise<void>; platform?: NodeJS.Platform; projectSpawn?: ProjectSpawner }
+interface ScriptOptions { spawnImpl?: ProjectProcessSpawner; env?: NodeJS.ProcessEnv | undefined; blockedPort?: number; onReady?: (run: ProjectRun) => void | Promise<void>; platform?: NodeJS.Platform; projectSpawn?: ProjectSpawner }
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
@@ -42,7 +43,7 @@ async function health(value: string, signal?: AbortSignal) {
 }
 
 function drain(child: ProjectChild) {
-  child.stdout?.resume(); child.stderr?.resume();
+  child.stdout?.resume!(); child.stderr?.resume();
 }
 
 function cancelled(run: ProjectRun) {
@@ -138,12 +139,12 @@ export async function startScriptServices(project: ScriptProject, run: ProjectRu
 async function finishLauncher(run: ProjectRun) {
   if (run.launcher?.jobManaged) return;
   if (!run.launcher || run.launcherExited) return;
-  try { run.launcher.kill("SIGTERM"); } catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; }
+  try { run.launcher.kill!("SIGTERM"); } catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; }
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([run.launcherDone, new Promise((resolve) => { timer = setTimeout(resolve, 1000); timer.unref(); })]);
   clearTimeout(timer);
   if (!run.launcherExited) {
-    try { run.launcher.kill("SIGKILL"); } catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; }
+    try { run.launcher.kill!("SIGKILL"); } catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; }
     await run.launcherDone;
   }
 }
@@ -158,7 +159,7 @@ async function executeStop(project: Pick<ProjectRecord, "root">, launch: Project
   catch { throw new InputError("项目停止脚本未能执行，请检查本地运行环境。"); }
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* Best effort after timeout; retain ownership for retry. */ }
+      try { child.kill!("SIGKILL"); } catch { /* Best effort after timeout; retain ownership for retry. */ }
       reject(new InputError("项目停止脚本超时，仍保留运行记录，可以再次尝试停止。"));
     }, 10_000); timer.unref();
     drain(child);

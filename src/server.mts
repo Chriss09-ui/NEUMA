@@ -1,20 +1,25 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ServerAgents, ServerProjects, ServerPromptPort, ServerMainPort, ServerCollaborationPort } from "./server-port.mjs";
+import type { SkillRoutePort } from "./skills/skill-api.mjs";
+import type { HttpRequest, HttpResponse } from "./runtime/http-port.mjs";
+import { Writable } from "node:stream";
+import { ServerResponse as NodeServerResponse } from "node:http";
 import { objectFields } from "./runtime/type-boundary.mjs";
 import type { RawMaterial } from "./contracts/material.mjs";
 import type { ProviderConfig, Providers } from "./requirements/requirement-provider-port.mjs";
 import type { Progress } from "./runtime/pi-port.mjs";
 type RequirementTurnResult = Awaited<ReturnType<RequirementSessions["turn"]>>;
 type ProcessRequirement = (body: unknown, options?: Parameters<RequirementSessions["turn"]>[2]) => Promise<RequirementTurnResult>;
-interface PromptPort { prompt(body: Record<string, unknown>, progress?: Progress, options?: { signal?: AbortSignal | undefined }): Promise<unknown>; cancel(sessionId: string): Promise<unknown> }
+type PromptPort = ServerPromptPort;
 export interface RequestHandlerOptions {
-  config?: ProviderConfig; providers?: Providers; dataDir?: string; envPath?: string; cwd?: string; port?: number; instanceId?: string | null;
-  pickProjectFolder?: ReturnType<typeof createProjectFolderPicker>; projects?: ProjectManager; skillManager?: SkillManager;
-  pickSkillFolder?: ReturnType<typeof createProjectFolderPicker>; modelConnectionTester?: typeof testModelConnection;
-  agentModelConnectionTester?: typeof testAgentModelConnection; jevConnectionTester?: typeof testJevConnection;
-  projectAgent?: PiProjectAgent; prototypeAgents?: PrototypeAgents; requirementSessions?: RequirementSessions;
-  collaboration?: CollaborationService; mainAgent?: MainAgent;
+  config?: Partial<ProviderConfig>; providers?: Providers; dataDir?: string; envPath?: string; cwd?: string; port?: number; instanceId?: string | null;
+  pickProjectFolder?: ReturnType<typeof createProjectFolderPicker>; projects?: ServerProjects; skillManager?: SkillRoutePort;
+  pickSkillFolder?: ReturnType<typeof createProjectFolderPicker>; modelConnectionTester?(config: Partial<ProviderConfig>, body: Record<string, unknown>, options: { signal: AbortSignal }): unknown | Promise<unknown>;
+  agentModelConnectionTester?(config: Partial<ProviderConfig>, body: Record<string, unknown>, options: { signal: AbortSignal }): unknown | Promise<unknown>;
+  jevConnectionTester?(config: Partial<ProviderConfig>, body: Record<string, unknown>, options: { signal: AbortSignal }): unknown | Promise<unknown>;
+  projectAgent?: ServerPromptPort; prototypeAgents?: ServerAgents; requirementSessions?: RequirementSessions;
+  collaboration?: ServerCollaborationPort; mainAgent?: ServerMainPort;
 }
-export interface RequestHandler { (request: IncomingMessage, response: ServerResponse): Promise<unknown>; ready: Promise<void>; dispose(): Promise<void> }
+export interface RequestHandler { (request: HttpRequest, response: HttpResponse): Promise<unknown>; ready: Promise<void>; dispose(): Promise<void> }
 import { createServer } from "node:http";
 import { constants } from "node:fs";
 import { open, readFile, realpath } from "node:fs/promises";
@@ -62,6 +67,8 @@ function vendorAsset(path: string): [string, string] | null {
 const PUBLIC = new Map<string, [string, string]>([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/page-elements.js", ["page-elements.js", "text/javascript; charset=utf-8"]],
+  ["/ui-types.js", ["ui-types.js", "text/javascript; charset=utf-8"]],
   ["/agents.js", ["agents.js", "text/javascript; charset=utf-8"]],
   ["/agent-conversations.js", ["agent-conversations.js", "text/javascript; charset=utf-8"]],
   ["/agent-runtime.js", ["agent-runtime.js", "text/javascript; charset=utf-8"]],
@@ -97,12 +104,12 @@ const PUBLIC = new Map<string, [string, string]>([
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
 ]);
 
-function sendJson(response: ServerResponse, status: number, value: unknown) {
+function sendJson(response: HttpResponse, status: number, value: unknown) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(value));
 }
 
-function safeFailure(error: unknown, config: ProviderConfig) {
+function safeFailure(error: unknown, config: Partial<ProviderConfig>) {
   const inputContract = publicInputContractFailure(error);
   if (inputContract) return { status: 400, payload: { ...inputContract,
     diagnostic: { stage: "input", reason: inputContract.reason, providerModel: config.model || null } } };
@@ -132,7 +139,7 @@ const binaryHeaders = (name: string, mimeType: string, download = false) => ({
   "content-security-policy": "sandbox; default-src 'none'",
 });
 
-async function sendMaterialFile(response: ServerResponse, file: RawMaterial, download: boolean, signal?: AbortSignal) {
+async function sendMaterialFile(response: HttpResponse, file: RawMaterial, download: boolean, signal?: AbortSignal) {
   const handle = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
@@ -141,42 +148,43 @@ async function sendMaterialFile(response: ServerResponse, file: RawMaterial, dow
       throw new InputError("材料原文件已改变或无法读取，请重新上传");
     signal?.throwIfAborted();
     response.writeHead(200, { ...binaryHeaders(file.name, file.mimeType, download), "content-length": info.size });
+    if (!(response instanceof Writable || response instanceof NodeServerResponse)) throw new TypeError("材料响应必须是可写流");
     await pipeline(handle.createReadStream({ autoClose: false }), response, { signal });
   } finally { await handle.close(); }
 }
 
-async function streamProjectReply(response: ServerResponse, agent: PromptPort, body: Record<string, unknown>, config: ProviderConfig, signal?: AbortSignal) {
+async function streamProjectReply(response: HttpResponse, agent: PromptPort, body: Record<string, unknown>, config: Partial<ProviderConfig>, signal?: AbortSignal) {
   response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
   response.flushHeaders?.();
   const write = (event: unknown) => {
-    if (!signal?.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+    if (!signal?.aborted && !response.destroyed && !response.writableEnded) response.write!(`${JSON.stringify(event)}\n`);
   };
   const disconnected = () => {
-    if (!response.writableEnded) void agent.cancel(body.sessionId as string).catch(() => {});
+    if (!response.writableEnded) void agent.cancel!(body.sessionId as string).catch(() => {});
   };
-  response.on("close", disconnected);
+  response.on!("close", disconnected);
   try {
     if (response.destroyed) return;
     signal?.throwIfAborted();
-    const result = await agent.prompt(body, write, { signal });
+    const result = await agent.prompt!(body, write, { signal });
     write({ type: "done", result });
   } catch (error) {
     write({ type: "error", ...safeFailure(error, config).payload });
   } finally {
-    response.removeListener("close", disconnected);
+    response.removeListener!("close", disconnected);
     response.end();
   }
 }
 
-async function streamProjectSetup(response: ServerResponse, action: (options: { signal: AbortSignal; onProgress: Progress }) => Promise<unknown>, config: ProviderConfig, externalSignal?: AbortSignal) {
+async function streamProjectSetup(response: HttpResponse, action: (options: { signal: AbortSignal; onProgress: Progress }) => Promise<unknown>, config: Partial<ProviderConfig>, externalSignal?: AbortSignal) {
   const controller = new AbortController();
   const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const disconnected = () => { if (!response.writableEnded) controller.abort(); };
-  response.on("close", disconnected);
+  response.on!("close", disconnected);
   response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
   response.flushHeaders?.();
   const write = (event: unknown) => {
-    if (!controller.signal.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+    if (!controller.signal.aborted && !response.destroyed && !response.writableEnded) response.write!(`${JSON.stringify(event)}\n`);
   };
   try {
     if (response.destroyed) return;
@@ -185,7 +193,7 @@ async function streamProjectSetup(response: ServerResponse, action: (options: { 
     const project = await action({ signal, onProgress: write });
     write({ type: "done", result: { project } });
   } catch (error) { write({ type: "error", ...safeFailure(error, config).payload }); }
-  finally { response.removeListener("close", disconnected); response.end(); }
+  finally { response.removeListener!("close", disconnected); response.end(); }
 }
 
 function requirementReply(result: RequirementTurnResult) {
@@ -194,14 +202,14 @@ function requirementReply(result: RequirementTurnResult) {
   return `${result.summary}\n\n${result.question}`;
 }
 
-async function buildAgentReply(request: IncomingMessage, response: ServerResponse, agents: Pick<PrototypeAgents, "build">, body: Record<string, unknown>, config: ProviderConfig, forceStreaming = false, externalSignal?: AbortSignal) {
+async function buildAgentReply(request: HttpRequest, response: HttpResponse, agents: Pick<ServerAgents, "build">, body: Record<string, unknown>, config: Partial<ProviderConfig>, forceStreaming = false, externalSignal?: AbortSignal) {
   const controller = new AbortController();
   const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const streaming = forceStreaming || request.headers.accept?.includes("application/x-ndjson");
   const disconnected = () => { if (!response.writableEnded) controller.abort(); };
   response.on?.("close", disconnected);
   const write = (event: unknown) => {
-    if (!signal.aborted && !response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`);
+    if (!signal.aborted && !response.destroyed && !response.writableEnded) response.write!(`${JSON.stringify(event)}\n`);
   };
   try {
     signal.throwIfAborted();
@@ -209,7 +217,7 @@ async function buildAgentReply(request: IncomingMessage, response: ServerRespons
       response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
       response.flushHeaders?.();
     }
-    const result = await agents.build(body, { signal, onProgress: streaming ? write : () => {} });
+    const result = await agents.build!(body, { signal, onProgress: streaming ? write : () => {} });
     if (!signal.aborted && !response.destroyed) {
       if (streaming) write({ type: "done", result });
       else sendJson(response, 200, result);
@@ -226,17 +234,17 @@ async function buildAgentReply(request: IncomingMessage, response: ServerRespons
   }
 }
 
-async function streamRequirementReply(response: ServerResponse, providers: Providers, body: Record<string, unknown>, config: ProviderConfig, externalSignal: AbortSignal | undefined, processRequirement: ProcessRequirement) {
+async function streamRequirementReply(response: HttpResponse, providers: Providers, body: Record<string, unknown>, config: Partial<ProviderConfig>, externalSignal: AbortSignal | undefined, processRequirement: ProcessRequirement) {
   const controller = new AbortController();
   const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
   const disconnected = () => {
     if (!response.writableEnded) controller.abort();
   };
-  response.on("close", disconnected);
+  response.on!("close", disconnected);
   response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
   response.flushHeaders?.();
   const write = (event: unknown) => {
-    if (!response.destroyed && !response.writableEnded && !signal.aborted) response.write(`${JSON.stringify(event)}\n`);
+    if (!response.destroyed && !response.writableEnded && !signal.aborted) response.write!(`${JSON.stringify(event)}\n`);
   };
   let reply = "";
   const append = (delta: unknown) => {
@@ -278,12 +286,12 @@ async function streamRequirementReply(response: ServerResponse, providers: Provi
   } catch (error) {
     if (!signal.aborted) write({ type: "error", ...safeFailure(error, config).payload });
   } finally {
-    response.removeListener("close", disconnected);
+    response.removeListener!("close", disconnected);
     response.end();
   }
 }
 
-async function readJson(request: IncomingMessage, maxBytes = 128_000): Promise<Record<string, unknown>> {
+async function readJson(request: HttpRequest, maxBytes = 128_000): Promise<Record<string, unknown>> {
   if (!request.headers["content-type"]?.startsWith("application/json")) {
     throw new InputError("请求必须使用 JSON 格式");
   }
@@ -325,7 +333,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     const options = { agentId: "requirements-preflight", scope: "public-technical-research", signal,
       allowNetwork: objectFields(objectFields(platform).network).allowNetwork !== false };
     if (!prototypeAgents.web) throw new InputError("只读资料核实通道尚未配置");
-    return url ? prototypeAgents.web.fetch({ url }, options) : prototypeAgents.web.search({ query, maxResults: 5 }, options);
+    return url ? prototypeAgents.web.fetch!({ url }, options) : prototypeAgents.web.search!({ query, maxResults: 5 }, options);
   } });
   let providers = injectedProviders ?? requirementProviders();
   let requirementSessions = injectedRequirementSessions;
@@ -348,21 +356,21 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     const result = settingsQueue.then(async () => {
       try { await writeEnvFile(envPath, updates); }
       catch { throw new InputError("无法写入本机 .env 文件，请检查文件权限"); }
-      await mainAgent?.close({ permanent: false });
-      await collaboration?.close({ permanent: false });
+      await mainAgent?.close!({ permanent: false });
+      await collaboration?.close!({ permanent: false });
       Object.assign(config, getProviderConfig({ ...configEnv(config), ...updates }));
       if (!injectedProviders) providers = requirementProviders();
       // Keep the file, active config and session reset in the same save order.
       await projectAgent.dispose?.();
-      await prototypeAgents.close();
-      await prototypeAgents.services?.restore();
-      await prototypeAgents.gateway?.resume();
+      await prototypeAgents.close!();
+      await prototypeAgents.services?.restore!();
+      await prototypeAgents.gateway?.resume!();
       return settingsView(config);
     });
     settingsQueue = result.catch(() => {});
     return result;
   };
-  const handler = async (request: IncomingMessage, response: ServerResponse) => {
+  const handler = async (request: HttpRequest, response: HttpResponse) => {
     if (["stopping", "stopped"].includes(state)) return sendJson(response, 503, { ok: false, state, version: APP_VERSION, instanceId });
     const { controller: requestController, release: releaseRequest } = beginRequest();
     const stopRequest = () => { request.destroy?.(); response.destroy?.(); };
@@ -433,30 +441,30 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         if (!requestController.signal.aborted) return sendJson(response, 200, result);
         return;
       }
-      if (request.method === "GET" && path === "/api/agent-requirements") return sendJson(response, 200, await prototypeAgents.getRequirements());
+      if (request.method === "GET" && path === "/api/agent-requirements") return sendJson(response, 200, await prototypeAgents.getRequirements!());
       const agentRequirement = path.match(/^\/api\/agents\/([\w-]+)\/requirements$/);
       if (request.method === "POST" && agentRequirement) {
         const body = await readJson(request, REQUIREMENT_REQUEST_MAX_BYTES);
         return sendJson(response, 200, body.requirementSessionId
           ? await getRequirementSessions().save(body.requirementSessionId as string, agentRequirement[1]!, { name: body.name, draft: body.draft }, prototypeAgents)
-          : await prototypeAgents.saveRequirements(agentRequirement[1]!, body));
+          : await prototypeAgents.saveRequirements!(agentRequirement[1]!, body));
       }
       const agentConversation = path.match(/^\/api\/agents\/([\w-]+)\/conversation$/);
       if (agentConversation && request.method === "GET")
-        return sendJson(response, 200, await prototypeAgents.getConversation(agentConversation[1]!));
+        return sendJson(response, 200, await prototypeAgents.getConversation!(agentConversation[1]!));
       if (agentConversation && request.method === "POST")
-        return sendJson(response, 200, await prototypeAgents.saveConversation(agentConversation[1]!, await readJson(request, 20_000_000)));
+        return sendJson(response, 200, await prototypeAgents.saveConversation!(agentConversation[1]!, await readJson(request, 20_000_000)));
       const agentConversations = path.match(/^\/api\/agents\/([\w-]+)\/conversations$/);
       if (agentConversations && request.method === "GET")
-        return sendJson(response, 200, await prototypeAgents.listConversations(agentConversations[1]!));
+        return sendJson(response, 200, await prototypeAgents.listConversations!(agentConversations[1]!));
       const conversationRecord = path.match(/^\/api\/agents\/([\w-]+)\/conversations\/([\w-]+)(?:\/(remove))?$/);
       if (conversationRecord) {
         const [, id, cid, action] = conversationRecord as [string, string, string, string?];
-        if (!action && request.method === "GET") return sendJson(response, 200, await prototypeAgents.getConversationRecord(id, cid));
+        if (!action && request.method === "GET") return sendJson(response, 200, await prototypeAgents.getConversationRecord!(id, cid));
         if (request.method === "POST") {
           const body = await readJson(request, 20_000_000);
-          return sendJson(response, 200, action === "remove" ? await prototypeAgents.removeConversation(id, cid)
-            : await prototypeAgents.saveConversationRecord(id, cid, body));
+          return sendJson(response, 200, action === "remove" ? await prototypeAgents.removeConversation!(id, cid)
+            : await prototypeAgents.saveConversationRecord!(id, cid, body));
         }
       }
       if (request.method === "POST" && path === "/api/agents/build") {
@@ -465,54 +473,54 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const buildCancellation = path.match(/^\/api\/agents\/([\w-]+)\/build\/cancel$/);
       if (request.method === "POST" && buildCancellation) {
         if (Object.keys(await readJson(request)).length) throw new InputError("终止生成请求不接受额外参数");
-        return sendJson(response, 200, await prototypeAgents.cancelBuild(buildCancellation[1]!));
+        return sendJson(response, 200, await prototypeAgents.cancelBuild!(buildCancellation[1]!));
       }
       if (request.method === "POST" && path === "/api/agents/turn") {
         const body = await readJson(request);
         if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, prototypeAgents, body, config, requestController.signal);
-        const result = await prototypeAgents.prompt(body, undefined, { signal: requestController.signal });
+        const result = await prototypeAgents.prompt!(body, undefined, { signal: requestController.signal });
         if (!requestController.signal.aborted) return sendJson(response, 200, result);
         return;
       }
       if (request.method === "POST" && path === "/api/agents/cancel") {
-        return sendJson(response, 200, await prototypeAgents.cancel((await readJson(request)).sessionId as string));
+        return sendJson(response, 200, await prototypeAgents.cancel!((await readJson(request)).sessionId as string));
       }
-      if (request.method === "GET" && path === "/api/agent-profiles") return sendJson(response, 200, await prototypeAgents.getProfiles());
+      if (request.method === "GET" && path === "/api/agent-profiles") return sendJson(response, 200, await prototypeAgents.getProfiles!());
       const developmentQuery = path.match(/^\/api\/agents\/([\w-]+)\/development(?:\/(stream|cancel))?$/);
       if (developmentQuery) {
         const [, id, action] = developmentQuery as [string, string, string?];
-        if (request.method === "GET" && !action) return sendJson(response, 200, { development: await prototypeAgents.getDevelopment(id) });
+        if (request.method === "GET" && !action) return sendJson(response, 200, { development: await prototypeAgents.getDevelopment!(id) });
         if (request.method === "POST") {
           const body = await readJson(request);
           if (Object.keys(body).some((key) => key !== "resume") || (body.resume !== undefined && typeof body.resume !== "boolean"))
             throw new InputError("研发请求只接受布尔类型的 resume 参数");
-          if (action === "cancel") return sendJson(response, 200, await prototypeAgents.cancelDevelopment(id));
-          return await buildAgentReply(request, response, { build: (_body, options) => prototypeAgents.develop(id, { resume: body.resume as boolean | undefined ?? false, ...options }) },
+          if (action === "cancel") return sendJson(response, 200, await prototypeAgents.cancelDevelopment!(id));
+          return await buildAgentReply(request, response, { build: (_body, options) => prototypeAgents.develop!(id, { resume: body.resume as boolean | undefined ?? false, ...options }) },
             body, config, action === "stream", requestController.signal);
         }
       }
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
-      if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get(agentQuery[1]!),
+      if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get!(agentQuery[1]!),
         architecture: await prototypeAgents.getArchitecture?.(agentQuery[1]!) ?? null,
-        ...(prototypeAgents.getActiveRuntime ? { activeRuntime: await prototypeAgents.getActiveRuntime(agentQuery[1]!) } : {}),
-        ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment(agentQuery[1]!) } : {}),
-        ...(prototypeAgents.applications ? { application: await prototypeAgents.applications.summary(agentQuery[1]!).catch(() => ({ manifest: null, pageReady: false, actions: [], deliveryVersion: null })),
-          connectionRequirements: await prototypeAgents.connectionRequirements(agentQuery[1]!),
-          tasks: (await prototypeAgents.applications.store.list(agentQuery[1]!, { scope: "private" })).slice(-20) } : {}) });
+        ...(prototypeAgents.getActiveRuntime ? { activeRuntime: await prototypeAgents.getActiveRuntime!(agentQuery[1]!) } : {}),
+        ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment!(agentQuery[1]!) } : {}),
+        ...(prototypeAgents.applications ? { application: await prototypeAgents.applications.summary!(agentQuery[1]!).catch(() => ({ manifest: null, pageReady: false, actions: [], deliveryVersion: null })),
+          connectionRequirements: await prototypeAgents.connectionRequirements!(agentQuery[1]!),
+          tasks: (await prototypeAgents.applications.store!.list(agentQuery[1]!, { scope: "private" })).slice(-20) } : {}) });
       const agentProfile = path.match(/^\/api\/agents\/([\w-]+)\/profile$/);
-      if (request.method === "POST" && agentProfile) return sendJson(response, 200, await prototypeAgents.setProfile(agentProfile[1]!, await readJson(request)));
+      if (request.method === "POST" && agentProfile) return sendJson(response, 200, await prototypeAgents.setProfile!(agentProfile[1]!, await readJson(request)));
       const agentMemory = path.match(/^\/api\/agents\/([\w-]+)\/memory$/);
-      if (request.method === "GET" && agentMemory) return sendJson(response, 200, await prototypeAgents.getMemory(agentMemory[1]!));
-      if (request.method === "POST" && agentMemory) return sendJson(response, 200, await prototypeAgents.setMemory(agentMemory[1]!, (await readJson(request)).memory));
+      if (request.method === "GET" && agentMemory) return sendJson(response, 200, await prototypeAgents.getMemory!(agentMemory[1]!));
+      if (request.method === "POST" && agentMemory) return sendJson(response, 200, await prototypeAgents.setMemory!(agentMemory[1]!, (await readJson(request)).memory));
       const attachments = path.match(/^\/api\/agents\/([\w-]+)\/attachments$/);
       if (attachments) {
         const id = attachments[1]!;
-        if (request.method === "GET") return sendJson(response, 200, await prototypeAgents.listAttachments(id));
+        if (request.method === "GET") return sendJson(response, 200, await prototypeAgents.listAttachments!(id));
         if (request.method === "POST") {
           const length = request.headers["content-length"];
           if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > MAX_MATERIAL_BYTES))
             throw new InputError("单个上传文件不能超过 20 MiB");
-          const result = await prototypeAgents.uploadAttachment(id, { name: address.searchParams.get("name"),
+          const result = await prototypeAgents.uploadAttachment!(id, { name: address.searchParams.get("name"),
             mimeType: address.searchParams.get("mimeType") || request.headers["content-type"], source: request, signal: requestController.signal });
           if (!requestController.signal.aborted) return sendJson(response, 200, result);
           return;
@@ -521,8 +529,8 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       const attachment = path.match(/^\/api\/agents\/([\w-]+)\/attachments\/([\w-]+)(?:\/(raw|preview|image))?$/);
       if (attachment && request.method === "GET") {
         const [, id, attachmentId, action] = attachment as [string, string, string, string?];
-        if (!action) return sendJson(response, 200, await prototypeAgents.getAttachment(id, attachmentId));
-        if (action === "raw") return await sendMaterialFile(response, await prototypeAgents.attachmentRaw(id, attachmentId),
+        if (!action) return sendJson(response, 200, await prototypeAgents.getAttachment!(id, attachmentId));
+        if (action === "raw") return await sendMaterialFile(response, await prototypeAgents.attachmentRaw!(id, attachmentId),
           address.searchParams.get("download") === "1", requestController.signal);
         const offset = address.searchParams.get("offset"), page = address.searchParams.get("page");
         const number = (value: string | null, fallback: number) => {
@@ -531,11 +539,11 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
           return Number(value);
         };
         if (action === "preview") {
-          const result = await prototypeAgents.attachmentPreview(id, attachmentId, { offset: number(offset, 0), signal: requestController.signal });
+          const result = await prototypeAgents.attachmentPreview!(id, attachmentId, { offset: number(offset, 0), signal: requestController.signal });
           if (!requestController.signal.aborted) return sendJson(response, 200, result);
           return;
         }
-        const result = await prototypeAgents.attachmentImage(id, attachmentId, { page: number(page, 1),
+        const result = await prototypeAgents.attachmentImage!(id, attachmentId, { page: number(page, 1),
           ...(address.searchParams.has("imageId") ? { imageId: address.searchParams.get("imageId") } : {}), signal: requestController.signal });
         requestController.signal.throwIfAborted();
         response.writeHead(200, { ...binaryHeaders("material.png", result.mimeType),
@@ -544,47 +552,47 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         response.end(Buffer.from(result.data, "base64")); return;
       }
       const agentFiles = path.match(/^\/api\/agents\/([\w-]+)\/files$/);
-      if (request.method === "GET" && agentFiles) return sendJson(response, 200, await prototypeAgents.files(agentFiles[1]!));
+      if (request.method === "GET" && agentFiles) return sendJson(response, 200, await prototypeAgents.files!(agentFiles[1]!));
       const agentFile = path.match(/^\/api\/agents\/([\w-]+)\/file$/);
       if (request.method === "GET" && agentFile) {
         const filePath = address.searchParams.get("path");
         if (address.searchParams.get("download") === "1") {
-          const file = await prototypeAgents.downloadFile(agentFile[1]!, filePath as string, { signal: requestController.signal });
+          const file = await prototypeAgents.downloadFile!(agentFile[1]!, filePath as string, { signal: requestController.signal });
           requestController.signal.throwIfAborted();
           response.writeHead(200, { ...binaryHeaders(file.name!, "application/octet-stream", true), "content-length": file.content!.length });
           response.end(file.content); return;
         }
-        return sendJson(response, 200, await prototypeAgents.file(agentFile[1]!, filePath as string));
+        return sendJson(response, 200, await prototypeAgents.file!(agentFile[1]!, filePath as string));
       }
       const agentRemoval = path.match(/^\/api\/agents\/([\w-]+)\/remove$/);
       if (request.method === "POST" && agentRemoval) {
         await readJson(request);
-        return sendJson(response, 200, await prototypeAgents.remove(agentRemoval[1]!));
+        return sendJson(response, 200, await prototypeAgents.remove!(agentRemoval[1]!));
       }
       if (request.method === "GET" && path === "/api/projects") {
-        return sendJson(response, 200, { projects: await projects.list(), pendingAdditions: projects.pendingAdds?.size ?? 0 });
+        return sendJson(response, 200, { projects: await projects.list!(), pendingAdditions: projects.pendingAdds?.size ?? 0 });
       }
       if (request.method === "GET" && path === "/api/projects/failures") {
-        return sendJson(response, 200, { failures: await projects.failures({ limit: 10 }) });
+        return sendJson(response, 200, { failures: await projects.failures!({ limit: 10 }) });
       }
       if (request.method === "GET" && path === "/api/projects/runtime") {
         const { controller, release } = beginRequest();
         const disconnected = () => { if (!response.writableEnded) controller.abort(); };
-        response.on("close", disconnected);
+        response.on!("close", disconnected);
         try {
           if (response.destroyed) return;
-          const snapshot = await projects.runtime({ signal: controller.signal });
+          const snapshot = await projects.runtime!({ signal: controller.signal });
           if (!controller.signal.aborted) sendJson(response, 200, snapshot);
         } catch (error) {
           if (!controller.signal.aborted) throw error;
-        } finally { response.removeListener("close", disconnected); release(); }
+        } finally { response.removeListener!("close", disconnected); release(); }
         return;
       }
       if (request.method === "POST" && path === "/api/projects/pick-folder") {
         await readJson(request);
         const { controller, release } = beginRequest();
         const disconnected = () => { if (!response.writableEnded) controller.abort(); };
-        response.on("close", disconnected);
+        response.on!("close", disconnected);
         try {
           if (response.destroyed) return;
           const result = await pickProjectFolder({ signal: controller.signal });
@@ -592,7 +600,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
         } catch (error) {
           if (!controller.signal.aborted) throw error;
         } finally {
-          response.removeListener("close", disconnected);
+          response.removeListener!("close", disconnected);
           release();
         }
         return;
@@ -600,26 +608,26 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       if (request.method === "POST" && path === "/api/projects/turn") {
         const body = await readJson(request);
         if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectReply(response, projectAgent, body, config, requestController.signal);
-        const result = await projectAgent.prompt({ ...body, message: body.message, sessionId: body.sessionId }, undefined, { signal: requestController.signal });
+        const result = await projectAgent.prompt!({ ...body, message: body.message, sessionId: body.sessionId }, undefined, { signal: requestController.signal });
         if (!requestController.signal.aborted) return sendJson(response, 200, result);
         return;
       }
       if (request.method === "POST" && path === "/api/projects/cancel") {
         const body = await readJson(request);
-        return sendJson(response, 200, await projectAgent.cancel(body.sessionId as string));
+        return sendJson(response, 200, await projectAgent.cancel!(body.sessionId as string));
       }
       if (request.method === "POST" && path === "/api/projects") {
         const body = await readJson(request);
-        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.add(body, options), config, requestController.signal);
-        return sendJson(response, 200, { project: await projects.add(body, { signal: requestController.signal }) });
+        if (request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.add!(body, options), config, requestController.signal);
+        return sendJson(response, 200, { project: await projects.add!(body, { signal: requestController.signal }) });
       }
       const operation = path.match(/^\/api\/projects\/([\w-]+)\/(configure|inspect|start|stop|remove)$/);
       if (request.method === "POST" && operation) {
         const body = await readJson(request), [, id, action] = operation as [string, string, string];
         if (action === "remove" && body.confirm !== true) throw new InputError("请确认移除项目记录");
-        if (action === "inspect" && request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.inspect(id, options), config, requestController.signal);
-        const project = action === "configure" ? await projects.configure(id, body)
-          : action === "remove" ? await projects.remove(id, { removeOnly: body.removeOnly ?? false }) : await projects[action as "inspect" | "start" | "stop"](id!, action === "inspect" ? { signal: requestController.signal } : undefined);
+        if (action === "inspect" && request.headers.accept?.includes("application/x-ndjson")) return await streamProjectSetup(response, (options) => projects.inspect!(id, options), config, requestController.signal);
+        const project = action === "configure" ? await projects.configure!(id, body)
+          : action === "remove" ? await projects.remove!(id, { removeOnly: body.removeOnly ?? false }) : await projects[action as "inspect" | "start" | "stop"]!(id!, action === "inspect" ? { signal: requestController.signal } : undefined!);
         return sendJson(response, 200, { project });
       }
       const requirementSession = path.match(/^\/api\/requirements\/sessions\/([\w-]+)$/);
@@ -675,7 +683,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
     prototypeAgents.architecture?.ready, prototypeAgents.development?.store?.ready, prototypeAgents.applications?.ready,
     prototypeAgents.connections?.ready, prototypeAgents.runtimeReady, prototypeAgents.gateway?.ready,
     prototypeAgents.applications?.workflowReady, collaboration?.ready, mainAgent?.ready];
-  if (projects.load) initialization.push(projects.load());
+  if (projects.load) initialization.push(projects.load!());
   if (initialization.every((item) => item === undefined)) state = "ready";
   handler.ready = Promise.all(initialization).then(() => { if (state === "starting") state = "ready"; });
   handler.ready.catch(() => { if (state === "starting") state = "failed"; });
@@ -686,7 +694,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       for (const controller of activeRequests.keys()) controller.abort();
       await handler.ready.catch(() => {});
       const failures = [];
-      const cancelled = [() => mainAgent?.close(), () => collaboration?.close(), () => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.(), () => skillManager.dispose?.()]
+      const cancelled = [() => mainAgent?.close!(), () => collaboration?.close!(), () => prototypeAgents.close?.(), () => projectAgent.dispose?.(), () => projects.dispose?.(), () => skillManager.dispose?.()]
         .map((close) => { try { return close(); } catch (error) { return Promise.reject(error); } });
       for (const result of await Promise.allSettled(cancelled)) if (result.status === "rejected") failures.push(result.reason);
       for (const close of [() => settingsQueue, () => requirementSessions?.close(), () => prototypeAgents.persistence,

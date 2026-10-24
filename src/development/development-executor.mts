@@ -1,4 +1,4 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { IsolationProcess, IsolationSpawner } from "../runtime/process-port.mjs";
 import type { DevelopmentCase, DevelopmentApplication, FixtureMetadata } from "../contracts/development.mjs";
 import type { JsonValue, UnknownRecord } from "../contracts/json.mjs";
 import type { DevelopmentSnapshot } from "./development-workspace.mjs";
@@ -12,7 +12,7 @@ export interface ActionRunOptions { codeDir: string; entrypoint: string; actionI
   onCapability?: ((input: { capability: string; args: UnknownRecord; signal: AbortSignal }) => Promise<unknown>) | undefined;
   onProgress?: (value: unknown) => unknown | Promise<unknown> }
 interface ExecutorOptions { platform?: NodeJS.Platform; arch?: NodeJS.Architecture; sandboxPath?: string; nodePath?: string; nativeHelperPath?: string | null;
-  spawnImpl?: typeof spawn; killImpl?: typeof process.kill; timeoutMs?: number; maxOutputBytes?: number; temporaryDir?: string }
+  spawnImpl?: IsolationSpawner; killImpl?: (pid: number, signal: NodeJS.Signals) => unknown; timeoutMs?: number; maxOutputBytes?: number; temporaryDir?: string }
 export interface ExecutionCaseResult { caseId: string; status: string; input: unknown; exitCode: number | null; reason: string;
   expected?: { path: string; value: JsonValue }[]; actual?: unknown; [key: string]: unknown }
 export interface ExecutionReport { status: string; codeHash: string | null; results: ExecutionCaseResult[]; summary: string; stateful: boolean;
@@ -68,7 +68,7 @@ function cleanEnv(writableDir: string, nodePath: string) {
 /** Execute Node JSON entrypoints only after a real OS boundary passes canary checks. */
 export class DevelopmentExecutor {
   platform!: NodeJS.Platform; arch!: NodeJS.Architecture; sandboxPath!: string; nodePath!: string; nativeHelperPath!: string | null;
-  spawnImpl!: typeof spawn; killImpl!: typeof process.kill; timeoutMs!: number; maxOutputBytes!: number; temporaryDir!: string;
+  spawnImpl!: IsolationSpawner; killImpl!: (pid: number, signal: NodeJS.Signals) => unknown; timeoutMs!: number; maxOutputBytes!: number; temporaryDir!: string;
   probeResult: IsolationAvailability | null; probePromise: Promise<IsolationAvailability> | null;
   constructor({ platform = process.platform, arch = process.arch, sandboxPath = "/usr/bin/sandbox-exec", nodePath = process.execPath,
     nativeHelperPath = bundledIsolationHelper({ platform, arch }),
@@ -108,7 +108,7 @@ export class DevelopmentExecutor {
       } catch { return outcome("error", "isolation_setup_failed"); }
     } else return outcome("not_run", "当前平台没有操作系统隔离执行器");
     try { return await new Promise<ExecutionOutcome>((resolveResult) => {
-      let child: ChildProcessWithoutNullStreams | undefined, timer: ReturnType<typeof setTimeout> | undefined, settled = false, reason = "", sentBytes = 0, stdout: Buffer = Buffer.alloc(0), stderr: Buffer = Buffer.alloc(0), exitCode: number | null = null;
+      let child: IsolationProcess | undefined, timer: ReturnType<typeof setTimeout> | undefined, settled = false, reason = "", sentBytes = 0, stdout: Buffer = Buffer.alloc(0), stderr: Buffer = Buffer.alloc(0), exitCode: number | null = null;
       const kill = () => {
         if (!child?.pid) return;
         if (this.platform === "win32") { try { child.kill("SIGKILL"); } catch {} }
@@ -151,16 +151,16 @@ export class DevelopmentExecutor {
           detached: this.platform !== "win32", windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
         child.stdout?.on("data", (value) => collect("stdout", value));
         child.stderr?.on("data", (value) => collect("stderr", value));
-        child.stdin?.on("error", () => { /* The child may exit before consuming input. */ });
+        child.stdin?.on!("error", () => { /* The child may exit before consuming input. */ });
         if (channel) {
           channel.open((value) => {
             if (settled || reason || signal?.aborted) return false;
             const data = JSON.stringify(value) + "\n";
             if (Buffer.byteLength(data) + sentBytes + stdout.length + stderr.length > maxOutputBytes) { stop("output_limit"); return false; }
             sentBytes += Buffer.byteLength(data);
-            child!.stdin.write(data); return true;
+            child!.stdin!.write!(data); return true;
           }, stop);
-        } else child.stdin?.end(input);
+        } else child.stdin?.end!(input);
         child.on("error", () => stop("spawn_failed"));
         child.on("exit", (code, terminationSignal) => { exitCode = code; if (terminationSignal && !reason) reason = "process_terminated"; kill(); });
         child.on("close", (code, terminationSignal) => {
@@ -343,7 +343,7 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
     finally { calls.abort(); signal?.removeEventListener("abort", abort); if (scratch) await rm(scratch, { recursive: true, force: true }); }
   }
 
-  async verify({ snapshot, entrypoint, cases, stateful = false, signal, runtime = "node-json", application, validateResources = true }: { snapshot: DevelopmentSnapshot; entrypoint: string; cases: DevelopmentCase[]; stateful?: boolean; signal?: AbortSignal | undefined; runtime?: string; application?: DevelopmentApplication | undefined; validateResources?: boolean }): Promise<ExecutionReport> {
+  async verify({ snapshot, entrypoint, cases, stateful = false, signal, runtime = "node-json", application, validateResources = true }: { snapshot: Pick<DevelopmentSnapshot, "path" | "hash" | "files">; entrypoint: string; cases: DevelopmentCase[]; stateful?: boolean; signal?: AbortSignal | undefined; runtime?: string; application?: DevelopmentApplication | undefined; validateResources?: boolean }): Promise<ExecutionReport> {
     const report: ExecutionReport = { status: "not_run", codeHash: snapshot?.hash ?? null, results: [], summary: "没有实际执行验收", stateful };
     if (!["node-json", "node-action"].includes(runtime)) return { ...report, status: "error", summary: "验收运行协议无效" };
     if (runtime === "node-action") {

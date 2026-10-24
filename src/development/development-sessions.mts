@@ -10,9 +10,9 @@ export interface DevelopmentSessionIdentity { id: string; agentId: string; archi
 interface HistoricalPlanningRecord extends DevelopmentSessionIdentity { phase?: unknown; status?: unknown; delivery?: unknown; plan?: unknown; planHash?: unknown; package?: unknown; tasks?: unknown; deliveries?: unknown; sessions?: unknown }
 export interface DevelopmentSessionRecord { id: string; agentId: string; architectureRef: unknown; architecture: DevelopmentArchitecture;
   sessions?: Record<string, DevelopmentSessionReference>; phase?: string; status?: string; delivery?: string; plan?: unknown; planHash?: unknown; package?: unknown; tasks?: unknown[]; deliveries?: unknown[] }
-interface FailureSource { agentId: string; runId: string; recordHash: string; bindingHash: string; sessionHash: string | null; leafId: string | null }
+export interface FailureSource { agentId: string; runId: string; recordHash: string; bindingHash: string; sessionHash: string | null; leafId: string | null }
 type CaseReference = { id: string; acceptanceId: string; taskId?: string; actionId?: string; kind?: string; inputTarget?: string }
-interface PlanningFailureIssue { path: string; reason: string; remedy: string; source?: { path: string; localIndex?: number; caseId?: string }; proposedCaseRef?: CaseReference }
+export interface PlanningFailureIssue { path: string; reason: string; remedy: string; source?: { path: string; localIndex?: number; caseId?: string }; proposedCaseRef?: CaseReference }
 import { basename, join } from "node:path";
 import { types } from "node:util";
 import { InputError } from "../requirements/core.mjs";
@@ -68,7 +68,7 @@ function failureBase(source: FailureSource | null) {
 }
 
 function unavailableFailures(source: FailureSource | null, reason: string) {
-  return finishFailures({ ...failureBase(source), status: "unavailable", reason });
+  return finishFailures({ ...failureBase(source), status: "unavailable" as const, reason });
 }
 
 function caseReference(value: unknown): CaseReference | null {
@@ -137,7 +137,7 @@ export function validatedDevelopmentPlanningToolFailures(value: unknown, record:
     const failures = suppliedFailures.map(normalizeFailure);
     if (failures.every((failure): failure is NonNullable<typeof failure> => failure !== null) && new Set(failures.map((failure) => failure.entryId)).size === failures.length
       && new Set(failures.map((failure) => failure.toolCallId)).size === failures.length)
-      checked = finishFailures({ ...base, status: "available", failures, omittedFailures: value.omittedFailures });
+      checked = finishFailures({ ...base, status: "available" as const, failures, omittedFailures: value.omittedFailures });
   }
   return checked && checked.bytes === value.bytes && checked.bytes <= PLANNING_TOOL_FAILURE_MAX_BYTES ? checked : invalid();
 }
@@ -205,7 +205,7 @@ export function projectDevelopmentPlanningToolFailures(manager: { getBranch(): u
     results.push(failure);
   }
   if (!results.length) return unavailableFailures(source, "planning_tool_failures_missing");
-  const projection = finishFailures({ ...failureBase(source), status: "available", failures: results.slice(-4), omittedFailures: Math.max(0, results.length - 4) });
+  const projection = finishFailures({ ...failureBase(source), status: "available" as const, failures: results.slice(-4), omittedFailures: Math.max(0, results.length - 4) });
   return projection.bytes <= PLANNING_TOOL_FAILURE_MAX_BYTES ? projection : unavailableFailures(source, "planning_tool_failures_too_large");
 }
 
