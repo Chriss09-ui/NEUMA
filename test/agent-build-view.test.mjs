@@ -237,7 +237,7 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
   assert.equal(facts.details, 1);
   assert.equal(facts.focusPreserved, true);
   assert.deepEqual(facts.stopping, { disabled: true, label: "正在终止…", state: "stopping" });
-  assert.deepEqual(facts.ready, { panel: false, historyVisible: true, conversation: true });
+  assert.deepEqual(facts.ready, { panel: false, historyVisible: true, historyInNavigation: true, conversation: true });
 });
 
 test("真实浏览器减少动态效果时停止动画，失败文字安全展示并可重新生成", { timeout: 20_000 }, async (t) => {

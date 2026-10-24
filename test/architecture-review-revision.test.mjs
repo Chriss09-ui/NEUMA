@@ -55,13 +55,15 @@ test("已耗尽原设计的完整候选可显式按评审修订，原15轮及模
 });
 
 test("新设计二十五轮总账允许正式评审后修订，旧版和未知预算版本不能借此放宽", async () => {
-  const f = fixture({ progressVersion: 2, designCalls: 25 });
-  assert.equal(architectureReviewRevisionRecovery(f.source).status, "available");
-  await f.run();
-  assert.equal(f.record.designProgressCheckpoint.modelCalls, 25);
-  assert.equal(f.record.reviewRevisionCheckpoint.modelCalls, 1);
+  for (const progressVersion of [2, 3]) {
+    const f = fixture({ progressVersion, designCalls: 25 });
+    assert.equal(architectureReviewRevisionRecovery(f.source).status, "available");
+    await f.run();
+    assert.equal(f.record.designProgressCheckpoint.modelCalls, 25);
+    assert.equal(f.record.reviewRevisionCheckpoint.modelCalls, 1);
+  }
   for (const options of [{ progressVersion: 1, designCalls: 16 }, { progressVersion: 2, designCalls: 26 },
-    { progressVersion: 3, designCalls: 1 }]) {
+    { progressVersion: 3, designCalls: 26 }, { progressVersion: 4, designCalls: 1 }]) {
     const invalid = fixture(options);
     await assert.rejects(invalid.run());
     assert.equal(invalid.calls.length, 0);

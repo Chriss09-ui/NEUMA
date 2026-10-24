@@ -110,7 +110,7 @@ function inspectGroupLayout({ markup, stylesheet, avatarAssets }, initResize, re
       textOverflow: getComputedStyle(title).textOverflow, whiteSpace: getComputedStyle(title).whiteSpace },
     composer: rect(composer), compose: { plus: rect(plus), input: rect(input), send: rect(send), rows: input.rows,
       uploadVisible: visible(byId("group-upload")), shareVisible: visible(byId("group-share-open")),
-      recipientVisible: visible(byId("group-recipient-trigger")) },
+      mentionInputVisible: visible(input), mentionPopupRole: byId("group-mention-popup").getAttribute("role") },
     messages: { ...rect(messages), clientHeight: messages.clientHeight, scrollHeight: messages.scrollHeight, scrollTop: messages.scrollTop,
       clientWidth: messages.clientWidth, scrollWidth: messages.scrollWidth },
     date: { ...rect(messages.querySelector(".conversation-date")), text: messages.querySelector(".conversation-date").textContent },
@@ -168,7 +168,8 @@ export function assertGroupLayout(facts) {
     assert.ok(sample.compose.plus.right <= sample.compose.input.left + 1
       && sample.compose.input.right <= sample.compose.send.left + 1, `${name} 加号、输入区和发送应同排`);
     assert.ok(!sample.compose.uploadVisible && !sample.compose.shareVisible, `${name} 上传与分享应收进加号菜单`);
-    assert.ok(sample.compose.recipientVisible, `${name} 群协作与定向成员入口应可见`);
+    assert.ok(sample.compose.mentionInputVisible, `${name} 群协作与定向成员的消息输入入口应可见`);
+    assert.equal(sample.compose.mentionPopupRole, "listbox", `${name} 群成员提及弹层应保留选择列表角色`);
     if (name !== "expandedComposer") assert.ok(sample.composer.height <= 64, `${name} 默认群输入区应紧凑`);
     if (!sample.settings.hidden) {
       close(sample.settings.width, 400, `${name} 群组设置栏宽度`);
