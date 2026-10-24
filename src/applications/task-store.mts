@@ -17,6 +17,7 @@ function checkedTask(value: unknown, id: string): ApplicationTask {
     || ["actionId", "mutationId", "deliveryVersion", "requestHash", "createdAt", "updatedAt"].some((key) => typeof task[key] !== "string")
     || !Object.hasOwn(task, "input") || !isInteger(task.sequence) || !isRecord(task.source) || typeof task.source.scope !== "string"
     || (task.source.kind !== undefined && typeof task.source.kind !== "string")
+    || (task.allowNetwork !== undefined && typeof task.allowNetwork !== "boolean")
     || (task.workflowId !== undefined && typeof task.workflowId !== "string")
     || (task.error !== undefined && task.error !== null && typeof task.error !== "string")
     || (task.finishedAt !== undefined && task.finishedAt !== null && typeof task.finishedAt !== "string")
