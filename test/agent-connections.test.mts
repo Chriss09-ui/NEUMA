@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
 import { AgentConnectionStore } from "../src/agents/agent-connections.mjs";
 import { WebCapabilities } from "../src/runtime/web-capabilities.mjs";
 
-const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+const json = (value: { id?: string; echoed?: string; authorization?: string; ok?: boolean; results?: { title: string; url: string; content: string; }[]; }, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 const requirements = [{ id: "orders", purpose: "business", required: true, description: "订单服务", operations: [
   { id: "list", method: "GET", path: "/orders", input: "limit number", output: "orders array", safeTest: true },
   { id: "create", method: "POST", path: "/orders", input: "name string", output: "id string", safeTest: false },
 ] }];
-async function fixture(t, options = {}) {
+async function fixture(t: test.TestContext, options: Partial<ConstructorParameters<typeof AgentConnectionStore>[0]> = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-connections-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   return { dataDir, store: new AgentConnectionStore({ dataDir, credentialKeySource: async () => Buffer.alloc(32, 7), ...options }) };
@@ -21,7 +21,7 @@ test("connections stay per agent, redacted and private; failed save preserves pr
   const { store, dataDir } = await fixture(t);
   const secret = "test-credential-not-a-real-key";
   const saved = await store.save("alpha", { id: "search", kind: "search", provider: "tavily", secret });
-  assert.equal(saved.connections[0].hasSecret, true); assert.equal(JSON.stringify(saved).includes(secret), false);
+  assert.equal(saved.connections[0]!.hasSecret, true); assert.equal(JSON.stringify(saved).includes(secret), false);
   assert.deepEqual((await store.list("beta")).connections, []);
   assert.equal(JSON.stringify(await store.snapshot("alpha")).includes(secret), false);
   const path = join(dataDir, "agents/alpha/private/connections.json");
@@ -30,7 +30,7 @@ test("connections stay per agent, redacted and private; failed save preserves pr
   const write = store.storage.writeJson; store.storage.writeJson = async () => { throw new Error("disk failed"); };
   await assert.rejects(store.save("alpha", { id: "search", kind: "search", provider: "tavily", secret: "changed" }));
   store.storage.writeJson = write;
-  assert.equal((await store.resolveKind(await store.snapshot("alpha"), "search")).secret, secret);
+  assert.equal((await store.resolveKind(await store.snapshot("alpha"), "search"))!.secret, secret);
 });
 
 test("new tasks use updated versions while revocation also blocks older versions after re-add", async (t) => {
@@ -49,7 +49,7 @@ test("new tasks use updated versions while revocation also blocks older versions
 });
 
 test("business calls use only designed operations and inject auth outside arguments", async (t) => {
-  const requests = [];
+  const requests: { url: string | URL | Request; options: RequestInit | undefined }[] = [];
   const { store } = await fixture(t, { fetchImpl: async (url, options) => {
     requests.push({ url, options }); return json({ id: "one", echoed: "business-test-key", authorization: "must disappear" });
   } });
@@ -57,9 +57,9 @@ test("business calls use only designed operations and inject auth outside argume
   await store.save("alpha", { id: "orders", kind: "business", baseUrl: "http://localhost:8123/v1", authType: "header", headerName: "X-Service-Key", secret: "business-test-key" }, requirements);
   const snapshot = await store.snapshot("alpha");
   const result = await store.call(snapshot, { connectionId: "orders", operationId: "list", input: { limit: 2 } }, { requirements });
-  assert.equal(requests[0].url, "http://localhost:8123/v1/orders?limit=2");
-  assert.equal(requests[0].options.headers["X-Service-Key"], "business-test-key");
-  assert.equal(requests[0].options.redirect, "manual"); assert.equal(JSON.stringify(result).includes("business-test-key"), false);
+  assert.equal(requests[0]!.url, "http://localhost:8123/v1/orders?limit=2");
+  assert.equal(new Headers(requests[0]!.options!.headers).get("X-Service-Key"), "business-test-key");
+  assert.equal(requests[0]!.options!.redirect, "manual"); assert.equal(JSON.stringify(result).includes("business-test-key"), false);
   await assert.rejects(store.call(snapshot, { connectionId: "orders", operationId: "arbitrary" }, { requirements }), { reason: "operation_not_designed" });
   await assert.rejects(store.call(snapshot, { connectionId: "orders", operationId: "create" }, { requirements, test: true }), { reason: "unsafe_connection_test" });
   assert.equal(requests.length, 1);
@@ -69,7 +69,7 @@ test("connection tests do not write and report configured-but-unverified without
   let calls = 0;
   const { store } = await fixture(t, { fetchImpl: async () => { calls++; return json({ ok: true }); } });
   await store.save("alpha", { id: "orders", kind: "business", baseUrl: "http://localhost:8123", authType: "none" }, requirements);
-  const unverified = await store.test("alpha", "orders", { requirements: [{ ...requirements[0], operations: [requirements[0].operations[1]] }] });
+  const unverified = await store.test("alpha", "orders", { requirements: [{ ...requirements[0]!, operations: [requirements[0]!.operations[1]!] }] });
   assert.equal(unverified.status, "configured"); assert.equal(calls, 0);
   const verified = await store.test("alpha", "orders", { requirements });
   assert.equal(verified.status, "verified"); assert.equal(calls, 1);
@@ -82,7 +82,7 @@ test("dedicated search only falls back with consent and cached calls honor revoc
   await store.save("alpha", { id: "search", kind: "search", provider: "tavily", secret: "dedicated-key" });
   const web = new WebCapabilities({ connectionStore: store, fetchImpl: async (_url, options) => {
     calls++;
-    if (options.headers.authorization) return json({}, 401);
+    if (new Headers(options!.headers).get("authorization")) return json({}, 401);
     return json({ results: [{ title: "public", url: "https://example.com", content: "excerpt" }] });
   } });
   const context = { agentId: "alpha", scope: "private:one", connectionSnapshot: await store.snapshot("alpha") };
@@ -113,18 +113,18 @@ test("successful business side effect followed by metadata write failure is not 
   const snapshot = await store.snapshot("alpha");
   store.storage.writeJson = async () => { writes++; throw new Error("fixture-disk-error"); };
   await assert.rejects(store.call(snapshot, { connectionId: "orders", operationId: "create" }, { requirements }), (error) => {
-    assert.equal(error.reason, "connection_persistence_failed"); assert.doesNotMatch(error.message, /fixture-disk-error/); return true;
+    assert.ok(error instanceof Error && "reason" in error); assert.equal(error.reason, "connection_persistence_failed"); assert.doesNotMatch(error.message, /fixture-disk-error/); return true;
   });
   assert.equal(requests, 1); assert.equal(writes, 1);
-  assert.equal((await store.list("alpha")).connections[0].status, "configured");
+  assert.equal((await store.list("alpha")).connections[0]!.status, "configured");
 });
 
 test("model without a safe list endpoint remains configured and does not issue a completion probe", async (t) => {
-  const seen = [];
-  const { store } = await fixture(t, { fetchImpl: async (url, options) => { seen.push({ url, method: options.method }); return json({}, 404); } });
+  const seen: {url: string | URL | Request; method: string | undefined}[] = [];
+  const { store } = await fixture(t, { fetchImpl: async (url, options) => { seen.push({ url, method: options?.method }); return json({}, 404); } });
   await store.save("alpha", { id: "model", kind: "model", baseUrl: "http://localhost:8123/v1", model: "local", authType: "none" });
   const result = await store.test("alpha", "model");
   assert.equal(result.status, "configured"); assert.equal(result.verified, false);
   assert.deepEqual(seen, [{ url: "http://localhost:8123/v1/models", method: "GET" }]);
-  assert.equal((await store.list("alpha")).connections[0].status, "configured");
+  assert.equal((await store.list("alpha")).connections[0]!.status, "configured");
 });

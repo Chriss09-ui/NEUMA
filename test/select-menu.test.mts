@@ -9,57 +9,84 @@ function fixture(rows = [
   { value: "b", label: "材料阅读测试" },
 ]) {
   class FixtureEvent {
-    constructor(type, values = {}) { this.type = type; Object.assign(this, values); }
+declare type: string;
+declare target: Target;
+declare key: string;
+declare bubbles: boolean;
+declare ctrlKey: boolean;
+declare metaKey: boolean;
+declare altKey: boolean;
+declare defaultPrevented: boolean;
+declare propagationStopped: boolean;
+    constructor(type: string, values = {}) { this.type = type; Object.assign(this, values); }
     preventDefault() { this.defaultPrevented = true; }
     stopPropagation() { this.propagationStopped = true; }
   }
   class Target {
-    listeners = new Map();
-    addEventListener(type, handler) {
+    listeners = new Map<string, ((event: FixtureEvent) => unknown)[]>();
+declare Event: typeof FixtureEvent;
+declare innerHeight: number;
+declare defaultView: Target;
+declare activeElement: Element;
+declare createElement: (tagName: string) => Element;
+
+    addEventListener(type: string, handler: (event: FixtureEvent) => unknown) {
       const handlers = this.listeners.get(type) ?? [];
       handlers.push(handler); this.listeners.set(type, handlers);
     }
-    dispatchEvent(event) {
+    dispatchEvent(event: FixtureEvent) {
       event.target ??= this;
       for (const handler of this.listeners.get(event.type) ?? []) handler(event);
       return !event.defaultPrevented;
     }
-    fire(type, values) { const event = new FixtureEvent(type, values); this.dispatchEvent(event); return event; }
+    fire(type: string, values: object = {}) { const event = new FixtureEvent(type, values); this.dispatchEvent(event); return event; }
   }
   const document = new Target();
   const window = new Target();
   window.Event = FixtureEvent; window.innerHeight = 600;
   document.defaultView = window;
   class Element extends Target {
-    constructor(tagName) { super(); this.tagName = tagName.toUpperCase(); this.ownerDocument = document; }
-    children = []; attributes = new Map(); className = ""; disabled = false;
+declare tagName: string;
+declare ownerDocument: Target;
+declare text: string;
+declare parent: Element | undefined;
+declare id: string;
+declare value: string;
+declare label: string;
+declare type: string;
+declare tabIndex: number;
+dataset: Record<string,string> = {};
+declare rect: { top: number; bottom: number; height: number; };
+    constructor(tagName: string) { super(); this.tagName = tagName.toUpperCase(); this.ownerDocument = document; }
+    children: Element[] = []; attributes = new Map(); className = ""; disabled = false;
     hidden = false; scrollTop = 0; clientHeight = 80; offsetHeight = 40;
     classList = {
-      toggle: (name, force) => {
+      toggle: (name: string, force?: boolean) => {
         const names = new Set(this.className.split(/\s+/).filter(Boolean));
         if (force ?? !names.has(name)) names.add(name); else names.delete(name);
         this.className = [...names].join(" ");
       },
-      contains: (name) => this.className.split(/\s+/).includes(name),
+      add(..._names: string[]) {}, remove(..._names: string[]) {},
+      contains: (name: string) => this.className.split(/\s+/).includes(name),
     };
-    get textContent() { return this.text ?? this.children.map((child) => child.textContent).join(""); }
-    set textContent(value) { this.text = String(value); this.children = []; }
-    get offsetTop() { return this.parent?.children.indexOf(this) * 40 || 0; }
-    replaceChildren(...children) { this.text = ""; this.children = []; this.append(...children); this.scrollTop = 0; }
-    append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
-    setAttribute(name, value) { this.attributes.set(name, String(value)); }
-    getAttribute(name) { return this.attributes.get(name) ?? null; }
-    removeAttribute(name) { this.attributes.delete(name); }
-    contains(target) { return target === this || this.children.some((child) => child.contains(target)); }
+    get textContent(): string { return this.text ?? this.children.map((child) => child.textContent).join(""); }
+    set textContent(value: string) { this.text = String(value); this.children = []; }
+    get offsetTop() { return (this.parent?.children.indexOf(this) ?? 0) * 40 || 0; }
+    replaceChildren(...children: Element[]) { this.text = ""; this.children = []; this.append(...children); this.scrollTop = 0; }
+    append(...children: Element[]) { for (const child of children) { child.parent = this; this.children.push(child); } }
+    setAttribute(name: string, value: string) { this.attributes.set(name, String(value)); }
+    getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name: string) { this.attributes.delete(name); }
+    contains(target: unknown): boolean { return target === this || this.children.some((child) => child.contains(target)); }
     focus() { document.activeElement = this; }
     getBoundingClientRect() { return this.rect ?? { top: 500, bottom: 540, height: 40 }; }
   }
-  document.createElement = (tagName) => new Element(tagName);
+  document.createElement = (tagName: string) => new Element(tagName);
   const select = document.createElement("select"), trigger = document.createElement("button");
   const menu = document.createElement("div"), value = document.createElement("span"), icon = document.createElement("span");
   menu.id = "group-recipient-menu"; menu.rect = { top: 550, bottom: 710, height: 160 };
   trigger.append(icon, value); select.value = rows[0]?.value ?? "";
-  function setOptions(next) {
+  function setOptions(next: { value: string; label: string; disabled?: boolean }[]) {
     select.replaceChildren(...next.map((row) => {
       const option = document.createElement("option");
       option.value = row.value; option.label = row.label; option.disabled = Boolean(row.disabled);
@@ -67,7 +94,7 @@ function fixture(rows = [
     }));
   }
   setOptions(rows);
-  const renderIcon = (target, option) => { target.textContent = option.value === "" ? "群星核" : `星核:${option.value}`; };
+  const renderIcon = (target: { textContent: string; }, option: { value: string; }) => { target.textContent = option.value === "" ? "群星核" : `星核:${option.value}`; };
   const control = createSelectMenu({ select, trigger, menu, value, icon, renderIcon, document, window });
   const activeValue = () => {
     const id = trigger.getAttribute("aria-activedescendant");
@@ -79,35 +106,35 @@ function fixture(rows = [
 
 test("显示权威选择与星核，鼠标切换仅产生一次冒泡 change，重复选择不发送", () => {
   const { select, trigger, menu, value, icon, document } = fixture();
-  const changes = [];
+  const changes: {value:string;bubbles:boolean}[] = [];
   select.addEventListener("change", (event) => changes.push({ value: select.value, bubbles: event.bubbles }));
   assert.equal(value.textContent, "群内成员自主协作");
   assert.equal(icon.textContent, "群星核");
-  assert.equal(menu.children[0].getAttribute("aria-selected"), "true");
-  assert.equal(menu.children[0].children.at(-1).getAttribute("aria-hidden"), "true");
-  assert.equal(menu.children[0].children.at(-1).hidden, false);
+  assert.equal(menu.children[0]!.getAttribute("aria-selected"), "true");
+  assert.equal(menu.children[0]!.children.at(-1)!.getAttribute("aria-hidden"), "true");
+  assert.equal(menu.children[0]!.children.at(-1)!.hidden, false);
   trigger.fire("click");
   assert.equal(menu.hidden, false);
   assert.equal(trigger.getAttribute("aria-expanded"), "true");
-  menu.children[2].fire("click");
+  menu.children[2]!.fire("click");
   assert.equal(select.value, "a");
   assert.equal(value.textContent, "微积分可视化学习助手");
   assert.equal(icon.textContent, "星核:a");
   assert.equal(menu.hidden, true);
   assert.equal(document.activeElement, trigger);
   assert.deepEqual(changes, [{ value: "a", bubbles: true }]);
-  trigger.fire("click"); menu.children[2].fire("click");
+  trigger.fire("click"); menu.children[2]!.fire("click");
   assert.equal(changes.length, 1);
-  trigger.fire("click"); menu.children[0].fire("click");
+  trigger.fire("click"); menu.children[0]!.fire("click");
   assert.equal(select.value, "");
   assert.equal(value.textContent, "群内成员自主协作");
 });
 
 test("不能选未就绪项，原生 select 禁用或无可选项时关闭并禁用触发器", () => {
   const { select, trigger, menu, control, setOptions } = fixture();
-  assert.equal(menu.children[1].disabled, true);
-  assert.equal(menu.children[1].getAttribute("aria-disabled"), "true");
-  trigger.fire("click"); menu.children[1].fire("click");
+  assert.equal(menu.children[1]!.disabled, true);
+  assert.equal(menu.children[1]!.getAttribute("aria-disabled"), "true");
+  trigger.fire("click"); menu.children[1]!.fire("click");
   assert.equal(select.value, ""); assert.equal(menu.hidden, false);
   select.disabled = true; control.refresh();
   assert.equal(trigger.disabled, true); assert.equal(menu.hidden, true);
@@ -131,9 +158,9 @@ test("change 回调观察到菜单已关闭，可转移焦点而不被组件夺�
     assert.equal(document.activeElement, trigger);
     input.focus();
   });
-  trigger.fire("click"); menu.children[2].fire("click");
+  trigger.fire("click"); menu.children[2]!.fire("click");
   assert.equal(changes, 1); assert.equal(document.activeElement, input);
-  trigger.fire("click"); menu.children[2].fire("click");
+  trigger.fire("click"); menu.children[2]!.fire("click");
   assert.equal(changes, 1); assert.equal(document.activeElement, trigger);
 });
 
@@ -160,7 +187,7 @@ test("外部点击、窗口变化和页面滚动关闭；菜单内滚动与 poin
   const { trigger, menu, document, window } = fixture();
   trigger.focus(); trigger.fire("click");
   document.fire("pointerdown", { target: trigger.children[0] }); assert.equal(menu.hidden, false);
-  document.fire("pointerdown", { target: menu.children[2].children[0] }); assert.equal(menu.hidden, false);
+  document.fire("pointerdown", { target: menu.children[2]!.children[0] }); assert.equal(menu.hidden, false);
   const pointer = menu.fire("pointerdown", { target: menu.children[2] });
   assert.equal(pointer.defaultPrevented, true); assert.equal(document.activeElement, trigger);
   document.fire("scroll", { target: menu }); assert.equal(menu.hidden, false);
@@ -181,7 +208,7 @@ test("定期刷新保留展开、活动成员及滚动位置，名称/图标/当
   control.refresh();
   assert.equal(menu.hidden, false); assert.equal(activeValue(), "b"); assert.equal(menu.scrollTop, 57);
   assert.equal(value.textContent, "群内协作新版"); assert.equal(icon.textContent, "群星核");
-  assert.equal(menu.children[1].getAttribute("aria-selected"), "true");
+  assert.equal(menu.children[1]!.getAttribute("aria-selected"), "true");
   select.value = "a"; select.fire("change");
   assert.equal(value.textContent, "数学助手新版"); assert.equal(icon.textContent, "星核:a");
   assert.equal(activeValue(), "b"); assert.equal(menu.scrollTop, 57);
@@ -203,11 +230,11 @@ test("刷新支持空字符串活动值，删除或禁用活动项时回到可�
 test("菜单根据可用空间向上展开，鼠标悬停更新活动项但不立即选择", () => {
   const { select, trigger, menu, control, activeValue } = fixture();
   trigger.fire("click"); assert.equal(menu.classList.contains("opens-above"), true);
-  menu.children[2].fire("mouseover"); assert.equal(activeValue(), "a"); assert.equal(select.value, "");
-  menu.children[1].fire("mouseover"); assert.equal(activeValue(), "a");
+  menu.children[2]!.fire("mouseover"); assert.equal(activeValue(), "a"); assert.equal(select.value, "");
+  menu.children[1]!.fire("mouseover"); assert.equal(activeValue(), "a");
   trigger.rect = { top: 80, bottom: 120, height: 40 }; control.refresh();
   assert.equal(menu.classList.contains("opens-above"), false);
-  assert.equal(menu.children[2].classList.contains("is-active"), true);
+  assert.equal(menu.children[2]!.classList.contains("is-active"), true);
 });
 
 test("可打印输入按选项名称定位，不匹配时不改选择", () => {

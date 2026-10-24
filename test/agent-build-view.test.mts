@@ -1,3 +1,5 @@
+import type { ArchitectureView, DevelopmentView, RuntimeState, AgentRequirement } from "../public/ui-types.js";
+import { validDraft, validDesign } from "./helpers/architecture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -8,15 +10,15 @@ import { agentBuildState } from "../public/agent-runtime.js";
 import { agentDisplayName } from "../public/state.js";
 import { browserResult, testBrowser } from "./helpers/browser.mjs";
 
-const agent = { id: "making-one", name: "微积分可视化学习助手", draft: { goal: { value: "通过动态几何理解微积分" } } };
-const architecture = (overrides = {}) => ({ agentId: agent.id, name: agent.name, draft: agent.draft, version: 1,
-  candidateHash: "candidate-1", status: "passed", delivery: "needs_development", design: { profile: "workflow" }, ...overrides });
-const development = (overrides = {}) => ({ agentId: agent.id, id: "development-one", status: "running", phase: "implementing",
+const agent: AgentRequirement = { persisted: false, dirty: false, id: "making-one", name: "微积分可视化学习助手", draft: validDraft("通过动态几何理解微积分") };
+const architecture = (overrides: Partial<ArchitectureView> = {}): ArchitectureView => ({ agentId: agent.id, name: agent.name, draft: agent.draft, version: 1,
+  candidateHash: "candidate-1", status: "passed", delivery: "needs_development", design: { ...validDesign([]), profile: "workflow" }, ...overrides });
+const development = (overrides: Partial<DevelopmentView> = {}): DevelopmentView => ({ agentId: agent.id, id: "development-one", status: "running", phase: "implementing",
   architectureRef: { version: 1, candidateHash: "candidate-1" }, delivery: "needs_development", tasks: [], ...overrides });
-const currentStage = (presentation) => presentation.stages.find((stage) => stage.status === "current")?.id;
+const currentStage = (presentation: ReturnType<typeof agentMakingState>) => presentation.stages.find((stage: { status: string; }) => stage.status === "current")?.id;
 
 test("显式重开停在架构起点并提供可用的手动开始按钮", () => {
-  const pending = architecture({ status: "pending", delivery: "blocked", candidateHash: null, design: null, review: null });
+  const pending = architecture({ status: "pending", delivery: "blocked", candidateHash: undefined, design: null, review: null });
   const state = agentBuildState(agent, { architecture: pending });
   assert.equal(state.status, "pending");
   const result = agentMakingState(agent, { ...state, architecture: pending });
@@ -70,7 +72,7 @@ test("评审额度耗尽仍显示继续设计，等待用户点击再开启一�
       request: { kind: "review_continue", version: 30 } } }) });
   assert.equal(result.canRetry, true); assert.equal(result.actionLabel, "继续设计");
   assert.equal(result.phase, "evaluating"); assert.equal(result.failed, true);
-  assert.equal(result.active, false); assert.equal(result.stages.at(-1).status, "pending");
+  assert.equal(result.active, false); assert.equal(result.stages.at(-1)!.status, "pending");
 });
 
 test("本次构建错误优先于旧恢复提示，仍保留修订操作，进行中不残留失败原因", () => {
@@ -81,25 +83,25 @@ test("本次构建错误优先于旧恢复提示，仍保留修订操作，进�
   assert.equal(result.summary, "本次来源摘要与冻结评审不一致");
   assert.equal(result.canRetry, true); assert.equal(result.actionLabel, "按评审修订（最多3轮）");
   const active = agentMakingState(agent, { status: "building", architecture: saved, buildError: "旧的失败",
-    operation: { phase: "designing", label: "正在修订原方案" } });
+    operation: { controller: new AbortController(), phase: "designing", label: "正在修订原方案" } });
   assert.equal(active.summary, "正在修订原方案");
 });
 
 test("制作阶段以当前控制器和持久记录为准，重连与方案修订保留真实阶段", () => {
   for (const phase of ["researching", "designing", "designer", "specialist"]) {
-    const result = agentMakingState(agent, { status: "building", operation: { phase } });
+    const result = agentMakingState(agent, { status: "building", operation: { controller: new AbortController(), phase } });
     assert.equal(currentStage(result), "designing");
   }
   for (const phase of ["evaluating", "reviewer"]) {
-    const result = agentMakingState(agent, { status: "building", operation: { phase } });
+    const result = agentMakingState(agent, { status: "building", operation: { controller: new AbortController(), phase } });
     assert.equal(currentStage(result), "evaluating");
   }
-  const revised = agentMakingState(agent, { status: "building", operation: { phase: "designing" } });
-  assert.equal(revised.stages.find((stage) => stage.id === "evaluating").status, "pending");
+  const revised = agentMakingState(agent, { status: "building", operation: { controller: new AbortController(), phase: "designing" } });
+  assert.equal(revised.stages.find((stage) => stage.id === "evaluating")!.status, "pending");
   const restored = agentMakingState(agent, { status: "evaluating", architecture: architecture({ status: "evaluating" }) });
   assert.equal(restored.active, true);
   assert.equal(currentStage(restored), "evaluating");
-  const outdated = agentMakingState({ ...agent, draft: { goal: { value: "新的需求" } } },
+  const outdated = agentMakingState({ ...agent, draft: validDraft("新的需求") },
     { status: "missing", architecture: architecture({ status: "evaluating" }) });
   assert.equal(outdated.active, false);
   assert.equal(currentStage(outdated), undefined);
@@ -114,19 +116,19 @@ test("读取、取消、失败和轻量交付不冒充已生成，研发整理�
   const stopped = agentMakingState(agent, { status: "cancelled", architecture: architecture({ status: "cancelled" }) });
   assert.equal(stopped.headline, "生成已终止");
   assert.equal(stopped.canRetry, true);
-  assert.equal(stopped.stages.find((stage) => stage.id === "designing").status, "stopped");
+  assert.equal(stopped.stages.find((stage) => stage.id === "designing")!.status, "stopped");
   const failed = agentMakingState(agent, { status: "failed",
     architecture: architecture({ status: "failed", diagnostic: { phase: "evaluating" } }) });
-  assert.equal(failed.stages.find((stage) => stage.id === "evaluating").status, "blocked");
-  assert.equal(failed.stages.at(-1).status, "pending");
+  assert.equal(failed.stages.find((stage) => stage.id === "evaluating")!.status, "blocked");
+  assert.equal(failed.stages.at(-1)!.status, "pending");
 
-  const preparing = agentMakingState(agent, { status: "building", operation: { phase: "packaging" },
-    architecture: architecture({ design: { profile: "light" }, delivery: "blocked" }) });
-  assert.equal(preparing.stages.find((stage) => stage.id === "development").status, "skipped");
-  assert.equal(preparing.stages.at(-1).status, "current");
+  const preparing = agentMakingState(agent, { status: "building", operation: { controller: new AbortController(), phase: "packaging" },
+    architecture: architecture({ design: { ...validDesign([]), profile: "light" }, delivery: "blocked" }) });
+  assert.equal(preparing.stages.find((stage) => stage.id === "development")!.status, "skipped");
+  assert.equal(preparing.stages.at(-1)!.status, "current");
   const ready = agentMakingState(agent, { status: "ready",
-    architecture: architecture({ design: { profile: "light" }, delivery: "ready" }) });
-  assert.equal(ready.stages.at(-1).status, "complete");
+    architecture: architecture({ design: { ...validDesign([]), profile: "light" }, delivery: "ready" }) });
+  assert.equal(ready.stages.at(-1)!.status, "complete");
   const developing = agentMakingState(agent, { status: "developing", architecture: architecture(), development: development() });
   assert.equal(currentStage(developing), "development");
   const packaging = agentMakingState(agent, { status: "developing", architecture: architecture(),
@@ -137,18 +139,18 @@ test("读取、取消、失败和轻量交付不冒充已生成，研发整理�
 const [stylesheet, html, runtimeSource, makingSource, agentsSource, historySource] = await Promise.all([
   "style.css", "index.html", "agent-runtime.js", "agent-build-view.js", "agents.js", "sidebar-history.js",
 ].map((file) => readFile(new URL(`../public/${file}`, import.meta.url), "utf8")));
-const stripModule = (source) => source.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "");
-const literal = (value) => JSON.stringify(value).replaceAll("<", "\\u003c");
-const pageStart = html.indexOf('<section id="page-agent"');
-const pageEnd = html.indexOf('<section id="page-projects"', pageStart);
+const stripModule = (source: string|undefined) => source!.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "");
+const literal = (value: unknown) => JSON.stringify(value).replaceAll("<", "\\u003c");
+const pageStart = html!.indexOf('<section id="page-agent"');
+const pageEnd = html!.indexOf('<section id="page-projects"', pageStart);
 assert.ok(pageStart >= 0 && pageEnd > pageStart);
-const pageMarkup = html.match(/<body>([\s\S]*)<\/body>/)[1].replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
-const renderStart = agentsSource.indexOf("function renderMaking(");
-const renderEnd = agentsSource.indexOf("\nfunction clearInspectionTimer", renderStart);
+const pageMarkup = html!.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
+const renderStart = agentsSource!.indexOf("function renderMaking(");
+const renderEnd = agentsSource!.indexOf("\nfunction clearInspectionTimer", renderStart);
 assert.ok(renderStart >= 0 && renderEnd > renderStart);
 
 const browserPrelude = `
-  ${stripModule(runtimeSource.slice(0, runtimeSource.indexOf("export function agentHistory")))}
+  ${stripModule(runtimeSource!.slice(0, runtimeSource!.indexOf("export function agentHistory")))}
   ${agentDisplayName.toString()}
   function renderAgentAvatar(target) { target.textContent = "✦"; target.style.cssText = "display:grid;place-items:center;height:100%;font-size:64px;color:#409af0"; }
   ${stripModule(makingSource)}
@@ -171,7 +173,7 @@ const browserPrelude = `
   const developAgent = () => started++;
   const buildAgent = () => started++;
   byId("agent-panel-toggle").addEventListener("click", () => details++);
-  ${agentsSource.slice(renderStart, renderEnd)}
+  ${agentsSource!.slice(renderStart, renderEnd)}
   const agent = ${literal(agent)};
   const visible = (id) => byId(id).getClientRects().length > 0;
   const stageFacts = () => [...document.querySelectorAll(".agent-making-step")].map((step) => ({
@@ -180,13 +182,13 @@ const browserPrelude = `
   }));
 `;
 
-async function desktopBrowser(t, { reducedMotion = false } = {}) {
+async function desktopBrowser(t: test.TestContext, { reducedMotion = false } = {}) {
   const browser = await testBrowser(t);
   if (!browser) return null;
   const directory = await mkdtemp(join(tmpdir(), "neuma-making-browser-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const wrapper = join(directory, "browser");
-  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const flags = ["--window-size=1440,1000", ...(reducedMotion ? ["--force-prefers-reduced-motion"] : [])];
   await writeFile(wrapper, `#!/bin/sh\nexec ${[browser, ...flags].map(quote).join(" ")} "$@"\n`, { mode: 0o700 });
   return wrapper;
@@ -196,7 +198,7 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
   const browser = await desktopBrowser(t);
   if (!browser) return;
   const facts = await browserResult(t, browser, `${browserPrelude}
-    currentState = { status: "building", label: "正在核实技术资料…", operation: { phase: "researching" } };
+    currentState = { status: "building", label: "正在核实技术资料…", operation: { controller: new AbortController(), phase: "researching" } };
     renderMaking(agent);
     const active = {
       width: innerWidth, panel: visible("agent-making-panel"), historyVisible: visible("making-history"),
@@ -210,7 +212,7 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
     makingView.stop.click(); makingView.details.click();
     makingView.stop.focus(); renderMaking(agent);
     const focusPreserved = document.activeElement === makingView.stop;
-    currentState = { ...currentState, operation: { phase: "evaluating", stopping: true } };
+    currentState = { ...currentState, operation: { controller: new AbortController(), phase: "evaluating", stopping: true } };
     renderMaking(agent);
     const stopping = { disabled: makingView.stop.disabled, label: makingView.stop.textContent, state: makingView.root.dataset.state };
     makingView.stop.click();
@@ -226,9 +228,9 @@ test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动�
   assert.equal(facts.active.title, true);
   assert.equal(facts.active.settings, true);
   assert.equal(facts.active.workspace, "block");
-  assert.deepEqual(facts.active.stages.map((stage) => stage.state), ["complete", "current", "pending", "pending", "pending"]);
+  assert.deepEqual(facts.active.stages.map((stage: {state:string}) => stage.state), ["complete", "current", "pending", "pending", "pending"]);
   assert.equal(facts.active.stages[1].current, "step");
-  assert.ok(facts.active.stages.every((stage, index, stages) => !index || stage.rect.left >= stages[index - 1].rect.right - 1));
+  assert.ok(facts.active.stages.every((stage: { rect: { left: number; }; }, index: number, stages: { rect: { right: number; }; }[]) => !index || stage.rect.left >= stages[index - 1]!.rect.right - 1));
   assert.equal(facts.active.animation, "agent-making-orbit");
   assert.equal(facts.active.pulse, "agent-making-pulse");
   assert.equal(facts.active.stop, "终止生成");
@@ -245,7 +247,7 @@ test("真实浏览器减少动态效果时停止动画，失败文字安全展�
   if (!browser) return;
   const unsafeText = '<img src="x" onerror="window.makingInjected=true"><script>window.makingInjected=true</script>';
   const facts = await browserResult(t, browser, `${browserPrelude}
-    currentState = { status: "building", operation: { phase: "evaluating" } }; renderMaking(agent);
+    currentState = { status: "building", operation: { controller: new AbortController(), phase: "evaluating" } }; renderMaking(agent);
     const animations = [...document.querySelectorAll(".agent-making-satellite,.agent-making-avatar,.agent-making-marker")]
       .map((node) => getComputedStyle(node).animationName);
     currentState = { status: "failed", error: ${literal(unsafeText)} };

@@ -1,3 +1,8 @@
+interface FixtureEvent {type:string;[key:string]:unknown}
+import { pageElement } from "../public/page-elements.js";
+import { errorInfo } from "../public/ui-types.js";
+import { objectFields } from "../src/runtime/type-boundary.mjs";
+import { fixtureDeferred } from "./helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -6,60 +11,62 @@ import vm from "node:vm";
 const [source, html] = await Promise.all(["settings.js", "index.html"].map((file) =>
   readFile(new URL(`../public/${file}`, import.meta.url), "utf8")));
 const settle = () => new Promise(setImmediate);
-const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+const deferred = fixtureDeferred;
 const settings = (overrides = {}) => ({ chatUrl: "https://example.test/v1/chat/completions", model: "old-model", jevModel: "jev",
   apiKey: { set: false, hint: "" }, jevApiKey: { set: true, hint: "" }, llmConfigured: false, jevConfigured: true, ...overrides });
 
-async function setup({ load, save, probe, probeJev } = {}) {
+async function setup({ load, save, probe, probeJev }:{load?:()=>unknown|Promise<unknown>;save?:(body:Record<string,unknown>)=>unknown|Promise<unknown>;probe?:(body:unknown,signal:unknown)=>unknown|Promise<unknown>;probeJev?:(body:unknown,signal:unknown)=>unknown|Promise<unknown>} = {}) {
   class Events {
-    listeners = new Map();
-    addEventListener(type, callback) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
-    dispatchEvent(event) { return Promise.all((this.listeners.get(event.type) ?? []).map((callback) => callback(event))); }
+    listeners = new Map<string,((event:FixtureEvent)=>unknown)[]>();
+    addEventListener(type:string, callback:(event:FixtureEvent)=>unknown) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), callback]); }
+    dispatchEvent(event:FixtureEvent) { return Promise.all((this.listeners.get(event.type) ?? []).map((callback) => callback(event))); }
   }
-  const document = new Events(), nodes = new Map(), requests = [], formControls = [];
+  class Doc extends Events {declare activeElement?:Element;declare getElementById:(id:string)=>Element|null;}
+  const document = new Doc(), nodes = new Map<string,Element>(), requests: ({ "path": (string); "body": (unknown); "signal": (unknown); })[] = [], formControls: ((Element & { id: string | undefined; tagName: string; type: string | undefined; hidden: boolean; disabled: boolean; }))[] = [];
   class Element extends Events {
-    value = ""; textContent = ""; hidden = false; disabled = false; dataset = {};
+    declare id:string|undefined;declare tagName:string;declare type:string|undefined;
+    value:unknown = ""; textContent = ""; hidden = false; disabled = false; dataset:Record<string,string> = {};
     focus() { document.activeElement = this; }
-    querySelectorAll(selector) {
+    querySelectorAll(selector: string) {
       if (this.id !== "settings-form") return [];
       if (selector === "input, button") return formControls;
-      return selector === "[data-reveal]" ? formControls.filter((element) => element.dataset.reveal) : [];
+      return selector === "[data-reveal]" ? formControls.filter((element) => objectFields(element.dataset).reveal) : [];
     }
   }
   let inSettingsForm = false;
-  for (const [, closing, tag, attributes] of html.matchAll(/<(\/?)([a-z][\w-]*)\b([^>]*)>/gi)) {
+  for (const [, closing, tag, attributes] of html!.matchAll!(/<(\/?)([a-z][\w-]*)\b([^>]*)>/gi)) {
     if (closing) { if (tag === "form") inSettingsForm = false; continue; }
-    const id = attributes.match(/(?:^|\s)id="([^"]+)"/)?.[1];
-    const element = Object.assign(new Element(), { id, tagName: tag.toUpperCase(),
-      type: attributes.match(/(?:^|\s)type="([^"]+)"/)?.[1],
-      hidden: /\shidden(?:\s|$)/.test(attributes), disabled: /\sdisabled(?:\s|$)/.test(attributes) });
-    const reveal = attributes.match(/(?:^|\s)data-reveal="([^"]+)"/)?.[1];
-    if (reveal) element.dataset.reveal = reveal;
+    const id = attributes!.match!(/(?:^|\s)id="([^"]+)"/)?.[1];
+    const element = Object.assign(new Element(), { id, tagName: tag!.toUpperCase!(),
+      type: attributes!.match!(/(?:^|\s)type="([^"]+)"/)?.[1],
+      hidden: /\shidden(?:\s|$)/.test(attributes!), disabled: /\sdisabled(?:\s|$)/.test(attributes!) });
+    const reveal = attributes!.match!(/(?:^|\s)data-reveal="([^"]+)"/)?.[1];
+    if (reveal) objectFields(element.dataset).reveal = reveal;
     if (id) {
       assert.equal(nodes.has(id), false, `页面 ID 不应重复：${id}`);
       nodes.set(id, element);
     }
     if (tag === "form" && id === "settings-form") inSettingsForm = true;
-    if (inSettingsForm && ["input", "button"].includes(tag)) formControls.push(element);
+    if (inSettingsForm && ["input", "button"].includes(tag!)) formControls.push(element);
   }
-  const get = (id) => nodes.get(id) ?? null;
+  const get = (id:string) => nodes.get(id)!;
   document.getElementById = get;
-  class Event { constructor(type, fields = {}) { this.type = type; Object.assign(this, fields); } }
-  vm.runInNewContext(source, { document, CustomEvent: Event, AbortController,
-    fetch: async (path, options = {}) => {
-      const body = options.body ? JSON.parse(options.body) : undefined;
-      requests.push({ path, body, signal: options.signal });
-      if (path === "/api/settings/test-model") return await (probe?.(body, options.signal) ?? Response.json({ ok: true, model: body.model, latencyMs: 125 }));
-      if (path === "/api/settings/test-jev") return await (probeJev?.(body, options.signal) ?? Response.json({ ok: true, model: body.jevModel, latencyMs: 80 }));
+  class Event { type:string;[key:string]:unknown;constructor(type: string, fields = {}) { this.type = type; Object.assign(this, fields); } }
+  vm.runInNewContext(source!.replace(/^import .*;\n/gm, ""), { document, pageElement, errorInfo, CustomEvent: Event, AbortController,
+    fetch: async (path: string, options = {}) => {
+      const body = objectFields(options).body ? JSON.parse(String(objectFields(options).body)) : undefined;
+      requests.push({ path, body, signal: objectFields(options).signal });
+      if (path === "/api/settings/test-model") return await (probe?.(body, objectFields(options).signal) ?? Response.json({ ok: true, model: body.model, latencyMs: 125 }));
+      if (path === "/api/settings/test-jev") return await (probeJev?.(body, objectFields(options).signal) ?? Response.json({ ok: true, model: body.jevModel, latencyMs: 80 }));
       return body ? await (save?.(body) ?? Response.json(settings({ ...body })))
         : await (load?.() ?? Response.json(settings()));
     },
   });
   await settle();
   return { get, requests,
-    route: (page) => document.dispatchEvent(new Event("neuma:route", { detail: { page } })),
-    input: async (id, value) => { get(id).value = value; await get(id).dispatchEvent(new Event("input")); },
-    click: async (id) => { await get(id).dispatchEvent(new Event("click")); await settle(); },
+    route: (page: unknown) => document.dispatchEvent(new Event("neuma:route", { detail: { page } })),
+    input: async (id: string, value: unknown) => { get(id).value = value; await get(id).dispatchEvent(new Event("input")); },
+    click: async (id: string) => { await get(id).dispatchEvent(new Event("click")); await settle(); },
     submit: () => get("settings-form").dispatchEvent({ type: "submit", preventDefault() {} }),
   };
 }
@@ -70,7 +77,7 @@ test("设置初始化和路由共享正在读取的请求，迟到结果保留�
   assert.equal(ui.requests.length, 1);
   await ui.input("settings-model", "edited-model");
   await ui.input("settings-api-key", "synthetic-input");
-  pending.resolve(Response.json(settings())); await settle();
+  pending.resolve!(Response.json(settings())); await settle();
   assert.equal(ui.get("settings-model").value, "edited-model");
   assert.equal(ui.get("settings-api-key").value, "synthetic-input");
   assert.equal(ui.get("settings-chat-url").value, settings().chatUrl);
@@ -84,7 +91,7 @@ test("离开再返回设置保留尚未保存的输入与清除选择", async ()
   assert.equal(ui.get("settings-model").value, "unsaved-model");
   assert.equal(ui.get("settings-clear-jev").textContent, "撤销清除");
   await ui.submit();
-  assert.deepEqual(ui.requests.at(-1).body, { model: "unsaved-model", clear: ["jevApiKey"] });
+  assert.deepEqual(ui.requests.at(-1)!.body, { model: "unsaved-model", clear: ["jevApiKey"] });
 });
 
 test("快捷地址属于未保存修改，返回设置时不会被服务端旧地址覆盖", async () => {
@@ -98,12 +105,12 @@ test("保存后旧读取结果和旧读取失败都不能回写表单或错误",
   for (const failure of [false, true]) {
     const pending = deferred(); let loads = 0;
     const ui = await setup({ load: () => ++loads === 1 ? Response.json(settings()) : pending.promise,
-      save: (body) => Response.json(settings({ ...body })) });
+      save: (body: {}|undefined) => Response.json(settings({ ...body! })) });
     await ui.route("settings");
     await ui.input("settings-model", "saved-model");
     await ui.submit();
-    if (failure) pending.reject(new Error("旧读取失败"));
-    else pending.resolve(Response.json(settings()));
+    if (failure) pending.reject!(new Error("旧读取失败"));
+    else pending.resolve!(Response.json(settings()));
     await settle();
     assert.equal(ui.get("settings-model").value, "saved-model");
     assert.equal(ui.get("settings-error").hidden, true);
@@ -117,8 +124,8 @@ test("连接测试使用当前未保存值并裁剪空白，不保存或清空�
   await ui.input("settings-model", "  unsaved-model  ");
   await ui.input("settings-api-key", "  synthetic-new-key  ");
   await ui.click("settings-model-test");
-  assert.equal(ui.requests.at(-1).path, "/api/settings/test-model");
-  assert.deepEqual(ui.requests.at(-1).body, { chatUrl: "https://example.test/v2/chat/completions", model: "unsaved-model", apiKey: "synthetic-new-key" });
+  assert.equal(ui.requests.at(-1)!.path, "/api/settings/test-model");
+  assert.deepEqual(ui.requests.at(-1)!.body, { chatUrl: "https://example.test/v2/chat/completions", model: "unsaved-model", apiKey: "synthetic-new-key" });
   assert.equal(ui.requests.filter((request) => request.path === "/api/settings" && request.body).length, 0);
   assert.equal(ui.get("settings-api-key").value, "  synthetic-new-key  ");
   assert.equal(ui.get("settings-model").value, "  unsaved-model  ");
@@ -133,7 +140,7 @@ test("Key 留空测试不发送替换字段，读取已保存 Key 时不获取�
   const ui = await setup({ load: () => Response.json(settings({ apiKey: { set: true, hint: "test" } })) });
   await ui.input("settings-api-key", "  ");
   await ui.click("settings-model-test");
-  assert.deepEqual(ui.requests.at(-1).body, { chatUrl: settings().chatUrl, model: settings().model });
+  assert.deepEqual(ui.requests.at(-1)!.body, { chatUrl: settings().chatUrl, model: settings().model });
   assert.equal(ui.get("settings-api-key").value, "  ");
 });
 
@@ -149,7 +156,7 @@ test("测试中锁定配置与保存且防止重复请求，取消按钮仍可�
   assert.equal(ui.get("settings-model-test-result").dataset.state, "testing");
   await ui.click("settings-model-test"); await ui.submit();
   assert.equal(ui.requests.filter((request) => request.body).length, 1);
-  pending.resolve(Response.json({ ok: true, model: "draft-model", latencyMs: 99 })); await running; await settle();
+  pending.resolve!(Response.json({ ok: true, model: "draft-model", latencyMs: 99 })); await running; await settle();
   assert.equal(ui.get("settings-model").disabled, false);
   assert.equal(ui.get("settings-save").disabled, false);
   assert.equal(ui.get("settings-model-test-cancel").hidden, true);
@@ -163,7 +170,7 @@ test("保存中不能发起连接测试，保存结束恢复测试按钮", async
   assert.equal(ui.get("settings-model-test").disabled, true);
   await ui.click("settings-model-test");
   assert.equal(ui.requests.filter((request) => request.path === "/api/settings/test-model").length, 0);
-  pending.resolve(Response.json(settings({ model: "saved-model" }))); await running;
+  pending.resolve!(Response.json(settings({ model: "saved-model" }))); await running;
   assert.equal(ui.get("settings-model-test").disabled, false);
 });
 
@@ -173,16 +180,16 @@ test("取消测试中止请求并保持输入，迟到结果不能覆盖下一�
   await ui.input("settings-model", "draft-model");
   await ui.input("settings-api-key", "synthetic-draft-key");
   const running = ui.click("settings-model-test"); await settle();
-  const signal = ui.requests.at(-1).signal;
+  const signal = ui.requests.at(-1)!.signal;
   await ui.click("settings-model-test-cancel");
-  assert.equal(signal.aborted, true);
+  assert.equal(objectFields(signal).aborted, true);
   assert.equal(ui.get("settings-model-test-result").dataset.state, "cancelled");
   assert.equal(ui.get("settings-model-test").disabled, false);
   assert.equal(ui.get("settings-model").value, "draft-model");
   assert.equal(ui.get("settings-api-key").value, "synthetic-draft-key");
   await ui.click("settings-model-test");
   const result = ui.get("settings-model-test-result").textContent;
-  pending.resolve(Response.json({ ok: true, model: "old-test", latencyMs: 9000 })); await running; await settle();
+  pending.resolve!(Response.json({ ok: true, model: "old-test", latencyMs: 9000 })); await running; await settle();
   assert.equal(ui.get("settings-model-test-result").dataset.state, "success");
   assert.equal(ui.get("settings-model-test-result").textContent, result);
 });
@@ -191,12 +198,12 @@ test("离开设置中止测试，迟到异常不会覆盖取消状态或保存�
   const pending = deferred(), ui = await setup({ probe: () => pending.promise });
   await ui.input("settings-model", "draft-model");
   const running = ui.click("settings-model-test"); await settle();
-  const signal = ui.requests.at(-1).signal;
+  const signal = ui.requests.at(-1)!.signal;
   await ui.route("chat");
-  assert.equal(signal.aborted, true);
+  assert.equal(objectFields(signal).aborted, true);
   assert.equal(ui.get("settings-model-test-result").dataset.state, "cancelled");
   const cancelled = ui.get("settings-model-test-result").textContent;
-  pending.reject(new Error("synthetic-late-private-payload")); await running;
+  pending.reject!(new Error("synthetic-late-private-payload")); await running;
   await ui.route("settings"); await settle();
   assert.equal(ui.get("settings-model-test-result").textContent, cancelled);
   assert.equal(ui.get("settings-model").value, "draft-model");
@@ -230,7 +237,7 @@ test("修改主模型配置或快捷地址清除旧测试结果，Jev 修改不�
   assert.equal(ui.get("settings-model-test-result").textContent, result);
   assert.equal(ui.get("settings-model-test-result").hidden, false);
   for (const [id, value] of [["settings-chat-url", "https://new.example.test/v1/chat/completions"], ["settings-model", "next-model"], ["settings-api-key", "synthetic-next-key"]]) {
-    await ui.input(id, value);
+    await ui.input(id!, value);
     assert.equal(ui.get("settings-model-test-result").hidden, true, id);
     await ui.click("settings-model-test");
     assert.equal(ui.get("settings-model-test-result").hidden, false);
@@ -241,7 +248,7 @@ test("修改主模型配置或快捷地址清除旧测试结果，Jev 修改不�
 
 test("保存成功清除测试结果，保存失败保留结果", async () => {
   for (const success of [true, false]) {
-    const ui = await setup({ save: (body) => success ? Response.json(settings({ ...body })) : Response.json({ error: "保存失败" }, { status: 400 }) });
+    const ui = await setup({ save: (body: {}|undefined) => success ? Response.json(settings({ ...body! })) : Response.json({ error: "保存失败" }, { status: 400 }) });
     await ui.input("settings-model", "draft-model");
     await ui.click("settings-model-test");
     assert.equal(ui.get("settings-model-test-result").hidden, false);
@@ -258,7 +265,7 @@ test("读取设置期间两个测试均不可用但保留草稿，读取后恢�
   await ui.input("settings-model", "pending-edit");
   await ui.click("settings-model-test"); await ui.click("settings-jev-test");
   assert.equal(ui.requests.length, 1);
-  pending.resolve(Response.json(settings({ chatUrl: "", model: "", llmConfigured: false }))); await settle();
+  pending.resolve!(Response.json(settings({ chatUrl: "", model: "", llmConfigured: false }))); await settle();
   assert.equal(ui.get("settings-model-test").disabled, false);
   assert.equal(ui.get("settings-jev-test").disabled, false);
   assert.equal(ui.get("settings-model").value, "pending-edit");
@@ -273,8 +280,8 @@ test("Jev 测试使用当前草稿且不发送主模型字段，不保存或清�
   await ui.input("settings-jev-model", "  unsaved-jev  ");
   await ui.input("settings-jev-key", "  synthetic-new-jev-key  ");
   await ui.click("settings-jev-test");
-  assert.equal(ui.requests.at(-1).path, "/api/settings/test-jev");
-  assert.deepEqual(ui.requests.at(-1).body, { jevModel: "unsaved-jev", jevApiKey: "synthetic-new-jev-key" });
+  assert.equal(ui.requests.at(-1)!.path, "/api/settings/test-jev");
+  assert.deepEqual(ui.requests.at(-1)!.body, { jevModel: "unsaved-jev", jevApiKey: "synthetic-new-jev-key" });
   assert.equal(ui.requests.filter((request) => request.path === "/api/settings" && request.body).length, 0);
   assert.equal(ui.get("settings-jev-key").value, "  synthetic-new-jev-key  ");
   assert.equal(ui.get("settings-jev-model").value, "  unsaved-jev  ");
@@ -285,14 +292,14 @@ test("Jev 测试使用当前草稿且不发送主模型字段，不保存或清�
 test("Jev 留空 Key 省略字段，清除选择和新 Key 按当前草稿发送", async () => {
   const ui = await setup();
   await ui.click("settings-jev-test");
-  assert.deepEqual(ui.requests.at(-1).body, { jevModel: "jev" });
+  assert.deepEqual(ui.requests.at(-1)!.body, { jevModel: "jev" });
   await ui.click("settings-clear-jev"); await ui.click("settings-jev-test");
-  assert.deepEqual(ui.requests.at(-1).body, { jevModel: "jev", clear: ["jevApiKey"] });
+  assert.deepEqual(ui.requests.at(-1)!.body, { jevModel: "jev", clear: ["jevApiKey"] });
   assert.equal(ui.get("settings-clear-jev").textContent, "撤销清除");
   await ui.input("settings-jev-key", "  synthetic-replacement-key  "); await ui.click("settings-jev-test");
-  assert.deepEqual(ui.requests.at(-1).body, { jevModel: "jev", jevApiKey: "synthetic-replacement-key" });
+  assert.deepEqual(ui.requests.at(-1)!.body, { jevModel: "jev", jevApiKey: "synthetic-replacement-key" });
   await ui.click("settings-clear-jev"); await ui.click("settings-jev-test");
-  assert.deepEqual(ui.requests.at(-1).body, { jevModel: "jev" });
+  assert.deepEqual(ui.requests.at(-1)!.body, { jevModel: "jev" });
   assert.equal(ui.get("settings-clear-jev").textContent, "清除此 Key");
 });
 
@@ -312,7 +319,7 @@ test("Jev 测试锁定表单与另一个测试，仅显示当前测试取消按�
   assert.equal(ui.get("settings-model-test-result").textContent, modelResult);
   await ui.click("settings-model-test"); await ui.click("settings-jev-test"); await ui.submit();
   assert.equal(ui.requests.filter((request) => request.body).length, 2);
-  pending.resolve(Response.json({ ok: true, model: "jev", latencyMs: 55 })); await running; await settle();
+  pending.resolve!(Response.json({ ok: true, model: "jev", latencyMs: 55 })); await running; await settle();
   assert.equal(ui.get("settings-jev-test").disabled, false);
   assert.equal(ui.get("settings-model-test").disabled, false);
   assert.equal(ui.get("settings-jev-test-cancel").hidden, true);
@@ -326,13 +333,13 @@ test("主模型测试和保存期间均不能发起 Jev 测试", async () => {
   assert.equal(ui.get("settings-jev-test-cancel").hidden, true);
   await ui.click("settings-jev-test");
   assert.equal(ui.requests.filter((request) => request.path === "/api/settings/test-jev").length, 0);
-  pendingModel.resolve(Response.json({ ok: true, model: "old-model", latencyMs: 1 })); await runningModel; await settle();
+  pendingModel.resolve!(Response.json({ ok: true, model: "old-model", latencyMs: 1 })); await runningModel; await settle();
   await ui.input("settings-model", "saved-model");
   const runningSave = ui.submit(); await settle();
   assert.equal(ui.get("settings-jev-test").disabled, true);
   await ui.click("settings-jev-test");
   assert.equal(ui.requests.filter((request) => request.path === "/api/settings/test-jev").length, 0);
-  pendingSave.resolve(Response.json(settings({ model: "saved-model" }))); await runningSave;
+  pendingSave.resolve!(Response.json(settings({ model: "saved-model" }))); await runningSave;
   assert.equal(ui.get("settings-jev-test").disabled, false);
 });
 
@@ -341,7 +348,7 @@ test("两类配置只清除各自结果，Jev 清除和撤销操作也清除 Jev
   await ui.click("settings-model-test"); await ui.click("settings-jev-test");
   const modelResult = ui.get("settings-model-test-result").textContent;
   for (const [id, value] of [["settings-jev-model", "next-jev"], ["settings-jev-key", "synthetic-next-jev-key"]]) {
-    await ui.input(id, value);
+    await ui.input(id!, value);
     assert.equal(ui.get("settings-jev-test-result").hidden, true, id);
     assert.equal(ui.get("settings-model-test-result").textContent, modelResult);
     assert.equal(ui.get("settings-model-test-result").hidden, false);
@@ -369,19 +376,19 @@ test("取消后跨类型重测，旧成功不能覆盖新类型结果或解除�
       probeJev: () => first === "jev" ? pending.promise : next.promise });
     await ui.input("settings-jev-key", "synthetic-unsaved-jev-key");
     const oldRun = ui.click(`settings-${first}-test`); await settle();
-    const signal = ui.requests.at(-1).signal;
+    const signal = ui.requests.at(-1)!.signal;
     await ui.click(`settings-${first}-test-cancel`);
-    assert.equal(signal.aborted, true);
+    assert.equal(objectFields(signal).aborted, true);
     assert.equal(ui.get(`settings-${first}-test-result`).dataset.state, "cancelled");
     const cancelled = ui.get(`settings-${first}-test-result`).textContent;
     const nextRun = ui.click(`settings-${second}-test`); await settle();
-    pending.resolve(Response.json({ ok: true, model: "late-old-model", latencyMs: 9000 })); await oldRun; await settle();
+    pending.resolve!(Response.json({ ok: true, model: "late-old-model", latencyMs: 9000 })); await oldRun; await settle();
     assert.equal(ui.get(`settings-${first}-test-result`).textContent, cancelled);
     assert.equal(ui.get(`settings-${second}-test-result`).dataset.state, "testing");
     assert.equal(ui.get(`settings-${second}-test`).disabled, true);
     assert.equal(ui.get(`settings-${second}-test-cancel`).hidden, false);
     assert.equal(ui.get("settings-jev-key").value, "synthetic-unsaved-jev-key");
-    next.resolve(Response.json({ ok: true, model: "new-result", latencyMs: 20 })); await nextRun; await settle();
+    next.resolve!(Response.json({ ok: true, model: "new-result", latencyMs: 20 })); await nextRun; await settle();
     assert.equal(ui.get(`settings-${second}-test-result`).dataset.state, "success");
     assert.match(ui.get(`settings-${second}-test-result`).textContent, /new-result/);
   }
@@ -394,12 +401,12 @@ test("离开设置取消 Jev 测试，迟到错误不影响另一类结果和保
   await ui.click("settings-model-test");
   const modelResult = ui.get("settings-model-test-result").textContent;
   const running = ui.click("settings-jev-test"); await settle();
-  const signal = ui.requests.at(-1).signal;
+  const signal = ui.requests.at(-1)!.signal;
   await ui.route("chat");
-  assert.equal(signal.aborted, true);
+  assert.equal(objectFields(signal).aborted, true);
   assert.equal(ui.get("settings-jev-test-result").dataset.state, "cancelled");
   const cancelled = ui.get("settings-jev-test-result").textContent;
-  pending.reject(new Error("synthetic-private-jev-payload")); await running; await settle();
+  pending.reject!(new Error("synthetic-private-jev-payload")); await running; await settle();
   await ui.route("settings"); await settle();
   assert.equal(ui.get("settings-model-test-result").textContent, modelResult);
   assert.equal(ui.get("settings-jev-test-result").textContent, cancelled);
