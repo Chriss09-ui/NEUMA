@@ -1,0 +1,370 @@
+import type { TaskSpecV1 } from "../src/contracts/versions.mjs";
+import { objectFields } from "../src/runtime/type-boundary.mjs";
+import type { TestFailure } from "./helpers/m7-test-boundaries.mjs";
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentLibrary, normalizeAttachmentRefs } from "../src/agents/agent-library.mjs";
+import { InputError } from "../src/requirements/core.mjs";
+import { REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_RECORD_MAX_BYTES } from "../src/requirements/requirement-limits.mjs";
+
+async function fixture(t: test.TestContext) {
+  const dataDir = await mkdtemp(join(tmpdir(), "neuma-agent-library-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  return { dataDir, library: new AgentLibrary({ dataDir }) };
+}
+
+const input = (name = "周报助手", goal = "整理周报"): { name: string; draft: { goal: { value: string; source: string }; taskSpec?: TaskSpecV1 }; updatedAt: string } => ({ name, draft: { goal: { value: goal, source: "user" } }, updatedAt: "2026-10-08T00:00:00.000Z" });
+const snapshot = (content = "已整理") => ({ schemaVersion: 2, messages: [
+  { role: "user", content: "整理材料", delivery: "pending", revision: "v1" },
+  { role: "assistant", content, status: "complete", revision: "v1" },
+] });
+
+test("需求共用UTF8总量预算，超过旧60000字的合法任务要求完整保存并读回", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  const value = input();
+  value.draft.taskSpec = { version: 1, items: Array.from({ length: 30 }, (_, index) => ({ id: `task_${index}`,
+    dimension: "processing", applicability: "applies", content: "要求".repeat(1000), critical: false,
+    source: { kind: "user", evidence: [{ messageId: "source", quote: "用户原文" }] } })) };
+  assert.ok(JSON.stringify(value.draft).length > 60_000);
+  const saved = await library.saveRequirement("large", value, { consultation: { notes: "本机协商记录".repeat(200_000) } });
+  assert.deepEqual(saved.requirement!.draft, value.draft);
+  const restored = new AgentLibrary({ dataDir });
+  assert.deepEqual((await restored.list()).requirements![0]!.draft, value.draft);
+  const file = join(dataDir, "agents/large/requirements.json"), original = await readFile(file);
+  assert.ok(original.length > 2 * 1024 * 1024 && original.length < REQUIREMENT_RECORD_MAX_BYTES);
+  assert.throws(() => library.saveRequirement("large", { ...value, draft: { ...value.draft, excessive: "字".repeat(REQUIREMENT_DRAFT_MAX_BYTES) } }),
+    (error: TestFailure) => error.reason === "requirement_draft_too_large" && error.bytes! > error.limitBytes!);
+  await assert.rejects(library.saveRequirement("large", value, { consultation: { notes: "x".repeat(REQUIREMENT_RECORD_MAX_BYTES) } }),
+    (error: TestFailure) => error.reason === "requirement_record_too_large" && error.bytes! > error.limitBytes!);
+  assert.deepEqual(await readFile(file), original);
+});
+
+test("12000字符用户消息原文保存、恢复，超限写入不改变旧对话", async (t) => {
+  const { dataDir, library } = await fixture(t); await library.saveRequirement("long-chat", input());
+  const message = "😀".repeat(12_000), value = { schemaVersion: 2, messages: [{ role: "user", content: message },
+    { role: "assistant", content: "已接收", status: "complete" }] };
+  await library.saveConversation("long-chat", value);
+  assert.equal((await new AgentLibrary({ dataDir }).getConversation("long-chat")).conversation!.messages[0]!.content, message);
+  assert.throws(() => library.saveConversation("long-chat", { ...value, messages: [{ role: "user", content: `${message}字` }] }), InputError);
+  assert.equal((await library.getConversation("long-chat")).conversation!.messages[0]!.content, message);
+});
+
+test("保存名称接受120个Unicode字符，121字符拒绝后保留旧记录", async (t) => {
+  const { library } = await fixture(t), name = "😀".repeat(120);
+  await library.saveRequirement("name-limit", input(name));
+  assert.throws(() => library.saveRequirement("name-limit", input(`${name}字`)), InputError);
+  assert.equal((await library.list()).requirements![0]!.name, name);
+});
+
+test("requirements and explicit conversation snapshots survive restart in the same Agent folder", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  const saved = await library.saveRequirement("weekly", input());
+  assert.equal(saved.requirement!.id, "weekly");
+  assert.deepEqual(await library.getConversation("weekly"), { conversation: null });
+  const conversation = await library.saveConversation("weekly", snapshot());
+  assert.equal(conversation.conversation!.messages[0]!.delivery, "stopped");
+  const restored = new AgentLibrary({ dataDir });
+  assert.deepEqual((await restored.list()).requirements, [saved.requirement]);
+  assert.deepEqual(await restored.getConversation("weekly"), conversation);
+  assert.equal(JSON.parse(String(await readFile(join(dataDir, "agents/weekly/requirements.json"), "utf8"))).name, input().name);
+  assert.equal(JSON.parse(String(await readFile(join(dataDir, "agents/weekly/conversations/saved.json"), "utf8"))).schemaVersion, 2);
+  assert.deepEqual(await restored.getConversation("other"), { conversation: null });
+});
+
+test("browser imports fill missing data and cannot replace confirmed server records", async (t) => {
+  const { library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  await library.saveConversation("weekly", snapshot());
+  const imported = await library.saveRequirement("weekly", { ...input("旧浏览器助手", "旧目标"), importOnly: true });
+  assert.equal(imported.requirement!.name, "周报助手");
+  const importedChat = await library.saveConversation("weekly", { ...snapshot("旧回复"), importOnly: true });
+  assert.equal(importedChat.conversation!.messages[1]!.content, "已整理");
+  await library.saveRequirement("new", { ...input(), importOnly: true });
+  assert.equal((await library.list()).requirements.length, 2);
+});
+
+test("newer browser requirements can replace legacy fallback but never newer confirmed data", async (t) => {
+  const { dataDir, library } = await fixture(t); await library.storage.ready;
+  await library.storage.writeJson("weekly", "requirements.json", { id: "weekly", ...input("旧定义", "旧需求"), _legacyFallback: "definition" });
+  const newer = await library.saveRequirement("weekly", { ...input("浏览器新版", "新需求"), importOnly: true });
+  assert.equal(newer.requirement!.draft.goal.value, "新需求");
+  assert.equal(JSON.parse(String(await readFile(join(dataDir, "agents/weekly/requirements.json"), "utf8")))._legacyFallback, undefined);
+  await library.storage.writeJson("other", "requirements.json", { id: "other", ...input("最新架构", "已确认新版"), _legacyFallback: "architecture" });
+  const older = await library.saveRequirement("other", { ...input("旧浏览器", "旧需求"), updatedAt: "2026-10-04T00:00:00.000Z", importOnly: true });
+  assert.equal(older.requirement!.draft.goal.value, "已确认新版");
+});
+
+test("deletion blocks browser imports and explicit saves while retaining the Agent folder", async (t) => {
+  const { library } = await fixture(t);
+  await library.saveRequirement("weekly", input()); await library.saveConversation("weekly", snapshot());
+  await library.remove("weekly");
+  assert.deepEqual(await library.list(), { requirements: [] });
+  assert.deepEqual(await library.saveRequirement("weekly", { ...input(), importOnly: true }), { requirement: null, deleted: true });
+  assert.deepEqual(await library.saveConversation("weekly", { ...snapshot(), importOnly: true }), { conversation: null, deleted: true });
+  await assert.rejects(library.saveRequirement("weekly", input()), InputError);
+  await assert.rejects(library.saveConversation("weekly", snapshot()), InputError);
+  assert.ok(await library.storage.directory("weekly"));
+});
+
+test("invalid snapshots and failed atomic saves preserve the last saved conversation", async (t) => {
+  const { library } = await fixture(t);
+  await library.saveRequirement("weekly", input()); const original = await library.saveConversation("weekly", snapshot());
+  assert.throws(() => library.saveConversation("weekly", { schemaVersion: 2, messages: [{ role: "system", content: "invalid" }] }), InputError);
+  assert.throws(() => library.saveRequirement("../other", input()), InputError);
+  const write = library.storage.writeJson.bind(library.storage);
+  library.storage.writeJson = async () => { throw new InputError("模拟保存失败"); };
+  await assert.rejects(library.saveConversation("weekly", snapshot("未保存")), InputError);
+  library.storage.writeJson = write;
+  assert.deepEqual(await library.getConversation("weekly"), original);
+});
+
+const autosave = (content = "已整理", expectedVersion = 0, mutationId = "save-one") => ({
+  ...snapshot(content), schemaVersion: 3, expectedVersion, mutationId,
+});
+
+test("multiple conversations persist complete transcripts, derive Unicode titles and remain isolated", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  await library.saveRequirement("other", input());
+  const messages = Array.from({ length: 120 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `消息 ${index}`,
+    ...(index % 2 ? { status: "complete" } : { delivery: "sent" }) }));
+  messages[0]!.content = "  😀  中文\n标题  " + "😀".repeat(35);
+  messages[1]!.content = "长".repeat(40000);
+  const first = await library.saveConversationRecord("weekly", "chat-one", { ...autosave(), messages });
+  const second = await library.saveConversationRecord("weekly", "chat-two", autosave("另一个结果"));
+  assert.equal(first.conversation!.messages.length, 120);
+  assert.equal(first.conversation!.messages[1]!.content.length, 40000);
+  assert.equal(Array.from(first.conversation!.title).length, 30);
+  assert.match(first.conversation!.title, /^😀 中文 标题 😀/);
+  assert.equal(first.conversation!.saveVersion, 1);
+  const restored = new AgentLibrary({ dataDir });
+  assert.deepEqual(await restored.getConversationRecord("weekly", "chat-one"), first);
+  assert.deepEqual(await restored.getConversationRecord("weekly", "chat-two"), second);
+  const listing = await restored.listConversations("weekly");
+  assert.equal(listing.conversations.length, 2);
+  assert.deepEqual(Object.keys(listing.conversations[0]!), ["id", "title", "createdAt", "updatedAt", "saveVersion"]);
+  assert.deepEqual(await restored.listConversations("other"), { conversations: [] });
+  assert.deepEqual(await restored.getConversationRecord("other", "chat-one"), { conversation: null });
+});
+
+test("autosave retries are idempotent and stale concurrent writers cannot overwrite a later version", async (t) => {
+  const { library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  const first = await library.saveConversationRecord("weekly", "chat-one", autosave());
+  assert.deepEqual(await library.saveConversationRecord("weekly", "chat-one", autosave()), first);
+  await assert.rejects(library.saveConversationRecord("weekly", "chat-one", autosave("换了内容")), { reason: "conversation_conflict" });
+  const results = await Promise.allSettled([
+    library.saveConversationRecord("weekly", "chat-one", autosave("新版", 1, "save-two")),
+    library.saveConversationRecord("weekly", "chat-one", autosave("迟到版", 1, "save-three")),
+  ]);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1]!.status, "rejected");
+  assert.equal(objectFields(results[1]!.reason).reason, "conversation_conflict");
+  assert.equal(results[0]!.value.conversation!.saveVersion, 2);
+  assert.equal(results[0]!.value.conversation!.createdAt, first.conversation!.createdAt);
+  await assert.rejects(library.saveConversationRecord("weekly", "chat-one", autosave()), { reason: "conversation_conflict" });
+  assert.deepEqual(await library.getConversationRecord("weekly", "chat-one"), results[0].value);
+  assert.deepEqual(await library.saveConversationRecord("weekly", "chat-one", { ...autosave("旧浏览器"), importOnly: true }), results[0].value);
+});
+
+test("conversation deletion removes its body and prevents late saves, imports and repeated migration from resurrecting it", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  await library.saveConversation("weekly", snapshot());
+  assert.equal((await library.listConversations("weekly")).conversations![0]!.id, "legacy-saved");
+  const savedBytes = await readFile(join(dataDir, "agents/weekly/conversations/saved.json"), "utf8");
+  assert.deepEqual(await library.removeConversation("weekly", "legacy-saved"), { deleted: true, id: "legacy-saved" });
+  const tombstone = await library.storage.readJson("weekly", "conversations/records/legacy-saved.json");
+  assert.deepEqual(Object.keys(objectFields(tombstone)), ["schemaVersion", "id", "agentId", "deletedAt"]);
+  assert.deepEqual(await library.getConversation("weekly"), { conversation: null, deleted: true });
+  assert.deepEqual(await library.getConversationRecord("weekly", "legacy-saved"), { conversation: null, deleted: true });
+  assert.deepEqual(await library.listConversations("weekly"), { conversations: [] });
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", autosave()), { reason: "conversation_deleted" });
+  await assert.rejects(library.saveConversation("weekly", snapshot()), { reason: "conversation_deleted" });
+  assert.deepEqual(await library.saveConversationRecord("weekly", "legacy-saved", { ...autosave(), importOnly: true }), { conversation: null, deleted: true });
+  assert.equal(await readFile(join(dataDir, "agents/weekly/conversations/saved.json"), "utf8"), savedBytes);
+  assert.deepEqual(await new AgentLibrary({ dataDir }).listConversations("weekly"), { conversations: [] });
+  await library.removeConversation("weekly", "not-yet-saved");
+  await assert.rejects(library.saveConversationRecord("weekly", "not-yet-saved", autosave()), { reason: "conversation_deleted" });
+});
+
+test("legacy saved snapshot imports once and never replaces an updated active conversation", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  await library.storage.writeJson("weekly", "conversations/saved.json", snapshot("旧磁盘"));
+  const first = await library.getConversationRecord("weekly", "legacy-saved");
+  assert.equal(first.conversation!.mutationId, "legacy-migration");
+  const updated = await library.saveConversationRecord("weekly", "legacy-saved", autosave("新版本", 1, "new-save"));
+  assert.deepEqual(await new AgentLibrary({ dataDir }).getConversationRecord("weekly", "legacy-saved"), updated);
+  assert.equal(objectFields(objectFields(objectFields((await library.storage.readJson("weekly", "conversations/saved.json"))).messages)[1]).content, "旧磁盘");
+});
+
+test("failed compatibility synchronization restores the old saved file and active record", async (t) => {
+  const { library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  const old = await library.saveConversation("weekly", snapshot("原内容"));
+  const originalRecord = await library.getConversationRecord("weekly", "legacy-saved");
+  const write = library.storage.writeJson.bind(library.storage);
+  library.storage.writeJson = async (id, file, value) => {
+    if (file === "conversations/records/legacy-saved.json") throw new InputError("模拟记录同步失败");
+    return write(id, file, value);
+  };
+  await assert.rejects(library.saveConversation("weekly", snapshot("未保存的新内容")), /同步失败/);
+  library.storage.writeJson = write;
+  assert.deepEqual(await library.getConversation("weekly"), old);
+  assert.deepEqual(await library.getConversationRecord("weekly", "legacy-saved"), originalRecord);
+  assert.deepEqual(await library.storage.readJson("weekly", "conversations/saved.json"), old.conversation);
+});
+
+test("8 MiB uses actual persisted JSON bytes and failed writes preserve prior versions", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  const first = await library.saveConversationRecord("weekly", "chat", autosave());
+  const file = join(dataDir, "agents/weekly/conversations/records/chat.json"), originalBytes = await readFile(file);
+  const maxBytes = 8 * 1024 * 1024;
+  const boundaryInput = autosave("", 1, "boundary-save");
+  const envelope = { ...first.conversation!, saveVersion: 2, mutationId: boundaryInput.mutationId,
+    messages: first.conversation!.messages.map((message) => message.role === "assistant" ? { ...message, content: "" } : message) };
+  const contentBytes = maxBytes - Buffer.byteLength(JSON.stringify(envelope, null, 2));
+  const escaped = "\n".repeat(4_200_000);
+  assert.ok(Buffer.byteLength(escaped) < maxBytes);
+  assert.ok(Buffer.byteLength(JSON.stringify(escaped)) > maxBytes);
+  const overEnvelope = { ...boundaryInput, messages: envelope.messages.map((message) => message.role === "assistant"
+    ? { ...message, content: "a".repeat(contentBytes + 1) } : message) };
+  assert.ok(Buffer.byteLength(overEnvelope.messages.map((message) => message.content).join("")) < maxBytes);
+  for (const oversized of [autosave("中文".repeat(1400000), 1, "big-save"), autosave(escaped, 1, "escaped-save"), overEnvelope]) {
+    await assert.rejects(library.saveConversationRecord("weekly", "chat", oversized), /8 MiB/);
+    assert.deepEqual(await library.getConversationRecord("weekly", "chat"), first);
+    assert.deepEqual(await readFile(file), originalBytes);
+  }
+  const boundary = await library.saveConversationRecord("weekly", "chat", { ...boundaryInput,
+    messages: envelope.messages.map((message) => message.role === "assistant" ? { ...message, content: "a".repeat(contentBytes) } : message) });
+  assert.equal((await readFile(file)).length, maxBytes);
+  assert.equal(boundary.conversation!.saveVersion, 2);
+  const write = library.storage.writeJson.bind(library.storage);
+  library.storage.writeJson = async () => { throw new InputError("模拟磁盘失败"); };
+  await assert.rejects(library.saveConversationRecord("weekly", "chat", autosave("未保存", 2, "failed-save")), /模拟磁盘失败/);
+  library.storage.writeJson = write;
+  assert.deepEqual(await library.getConversationRecord("weekly", "chat"), boundary);
+  assert.throws(() => library.saveConversationRecord("weekly", "../outside", autosave()), InputError);
+  assert.throws(() => library.saveConversationRecord("weekly", "chat", { ...autosave(), expectedVersion: -1 }), InputError);
+});
+
+test("deleting an Agent clears conversation bodies and blocks fresh IDs while retaining workspace files", async (t) => {
+  const { library } = await fixture(t);
+  await library.saveRequirement("weekly", input());
+  await library.saveConversationRecord("weekly", "chat", autosave());
+  const workspace = await library.storage.directory("weekly", "workspace", { create: true });
+  await writeFile(join(workspace, "result.md"), "保留产物");
+  await library.remove("weekly");
+  assert.deepEqual(await library.listConversations("weekly"), { conversations: [], deleted: true });
+  assert.deepEqual(await library.getConversationRecord("weekly", "chat"), { conversation: null, deleted: true });
+  assert.equal(await library.storage.readJson("weekly", "conversations/records/chat.json"), null);
+  await assert.rejects(library.saveConversationRecord("weekly", "fresh-chat", autosave()), { reason: "conversation_deleted" });
+  assert.equal(await readFile(join(workspace, "result.md"), "utf8"), "保留产物");
+});
+
+const attached = (ids = ["material-one"], expectedVersion = 0, mutationId = "attached-save") => ({
+  schemaVersion: 4, expectedVersion, mutationId,
+  messages: [{ role: "user", content: "", attachments: ids.map((id) => ({ id })), delivery: "sent", revision: "v1" }],
+});
+
+test("attachment references persist without file payloads, validate ownership and support same-Agent reuse", async (t) => {
+  const { dataDir, library } = await fixture(t);
+  const calls: ({ "id": (string); "refs": ({ id: string; }[]); })[] = [];
+  Reflect.set(library, "validateAttachments", async (id: string, refs: { id: string; }[]) => {
+    calls.push({ id, refs });
+    if (id !== "weekly" || refs.some((item) => item.id !== "material-one")) throw new InputError("材料不属于当前 Agent");
+  });
+  await library.saveRequirement("weekly", input()); await library.saveRequirement("other", input());
+  const first = await library.saveConversationRecord("weekly", "chat-one", attached());
+  assert.equal(first.conversation!.schemaVersion, 4);
+  assert.deepEqual(first.conversation!.messages[0]!.attachments, [{ id: "material-one" }]);
+  assert.equal(first.conversation!.messages[0]!.content, "");
+  assert.deepEqual(calls, [{ id: "weekly", refs: [{ id: "material-one" }] }]);
+  assert.deepEqual(await library.saveConversationRecord("weekly", "chat-one", attached()), first);
+  assert.equal(calls.length, 1, "已保存请求的幂等重试不再次校验材料");
+  const second = await library.saveConversationRecord("weekly", "chat-two", attached());
+  assert.deepEqual(second.conversation!.messages[0]!.attachments, first.conversation!.messages[0]!.attachments);
+  await assert.rejects(library.saveConversationRecord("other", "chat-one", attached()), /不属于/);
+  await assert.rejects(library.saveConversationRecord("weekly", "chat-one", attached(["forged"], 1, "forged-save")), /不属于/);
+  assert.deepEqual(await new AgentLibrary({ dataDir }).getConversationRecord("weekly", "chat-one"), first);
+  const stored = await library.storage.readJson("weekly", "conversations/records/chat-one.json");
+  assert.deepEqual(Object.keys(objectFields(objectFields(objectFields(objectFields(objectFields(stored).messages)[0]).attachments)[0])), ["id"]);
+});
+
+test("attachment validation fails closed and rejects malformed, duplicate and oversized reference lists", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  await assert.rejects(library.saveConversationRecord("weekly", "chat", attached()), /归属校验/);
+  for (const refs of [null, [{ id: "../outside" }], [{ id: "a", path: "private.pdf" }], [{ id: "a" }, { id: "a" }],
+    Array.from({ length: 11 }, (_, index) => ({ id: `material-${index}` })), [{ id: "a".repeat(81) }]])
+    assert.throws(() => normalizeAttachmentRefs(refs), InputError);
+  assert.deepEqual(normalizeAttachmentRefs(), []);
+  assert.deepEqual(normalizeAttachmentRefs([{ id: "13bb2df9-238f-481e-af78-53bfa9a6449a" }]), [{ id: "13bb2df9-238f-481e-af78-53bfa9a6449a" }]);
+  for (const payload of [attached([]), { ...attached(), schemaVersion: 3 },
+    { ...attached(), messages: [{ role: "assistant", content: "reply", attachments: [{ id: "material-one" }] }] }])
+    assert.throws(() => library.saveConversationRecord("weekly", "chat", payload), InputError);
+});
+
+test("schema 3 records are read without mutation and upgrade on the next successful save", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  const old = { schemaVersion: 3, id: "chat", agentId: "weekly", title: "整理材料",
+    createdAt: "2026-10-08T00:00:00.000Z", updatedAt: "2026-10-08T00:00:00.000Z", saveVersion: 7,
+    mutationId: "old-save", messages: [{ role: "user", content: "整理材料", delivery: "sent" }] };
+  await library.storage.writeJson("weekly", "conversations/records/chat.json", old);
+  assert.deepEqual((await library.getConversationRecord("weekly", "chat")).conversation, old);
+  assert.deepEqual(await library.storage.readJson("weekly", "conversations/records/chat.json"), old);
+  const updated = await library.saveConversationRecord("weekly", "chat", { schemaVersion: 3, expectedVersion: 7,
+    mutationId: "new-save", messages: old.messages });
+  assert.equal(updated.conversation!.schemaVersion, 4);
+  assert.equal(updated.conversation!.saveVersion, 8);
+  assert.equal(updated.conversation!.createdAt, old.createdAt);
+  assert.deepEqual(updated.conversation!.messages, old.messages);
+});
+
+test("attachment-only titles survive restart and earlier generic titles normalize without rewriting records", async (t) => {
+  const { dataDir, library } = await fixture(t); await library.saveRequirement("weekly", input());
+  Reflect.set(library, "validateAttachments", async () => {});
+  const saved = await library.saveConversationRecord("weekly", "attachment-title", attached());
+  assert.equal(saved.conversation!.title, "附件分析");
+  const restored = new AgentLibrary({ dataDir });
+  assert.equal((await restored.getConversationRecord("weekly", "attachment-title")).conversation!.title, "附件分析");
+  assert.equal((await restored.listConversations("weekly")).conversations![0]!.title, "附件分析");
+  const previous = { ...saved.conversation!, title: "新对话" };
+  await library.storage.writeJson("weekly", "conversations/records/attachment-title.json", previous);
+  const migrated = new AgentLibrary({ dataDir });
+  assert.equal((await migrated.getConversationRecord("weekly", "attachment-title")).conversation!.title, "附件分析");
+  assert.equal((await migrated.listConversations("weekly")).conversations![0]!.title, "附件分析");
+  assert.equal(objectFields((await library.storage.readJson("weekly", "conversations/records/attachment-title.json"))).title, "新对话");
+});
+
+test("legacy clients cannot silently strip attachments; conflicts, retries and deletion remain protected", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  Reflect.set(library, "validateAttachments", async () => {});
+  const first = await library.saveConversationRecord("weekly", "legacy-saved", attached());
+  assert.equal((await library.getConversation("weekly")).conversation!.schemaVersion, 4);
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", autosave("旧客户端", 1, "old-client")),
+    { reason: "conversation_schema_upgrade_required" });
+  await assert.rejects(library.saveConversation("weekly", snapshot("旧兼容入口")), { reason: "conversation_schema_upgrade_required" });
+  assert.deepEqual(await library.saveConversationRecord("weekly", "legacy-saved", { ...autosave(), importOnly: true }), first);
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", attached(["material-two"], 1)), { reason: "conversation_conflict" });
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", attached(["material-one"], 0, "stale-save")), { reason: "conversation_conflict" });
+  assert.deepEqual(await library.getConversationRecord("weekly", "legacy-saved"), first);
+  await library.removeConversation("weekly", "legacy-saved");
+  await assert.rejects(library.saveConversationRecord("weekly", "legacy-saved", attached()), { reason: "conversation_deleted" });
+  assert.deepEqual(await library.getConversationRecord("weekly", "legacy-saved"), { conversation: null, deleted: true });
+});
+
+test("long attachment histories validate unique references in bounded batches", async (t) => {
+  const { library } = await fixture(t); await library.saveRequirement("weekly", input());
+  const batches: ((unknown))[] = []; Reflect.set(library, "validateAttachments", async (id: unknown, refs: unknown) => { batches.push(refs); });
+  const refs = Array.from({ length: 12 }, (_, index) => `material-${index}`);
+  await library.saveConversationRecord("weekly", "chat", { ...attached(), messages: [
+    attached(refs.slice(0, 10)).messages[0], attached(refs.slice(9)).messages[0],
+  ] });
+  assert.deepEqual(batches.map((items) => objectFields(items).length), [10, 2]);
+  assert.deepEqual(batches.flat().map((item) => objectFields(item).id), refs);
+});
