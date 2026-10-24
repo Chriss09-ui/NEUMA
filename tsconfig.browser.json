@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": [] },
+  "include": ["public/**/*.ts"],
+  "exclude": ["public/application-frame-bridge.ts", "public/frame-globals.d.ts"]
+}

@@ -153,15 +153,16 @@ test("源码入口可以启动，不被循环模块等待卡住", {
 }, async (t) => {
   const root = await temporary(t);
   const source = fileURLToPath(new URL("../", import.meta.url));
+  const dependencySource = JSON.parse(await readFile(join(source, ".neuma-build.json"), "utf8")).sourceRoot;
   await copyFile(join(source, "package.json"), join(root, "package.json"));
   await cp(join(source, "src"), join(root, "src"), { recursive: true });
   await cp(join(source, "public"), join(root, "public"), { recursive: true });
   for (const dependency of ["marked", "katex"])
-    await cp(join(source, "node_modules", dependency), join(root, "node_modules", dependency), { recursive: true });
+    await cp(join(dependencySource, "node_modules", dependency), join(root, "node_modules", dependency), { recursive: true });
   const manifest = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
   for (const dependency of Object.keys(manifest.dependencies).filter((name) => !["marked", "katex"].includes(name))) {
     const destination = join(root, "node_modules", dependency); await mkdir(dirname(destination), { recursive: true });
-    await symlink(join(source, "node_modules", dependency), destination, "dir");
+    await symlink(join(dependencySource, "node_modules", dependency), destination, "dir");
   }
   const child = spawn(process.execPath, [join(root, "src", "server.mjs")], { cwd: root,
     env: { PATH: process.env.PATH, PORT: "0", NODE_OPTIONS: "--max-old-space-size=128" },
