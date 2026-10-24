@@ -10,3 +10,6 @@ dist/
 # Keep development Markdown local; publish only the root README.
 *.[mM][dD]
 !/README.md
+# docs/ has its own local-only repository (no remote); never track its control files here.
+docs/.gitignore
+docs/.git/
