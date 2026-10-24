@@ -1,0 +1,52 @@
+name: TypeScript and compiled package
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typescript-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22.22.2, 24.15.0, 26.3.0]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          architecture: arm64
+          package-manager-cache: false
+      - name: Confirm preview platform
+        run: node -e "if(process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Preview requires macOS ARM64')"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Run all tests from this compiled generation
+        run: node dist/ts-build/package/scripts/run-tests.mjs all
+      - name: Check compiled preview package
+        run: node dist/ts-build/package/scripts/check-preview-release.mjs
+      - name: Pack and verify the same generation
+        run: |
+          node --input-type=module -e 'const {runPackageCommand} = await import("./dist/ts-build/package/scripts/package-artifact.mjs"); for (const command of ["pack", "smoke", "install"]) await runPackageCommand({ root: process.cwd(), command }); if (process.exitCode) throw new Error("Package verification failed");'
+      - name: Retain package evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: typescript-package-node-${{ matrix.node }}
+          path: dist/npm/
+          if-no-files-found: error
+          retention-days: 7
