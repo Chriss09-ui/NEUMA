@@ -1,4 +1,4 @@
-const freeze = (value) => {
+const freeze = <T extends object>(value: T): Readonly<T> => {
   for (const child of Object.values(value)) if (child && typeof child === "object") freeze(child);
   return Object.freeze(value);
 };

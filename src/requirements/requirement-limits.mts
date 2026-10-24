@@ -21,7 +21,7 @@ export const REQUIREMENT_LIMITS = Object.freeze({
   normalizedDraftBytes: REQUIREMENT_DRAFT_MAX_BYTES,
 });
 
-export function assertRequirementDraftSize(draft) {
+export function assertRequirementDraftSize<T>(draft: T): T {
   const text = JSON.stringify(draft);
   const bytes = typeof text === "string" ? Buffer.byteLength(text, "utf8") : 0;
   if (!bytes || bytes > REQUIREMENT_DRAFT_MAX_BYTES) throw Object.assign(new RangeError("整份需求的 JSON UTF-8 总量不能超过 2 MiB；请减少重复依据，原需求未被截断或保存。"), {

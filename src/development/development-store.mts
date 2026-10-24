@@ -1,39 +1,46 @@
+import type { DevelopmentInput, DevelopmentRecord } from "../contracts/storage.mjs";
+import type { AgentStoragePort } from "../runtime/storage-port.mjs";
+import { isPlainRecord, isInteger, errorField, objectFields } from "../runtime/type-boundary.mjs";
 import { readdir } from "node:fs/promises";
 import { InputError } from "../requirements/core.mjs";
 import { hashValue } from "./development-contract.mjs";
 import { AgentStorage } from "../agents/agent-storage.mjs";
 
-function safeId(value) {
+function safeId(value: unknown): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value)) throw new InputError("研发记录标识无效");
   return value;
 }
 
-function checkedRecord(value, { stored = false } = {}) {
-  if (!value || typeof value !== "object" || Array.isArray(value)
-    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new InputError("研发记录必须为对象");
+function checkedRecord(value: unknown, options: { stored: true }): DevelopmentRecord;
+function checkedRecord(value: unknown, options?: { stored?: false }): DevelopmentInput;
+function checkedRecord(value: unknown, { stored = false } = {}): DevelopmentInput | DevelopmentRecord {
+  if (!isPlainRecord(value)) throw new InputError("研发记录必须为对象");
   safeId(value.id); safeId(value.agentId);
-  if (value.version !== undefined && (!Number.isSafeInteger(value.version) || value.version < 1)) throw new InputError("研发版本无效");
+  if (value.version !== undefined && (!isInteger(value.version) || value.version < 1)) throw new InputError("研发版本无效");
   if (typeof value.status !== "string" || !value.status.trim()) throw new InputError("研发记录缺少状态");
-  if (stored && (!Number.isSafeInteger(value.revision) || value.revision < 1
+  if (stored && (!isInteger(value.revision) || value.revision < 1
     || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))
     || typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt)))) throw new InputError("研发记录版本或时间无效");
   hashValue(value);
-  return structuredClone(value);
+  return structuredClone(value) as DevelopmentInput | DevelopmentRecord;
 }
 
 export class DevelopmentStore {
-  constructor({ dataDir, storage }) {
+  readonly storage: AgentStoragePort;
+  records = new Map<string, DevelopmentRecord>();
+  persistence: Promise<void>;
+  readonly ready: Promise<void>;
+  constructor({ dataDir, storage }: { dataDir: string; storage?: AgentStoragePort }) {
     if (typeof dataDir !== "string" || !dataDir || dataDir.includes("\0")) throw new InputError("研发存储目录无效");
     this.storage = storage ?? new AgentStorage({ dataDir });
-    this.records = new Map();
     this.persistence = Promise.resolve();
     this.ready = this.load();
     this.ready.catch(() => {});
   }
 
-  async directory(agentId, { create = false } = {}) { return this.storage.directory(agentId, "development/records", { create }); }
+  async directory(agentId: string, { create = false } = {}) { return this.storage.directory(agentId, "development/records", { create }); }
 
-  async write(record) {
+  async write(record: DevelopmentRecord) {
     try {
       await this.storage.writeJson(record.agentId, `development/records/${record.id}.json`, record);
     } catch {
@@ -43,7 +50,7 @@ export class DevelopmentStore {
 
   async load() {
     await this.storage.ready;
-    const records = new Map();
+    const records = new Map<string, DevelopmentRecord>();
     for (const agentId of await this.storage.agentIds()) {
       if (await this.storage.readJson(agentId, "deleted.json")) continue;
       let directory, entries;
@@ -51,7 +58,7 @@ export class DevelopmentStore {
         directory = await this.directory(agentId);
         entries = await readdir(directory, { withFileTypes: true });
       } catch (error) {
-        if (error.code === "ENOENT") continue;
+        if (errorField(error, "code") === "ENOENT") continue;
         throw new InputError("研发记录目录无法读取，请保留原文件并检查后重试");
       }
       for (const entry of entries.filter((item) => item.name.endsWith(".json") && !item.name.startsWith(".pending-"))) {
@@ -77,13 +84,13 @@ export class DevelopmentStore {
     this.records = records;
   }
 
-  queue(operation) {
+  queue<T>(operation: () => T | PromiseLike<T>): Promise<T> {
     const task = this.persistence.then(async () => { await this.ready; return operation(); });
-    this.persistence = task.catch(() => {});
+    this.persistence = task.then(() => {}, () => {});
     return task;
   }
 
-  create(value) {
+  create(value: unknown) {
     const snapshot = checkedRecord(value);
     return this.queue(async () => {
       if (this.records.has(snapshot.id)) throw new InputError("这个研发批次已经存在");
@@ -96,16 +103,16 @@ export class DevelopmentStore {
     });
   }
 
-  save(value, { expectedRevision = value?.revision } = {}) {
+  save(value: unknown, { expectedRevision = objectFields(value).revision }: { expectedRevision?: unknown } = {}) {
     const snapshot = checkedRecord(value);
-    if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new InputError("研发记录的预期版本无效");
+    if (expectedRevision !== undefined && (!isInteger(expectedRevision) || expectedRevision < 1)) throw new InputError("研发记录的预期版本无效");
     return this.queue(async () => {
       const current = this.records.get(snapshot.id);
       if (!current) throw new InputError("研发批次不存在，不能保存迟到结果");
       if (current.agentId !== snapshot.agentId || current.version !== snapshot.version) throw new InputError("研发批次的 Agent 或版本绑定不能改变");
       if (expectedRevision !== undefined && expectedRevision !== current.revision) {
         const error = new InputError("研发记录已更新，不能覆盖较新的状态");
-        error.code = "DEVELOPMENT_REVISION_CONFLICT";
+        Object.assign(error, { code: "DEVELOPMENT_REVISION_CONFLICT" });
         throw error;
       }
       const saved = { ...snapshot, revision: current.revision + 1, createdAt: current.createdAt, updatedAt: new Date().toISOString() };
@@ -115,20 +122,20 @@ export class DevelopmentStore {
     });
   }
 
-  async get(agentId) { return (await this.list(agentId))[0] ?? null; }
+  async get(agentId: string) { return (await this.list(agentId))[0] ?? null; }
 
-  async getRun(id) {
+  async getRun(id: string) {
     safeId(id); await this.ready; await this.persistence;
     return structuredClone(this.records.get(id) ?? null);
   }
 
-  async list(agentId) {
+  async list(agentId: string) {
     safeId(agentId); await this.ready; await this.persistence;
     return structuredClone([...this.records.values()].filter((record) => record.agentId === agentId)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)));
   }
 
-  remove(agentId) {
+  remove(agentId: string) {
     safeId(agentId);
     return this.queue(async () => {
       const records = [...this.records.values()].filter((record) => record.agentId === agentId);

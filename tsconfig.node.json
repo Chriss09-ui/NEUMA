@@ -1,6 +1,23 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "lib": ["ES2022"], "types": ["node"] },
-  "include": ["src/**/*.mts", "scripts/**/*.mts", "bin/**/*.cts", ".github/scripts/**/*.mts"],
-  "exclude": ["src/contracts/**/*.d.mts"]
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": [
+      "ES2023"
+    ],
+    "types": [
+      "node"
+    ],
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/**/*.mts",
+    "scripts/**/*.mts",
+    "bin/**/*.cts",
+    ".github/scripts/**/*.mts"
+  ],
+  "exclude": [
+    "src/contracts/**/*.d.mts"
+  ]
 }

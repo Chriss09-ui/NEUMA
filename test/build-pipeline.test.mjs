@@ -76,3 +76,11 @@ test("缺少worker使新构建失败且不能继续使用旧代次，历史归�
   await assert.rejects(assertFreshBuild(output), /ENOENT/);
   assert.equal(await readFile(join(root, "dist/retained.tgz"), "utf8"), "keep");
 });
+
+
+test("自有共享声明仍严格检查，不受SDK声明过渡例外影响", async (t) => {
+  const root = await fixture(t);
+  await mkdir(join(root, "src/contracts"), { recursive: true });
+  await writeFile(join(root, "src/contracts/invalid.d.mts"), "export type Invalid = MissingOwnType;\n");
+  await assert.rejects(checkTypes(root), /TS2304.*MissingOwnType/s);
+});

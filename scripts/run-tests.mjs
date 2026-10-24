@@ -8,7 +8,7 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 // Classify whole files. Files mixing doubles and real SDK/process execution belong in integration.
 export const TEST_LAYERS = Object.freeze({
   unit: Object.freeze([
-    "source-launcher.test.mjs",
+    "source-launcher.test.mjs", "typescript-boundaries.test.mjs",
     "model-context.test.mjs", "architecture-model-context.test.mjs",
     "application-ui.test.mjs", "application-context-ui.test.mjs", "application-assistant-ui.test.mjs", "application-context.test.mjs", "web-capabilities.test.mjs", "agent-connections.test.mjs",
     "agent-api.test.mjs", "agent-attachments.test.mjs", "agent-avatar.test.mjs", "agent-conversations.test.mjs",
@@ -79,7 +79,7 @@ async function main() {
     await assertFreshBuild(ROOT);
   }
   const entries = await readdir(new URL("../test/", import.meta.url), { withFileTypes: true });
-  const available = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+  const available = entries.filter((entry) => entry.isFile()).map((entry) => entry.name.replace(/\.test\.mts$/, ".test.mjs"));
   const { files, unclassified, missing } = layer === "all"
     ? { files: available.filter((name) => name.endsWith(".test.mjs")).sort(), unclassified: [], missing: [] }
     : selectTestFiles(layer, available);

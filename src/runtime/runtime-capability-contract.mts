@@ -1,8 +1,11 @@
+import type { UnknownRecord } from "../contracts/json.mjs";
+import { objectFields, isArray, isInteger } from "./type-boundary.mjs";
 import { createHash } from "node:crypto";
 import { MAX_RUNTIME_FILE_BYTES } from "./file-limits.mjs";
 import { VALUE_SCHEMA_RULES, JSON_VALUE_SCHEMA_DESCRIPTION } from "../applications/value-schema-rules.mjs";
 import { SERVICE_HOSTS, SERVICE_LANGUAGES } from "../services/service-runtime-options.mjs";
 import { InputError } from "../requirements/core.mjs";
+export interface HostDeliveryCapability { id: string; version: number; status: "available"; scope: string }
 
 export const WORKSPACE_TEXT_WRITE_CODE_UNITS = 120_000;
 export const WORKSPACE_TEXT_READ_CODE_UNITS = 24_000;
@@ -14,7 +17,7 @@ export const APPLICATION_ACTION_VALUE_BYTES = 1024 * 1024;
 export const APPLICATION_TASK_INPUT_BYTES = 128 * 1024;
 export const GATEWAY_REQUEST_BYTES = 256 * 1024;
 
-const freeze = (value) => {
+const freeze = <T extends object>(value: T): Readonly<T> => {
   for (const child of Object.values(value)) if (child && typeof child === "object") freeze(child);
   return Object.freeze(value);
 };
@@ -25,20 +28,20 @@ const hostDeliveryCapabilities = [
   { id: "gateway_mcp", version: 1, status: "available", scope: "工作台已实现回环Streamable HTTP MCP网关；这是平台机制而非工作工具。仅公开选定动作和授权任务，需实际协议检查；不证明当前已开启、已授权或业务结果已经通过。" },
 ];
 
-export function hostDeliveryCapabilityCatalog(runtimeCapabilities) {
-  const entries = runtimeCapabilities?.hostDeliveryCapabilities;
+export function hostDeliveryCapabilityCatalog(runtimeCapabilities: unknown): HostDeliveryCapability[] {
+  const entries = objectFields(runtimeCapabilities).hostDeliveryCapabilities;
   if (entries === undefined) return [];
-  if (!Array.isArray(entries) || entries.length > 40 || new Set(entries.map((item) => item?.id)).size !== entries.length
-    || entries.some((item) => !item || typeof item !== "object" || Array.isArray(item)
+  if (!isArray(entries) || entries.length > 40 || new Set(entries.map((item) => objectFields(item).id)).size !== entries.length
+    || entries.some((raw) => { const item = objectFields(raw); return !raw || typeof item !== "object" || isArray(item)
       || Object.keys(item).length !== 4 || !["id", "version", "status", "scope"].every((key) => Object.hasOwn(item, key))
       || typeof item.id !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(item.id)
-      || !Number.isSafeInteger(item.version) || item.version < 1 || item.status !== "available"
-      || typeof item.scope !== "string" || !item.scope.trim() || item.scope.length > 4000 || item.scope.includes("\0")))
+      || !isInteger(item.version) || item.version < 1 || item.status !== "available"
+      || typeof item.scope !== "string" || !item.scope.trim() || item.scope.length > 4000 || item.scope.includes("\0"); }))
     throw new InputError("冻结的平台交付能力目录无效");
-  return structuredClone(entries);
+  return structuredClone(entries) as HostDeliveryCapability[];
 }
 
-export const isHostDeliveryCapability = (id, runtimeCapabilities) => hostDeliveryCapabilityCatalog(runtimeCapabilities).some((item) => item.id === id);
+export const isHostDeliveryCapability = (id: unknown, runtimeCapabilities: unknown) => hostDeliveryCapabilityCatalog(runtimeCapabilities).some((item) => item.id === id);
 const methods = {
   "files.write": {
     method: "ctx.files.write", input: { file: "safe workspace-relative path", content: "complete UTF-8 text; replaces existing file" },

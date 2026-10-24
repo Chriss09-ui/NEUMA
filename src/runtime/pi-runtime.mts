@@ -1,3 +1,10 @@
+import type { AgentSession, AgentSessionEvent, ResourceLoader, LoadExtensionsResult, ExtensionFactory, EventBus, ExtensionRuntime, Extension, ProviderConfig, CreateModelRuntimeOptions, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { UnknownRecord } from "../contracts/json.mjs";
+import type { ToolSchema } from "../contracts/tools.mjs";
+import type { ModelConfig } from "../contracts/model.mjs";
+import type { PiSessionOptions, PiSessionPort, NeumaPiSession, SessionFactory, NeumaTool, Progress, ProjectTurn, ProjectSummary, ProjectManagerPort, ModelRequestRejection } from "./pi-port.mjs";
+import type { FetchPort } from "./model-idle-timeout.mjs";
+import { objectFields, errorField, isInteger } from "./type-boundary.mjs";
 import { join, relative } from "node:path";
 import { createRequire, findPackageJSON } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -9,6 +16,12 @@ import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
 import { resolvedModelProfile, modelProfileHash, modelOutputBudget } from "./model-limits.mjs";
 import { piSessionManager, piSessionPolicy } from "./pi-session-state.mjs";
 import { modelIdleTimeoutMs, withModelIdleTimeout } from "./model-idle-timeout.mjs";
+type Failure = ReturnType<typeof classifyModelFailure>;
+interface RetryState { attempt: number; failed: boolean; failure?: Failure | null }
+interface ProjectSession { busy: boolean; usedAt: number; turn: ProjectTurn; session: PiSessionPort | null; cancelled?: boolean }
+type StreamSimple = NonNullable<ProviderConfig["streamSimple"]>;
+type Credentials = NonNullable<CreateModelRuntimeOptions["credentials"]>;
+type Credential = NonNullable<Awaited<ReturnType<Credentials["read"]>>>;
 
 export const SYSTEM_PROMPT = `你是 NEUMA。NEUMA（纽玛）是用户正在使用的本地工作台。对用户只用这个名字，不要把它解释成乐谱、缩写或其他产品。当前处于“我的项目”工作区，用来管理用户电脑上已有的本地小项目；用自然语言创建智能体是工作台的另一项功能，不在这里完成。
 用户提供路径并要求添加时，调用 add_project；需要选择或查询时先调用 list_projects；用户要求打开、启动或停止时调用对应工具。
@@ -30,14 +43,14 @@ export const SYSTEM_PROMPT = `你是 NEUMA。NEUMA（纽玛）是用户正在使
 界面以纯文本展示回复，请用简洁中文自然段，不使用 Markdown 标记、内部状态值或工具名称。启动后系统会在页面就绪时自动打开浏览器，不要求用户寻找地址或再点击页面链接。只有 pageOpened=true 才能说页面已经打开；仍在准备时说明稍后会自动打开，openError 则说明窗口打开失败。
 任务结果以工具结果为准；没有成功调用添加工具就不能声称已经添加。`;
 
-const schema = (properties, required = []) => ({ type: "object", properties, required, additionalProperties: false });
-const string = (description) => ({ type: "string", description, minLength: 1, maxLength: 2000 });
-const projectSummary = (project) => ({ id: project.id, name: project.name, description: project.description,
+const schema = (properties: Record<string, ToolSchema>, required: string[] = []): ToolSchema => ({ type: "object", properties, required, additionalProperties: false });
+const string = (description: string) => ({ type: "string", description, minLength: 1, maxLength: 2000 });
+const projectSummary = (project: ProjectSummary) => ({ id: project.id, name: project.name, description: project.description,
   path: project.path, kind: project.kind, status: project.status, canLaunch: project.canLaunch,
   canStop: project.canStop, previewReady: Boolean(project.url), pageOpened: project.pageOpened,
   openingPage: project.openingPage, openError: project.openError, setup: project.setup, error: project.error });
 
-function retryProgress(event, state, onProgress) {
+function retryProgress(event: AgentSessionEvent, state: RetryState, onProgress: Progress) {
   if (event.type === "auto_retry_start") {
     state.attempt = event.attempt;
     state.failure = classifyModelFailure(event.errorMessage);
@@ -52,7 +65,7 @@ function retryProgress(event, state, onProgress) {
   }
 }
 
-export function classifyModelFailure(value = "") {
+export function classifyModelFailure(value: unknown = "") {
   const text = String(value);
   if (/\bNEUMA_MODEL_CALL_BLOCKED\b/u.test(text))
     return { reason: "request_blocked", message: "本地运行控制已停止后续模型请求，该请求没有发出；请检查任务停止原因" };
@@ -82,39 +95,40 @@ export function classifyModelFailure(value = "") {
   return { reason: "api_error", message: "模型接口请求未完成，请重试，并确认模型支持工具调用" };
 }
 
-function modelRequestRejection(error, { purpose, retryAttempt }) {
-  const field = (value, key) => {
-    try { return Object.getOwnPropertyDescriptor(value, key)?.value; } catch { return undefined; }
+function modelRequestRejection(error: unknown, { purpose, retryAttempt }: { purpose: string; retryAttempt: number }): ModelRequestRejection {
+  const field = (value: unknown, key: string): unknown => {
+    try { return Object.getOwnPropertyDescriptor(objectFields(value), key)?.value; } catch { return undefined; }
   };
   const admission = field(error, "requestAdmission"), diagnostic = field(error, "diagnostic");
   const reason = field(admission, "reason") ?? field(diagnostic, "reason") ?? field(error, "reason");
-  const reasons = new Set(["request_limit", "output_reservation_limit", "repeated_tool_error", "phase_complete",
+  const reasons = new Set<unknown>(["request_limit", "output_reservation_limit", "repeated_tool_error", "phase_complete",
     "turn_limit", "model_call_limit", "module_output_limit", "module_failed", "cancelled", "review_repair_stalled"]);
-  const result = { reason: "request_blocked", requestSent: false,
+  const result: ModelRequestRejection = { reason: "request_blocked", requestSent: false,
     source: field(admission, "source") === "real_test_guard" ? "real_test_guard" : "model_call_policy",
     causeReason: reasons.has(reason) ? reason : "policy_blocked",
     purpose: purpose === "compaction" ? "compaction" : "agent",
-    retryAttempt: Number.isSafeInteger(retryAttempt) && retryAttempt >= 0 && retryAttempt <= 5 ? retryAttempt : 0 };
-  for (const key of ["used", "limit"]) {
+    retryAttempt: isInteger(retryAttempt) && retryAttempt >= 0 && retryAttempt <= 5 ? retryAttempt : 0 };
+  for (const key of ["used", "limit"] as const) {
     const value = field(admission, key);
-    if (Number.isSafeInteger(value) && value >= 0) result[key] = value;
+    if (isInteger(value) && value >= 0) result[key] = value;
   }
   return result;
 }
 
-function connectionFailure(retry) {
+function connectionFailure(retry: RetryState) {
   return `${(retry.failure || classifyModelFailure()).message}。${retry.attempt ? `已重连 ${retry.attempt} 次仍未恢复。` : ""}已完成的项目操作会保留。`;
 }
 
-export function createProjectTools(manager, turn) {
-  const tool = (name, label, description, parameters, action) => ({
+export function createProjectTools(manager: ProjectManagerPort, turn: ProjectTurn): NeumaTool[] {
+  const tool = (name: string, label: string, description: string, parameters: ToolSchema, action: (params: UnknownRecord, signal?: AbortSignal) => unknown | Promise<unknown>): NeumaTool => ({
     name, label, description, parameters, executionMode: "sequential",
-    execute: async (_id, params, signal) => {
+    execute: async (_id, raw, signal) => {
       if (signal?.aborted) throw new InputError("任务已取消");
       if (turn.failedOperation) throw new InputError("上一次操作未完成，请等待用户再次发起");
-      const result = await action(params, signal);
-      if (result?.setup?.reason === "api_error" || result?.added === false) turn.failedOperation = result;
-      if (result?.added !== false && result?.removed !== false && !["list_projects", "get_runtime_status", "list_ports", "list_project_failures"].includes(name)) turn.actions.push({ tool: name, project: result });
+      const result = await action(objectFields(raw), signal);
+      const resultFields = objectFields(result);
+      if (objectFields(resultFields.setup).reason === "api_error" || resultFields.added === false) turn.failedOperation = resultFields;
+      if (resultFields.added !== false && resultFields.removed !== false && !["list_projects", "get_runtime_status", "list_ports", "list_project_failures"].includes(name)) turn.actions.push({ tool: name, project: result });
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} };
     },
   });
@@ -127,7 +141,7 @@ export function createProjectTools(manager, turn) {
     tool("get_runtime_status", "查看运行状态", "查询本机当前运行情况，识别已登记项目中由 NEUMA 启动、外部运行、未发现运行和无法确认的项目。只读，不启动或停止。",
       schema({ state: { type: "string", enum: ["all", "running", "stopped", "unknown"], description: "可选状态筛选，默认 all；stopped 表示未发现运行" } }),
       async ({ state = "all" }, signal) => {
-        if (!["all", "running", "stopped", "unknown"].includes(state)) throw new InputError("请选择有效的项目状态");
+        if (!["all", "running", "stopped", "unknown"].includes(state as string)) throw new InputError("请选择有效的项目状态");
         const snapshot = await manager.runtime({ signal });
         return { checkedAt: snapshot.checkedAt, summary: snapshot.summary, warnings: snapshot.warnings,
           projects: snapshot.projects.filter((project) => state === "all" || project.runtime.state === state)
@@ -137,7 +151,7 @@ export function createProjectTools(manager, turn) {
       schema({ port: { type: "integer", minimum: 1, maximum: 65535, description: "可选，指定端口号" },
         query: string("可选，搜索进程名称或已登记项目名称") }),
       async ({ port, query = "" }, signal) => {
-        if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new InputError("端口号应为 1 到 65535 的整数");
+        if (port !== undefined && (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535)) throw new InputError("端口号应为 1 到 65535 的整数");
         if (typeof query !== "string" || query.length > 2000) throw new InputError("请输入有效的进程或项目名称");
         const snapshot = await manager.runtime({ signal });
         const needle = query.trim().toLowerCase();
@@ -148,15 +162,15 @@ export function createProjectTools(manager, turn) {
     tool("add_project", "添加并配置项目", "检查本轮用户提供的路径并自动配置；新项目只有配置成功后才登记，失败不加入列表，不启动。",
       schema({ path: string("用户原话中的完整路径"), name: string("可选名称"), description: string("可选用途") }, ["path"]),
       async (params, signal) => {
-        if (!turn.message.includes(params.path)) throw new InputError("添加路径必须由用户在本轮明确提供");
+        if (!turn.message.includes(params.path as string)) throw new InputError("添加路径必须由用户在本轮明确提供");
         try {
           const project = await manager.add(params, { signal, instructions: turn.message, onProgress: (event) => turn.onProgress?.(event) });
           return projectSummary(project);
         } catch (error) {
-          if (error.code !== "PROJECT_ADD_FAILED") throw error;
-          return { added: false, setup: { status: "failed", reason: error.reason,
+          if (errorField(error, "code") !== "PROJECT_ADD_FAILED") throw error;
+          return { added: false, setup: { status: "failed", reason: errorField(error, "reason"),
             summary: error instanceof InputError ? safeDiagnosticText(error.message) : "添加失败：项目检查暂时无法完成，请稍后再试。项目未加入列表。" },
-            diagnostic: error instanceof InputError ? error.diagnostic : undefined };
+            diagnostic: error instanceof InputError ? errorField(error, "diagnostic") : undefined };
         }
       }),
     tool("inspect_project", "自动配置项目", "重新检查已有项目的文件并自动保存启动配置；用于旧项目或启动问题，不执行项目代码。",
@@ -178,7 +192,7 @@ export function createProjectTools(manager, turn) {
           const result = await manager.remove(id, { removeOnly });
           return { ...result, id, name: project.name, filesKept: true };
         } catch (error) {
-          if (!(error instanceof InputError) || error.code !== "PROJECT_REMOVE_STOP_FAILED") throw error;
+          if (!(error instanceof InputError) || errorField(error, "code") !== "PROJECT_REMOVE_STOP_FAILED") throw error;
           (turn.removalNeedsConfirmation ??= new Set()).add(id);
           return { removed: false, reason: "stop_failed", id, name: project.name, message: safeDiagnosticText(error.message),
             nextStep: "询问用户是否仅移除记录，仍在运行的服务不会停止。等待下一轮明确确认。" };
@@ -187,9 +201,9 @@ export function createProjectTools(manager, turn) {
   ];
 }
 
-export function modelBaseUrl(chatUrl) {
+export function modelBaseUrl(chatUrl: unknown) {
   try {
-    const url = new URL(chatUrl);
+    const url = new URL(chatUrl as string);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
       || !url.pathname.endsWith("/chat/completions")) throw new Error();
     url.pathname = url.pathname.slice(0, -"/chat/completions".length);
@@ -197,7 +211,7 @@ export function modelBaseUrl(chatUrl) {
   } catch { throw new InputError("Pi 接入需要以 /chat/completions 结尾的模型接口地址"); }
 }
 
-function controlledResources(extensions, systemPrompt) {
+function controlledResources(extensions: LoadExtensionsResult, systemPrompt: string): ResourceLoader {
   return {
     getExtensions: () => extensions,
     getSkills: () => ({ skills: [], diagnostics: [] }),
@@ -212,8 +226,8 @@ function controlledResources(extensions, systemPrompt) {
   };
 }
 
-export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager, turn), systemPrompt = SYSTEM_PROMPT,
-  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, reasoningMode = "off" }) {
+export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager!, turn!), systemPrompt = SYSTEM_PROMPT,
+  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, reasoningMode = "off" }: PiSessionOptions): Promise<NeumaPiSession> {
   if (!["off", "auto"].includes(reasoningMode)) throw new InputError("模型思考配置无效");
   if (transformContext !== undefined && typeof transformContext !== "function") throw new InputError("模型上下文投影配置无效");
   if (preparePrompt !== undefined && typeof preparePrompt !== "function") throw new InputError("模型首包投影配置无效");
@@ -222,22 +236,26 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
     throw new InputError("当前模型上下文不足以容纳 Pi 的安全余量，请使用至少 8192 上下文的模型");
   const reasoningEnabled = reasoningMode === "auto" && profile.reasoning;
   const outputLimit = profile.maxOutputTokens;
-  if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens > outputLimit)
+  if (!isInteger(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens > outputLimit)
     throw new InputError(`模型输出预算应为 256 到 ${outputLimit} 之间的整数`);
   const idleTimeoutMs = modelIdleTimeoutMs(config);
   const sdk = await import("@earendil-works/pi-coding-agent");
   // Resolve the adapter and transport shipped with this pinned SDK, rather than another version.
   const sdkUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-  const { DEFAULT_THINKING_LEVEL } = await import(new URL("./core/defaults.js", sdkUrl).href);
+  const { DEFAULT_THINKING_LEVEL }: { DEFAULT_THINKING_LEVEL: Parameters<AgentSession["setThinkingLevel"]>[0] } = await import(new URL("./core/defaults.js", sdkUrl).href);
   const fromPi = createRequire(sdkUrl);
   const aiManifestPath = findPackageJSON("@earendil-works/pi-ai", sdkUrl);
-  const aiManifest = JSON.parse(await readFile(aiManifestPath, "utf8"));
+  if (!aiManifestPath) throw new Error("锁定的 Pi 模型适配包缺失");
+  const aiManifest: { exports: { "./api/*": { import: string } } } = JSON.parse(await readFile(aiManifestPath, "utf8"));
   const adapterPath = aiManifest.exports["./api/*"].import.replace("*", "openai-completions");
-  const { streamSimple } = await import(new URL(adapterPath, pathToFileURL(aiManifestPath)).href);
+  const { streamSimple }: { streamSimple: StreamSimple } = await import(new URL(adapterPath, pathToFileURL(aiManifestPath)).href);
   const lazyPath = aiManifest.exports["./api/*"].import.replace("*", "lazy");
-  const { lazyStream } = await import(new URL(lazyPath, pathToFileURL(aiManifestPath)).href);
-  const { loadExtensionFromFactory } = await import(new URL("./core/extensions/loader.js", sdkUrl).href);
-  const { fetch: transportFetch, EnvHttpProxyAgent } = fromPi("undici");
+  const { lazyStream }: { lazyStream: (model: Parameters<StreamSimple>[0], start: () => Promise<ReturnType<StreamSimple>>) => ReturnType<StreamSimple> } = await import(new URL(lazyPath, pathToFileURL(aiManifestPath)).href);
+  const { loadExtensionFromFactory }: { loadExtensionFromFactory: (factory: ExtensionFactory, cwd: string, events: EventBus, runtime: ExtensionRuntime, path: string) => Promise<Extension> } = await import(new URL("./core/extensions/loader.js", sdkUrl).href);
+  const { fetch: transportFetch, EnvHttpProxyAgent }: {
+    fetch: (input: Parameters<FetchPort>[0], options: RequestInit & { dispatcher: { destroy(): Promise<void> } }) => ReturnType<FetchPort>;
+    EnvHttpProxyAgent: new (options: { headersTimeout: number; bodyTimeout: number; allowH2: boolean; proxyTunnel: boolean }) => NonNullable<RequestInit["dispatcher"]> & { destroy(): Promise<void> };
+  } = fromPi("undici");
   const baseUrl = modelBaseUrl(config.chatUrl);
   const contextWindow = profile.contextWindow;
   const reserveTokens = Math.min(known ? Math.max(16_384, maxOutputTokens + 4096) : Math.min(16_384, maxOutputTokens + 4096),
@@ -245,7 +263,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   // The SDK's 20k recent-history default exceeds the 16k threshold of an unknown 32k model.
   const keepRecentTokens = Math.max(0, Math.min(20_000,
     Math.floor((contextWindow - reserveTokens) / 2), contextWindow - reserveTokens - maxOutputTokens - 2048));
-  const credentials = new Map();
+  const credentials = new Map<string, Credential>();
   const modelRuntime = await sdk.ModelRuntime.create({
     modelsPath: null, allowModelNetwork: false, refreshOnCreate: false,
     credentials: {
@@ -257,11 +275,11 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   });
   const transport = new EnvHttpProxyAgent({ headersTimeout: 0, bodyTimeout: 0, allowH2: false, proxyTunnel: true });
   const anonymousModel = config.modelAuthType === "none";
-  let connectionFailed = false, session, runtimeError, lastRequestRejection, purpose = "agent", retryAttempt = 0;
+  let connectionFailed = false, session: AgentSession | undefined, runtimeError: unknown, lastRequestRejection: ModelRequestRejection | undefined, purpose = "agent", retryAttempt = 0;
   const secureHistory = () => {
     if (sessionStorage && session?.sessionFile && existsSync(session.sessionFile)) chmodSync(session.sessionFile, 0o600);
   };
-  const halt = (error) => {
+  const halt = (error: unknown) => {
     runtimeError ??= error;
     session?.settingsManager.setRetryEnabled(false);
     session?.setAutoCompactionEnabled(false);
@@ -273,15 +291,17 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
       stage: "llm", reason: "api_idle_timeout", ...diagnostic,
     })),
   });
-  const policy = piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, halt });
-  const fetchModel = async (input, options) => {
+  const policy = piSessionPolicy({ customTools, halt,
+    ...(onToolDiagnostic !== undefined ? { onToolDiagnostic } : {}), ...(toolErrorResult !== undefined ? { toolErrorResult } : {}),
+    ...(rawInputValidators !== undefined ? { rawInputValidators } : {}), ...(transformContext !== undefined ? { transformContext } : {}) });
+  const fetchModel: FetchPort = async (input, options) => {
     options?.signal?.throwIfAborted();
     if (connectionFailed) throw new Error("Model connection retries exhausted");
     // Runs on every HTTP attempt, including SDK retries and tool continuations.
     await beforeModelRequest?.({ signal: options?.signal });
     options?.signal?.throwIfAborted();
     secureHistory();
-    const headers = anonymousModel ? new Headers(options?.headers ?? input?.headers) : undefined;
+    const headers = anonymousModel ? new Headers(options?.headers ?? (objectFields(input).headers as RequestInit["headers"])) : undefined;
     headers?.delete("authorization");
     return fetchWithIdleTimeout(input, { ...options, ...(headers ? { headers } : {}) });
   };
@@ -291,7 +311,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
     const profileHash = modelProfileHash(profile), customType = "neuma.model-profile.v1";
     const previous = persisted.manager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === customType);
     // Capability changes are auditable without changing task identity or replenishing its budget.
-    if (previous?.data?.bindingHash !== persisted.bindingHash || previous.data.profileHash !== profileHash)
+    if (objectFields(previous?.type === "custom" ? previous.data : undefined).bindingHash !== persisted.bindingHash || objectFields(previous?.type === "custom" ? previous.data : undefined).profileHash !== profileHash)
       persisted.manager.appendCustomEntry(customType, { version: 1, bindingHash: persisted.bindingHash, profileHash,
         source: profile.source.kind, contextWindow: profile.contextWindow, maxOutputTokens: profile.maxOutputTokens,
         reasoning: profile.reasoning, input: [...profile.input] });
@@ -315,7 +335,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
       policy.startRequest();
       return streamSimple(model, context, { ...options, maxTokens: maxOutputTokens, fetch: fetchModel, maxRetries: 0 });
     }),
-    models: [{ id: config.model, name: config.model, reasoning: profile.reasoning, input: [...profile.input],
+    models: [{ id: config.model!, name: config.model!, reasoning: profile.reasoning, input: [...profile.input],
       // Pi requires cost metadata. These placeholders do not represent the provider's actual prices.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow, maxTokens: maxOutputTokens,
       compat: profile.compat,
@@ -323,11 +343,14 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
       ...(profile.inputLimits ? { inputLimits: profile.inputLimits } : {}) }],
   });
   // Pi requires a nonempty key even for an anonymous endpoint; the transport strips the synthetic header.
-  await modelRuntime.setRuntimeApiKey("neuma", anonymousModel ? "neuma-anonymous-placeholder" : config.apiKey);
+  await modelRuntime.setRuntimeApiKey("neuma", anonymousModel ? "neuma-anonymous-placeholder" : config.apiKey!);
   ({ session } = await sdk.createAgentSession({
-    cwd, agentDir: join(dataDir, "pi"), modelRuntime, model: modelRuntime.getModel("neuma", config.model),
+    cwd, agentDir: join(dataDir, "pi"), modelRuntime, model: modelRuntime.getModel("neuma", config.model!)!,
     resourceLoader: controlledResources({ extensions: [extension], errors: [], runtime: extensionRuntime }, systemPrompt),
-    tools: customTools.map((item) => item.name), customTools,
+    tools: customTools.map((item) => item.name),
+    // Pi accepts these registered JSON schemas at runtime; its TSchema declaration also asks
+    // for TypeBox's compile-time symbol. Keep that representation shim at this SDK boundary.
+    customTools: customTools as ToolDefinition[],
     sessionManager: persisted.manager,
     settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens, keepRecentTokens }, httpIdleTimeoutMs: 0,
       retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000, maxAgentDelayMs: 8000, provider: { maxRetries: 0 } },
@@ -336,44 +359,48 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   // Apply the pinned SDK policy even when a restored NEUMA session saved an older level.
   session.setThinkingLevel(reasoningEnabled ? DEFAULT_THINKING_LEVEL : "off");
   secureHistory();
-  session.modelCallAccounting = typeof onModelCall === "function";
+  const activeSession = Object.assign(session, { modelCallAccounting: typeof onModelCall === "function",
+    modelProfile: profile, modelProfileHash: modelProfileHash(profile) }) as NeumaPiSession;
   Object.defineProperty(session, "modelRequestRejection", { get: () => lastRequestRejection && structuredClone(lastRequestRejection) });
-  session.modelProfile = profile;
-  session.modelProfileHash = modelProfileHash(profile);
-  if (persisted.bindingHash) session.sessionBindingHash = persisted.bindingHash;
-  for (const operation of ["prompt", "compact"]) {
-    const invoke = session[operation].bind(session);
-    session[operation] = async (...args) => {
-      if (runtimeError) throw runtimeError;
-      if (operation === "prompt" && args[1]?.images?.length && !profile.input.includes("image"))
-        throw new InputError("当前模型未声明支持图片，请选择支持图片的模型或配置其已确认能力");
-      if (operation === "prompt" && preparePrompt) {
-        const prepared = await preparePrompt(args[0]);
-        if (typeof prepared !== "string") throw new InputError("模型首包投影必须返回文本");
-        args[0] = prepared;
-      }
-      try { return await invoke(...args); }
-      finally { secureHistory(); if (runtimeError) throw runtimeError; }
-    };
-  }
-  session.subscribe((event) => {
+  if (persisted.bindingHash) activeSession.sessionBindingHash = persisted.bindingHash;
+  const protect = async <T,>(operation: () => Promise<T>): Promise<T> => {
+    try { return await operation(); }
+    finally { secureHistory(); if (runtimeError) throw runtimeError; }
+  };
+  const prompt = session.prompt.bind(session), compact = session.compact.bind(session);
+  session.prompt = async (...args: Parameters<AgentSession["prompt"]>) => {
+    if (runtimeError) throw runtimeError;
+    if (args[1]?.images?.length && !profile.input.includes("image"))
+      throw new InputError("当前模型未声明支持图片，请选择支持图片的模型或配置其已确认能力");
+    if (preparePrompt) {
+      const prepared = await preparePrompt(args[0]);
+      if (typeof prepared !== "string") throw new InputError("模型首包投影必须返回文本");
+      args[0] = prepared;
+    }
+    return protect(() => prompt(...args));
+  };
+  session.compact = async (...args: Parameters<AgentSession["compact"]>) => {
+    if (runtimeError) throw runtimeError;
+    return protect(() => compact(...args));
+  };
+  activeSession.subscribe((event) => {
     if (event.type === "compaction_start") purpose = "compaction";
     if (event.type === "compaction_end") { purpose = "agent"; retryAttempt = 0; }
     if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") retryAttempt = event.attempt;
     if (event.type === "summarization_retry_finished") retryAttempt = 0;
     if (event.type === "auto_retry_end" && event.success) retryAttempt = 0;
-    if (event.type === "entry_appended" && persisted.directory && session.sessionFile && existsSync(session.sessionFile)) {
-      try { chmodSync(session.sessionFile, 0o600); } catch (error) { halt(error); }
+    if (event.type === "entry_appended" && persisted.directory && activeSession.sessionFile && existsSync(activeSession.sessionFile)) {
+      try { chmodSync(activeSession.sessionFile, 0o600); } catch (error) { halt(error); }
     }
     if (event.type === "auto_retry_end" && !event.success) {
       connectionFailed = true;
       // Do not let automatic compaction issue a fresh request after the retry budget is exhausted.
-      session.setAutoCompactionEnabled(false);
+      activeSession.setAutoCompactionEnabled(false);
     }
   });
-  const dispose = session.dispose.bind(session);
-  session.dispose = () => { dispose(); void transport.destroy().catch(() => {}); };
-  return session;
+  const dispose = activeSession.dispose.bind(session);
+  activeSession.dispose = () => { dispose(); void transport.destroy().catch(() => {}); };
+  return activeSession;
   } catch (error) {
     await transport.destroy().catch(() => {});
     throw error;
@@ -394,20 +421,20 @@ Mac/Linux 支持项目内已有的 .sh/.bash/.zsh/.command 启动脚本。先读
 如果缺少入口、存在多个无法区分的应用、必须先构建且没有可直接运行的脚本，或启动方式不受支持，status=needs_input，并在 summary 提出一个具体问题或说明缺口，不返回猜测的配置。
 必须调用 submit_launch_plan，不能只在文字回复里描述配置。`;
 
-export function createProjectAnalyzer({ config, dataDir, sessionFactory = createPiSession }) {
-  const analyze = async (project, { signal, instructions = "", onProgress = () => {} } = {}) => {
+export function createProjectAnalyzer({ config, dataDir, sessionFactory = createPiSession }: { config: ModelConfig; dataDir: string; sessionFactory?: SessionFactory }) {
+  const analyze = async (project: { root: string; kind: string; path: unknown; name: unknown; description: unknown; setup?: { summary?: unknown } }, { signal, instructions = "", onProgress = () => {} }: { signal?: AbortSignal; instructions?: string; onProgress?: Progress } = {}) => {
     if (!config.llmConfigured) throw new InputError("请先在设置中连接模型，再点击“自动识别启动方式”。");
     const combined = signal ?? new AbortController().signal;
-    const context = { reader: createProjectReader(project.root), session: null, plan: null, signal: combined, onProgress, lastToolError: null };
-    const retry = { attempt: 0, failed: false };
+    const context: { reader: ReturnType<typeof createProjectReader>; session: PiSessionPort | null; plan: Awaited<ReturnType<typeof validateProjectPlan>> | null; signal: AbortSignal; onProgress: Progress; lastToolError: string | null } = { reader: createProjectReader(project.root), session: null, plan: null, signal: combined, onProgress, lastToolError: null };
+    const retry: RetryState = { attempt: 0, failed: false };
     let unsubscribe = () => {};
     const abort = () => { void context.session?.abort(); };
-    const tool = (name, label, parameters, action) => ({ name, label, description: label, parameters, executionMode: "sequential",
-      execute: async (_id, params) => {
+    const tool = (name: string, label: string, parameters: ToolSchema, action: (params: UnknownRecord) => unknown | Promise<unknown>): NeumaTool => ({ name, label, description: label, parameters, executionMode: "sequential",
+      execute: async (_id, raw) => {
         context.signal.throwIfAborted();
         context.onProgress({ type: "status", phase: "tool", label });
         let result;
-        try { result = await action(params); }
+        try { result = await action(objectFields(raw)); }
         catch (error) {
           if (error instanceof InputError) context.lastToolError = safeDiagnosticText(error.message);
           throw error;
@@ -420,9 +447,9 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
     const offset = { type: "integer", minimum: 0, description: "续读时使用上次返回的 nextOffset，默认 0" };
     const customTools = [
       tool("list_project_files", "正在检查项目目录…", schema({ directory: string("项目内相对目录，默认 ."), offset }),
-        ({ directory, offset }) => context.reader.list(directory, offset)),
+        ({ directory, offset }) => context.reader.list(directory as string | undefined, offset as number | undefined)),
       tool("read_project_file", "正在阅读项目说明与启动入口…", schema({ file: string("项目内相对文件路径"), offset }, ["file"]),
-        ({ file, offset }) => context.reader.read(file, offset, { signal: context.signal })),
+        ({ file, offset }) => context.reader.read(file, offset as number | undefined, { signal: context.signal })),
       tool("submit_launch_plan", "正在保存启动配置…", schema({
         status: { type: "string", enum: ["ready", "needs_input"] }, summary: string("已识别的启动方式；不确定时说明具体缺口"),
         kind: { type: "string", enum: ["web", "node", "python", "script", "desktop"] }, directory: string("工作目录，相对项目根目录"),
@@ -452,12 +479,12 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
       const request = `检查并配置这个项目：${JSON.stringify({ path: project.path, name: project.name, description: project.description, kind: project.kind, previousResult: project.setup?.summary })}`;
       await context.session.prompt(`${request}\n用户本轮补充：${instructions.slice(0, 12_000) || "请自动选择项目主要应用的启动入口。"}`);
       combined.throwIfAborted();
-      if (!context.plan && !retry.failed && !["error", "aborted"].includes(context.session.messages?.findLast((message) => message.role === "assistant")?.stopReason)) {
+      if (!context.plan && !retry.failed && !["error", "aborted"].includes(context.session.messages?.findLast((message) => message.role === "assistant")?.stopReason ?? "")) {
         await context.session.prompt("检查尚未完成：你还没有通过 submit_launch_plan 提交有效配置。请基于刚才实际读取的文件提交方案；如果工具曾拒绝参数，请按错误提示修正。确实无法确定时，也必须调用该工具，以 needs_input 和一个具体缺口结束，不能仅回复文字。");
         combined.throwIfAborted();
       }
       const last = context.session.messages?.findLast((message) => message.role === "assistant");
-      if (retry.failed || ["error", "aborted"].includes(last?.stopReason)) {
+      if (retry.failed || ["error", "aborted"].includes(last?.stopReason ?? "")) {
         retry.failure ??= classifyModelFailure(last?.errorMessage);
         return { setup: { status: "failed", source: "pi", reason: "api_error", summary: connectionFailure(retry),
           diagnostic: { stage: "model", reason: retry.failure.reason, retries: retry.attempt } } };
@@ -467,7 +494,7 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof InputError) throw error;
-      retry.failure ??= classifyModelFailure(error?.message);
+      retry.failure ??= classifyModelFailure(errorField(error, "message"));
       return { setup: { status: "failed", source: "pi", reason: "api_error", summary: connectionFailure(retry),
         diagnostic: { stage: "model", reason: retry.failure.reason, retries: retry.attempt } } };
     } finally {
@@ -480,12 +507,13 @@ export function createProjectAnalyzer({ config, dataDir, sessionFactory = create
 }
 
 export class PiProjectAgent {
-  constructor({ config, manager, cwd, dataDir, sessionFactory = createPiSession }) {
-    Object.assign(this, { config, manager, cwd, dataDir, sessionFactory });
-    this.sessions = new Map();
+  readonly config: ModelConfig; readonly manager: ProjectManagerPort; readonly cwd: string; readonly dataDir: string; readonly sessionFactory: SessionFactory;
+  readonly sessions = new Map<string, ProjectSession>();
+  constructor({ config, manager, cwd, dataDir, sessionFactory = createPiSession }: { config: ModelConfig; manager: ProjectManagerPort; cwd: string; dataDir: string; sessionFactory?: SessionFactory }) {
+    this.config = config; this.manager = manager; this.cwd = cwd; this.dataDir = dataDir; this.sessionFactory = sessionFactory;
   }
 
-  async prompt({ message, sessionId }, onProgress = () => {}, { signal } = {}) {
+  async prompt({ message, sessionId }: { message: unknown; sessionId: unknown }, onProgress: Progress = () => {}, { signal }: { signal?: AbortSignal } = {}) {
     const cancellationError = () => new ProviderError("项目回复已停止，已执行的操作会保留", { stage: "pi", reason: "cancelled" });
     if (signal?.aborted) throw cancellationError();
     if (typeof message !== "string" || !message.trim() || message.length > 12_000) throw new InputError("请输入不超过 12000 字的项目操作要求");
@@ -508,10 +536,10 @@ export class PiProjectAgent {
     item.busy = true; item.cancelled = false;
     Object.assign(item.turn, { message: message.trim(), actions: [], failedOperation: null, removalNeedsConfirmation: new Set(), onProgress });
     let unsubscribe = () => {}, failed = false;
-    const retry = { attempt: 0, failed: false };
-    let abortingSession, abortion;
+    const retry: RetryState = { attempt: 0, failed: false };
+    let abortingSession: PiSessionPort | null | undefined, abortion: Promise<void> | undefined;
     const abortSession = () => {
-      const current = item.session;
+      const current = item!.session;
       if (!current) return Promise.resolve();
       if (current === abortingSession) return abortion;
       abortingSession = current;
@@ -519,8 +547,8 @@ export class PiProjectAgent {
       catch { abortion = Promise.resolve(); }
       return abortion;
     };
-    const cancelled = () => { item.cancelled = true; void abortSession(); };
-    const checkCancellation = () => { if (signal?.aborted || item.cancelled) throw cancellationError(); };
+    const cancelled = () => { item!.cancelled = true; void abortSession(); };
+    const checkCancellation = () => { if (signal?.aborted || item!.cancelled) throw cancellationError(); };
     signal?.addEventListener("abort", cancelled, { once: true });
     try {
       if (signal?.aborted) cancelled();
@@ -531,15 +559,15 @@ export class PiProjectAgent {
         turn: item.turn, cwd: this.cwd, dataDir: this.dataDir });
       checkCancellation();
       unsubscribe = item.session.subscribe((event) => {
-        if (item.cancelled) return;
+        if (item!.cancelled) return;
         retryProgress(event, retry, onProgress);
-        if (event.type === "tool_execution_end" && item.turn.failedOperation) { void item.session.abort(); return; }
+        if (event.type === "tool_execution_end" && item!.turn.failedOperation) { void item!.session!.abort(); return; }
         if (event.type === "message_start" && event.message?.role === "assistant") onProgress({ type: "text-start" });
         if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
           onProgress({ type: "text-delta", delta: event.assistantMessageEvent.delta });
         }
         if (event.type === "tool_execution_start") {
-          const labels = { list_projects: "正在查看项目…", list_project_failures: "正在查看添加失败记录…", get_runtime_status: "正在查看本机项目运行状态…", list_ports: "正在查询端口占用…",
+          const labels: Record<string, string> = { list_projects: "正在查看项目…", list_project_failures: "正在查看添加失败记录…", get_runtime_status: "正在查看本机项目运行状态…", list_ports: "正在查询端口占用…",
             add_project: "正在添加并配置项目…", inspect_project: "正在识别启动方式…", start_project: "正在启动项目…", stop_project: "正在停止项目…", remove_project: "正在删除项目记录，保留本地文件…" };
           onProgress({ type: "status", phase: "tool", label: labels[event.toolName] || "正在处理项目…" });
         }
@@ -552,7 +580,7 @@ export class PiProjectAgent {
         failed = true;
         const projects = await this.manager.list();
         checkCancellation();
-        return { reply: item.turn.failedOperation.setup.summary,
+        return { reply: objectFields(item.turn.failedOperation.setup).summary,
           sessionId, engine: "pi", actions: item.turn.actions, projects };
       }
       const last = item.session.messages?.findLast((entry) => entry.role === "assistant");
@@ -569,7 +597,8 @@ export class PiProjectAgent {
       failed = true;
       if (item.cancelled || signal?.aborted) throw cancellationError();
       if (error instanceof InputError || error instanceof ProviderError) throw error;
-      throw new ProviderError(connectionFailure(retry), { stage: "pi", reason: "request_failed", attempts: retry.attempt + 1 });
+      const diagnostic = { stage: "pi", reason: "request_failed", attempts: retry.attempt + 1 };
+      throw new ProviderError(connectionFailure(retry), diagnostic);
     } finally {
       signal?.removeEventListener("abort", cancelled);
       // A pending factory can return a session after the abort listener already ran.
@@ -596,7 +625,7 @@ export class PiProjectAgent {
     }));
   }
 
-  async cancel(sessionId) {
+  async cancel(sessionId: string) {
     const item = this.sessions.get(sessionId);
     if (item?.busy) item.cancelled = true;
     await item?.session?.abort();

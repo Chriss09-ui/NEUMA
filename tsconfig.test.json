@@ -1,5 +1,20 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": ["node"] },
-  "include": ["test/**/*.mts", "test/**/*.cts"]
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node"
+    ],
+    "skipLibCheck": true
+  },
+  "include": [
+    "test/**/*.mts",
+    "test/**/*.cts"
+  ]
 }
