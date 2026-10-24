@@ -1,3 +1,10 @@
+import {applicationApiFixture} from "./helpers/ui-api-fixture.mjs";
+import type {ApplicationDomEvent} from "../public/application-dom.js";
+import type {BridgeEvent} from "../public/application-bridge.js";
+interface FixtureEvent {type:string;pointerId?:number;clientX?:number;clientY?:number;detail?:{agentId?:string;active?:boolean;sessionId?:string};currentTarget?:unknown;target?:unknown;preventDefault?:()=>void;[key:string]:unknown}
+interface ObserverRecord {type:string;attributeName?:string|null;target?:unknown;oldValue?:string}
+interface ObserverFixture {callback:(records:ObserverRecord[])=>unknown;target?:unknown;options?:MutationObserverInit;disconnected?:boolean}
+import { objectFields } from "../src/runtime/type-boundary.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { boundAssistantLayout, createApplicationAssistant } from "../public/application-assistant.js";
@@ -6,37 +13,49 @@ import { renderAgentAvatar, setAgentAvatarActivity } from "../public/agent-avata
 
 function setup() {
   class Events {
-    listeners = new Map();
-    addEventListener(type, fn) { this.listeners.set(type, [...this.listeners.get(type) || [], fn]); }
-    removeEventListener(type, fn) { this.listeners.set(type, (this.listeners.get(type) || []).filter((entry) => entry !== fn)); }
-    dispatchEvent(event) { event.currentTarget ||= this; event.target ||= this; event.preventDefault ||= () => {}; return Promise.all((this.listeners.get(event.type) || []).map((fn) => fn(event))); }
+    listeners=new Map<string,unknown[]>();
+    declare activeElement:Element;
+    declare getElementById:(id:string)=>Element;
+    declare createElement:(tag:string)=>Element;
+    declare location:{origin:string};
+    declare setTimeout:(callback:()=>unknown,delay?:number)=>symbol;
+    declare clearTimeout:(id:unknown)=>unknown;
+    declare matchMedia:(query:string)=>{matches:boolean};
+    declare MutationObserver:new(callback:(records:ObserverRecord[])=>unknown)=>{observe(element:Element,options:MutationObserverInit):unknown;disconnect():unknown};
+    addEventListener(type:"message",callback:(event:BridgeEvent)=>unknown):void;
+    addEventListener(type:string,callback:(event:ApplicationDomEvent)=>unknown):void;
+    addEventListener(type:string,callback:unknown){this.listeners.set(type,[...(this.listeners.get(type)??[]),callback])}
+    removeEventListener(type:string,callback:unknown){this.listeners.set(type,(this.listeners.get(type)??[]).filter(entry=>entry!==callback))}
+    dispatchEvent(event:FixtureEvent){event.currentTarget ||=this;event.target ||=this;event.preventDefault ||=()=>{};return Promise.all((this.listeners.get(event.type)??[]).map(callback=>(callback as (event:FixtureEvent)=>unknown)(event)))}
+
   }
-  const document = new Events(), nodes = new Map(), values = new Map(), timers = new Map();
+  const document = new Events(), nodes = new Map<string,Element>(), values = new Map<string,string>(), timers = new Map<unknown,()=>unknown>();
   let bounds = { width: 1000, height: 700 };
   class Element extends Events {
-    children = []; classes = new Set(); attributes = new Map(); dataset = {}; hidden = false; textContent = ""; value = "";
-    style = { setProperty: (key, value) => this.attributes.set(key, value) };
-    classList = { toggle: (key, on) => on ? this.classes.add(key) : this.classes.delete(key) };
+    declare parent:Element|null;declare captured:unknown;declare className:string;declare inert:boolean;declare title:string;declare src:string;declare type:string;disabled=false;
+    children:Element[] = [];classes=new Set<string>();attributes=new Map<string,string>();dataset:Record<string,string>={}; hidden = false; textContent = ""; value = "";
+    style = { setProperty: (key:string,value:string) => this.attributes.set(key, value) };
+    classList = {add:(...keys:string[])=>keys.forEach(key=>this.classes.add(key)), toggle: (key:string,on?:boolean) => on ? this.classes.add(key) : this.classes.delete(key) };
     contentWindow = { postMessage() {} };
-    get parentElement() { return this.parent; }
-    getBoundingClientRect() { return bounds; }
-    append(...elements) { for (const node of elements) { node.remove(); node.parent = this; this.children.push(node); } }
-    remove() { if (this.parent) this.parent.children = this.parent.children.filter((node) => node !== this); this.parent = null; }
-    replaceChildren(...elements) { for (const node of this.children) node.parent = null; this.children = []; this.append(...elements); }
-    setAttribute(key, value) { this.attributes.set(key, value); }
-    setPointerCapture(id) { this.captured = id; }
+    get parentElement():Element|null {return this.parent||null;}
+    getBoundingClientRect():{width:number;height:number;x?:number;y?:number} {return bounds;}
+    append(...elements:Element[]) { for (const node of elements) { node.remove(); node.parent = this; this.children.push(node); } }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter((node:Element) => node !== this); this.parent = null; }
+    replaceChildren(...elements:Element[]) { for (const node of this.children) node.parent = null; this.children = []; this.append(...elements); }
+    setAttribute(key:string,value:string) { this.attributes.set(key, value); }
+    setPointerCapture(id: unknown) { this.captured = id; }
     releasePointerCapture() { this.captured = null; }
     focus() { document.activeElement = this; }
     close() { return this.dispatchEvent({ type: "close" }); }
     click() { return this.disabled ? Promise.resolve() : this.dispatchEvent({ type: "click" }); }
   }
-  const get = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
+  const get = (id: string) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id)!; };
   document.getElementById = get; document.createElement = () => new Element();
   const window = new Events(); window.location = { origin: "http://127.0.0.1:3000" };
-  window.setTimeout = (fn) => { const id = Symbol(); timers.set(id, fn); return id; };
-  window.clearTimeout = (id) => timers.delete(id);
-  const storage = { getItem: (key) => values.get(key), setItem: (key, value) => values.set(key, value) };
-  return { document, window, storage, get, values, timers, root: get("agent-workspace"), setBounds: (next) => { bounds = next; } };
+  window.setTimeout = (fn:()=>unknown) => { const id = Symbol(); timers.set(id, fn); return id; };
+  window.clearTimeout = (id: unknown) => timers.delete(id);
+  const storage = { getItem: (key:string) => values.get(key)??null,setItem: (key:string,value:string) => values.set(key, value) };
+  return { document, window, storage, get, values, timers, root: get("agent-workspace"), setBounds: (next: { width: number; height: number; }) => { bounds = next; } };
 }
 const settle = () => new Promise(setImmediate);
 const instance = { instanceId: "instance-1", origin: "http://127.0.0.1:4011", url: "http://127.0.0.1:4011/ui/index.html", deliveryVersion: "delivery-1" };
@@ -49,10 +68,11 @@ test("浮窗限制在工作区内，不接受损坏的持久尺寸", () => {
 });
 
 test("浮窗星核同步真实活动且重复进度、收起展开和设置隐藏不重建动画节点", () => {
-  const ui = setup(), observers = [];
+  const ui = setup(), observers:ObserverFixture[] = [];
   ui.window.MutationObserver = class {
-    constructor(callback) { this.callback = callback; observers.push(this); }
-    observe(target, options) { this.target = target; this.options = options; }
+    declare callback:(records:ObserverRecord[])=>unknown;declare target:unknown;declare options:MutationObserverInit;declare disconnected:boolean;
+    constructor(callback:(records:ObserverRecord[])=>unknown){this.callback=callback;observers.push(this);}
+    observe(target:unknown,options:MutationObserverInit) { this.target = target; this.options = options; }
     disconnect() { this.disconnected = true; }
   };
   const source = ui.get("agent-icon"), target = ui.get("agent-assistant-avatar");
@@ -60,32 +80,32 @@ test("浮窗星核同步真实活动且重复进度、收起展开和设置隐�
   renderAgentAvatar(source, one, { document: ui.document });
   const view = createApplicationAssistant(ui); view.select("one"); view.show(true);
   const star = target.children[0], observer = observers[0];
-  assert.equal(star.dataset.avatarMotion, "true");
-  assert.equal(star.dataset.activity, "idle");
+  assert.equal(star!.dataset.avatarMotion, "true");
+  assert.equal(star!.dataset.activity, "idle");
   for (const activity of ["thinking", "thinking", "working", "working", "queued", "idle"]) {
     setAgentAvatarActivity(source, activity);
-    observer.callback([{ type: "attributes", attributeName: "data-avatar-activity", target: source }]);
+    observer!.callback([{ type: "attributes", attributeName: "data-avatar-activity", target: source }]);
     assert.equal(target.children[0], star);
-    assert.equal(star.dataset.activity, activity);
+    assert.equal(star!.dataset.activity, activity);
   }
   view.expand(); view.toggle(); view.show(false); view.show(true);
   assert.equal(target.children[0], star);
   renderAgentAvatar(source, { id: "two", profile: { icon: "star:0:0" } }, { document: ui.document, activity: "thinking" });
   view.select("two");
   const second = target.children[0];
-  observer.callback([{ type: "attributes", attributeName: "data-avatar-activity", target: source, oldValue: "working" }]);
+  observer!.callback([{ type: "attributes", attributeName: "data-avatar-activity", target: source, oldValue: "working" }]);
   assert.equal(target.children[0], second);
-  assert.equal(second.dataset.shape, "cut");
-  assert.equal(second.dataset.color, "mint");
-  assert.equal(second.dataset.activity, "thinking");
+  assert.equal(second!.dataset.shape, "cut");
+  assert.equal(second!.dataset.color, "mint");
+  assert.equal(second!.dataset.activity, "thinking");
   renderAgentAvatar(source, { id: "two", profile: { icon: "☀️" } }, { document: ui.document });
-  observer.callback([{ type: "childList", target: source }]);
+  observer!.callback([{ type: "childList", target: source }]);
   assert.equal(target.textContent, "☀️");
   assert.equal(target.children.length, 0);
   renderAgentAvatar(source, one, { document: ui.document, activity: "working" });
-  observer.callback([{ type: "attributes", attributeName: "data-avatar-key", target: source }]);
-  assert.equal(target.children[0].dataset.activity, "working");
-  view.close(); assert.equal(observer.disconnected, true);
+  observer!.callback([{ type: "attributes", attributeName: "data-avatar-key", target: source }]);
+  assert.equal(target.children[0]!.dataset.activity, "working");
+  view.close(); assert.equal(objectFields(observer).disconnected, true);
 });
 
 test("开合动画可连续反向，结束后清理，保留输入和焦点", () => {
@@ -98,7 +118,7 @@ test("开合动画可连续反向，结束后清理，保留输入和焦点", ()
   view.toggle(); view.toggle();
   assert.equal(ui.timers.size, 1);
   assert.equal(view.isExpanded(), true);
-  [...ui.timers.values()][0]();
+  [...ui.timers.values()][0]!();
   assert.equal(ui.root.classes.has("application-assistant-animating"), false);
   assert.equal(ui.root.classes.has("application-assistant-expanding"), false);
   assert.equal(ui.timers.size, 0);
@@ -148,9 +168,7 @@ test("展开中途拖动接住当前画面的位置与尺寸，释放后才恢�
 });
 
 test("初始玻璃输入条在首次真实消息后展开，设置暂藏与刷新不重建会话和页面", async () => {
-  const ui = setup(), calls = [], view = createApplicationWorkspace({ ...ui, api: {
-    open: async () => instance, close: async (...args) => calls.push(args), tasks: async () => ({ tasks: [] }),
-  } });
+  const ui = setup(), calls: ((unknown))[] = [], view = createApplicationWorkspace({ ...ui, api:applicationApiFixture({open:async()=>instance,close:async(...args)=>{calls.push(args)},tasks:async()=>({tasks:[]})}) });
   try {
     view.route("dashboard"); view.update("dashboard", application); await settle();
     const frame = ui.get("agent-application-frame-host").children[0];
@@ -232,7 +250,7 @@ test("工作区缩小时浮窗仍可触达，恢复宽度后不丢原布局", as
 });
 
 test("助手显式关闭不展示浮窗；旧应用只保留手动入口，默认打开方式尊重本地选择", async () => {
-  const ui = setup(), view = createApplicationWorkspace({ ...ui, api: { open: async () => instance, close: async () => {}, tasks: async () => ({ tasks: [] }) } });
+  const ui = setup(), view = createApplicationWorkspace({ ...ui, api:applicationApiFixture({open:async()=>instance,close:async()=>{},tasks:async()=>({tasks:[]})}) });
   try {
     view.route("none"); view.update("none", { ...application, assistant: { enabled: false } }); await settle();
     assert.equal(ui.get("agent-assistant-toggle").hidden, true);

@@ -2,41 +2,57 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { pageElement } from "../public/page-elements.js";
 import { createSidebarAvatarMotion } from "../public/sidebar-motion.js";
 
 const source = (await readFile(new URL("../public/shell.js", import.meta.url), "utf8")).replace(/^import .*;\n/gm, "");
 
 function setup({ compact = false, reduced = false, transitions = false, hash = "", configured = true, collapsed = false, sidebarCollapsed = false, storageBlocked = false, resizeObserver = false } = {}) {
+  interface FixtureEvent { type: string; key?: string; detail?: unknown; defaultPrevented?: boolean; isComposing?: boolean; keyCode?: number; shiftKey?: boolean; preventDefault?: () => void }
   class Events {
-    listeners = new Map();
-    addEventListener(type, handler) {
+    listeners = new Map<string, ((event: FixtureEvent) => unknown)[]>();
+    declare activeElement: Element;
+    declare matches: boolean;
+    declare matchMedia: (query: string) => Events;
+    declare getElementById: (id: string) => Element | null;
+    querySelectorAll(_selector: string): Element[] { return []; }
+    declare startViewTransition?: (callback: () => void) => FixtureTransition;
+    addEventListener(type: string, handler: (event: FixtureEvent) => unknown) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
-      this.listeners.get(type).push(handler);
+      this.listeners.get(type)!.push(handler);
     }
-    dispatchEvent(event) {
+    dispatchEvent(event: FixtureEvent) {
       for (const handler of this.listeners.get(event.type) ?? []) handler(event);
     }
   }
-  const document = new Events(), window = new Events(), motionCalls = [];
-  const nodes = new Map();
+  interface FixtureTransition { callback: () => void; ready: Promise<void>; skipped: boolean; skipTransition(): void }
+  const document = new Events(), window = new Events(), motionCalls: { collapsed: boolean; beforeCollapsed: boolean }[] = [];
+  const nodes = new Map<string, Element>();
   class Element extends Events {
-    constructor(id) {
+    declare id: string; declare hidden: boolean; declare open: boolean; declare value: string;
+    declare style: Record<string, string>; declare scrollHeight: number; declare dataset: Record<string, string>;
+    declare classes: Set<string>; declare className: string; declare attributes: Map<string, string>;
+    declare classList: { toggle(name: string, on?: boolean): unknown };
+    declare form: { requestSubmit: () => void }; declare submissions: number; declare scrolled: boolean;
+    declare scrollOptions: { behavior: string; block: string }; declare inert: boolean;
+    declare firstElementChild: Element; declare textContent: string;
+    constructor(id: string) {
       super(); this.id = id; this.hidden = false; this.open = false; this.attributes = new Map();
       this.value = ""; this.style = {}; this.scrollHeight = 80; this.dataset = {};
       this.classes = new Set();
       this.classList = { toggle: (name, on) => on ? this.classes.add(name) : this.classes.delete(name) };
       this.form = { requestSubmit: () => { this.submissions = (this.submissions ?? 0) + 1; } };
     }
-    setAttribute(name, value) { this.attributes.set(name, value); }
-    getAttribute(name) { return this.attributes.get(name) ?? null; }
-    removeAttribute(name) { this.attributes.delete(name); }
+    setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+    getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name: string) { this.attributes.delete(name); }
     querySelector() { return get(`${this.id}-span`); }
-    querySelectorAll(selector) {
-      const composer = { "page-chat": "main-message", "page-create": "message", "page-projects": "project-message", "page-agent": "agent-message", "page-group": "group-message" }[this.id];
-      return composer ? [get(composer)] : [];
+    querySelectorAll(_selector: string) {
+      const composers: Record<string, string> = { "page-chat": "main-message", "page-create": "message", "page-projects": "project-message", "page-agent": "agent-message", "page-group": "group-message" };
+      const composer = composers[this.id]; return composer ? [get(composer)] : [];
     }
     closest() { return this.hidden ? this : null; }
-    contains(element) {
+    contains(element: unknown) {
       return (this.id === "project-library-body" && element === get("project-search"))
         || (this.id === "sidebar-details" && element === get("sidebar-create-agent"))
         || (this.id === "sidebar-agent-rail" && element === get("collapsed-agent-one"))
@@ -45,13 +61,13 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     }
     focus() { document.activeElement = this; }
     click() { this.dispatchEvent({ type: "click" }); }
-    scrollIntoView(options) { this.scrolled = true; this.scrollOptions = options; }
+    scrollIntoView(options: Element["scrollOptions"]) { this.scrolled = true; this.scrollOptions = options; }
     showModal() { this.open = true; get("project-path").focus(); }
     close() { this.open = false; }
   }
-  const get = (id) => {
+  const get = (id: string): Element => {
     if (!nodes.has(id)) nodes.set(id, new Element(id));
-    return nodes.get(id);
+    return nodes.get(id)!;
   };
   const inputs = ["message", "project-message", "agent-message", "main-message", "group-message"].map(get);
   const links = ["chat", "projects", "agents", "skills", "settings"].map((page) => {
@@ -59,42 +75,46 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
   });
   const groupsManage = get("sidebar-manage-groups"); groupsManage.className = "sidebar-manage"; groupsManage.dataset.page = "groups";
   links.push(groupsManage);
-  document.getElementById = (id) => ["llm-dot", "llm-state", "jev-dot", "jev-state"].includes(id) ? null : get(id);
-  document.querySelectorAll = (selector) => selector === ".nav-item, .sidebar-manage" ? links : inputs;
+  document.getElementById = (id: string) => ["llm-dot", "llm-state", "jev-dot", "jev-state"].includes(id) ? null : get(id);
+  document.querySelectorAll = (selector: string) => selector === ".nav-item, .sidebar-manage" ? links : inputs;
   get("setup-banner").firstElementChild = get("banner-text");
   get("project-setup-banner").firstElementChild = get("project-banner-text");
   get("chat-panel-toggle").setAttribute("aria-controls", "requirements-panel");
   get("agent-panel-toggle").setAttribute("aria-controls", "agent-panel");
-  const media = new Map();
-  window.matchMedia = (query) => {
+  const media = new Map<string, Events>();
+  window.matchMedia = (query: string) => {
     const match = new Events(); match.matches = query.includes("reduced") ? reduced : compact;
     media.set(query, match); return match;
   };
-  const pending = [];
-  if (transitions) document.startViewTransition = (callback) => {
+  const pending: FixtureTransition[] = [];
+  if (transitions) document.startViewTransition = (callback: () => void) => {
     const item = { callback, ready: Promise.resolve(), skipped: false, skipTransition() { this.skipped = true; } };
     pending.push(item); return item;
   };
   const location = { hash }, history = {
-    replaceState: (_state, _title, hash) => { location.hash = hash; },
-    pushState: (_state, _title, hash) => { location.hash = hash; },
+    replaceState: (_state: unknown, _title: string, hash: string) => { location.hash = hash; },
+    pushState: (_state: unknown, _title: string, hash: string) => { location.hash = hash; },
   };
-  class Event { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } }
+  class Event {
+declare type: string; constructor(type: string, init: object = {}) { this.type = type; Object.assign(this, init); } }
   const stored = new Map([["neuma-project-library-collapsed", String(collapsed)], ["neuma-sidebar-collapsed", String(sidebarCollapsed)]]);
   const localStorage = {
-    getItem(key) { if (storageBlocked) throw new Error("Unavailable"); return stored.get(key); },
-    setItem(key, value) { if (storageBlocked) throw new Error("Unavailable"); stored.set(key, value); },
+    getItem(key: string) { if (storageBlocked) throw new Error("Unavailable"); return stored.get(key); },
+    setItem(key: string, value: string) { if (storageBlocked) throw new Error("Unavailable"); stored.set(key, value); },
   };
-  const resizeObservers = [];
+  const resizeObservers: WidthObserver[] = [];
   class WidthObserver {
-    constructor(callback) { this.callback = callback; resizeObservers.push(this); }
-    observe(target) { this.target = target; }
-    notify(width) { this.callback([{ target: this.target, contentRect: { width } }]); }
+    declare callback: (entries: { target: Element; contentRect: { width: number } }[]) => void;
+    declare target: Element;
+    constructor(callback: WidthObserver["callback"]) { this.callback = callback; resizeObservers.push(this); }
+    observe(target: Element) { this.target = target; }
+    notify(width: number) { this.callback([{ target: this.target, contentRect: { width } }]); }
   }
-  vm.runInNewContext(source, { document, window, location, history, localStorage, Event, CustomEvent: Event,
-    createSidebarAvatarMotion: (options) => {
-      const motion = createSidebarAvatarMotion(options);
-      return { ...motion, prepare(collapsed) {
+  vm.runInNewContext(source, { document, pageElement, window, location, history, localStorage, Event, CustomEvent: Event,
+    createSidebarAvatarMotion: (options: unknown) => {
+      assert.ok(options && typeof options === "object");
+      const motion: ReturnType<typeof createSidebarAvatarMotion> = Reflect.apply(createSidebarAvatarMotion, undefined, [options]);
+      return { ...motion, prepare(collapsed: boolean) {
         motionCalls.push({ collapsed, beforeCollapsed: get("app-shell").classes.has("sidebar-collapsed") });
         motion.prepare(collapsed);
       } };
@@ -103,7 +123,7 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     ...(resizeObserver ? { ResizeObserver: WidthObserver } : {}),
     fetch: async () => ({ ok: true, json: async () => ({ llmConfigured: configured, jevConfigured: true }) }),
   });
-  const navigate = (detail) => document.dispatchEvent(new Event("neuma:navigate", { detail }));
+  const navigate = (detail: { page: string; groupId?: string; projectView?: string; agentId?: string }) => document.dispatchEvent(new Event("neuma:navigate", { detail }));
   return { get, document, window, location, media, pending, navigate, stored, resizeObservers, motionCalls };
 }
 
@@ -156,9 +176,9 @@ test("旧创建入口统一到主聊天，群详情保持群导航选中且主�
 
 test("群组管理从我的群组标题进入，群详情与管理页都选中同一入口", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
-  const navigation = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
+  const navigation = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)![0];
   assert.doesNotMatch(navigation, /data-page="groups"/);
-  const manage = html.match(/<a\b[^>]*id="sidebar-manage-groups"[^>]*>/)[0];
+  const manage = html.match(/<a\b[^>]*id="sidebar-manage-groups"[^>]*>/)![0];
   assert.match(manage, /class="sidebar-manage"/); assert.match(manage, /href="#groups"/);
   assert.match(manage, /data-page="groups"/);
   const { get, navigate } = setup();
@@ -428,7 +448,7 @@ test("旧导航链接保持可用，未知项目子路由回到助手", () => {
     ["#chat/requirements", "#chat", "chat", "page-chat"],
     ["#create", "#chat", "chat", "page-chat"],
     ["#projects/unknown", "#projects/assistant", "projects", "chat-projects"],
-  ]) {
+  ] as const) {
     const { get, location } = setup({ hash });
     assert.equal(location.hash, canonical, hash);
     assert.equal(get(`page-${page}`).hidden, false, hash);
@@ -447,7 +467,7 @@ test("旧创建书签在模块加载后激活需求，重复创建入口在同�
 
 test("侧栏移除服务状态和本机说明后，模型健康检查仍正常更新配置提示", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
-  const sidebar = html.match(/<aside class="sidebar">[\s\S]*?<\/aside>/)[0];
+  const sidebar = html.match(/<aside class="sidebar">[\s\S]*?<\/aside>/)![0];
   assert.doesNotMatch(sidebar, /service-status|模型服务|Jev 判断|仅在本机运行/);
   const { get, document } = setup();
   await new Promise(setImmediate);
@@ -483,10 +503,10 @@ test("提及候选打开时全局回车让给选择器，选择完成后的下�
   input.value = "@";
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && input.getAttribute("aria-expanded") === "true") {
-      event.preventDefault(); input.value = "@资料研究员 "; input.setAttribute("aria-expanded", "false");
+      event.preventDefault!(); input.value = "@资料研究员 "; input.setAttribute("aria-expanded", "false");
     }
   });
-  const key = () => ({ type: "keydown", key: "Enter", preventDefault() { this.defaultPrevented = true; } });
+  const key = (): { type: string; key: string; defaultPrevented?: boolean; preventDefault(): void } => ({ type: "keydown", key: "Enter", preventDefault() { this.defaultPrevented = true; } });
   input.dispatchEvent(key());
   assert.equal(input.value, "@资料研究员 "); assert.equal(input.submissions, undefined);
   input.dispatchEvent(key()); assert.equal(input.submissions, 1);
@@ -498,7 +518,7 @@ test("Agent 与群输入框随宽度重新增高，同宽高度通知不递归�
   assert.equal(resizeObservers.length, 2);
   assert.deepEqual(resizeObservers.map((observer) => observer.target.id), ["agent-message", "group-message"]);
   for (const id of ["agent-message", "group-message"]) {
-    const input = get(id), observer = resizeObservers.find((item) => item.target === input);
+    const input = get(id), observer = resizeObservers.find((item) => item.target === input)!;
     let height = 34, reads = 0;
     Object.defineProperty(input, "scrollHeight", { get() { reads++; return height; } });
     input.style.height = "previous"; input.hidden = true;

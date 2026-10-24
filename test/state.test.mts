@@ -1,3 +1,5 @@
+import type { RequirementSession, Message } from "../public/ui-types.js";
+type LegacySessionFixture = Omit<RequirementSession, "draft"> & { draft: unknown };
 import test from "node:test";
 import assert from "node:assert/strict";
 import { agentDisplayDescription, agentDisplayIcon, agentDisplayName } from "../public/state.js";
@@ -12,11 +14,11 @@ const SAVED_KEY = "neuma.requirements.session.optin.v1";
 const LEGACY_KEY = "neuma.requirements.session.v1";
 
 function storage() {
-  const entries = new Map();
+  const entries = new Map<string, string>();
   return {
-    getItem: (key) => entries.get(key) ?? null,
-    setItem: (key, value) => entries.set(key, value),
-    removeItem: (key) => entries.delete(key),
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => entries.set(key, value),
+    removeItem: (key: string) => entries.delete(key),
   };
 }
 
@@ -32,12 +34,12 @@ test("模型上下文只取当前对话的用户原话，并限制体积", () =>
   const large = Array.from({ length: 15 }, (_, index) => ({ role: "user", content: `${index}:` + "字".repeat(4000) }));
   const recent = recentUserMessages(large);
   assert.ok(recent.reduce((total, item) => total + item.length, 0) <= 12000);
-  assert.ok(recent.at(-1).startsWith("14:"));
+  assert.ok(recent.at(-1)!.startsWith("14:"));
 });
 
 test("刷新从空白开始，手动保存记录只有显式加载才进入当前会话", () => {
   const local = storage();
-  const session = blankSession();
+  const session: LegacySessionFixture = blankSession();
   session.messages.push({ role: "user", content: "做一个周报助手" });
   session.draft = { goal: { value: "写周报", source: "user" } };
   session.status = "needs_input";
@@ -65,7 +67,7 @@ test("本地草稿损坏时安全地回到初始状态", () => {
 
 test("新对话清空当前上下文但保留手动保存的记录", () => {
   const local = storage();
-  const saved = blankSession();
+  const saved: LegacySessionFixture = blankSession();
   saved.messages.push({ role: "user", content: "做一个周报助手" });
   saved.draft = { goal: { value: "写周报", source: "user" } };
   assert.equal(saveSession(local, saved), true);
@@ -82,7 +84,7 @@ test("旧版自动保存记录只移入当前页面内存，并清除本地存�
   const refreshed = initializeSession(local);
   assert.deepEqual(refreshed.session, blankSession());
   assert.equal(refreshed.legacyCleared, true);
-  assert.equal(refreshed.legacySession.messages[0].content, "旧记录");
+  assert.equal(refreshed.legacySession.messages[0]!.content, "旧记录");
   assert.equal(local.getItem(LEGACY_KEY), null);
   assert.equal(hasSavedSession(local), false);
 });
@@ -95,7 +97,7 @@ test("手动保存的旧格式草稿保留内容，但要重新补充新增的�
   }));
   const restored = loadSession(local);
   assert.equal(restored.status, "needs_input");
-  assert.equal(restored.draft.goal.value, "写周报");
+  assert.equal(restored.draft!.goal.value, "写周报");
   assert.equal(restored.confirmed, false);
 });
 
@@ -109,9 +111,9 @@ test("多份已确认需求在列表中独立，修改只更新当前条目", ()
     { ...weekly, goal: { value: "整理每周项目进展" } }, "unused");
   assert.equal(revised.items.length, 2);
   assert.equal(revised.activeId, "weekly");
-  assert.equal(revised.items[0].draft.goal.value, "整理每周项目进展");
-  assert.equal(revised.items[1].draft.goal.value, "整理纪要");
-  assert.equal(first.items[0].draft.goal.value, "整理周报");
+  assert.equal(revised.items[0]!.draft.goal.value, "整理每周项目进展");
+  assert.equal(revised.items[1]!.draft.goal.value, "整理纪要");
+  assert.equal(first.items[0]!.draft.goal.value, "整理周报");
 });
 
 test("只有手动保存的 Agent 需求会留下，删除只影响选中条目且不保存聊天", () => {
@@ -122,15 +124,15 @@ test("只有手动保存的 Agent 需求会留下，删除只影响选中条目�
     { name: { value: "会议纪要助手" }, goal: { value: "整理纪要" } }, "meeting").items[0];
   assert.deepEqual(loadSavedRequirements(local), []);
   assert.equal(saveRequirement(local, { ...weekly, messages: [{ content: "不应保存的聊天" }] }), true);
-  assert.equal(saveRequirement(local, meeting), true);
+  assert.equal(saveRequirement(local, meeting!), true);
   const saved = loadSavedRequirements(local);
   assert.deepEqual(saved.map((item) => item.id), ["meeting", "weekly"]);
   assert.equal(saved.every((item) => item.persisted && !item.dirty), true);
-  assert.equal(local.getItem("neuma.requirements.saved-list.v1").includes("不应保存的聊天"), false);
+  assert.equal(local.getItem("neuma.requirements.saved-list.v1")!.includes("不应保存的聊天"), false);
   assert.equal(saveRequirement(local, { ...weekly,
-    draft: { ...weekly.draft, goal: { value: "整理项目周报" } } }), true);
+    draft: { ...weekly!.draft, goal: { value: "整理项目周报" } } }), true);
   assert.equal(loadSavedRequirements(local).length, 2);
-  assert.equal(loadSavedRequirements(local).find((item) => item.id === "weekly").draft.goal.value,
+  assert.equal(loadSavedRequirements(local).find((item) => item.id === "weekly")!.draft.goal.value,
     "整理项目周报");
   assert.equal(deleteRequirement(local, "weekly"), true);
   assert.deepEqual(loadSavedRequirements(local).map((item) => item.id), ["meeting"]);
@@ -158,7 +160,7 @@ test("预览记录限制输入体积，损坏或执行回复不能被当成预�
   const old = [{ role: "user", content: "原始输入" }];
   const next = appendAgentPreview(old, "  新输入  ");
   assert.equal(old.length, 1);
-  assert.equal(next.at(-1).content, "新输入");
+  assert.equal(next.at(-1)!.content, "新输入");
   assert.throws(() => appendAgentPreview([], " "), /1～4000/);
   assert.throws(() => appendAgentPreview([], "字".repeat(4001)), /1～4000/);
   const many = Array.from({ length: 80 }, (_, i) => ({ role: "user", content: String(i) }));
@@ -185,11 +187,11 @@ test("真实对话保存角色、版本和结果状态，刷新后将未结束�
   ];
   assert.equal(saveAgentPreview(local, "weekly", messages), true);
   const saved = loadAgentPreview(local, "weekly");
-  assert.equal(saved[0].delivery, "sent");
-  assert.equal(saved[1].status, "complete");
-  assert.equal(saved[1].revision, "1");
-  assert.equal(saved[2].delivery, "stopped");
-  assert.equal(saved[3].status, "stopped");
+  assert.equal(saved[0]!.delivery, "sent");
+  assert.equal(saved[1]!.status, "complete");
+  assert.equal(saved[1]!.revision, "1");
+  assert.equal(saved[2]!.delivery, "stopped");
+  assert.equal(saved[3]!.status, "stopped");
   assert.equal(loadAgentPreview(local, "meeting").length, 0);
   assert.equal(deleteAgentPreview(local, "weekly"), true);
   assert.deepEqual(loadAgentPreview(local, "weekly"), []);
@@ -214,19 +216,19 @@ test("需求迭代保留展示 overlay，保存需求只写原始字段", () => 
   const previous = { id: "one", name: "原始名称", draft: { name: { value: "原始名称" }, goal: { value: "原始目标" } },
     profile: { id: "one", name: "展示名称", description: "展示简介", icon: "📚" }, persisted: true };
   const next = upsertConfirmedRequirement([previous], "one", { name: { value: "新需求名称" }, goal: { value: "新目标" } }, "unused").items[0];
-  assert.equal(next.id, "one");
-  assert.equal(next.name, "新需求名称");
+  assert.equal(next!.id, "one");
+  assert.equal(next!.name, "新需求名称");
   assert.equal(agentDisplayName(next), "展示名称");
-  assert.deepEqual(next.profile, previous.profile);
-  assert.notEqual(next.profile, previous.profile);
-  const values = new Map(), storage = {
-    getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value),
+  assert.deepEqual(next!.profile, previous.profile);
+  assert.notEqual(next!.profile, previous.profile);
+  const values = new Map<string, string>(), storage = {
+    getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value),
   };
-  assert.equal(saveRequirement(storage, next), true);
+  assert.equal(saveRequirement(storage, next!), true);
   const saved = loadSavedRequirements(storage)[0];
-  assert.equal(saved.name, "新需求名称");
-  assert.equal(saved.profile, undefined);
-  assert.equal(saved.draft.goal.value, "新目标");
+  assert.equal(saved!.name, "新需求名称");
+  assert.equal(saved!.profile, undefined);
+  assert.equal(saved!.draft.goal.value, "新目标");
 });
 
 test("迁移区分没有保存的对话与显式保存的空对话，快照保留失败状态且移除运行字段", () => {
@@ -244,30 +246,30 @@ test("迁移区分没有保存的对话与显式保存的空对话，快照保�
   ]);
   const requirement = normalizeAgentRequirement({ id: "one", name: "助手", draft: { goal: { value: "目标" } },
     profile: { name: "展示名" }, messages: [{ content: "主会话不要写入需求" }] });
-  assert.equal(requirement.persisted, true);
-  assert.equal(requirement.dirty, false);
-  assert.equal(requirement.profile.name, "展示名");
-  assert.equal(requirement.messages, undefined);
+  assert.equal(requirement!.persisted, true);
+  assert.equal(requirement!.dirty, false);
+  assert.equal(requirement!.profile!.name, "展示名");
+  assert.equal(Reflect.get(requirement!, "messages"), undefined);
   assert.equal(normalizeAgentRequirement({ id: "one", name: "助手", draft: [] }), null);
 });
 
 test("浏览器待同步标记独立保留，保存和删除其他 Agent 不会清除最新失败备份", () => {
-  const local = storage(), item = (id) => ({ id, name: id, draft: { goal: { value: id } } });
+  const local = storage(), item = (id: string) => ({ id, name: id, draft: { goal: { value: id } } });
   saveRequirement(local, { ...item("pending"), pendingSync: true });
   saveRequirement(local, item("other"));
-  assert.equal(loadSavedRequirements(local).find((entry) => entry.id === "pending").pendingSync, true);
+  assert.equal(loadSavedRequirements(local).find((entry) => entry.id === "pending")!.pendingSync, true);
   deleteRequirement(local, "other");
-  assert.equal(loadSavedRequirements(local)[0].dirty, true);
-  assert.equal(loadSavedRequirements(local)[0].pendingSync, true);
+  assert.equal(loadSavedRequirements(local)[0]!.dirty, true);
+  assert.equal(loadSavedRequirements(local)[0]!.pendingSync, true);
   saveAgentPreview(local, "pending", [{ role: "user", content: "失败保存" }], { pendingSync: true });
-  assert.equal(loadSavedAgentConversation(local, "pending").pendingSync, true);
+  assert.equal(loadSavedAgentConversation(local, "pending")!.pendingSync, true);
   saveRequirement(local, item("pending"));
   saveAgentPreview(local, "pending", [{ role: "user", content: "失败保存" }]);
-  assert.equal(loadSavedRequirements(local)[0].pendingSync, undefined);
-  assert.equal(loadSavedAgentConversation(local, "pending").pendingSync, undefined);
+  assert.equal(loadSavedRequirements(local)[0]!.pendingSync, undefined);
+  assert.equal(loadSavedAgentConversation(local, "pending")!.pendingSync, undefined);
 });
 
-const historyRecord = (id, overrides = {}) => ({ schemaVersion: 3, id, agentId: "one", title: id,
+const historyRecord = (id: string, overrides = {}) => ({ schemaVersion: 3, id, agentId: "one", title: id,
   createdAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", saveVersion: 1,
   mutationId: `mutation-${id}`, messages: [{ role: "user", content: id, delivery: "sent" }], ...overrides });
 
@@ -278,10 +280,10 @@ test("多对话浏览器备份独立排序，保存版本与待同步内容刷�
   assert.equal(saveAgentConversationBackup(local, "one", latest, { pendingSync: true, expectedVersion: 0, mutationId: "pending-mutation" }), true);
   const records = loadAgentConversationBackups(local, "one");
   assert.deepEqual(records.map((item) => item.id), ["latest", "first"]);
-  assert.equal(records[0].pendingSync, true);
-  assert.equal(records[0].expectedVersion, 0);
-  assert.equal(records[0].mutationId, "pending-mutation");
-  assert.equal(records[1].pendingSync, undefined);
+  assert.equal(records[0]!.pendingSync, true);
+  assert.equal(records[0]!.expectedVersion, 0);
+  assert.equal(records[0]!.mutationId, "pending-mutation");
+  assert.equal(records[1]!.pendingSync, undefined);
   assert.deepEqual(loadAgentConversationBackups(local, "other"), []);
   assert.equal(saveActiveAgentConversation(local, "one", "latest"), true);
   assert.equal(loadActiveAgentConversation(local, "one"), "latest");
@@ -295,29 +297,29 @@ test("断线备份区分最新聊天与冻结重试请求，刷新后继续使�
   const record = historyRecord("pending", { messages: [{ role: "user", content: "最新内容", delivery: "sent" }], retryRequest });
   assert.equal(saveAgentConversationBackup(local, "one", record, { pendingSync: true }), true);
   const restored = loadAgentConversationBackups(local, "one")[0];
-  assert.equal(restored.messages[0].content, "最新内容");
-  assert.deepEqual(restored.retryRequest, retryRequest);
-  assert.equal(restored.pendingSync, true);
+  assert.equal(restored!.messages[0]!.content, "最新内容");
+  assert.deepEqual(restored!.retryRequest, retryRequest);
+  assert.equal(restored!.pendingSync, true);
   assert.equal(saveAgentConversationBackup(local, "one", historyRecord("pending")), true);
-  assert.equal(loadAgentConversationBackups(local, "one")[0].retryRequest, undefined);
+  assert.equal(loadAgentConversationBackups(local, "one")[0]!.retryRequest, undefined);
 });
 
 test("完整历史不截断80条和长回复，恢复时停止运行状态并移除运行字段", () => {
-  const messages = Array.from({ length: 90 }, (_, index) => ({ role: "user", content: `第${index}条`, delivery: "sent" }));
+  const messages: Message[] = Array.from({ length: 90 }, (_, index) => ({ role: "user", content: `第${index}条`, delivery: "sent" }));
   messages.push({ role: "user", content: "最后任务", delivery: "pending", revision: "2", sessionId: "不保存" },
     { role: "assistant", content: "字".repeat(40_000), status: "writing", revision: "2", label: "不保存" });
   const snapshot = agentHistorySnapshot(messages);
   assert.equal(snapshot.schemaVersion, 4);
   assert.equal(snapshot.messages.length, 92);
-  assert.equal(snapshot.messages[0].content, "第0条");
-  assert.equal(snapshot.messages.at(-2).delivery, "stopped");
-  assert.equal(snapshot.messages.at(-2).sessionId, undefined);
-  assert.equal(snapshot.messages.at(-1).content.length, 40_000);
-  assert.equal(snapshot.messages.at(-1).status, "stopped");
-  assert.equal(snapshot.messages.at(-1).label, undefined);
+  assert.equal(snapshot.messages[0]!.content, "第0条");
+  assert.equal(snapshot.messages.at(-2)!.delivery, "stopped");
+  assert.equal(snapshot.messages.at(-2)!.sessionId, undefined);
+  assert.equal(snapshot.messages.at(-1)!.content.length, 40_000);
+  assert.equal(snapshot.messages.at(-1)!.status, "stopped");
+  assert.equal(snapshot.messages.at(-1)!.label, undefined);
   const local = storage();
   assert.equal(saveAgentConversationBackup(local, "one", historyRecord("complete", { messages })), true);
-  assert.equal(loadAgentConversationBackups(local, "one")[0].messages.length, 92);
+  assert.equal(loadAgentConversationBackups(local, "one")[0]!.messages.length, 92);
   assert.equal(agentConversationSnapshot(messages).messages.length, 80);
 });
 
@@ -329,7 +331,7 @@ test("完整历史无效或超过8MiB明确失败，既有完整备份不被裁�
   const oversized = [{ role: "assistant", content: "x".repeat(8 * 1024 * 1024), status: "complete" }];
   assert.throws(() => agentHistorySnapshot(oversized), /8 MiB/);
   assert.equal(saveAgentConversationBackup(local, "one", { ...record, messages: oversized }), false);
-  assert.equal(loadAgentConversationBackups(local, "one")[0].messages[0].content, "safe");
+  assert.equal(loadAgentConversationBackups(local, "one")[0]!.messages[0]!.content, "safe");
   assert.equal(saveAgentConversationBackup(local, "other", record), false);
 });
 
@@ -337,7 +339,7 @@ test("schema4只持久化附件ID，兼容旧版备份并拒绝重复、跨路�
   const message = { role: "user", content: "", delivery: "sent", attachments: [{ id: "material-one", data: "不保存二进制", name: "仅元数据查询显示" }] };
   const snapshot = agentHistorySnapshot([message]);
   assert.equal(snapshot.schemaVersion, 4);
-  assert.deepEqual(snapshot.messages[0].attachments, [{ id: "material-one" }]);
+  assert.deepEqual(snapshot.messages[0]!.attachments, [{ id: "material-one" }]);
   for (const attachments of [[{ id: "../other" }], [{ id: "material-one" }, { id: "material-one" }],
     Array.from({ length: 11 }, (_, index) => ({ id: `material-${index}` }))]) {
     assert.throws(() => agentHistorySnapshot([{ ...message, attachments }]), /附件引用格式无效/);
@@ -350,7 +352,7 @@ test("schema4只持久化附件ID，兼容旧版备份并拒绝重复、跨路�
   assert.equal(saveAgentConversationBackup(local, "one", historyRecord("image", { ...snapshot })), true);
   const restored = loadAgentConversationBackups(local, "one");
   assert.equal(restored.length, 4);
-  assert.deepEqual(restored.find((entry) => entry.id === "image").messages[0].attachments, [{ id: "material-one" }]);
+  assert.deepEqual(restored.find((entry) => entry.id === "image")!.messages[0]!.attachments, [{ id: "material-one" }]);
 });
 
 test("删除备份只删除所选对话并清选中记录，Agent删除清理全部聊天备份", () => {

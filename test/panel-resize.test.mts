@@ -2,38 +2,53 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import type { initPanelResize } from "../public/panel-resize.js";
+
+interface CapturedResize { handle: unknown; minWidth: number; getMax(): number; watch: unknown[] }
 
 const source = (await readFile(new URL("../public/panel-resize.js", import.meta.url), "utf8")).replace(/^export /gm, "");
 const VARIABLE = "--test-panel-width", STORAGE_KEY = "test-panel-width";
 
 function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMax = maxWidth,
   stored, enabled = true, collapsed = false, collapsedWidth = 40,
-  observer = true, storageBlocked = false, handleRect = { top: 0, height: 900 } } = {}) {
+  observer = true, storageBlocked = false, handleRect = { top: 0, height: 900 } }: { defaultWidth?: number; minWidth?: number; maxWidth?: number; availableMax?: number; stored?: unknown; enabled?: boolean; collapsed?: boolean; collapsedWidth?: number; observer?: boolean; storageBlocked?: boolean; handleRect?: { top: number; height: number } } = {}) {
+  interface FixtureEvent { type: string; button?: number; isPrimary?: boolean; pointerId?: number; clientX?: number; clientY?: number; shiftKey?: boolean; timeStamp?: number; key?: string; defaultPrevented?: boolean; propagationStopped?: boolean; preventDefault?(): void; stopPropagation?(): void }
+  interface FixtureStyle { setProperty(key: string, value: unknown): unknown; getPropertyValue(key: string): string; removeProperty(key: string): unknown }
+  interface FixtureObserver { kind: string; targets: Events[]; disconnected: boolean; callback(entries: { target: Events }[]): void; observe(target: Events): void; disconnect(): void }
   class Events {
-    listeners = new Map();
-    addEventListener(type, callback, options = {}) {
+    listeners = new Map<string, Set<(event: FixtureEvent) => void>>();
+    declare getBoundingClientRect: () => { top: number; bottom: number; left: number; width: number; height: number; right?: number };
+    declare classList: ReturnType<typeof makeClasses>; declare style: FixtureStyle; declare inert: boolean; declare tabIndex: number;
+    declare setPointerCapture: (id: number) => unknown; declare hasPointerCapture: (id: number) => boolean; declare releasePointerCapture: (id: number) => void;
+    declare setAttribute: (name: string, value: unknown) => unknown; declare getAttribute: (name: string) => string | null; declare removeAttribute: (name: string) => unknown;
+    declare focus: () => void; declare performance: { now(): number }; declare innerWidth: number; declare innerHeight: number;
+    declare getComputedStyle: () => { columnGap: string }; declare localStorage: typeof storage; declare document: typeof document;
+    declare ResizeObserver: new (callback: FixtureObserver["callback"]) => FixtureObserver;
+    declare MutationObserver: new (callback: FixtureObserver["callback"]) => FixtureObserver;
+    addEventListener(type: string, callback: (event: FixtureEvent) => void, options: { signal?: AbortSignal } = {}) {
       if (options.signal?.aborted) return;
       const callbacks = this.listeners.get(type) ?? new Set(); callbacks.add(callback); this.listeners.set(type, callbacks);
       options.signal?.addEventListener("abort", () => this.removeEventListener(type, callback), { once: true });
     }
-    removeEventListener(type, callback) { this.listeners.get(type)?.delete(callback); }
-    dispatchEvent(event) { for (const callback of [...(this.listeners.get(event.type) ?? [])]) callback(event); }
+    removeEventListener(type: string, callback: (event: FixtureEvent) => void) { this.listeners.get(type)?.delete(callback); }
+    dispatchEvent(event: FixtureEvent) { for (const callback of [...(this.listeners.get(event.type) ?? [])]) callback(event); }
     listenerCount() { return [...this.listeners.values()].reduce((count, callbacks) => count + callbacks.size, 0); }
   }
   const makeClasses = () => {
-    const names = new Set();
-    return { add: (...values) => values.forEach((value) => names.add(value)),
-      remove: (...values) => values.forEach((value) => names.delete(value)),
-      toggle: (value, active) => active ? names.add(value) : names.delete(value), contains: (value) => names.has(value) };
+    const names = new Set<string>();
+    return { add: (...values: string[]) => values.forEach((value) => names.add(value)),
+      remove: (...values: string[]) => values.forEach((value) => names.delete(value)),
+      toggle: (value: string, active?: boolean) => active ? names.add(value) : names.delete(value), contains: (value: string) => names.has(value) };
   };
   let clock = 0;
-  const properties = new Map(), attributes = new Map(), captures = new Set(), writes = [], releases = [], observations = [], collapses = [], expands = [], callbacks = [], renders = [];
+  interface CallbackState { width: number; captured: boolean; resizing: boolean }
+  const properties = new Map<string, string>(), attributes = new Map<string, string>(), captures = new Set<number>(), writes: { key: string; value: string }[] = [], releases: number[] = [], observations: FixtureObserver[] = [], collapses: CallbackState[] = [], expands: CallbackState[] = [], callbacks: (CallbackState & {kind: string; revealing: boolean})[] = [], renders: number[] = [];
   const layout = new Events(); layout.classList = makeClasses();
   layout.style = { setProperty: (key, value) => properties.set(key, String(value)), getPropertyValue: (key) => properties.get(key) ?? "",
     removeProperty: (key) => properties.delete(key) };
   layout.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1280, bottom: 900, width: 1280, height: 900 });
-  const document = { activeElement: null, getElementById: () => null, body: { style: {}, classList: makeClasses() }, documentElement: { style: {} } };
-  const handleProperties = new Map();
+  const document: { activeElement: Events | null; getElementById(): null; body: { style: object; classList: ReturnType<typeof makeClasses> }; documentElement: { style: object } } = { activeElement: null, getElementById: () => null, body: { style: {}, classList: makeClasses() }, documentElement: { style: {} } };
+  const handleProperties = new Map<string, string>();
   const handle = new Events(); handle.classList = makeClasses(); handle.inert = false;
   handle.style = { setProperty: (key, value) => handleProperties.set(key, String(value)), getPropertyValue: (key) => handleProperties.get(key) ?? "",
     removeProperty: (key) => handleProperties.delete(key) };
@@ -43,20 +58,21 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
   handle.removeAttribute = (key) => attributes.delete(key);
   Object.defineProperty(handle, "tabIndex", { get: () => Number(attributes.get("tabindex") ?? 0),
     set: (value) => attributes.set("tabindex", String(value)) });
-  handle.setPointerCapture = (id) => captures.add(id);
-  handle.hasPointerCapture = (id) => captures.has(id);
-  handle.releasePointerCapture = (id) => { captures.delete(id); releases.push(id); };
+  handle.setPointerCapture = (id: number) => captures.add(id);
+  handle.hasPointerCapture = (id: number) => captures.has(id);
+  handle.releasePointerCapture = (id: number) => { captures.delete(id); releases.push(id); };
   handle.focus = () => { document.activeElement = handle; handle.dispatchEvent({ type: "focus" }); };
   const watchTarget = new Events(); watchTarget.classList = makeClasses(); watchTarget.getBoundingClientRect = layout.getBoundingClientRect;
   const values = new Map(stored === undefined ? [] : [[STORAGE_KEY, String(stored)]]);
-  const storage = { getItem(key) { if (storageBlocked) throw new Error("Storage unavailable"); return values.get(key) ?? null; },
-    setItem(key, value) { writes.push({ key, value: String(value) }); if (storageBlocked) throw new Error("Storage unavailable"); values.set(key, String(value)); } };
+  const storage = { getItem(key: string) { if (storageBlocked) throw new Error("Storage unavailable"); return values.get(key) ?? null; },
+    setItem(key: string, value: string) { writes.push({ key, value: String(value) }); if (storageBlocked) throw new Error("Storage unavailable"); values.set(key, String(value)); } };
   const windowRef = new Events(); windowRef.localStorage = storage; windowRef.performance = { now: () => clock };
   windowRef.innerWidth = 1280; windowRef.innerHeight = 900; windowRef.document = document;
   windowRef.getComputedStyle = () => ({ columnGap: "0px" });
-  const makeObserver = (kind) => class {
-    constructor(callback) { this.callback = callback; this.kind = kind; this.targets = []; this.disconnected = false; observations.push(this); }
-    observe(target) { this.targets.push(target); }
+  const makeObserver = (kind: string) => class implements FixtureObserver {
+    declare kind: string; declare targets: Events[]; declare disconnected: boolean; declare callback: FixtureObserver["callback"];
+    constructor(callback: FixtureObserver["callback"]) { this.callback = callback; this.kind = kind; this.targets = []; this.disconnected = false; observations.push(this); }
+    observe(target: Events) { this.targets.push(target); }
     disconnect() { this.disconnected = true; }
   };
   if (observer) { windowRef.ResizeObserver = makeObserver("resize"); windowRef.MutationObserver = makeObserver("mutation"); }
@@ -67,14 +83,14 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
   const applied = () => Number.parseFloat(layout.style.getPropertyValue(VARIABLE));
   const callbackState = () => ({ width: applied(), captured: handle.hasPointerCapture(7),
     resizing: layout.classList.contains("is-panel-resizing") });
-  const rememberCallback = (kind, state) => callbacks.push({ kind, ...state, revealing: layout.classList.contains("is-panel-revealing") });
-  const controller = context.initPanelResize({ layout, handle, variable: VARIABLE, storageKey: STORAGE_KEY, label: "测试栏",
+  const rememberCallback = (kind: string, state: CallbackState) => callbacks.push({ kind, ...state, revealing: layout.classList.contains("is-panel-revealing") });
+  const controller: ReturnType<typeof initPanelResize> = context.initPanelResize({ layout, handle, variable: VARIABLE, storageKey: STORAGE_KEY, label: "测试栏",
     defaultWidth, minWidth, maxWidth, getMax: () => availableMax, isEnabled: () => enabled, isCollapsed: () => collapsed,
-    collapsedWidth, windowRef, storage, now: () => clock, watch: [watchTarget], onRender: (width) => renders.push(width),
+    collapsedWidth, windowRef, storage, now: () => clock, watch: [watchTarget], onRender: (width: number) => renders.push(width),
     collapse() { const state = callbackState(); collapsed = true; collapses.push(state); rememberCallback("collapse", state); },
     expand() { const state = callbackState(); collapsed = false; expands.push(state); rememberCallback("expand", state); } });
-  const emit = (type, fields = {}, target = handle) => {
-    const event = { type, button: 0, isPrimary: true, pointerId: 7, clientX: 400, clientY: 350, shiftKey: false, timeStamp: clock, ...fields,
+  const emit = (type: string, fields: Partial<FixtureEvent> = {}, target = handle) => {
+    const event: FixtureEvent & { pointerId: number } = { type, button: 0, isPrimary: true, pointerId: 7, clientX: 400, clientY: 350, shiftKey: false, timeStamp: clock, ...fields,
       preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.propagationStopped = true; } };
     if (type === "lostpointercapture") captures.delete(event.pointerId);
     target.dispatchEvent(event); if (target !== windowRef && !event.propagationStopped) windowRef.dispatchEvent(event); return event;
@@ -84,10 +100,10 @@ function setup({ defaultWidth = 208, minWidth = 160, maxWidth = 360, availableMa
     else windowRef.dispatchEvent({ type: "resize" });
   };
   return { controller, layout, handle, windowRef, watchTarget, document, values, writes, releases, observations, collapses, expands, callbacks, renders, emit, applied, notify,
-    grip: () => handle.style.getPropertyValue("--panel-grip-y") || "50%", setRect: (value) => { handleRect = { ...handleRect, ...value }; },
-    time: (value) => { clock = value; }, setMax: (value) => { availableMax = value; notify(); },
-    setEnabled: (value) => { enabled = value; controller.refresh(); },
-    setCollapsed: (value) => { collapsed = value; notify(); }, collapsed: () => collapsed };
+    grip: () => handle.style.getPropertyValue("--panel-grip-y") || "50%", setRect: (value: Partial<{ top: number; height: number }>) => { handleRect = { ...handleRect, ...value }; },
+    time: (value: number) => { clock = value; }, setMax: (value: number) => { availableMax = value; notify(); },
+    setEnabled: (value: boolean) => { enabled = value; controller.refresh(); },
+    setCollapsed: (value: boolean) => { collapsed = value; notify(); }, collapsed: () => collapsed };
 }
 
 test("列宽默认值与存储偏好更新可访问范围，初始化不保存", () => {
@@ -391,7 +407,7 @@ test("各栏右拉32px仍实时预览，松手才吸附展开原偏好且不落�
     assert.equal(ui.values.get(STORAGE_KEY), String(profile.stored)); assert.equal(ui.writes.length, 0);
     assert.equal(ui.handle.hasPointerCapture(7), false); assert.equal(ui.layout.classList.contains("is-panel-revealing"), false);
     assert.equal(ui.layout.classList.contains("is-panel-resizing"), false);
-    assert.deepEqual([ui.callbacks[0].captured, ui.callbacks[0].resizing, ui.callbacks[0].revealing], [false, false, false]);
+    assert.deepEqual([ui.callbacks[0]!.captured, ui.callbacks[0]!.resizing, ui.callbacks[0]!.revealing], [false, false, false]);
   }
 });
 
@@ -457,7 +473,7 @@ test("预览和恰好开到最小值后的纯纵向移动不算调宽，不丢�
   for (const clientX of [400, 520]) {
     const ui = setup({ collapsed: true, stored: 300, availableMax: 220 }); ui.emit("pointerdown");
     ui.emit("pointermove", { clientX }, ui.windowRef);
-    for (const [time, clientY] of [[0, 400], [500, 500], [1000, 500]]) {
+    for (const [time, clientY] of [[0, 400], [500, 500], [1000, 500]] as const) {
       ui.time(time); ui.emit("pointermove", { clientX, clientY }, ui.windowRef);
       assert.equal(ui.applied(), clientX === 400 ? 40 : 160); assert.equal(ui.writes.length, 0);
     }
@@ -482,7 +498,7 @@ test("取消预览或实际展开调宽都回到最初折叠偏好，状态回�
     assert.equal(ui.handle.hasPointerCapture(7), false); assert.equal(ui.layout.classList.contains("is-panel-revealing"), false);
     assert.equal(ui.layout.classList.contains("is-panel-resizing"), false);
     if (phase === "resizing") {
-      const rollback = ui.callbacks.at(-1); assert.equal(rollback.kind, "collapse");
+      const rollback = ui.callbacks.at(-1)!; assert.equal(rollback.kind, "collapse");
       assert.deepEqual([rollback.captured, rollback.resizing, rollback.revealing], [false, false, false]);
       assert.equal(ui.expands.length, 1); assert.equal(ui.collapses.length, 1);
     } else assert.equal(ui.callbacks.length, 0);
@@ -499,7 +515,7 @@ test("同一手势即时拉出再等待350ms拉动24px只折叠一次，不保�
   ui.emit("pointermove", { clientX: 464 }, ui.windowRef);
   assert.equal(ui.collapsed(), true); assert.equal(ui.expands.length, 1); assert.equal(ui.collapses.length, 1);
   assert.equal(ui.applied(), 300); assert.equal(ui.values.get(STORAGE_KEY), "300"); assert.equal(ui.writes.length, 0);
-  assert.deepEqual([ui.callbacks.at(-1).captured, ui.callbacks.at(-1).resizing, ui.callbacks.at(-1).revealing], [false, false, false]);
+  assert.deepEqual([ui.callbacks.at(-1)!.captured, ui.callbacks.at(-1)!.resizing, ui.callbacks.at(-1)!.revealing], [false, false, false]);
   ui.emit("pointerup", { clientX: 464 }, ui.windowRef); assert.equal(ui.writes.length, 0);
 });
 
@@ -560,21 +576,21 @@ test("折叠态方向键、回车和空格可展开，End展开到最大，双�
 
 test("主导航只保留单一拖宽控制器，需求说明打开按实际对话预算夹紧", () => {
   const classes = () => {
-    const names = new Set();
-    return { contains: (name) => names.has(name), toggle: (name, active) => active ? names.add(name) : names.delete(name) };
+    const names = new Set<string>();
+    return { contains: (name: string) => names.has(name), toggle: (name: string, active?: boolean) => active ? names.add(name) : names.delete(name) };
   };
   let shellWidth = 1200;
   const shell = { classList: classes(), getBoundingClientRect: () => ({ width: shellWidth }) };
   const workspace = { classList: classes(), getBoundingClientRect: () => ({ width: 900 }) };
   const page = { hidden: false }, handle = {};
   workspace.classList.toggle("context-open", true);
-  const elements = new Map([["app-shell", shell], ["main-workspace", workspace], ["page-chat", page], ["sidebar-resize", handle]]);
-  const documentRef = { getElementById: (id) => elements.get(id) ?? null };
+  const elements = new Map<string, object>([["app-shell", shell], ["main-workspace", workspace], ["page-chat", page], ["sidebar-resize", handle]]);
+  const documentRef = { getElementById: (id: string) => elements.get(id) ?? null };
   const windowRef = { getComputedStyle: () => ({ paddingLeft: "16px", paddingRight: "36px" }) };
   const context = vm.createContext({ document: { getElementById: () => null }, window: {} });
   vm.runInContext(source, context);
-  const captured = []; context.initPanelResize = (options) => { captured.push(options); return options; };
-  const controllers = context.initWorkspaceResize({ documentRef, windowRef });
+  const captured: CapturedResize[] = []; context.initPanelResize = (options: CapturedResize) => { captured.push(options); return options; };
+  const controllers: { sidebar: CapturedResize } = context.initWorkspaceResize({ documentRef, windowRef });
   assert.equal(captured.length, 1); assert.equal(controllers.sidebar, captured[0]);
   assert.deepEqual(Object.keys(controllers), ["sidebar"]);
   assert.equal(controllers.sidebar.handle, handle); assert.equal(controllers.sidebar.minWidth, 175);
@@ -586,8 +602,8 @@ test("主导航只保留单一拖宽控制器，需求说明打开按实际对�
 
 test("Agent 单列对话的导航预算跟随设置与应用助手实际占宽，临时夹紧不覆盖偏好", () => {
   const classes = () => {
-    const names = new Set();
-    return { contains: (name) => names.has(name), toggle: (name, active) => active ? names.add(name) : names.delete(name) };
+    const names = new Set<string>();
+    return { contains: (name: string) => names.has(name), toggle: (name: string, active?: boolean) => active ? names.add(name) : names.delete(name) };
   };
   let workspaceWidth = 900, shellWidth = 1200, applicationExtra = 0;
   const shell = { classList: classes(), getBoundingClientRect: () => ({ width: shellWidth }) };
@@ -598,16 +614,16 @@ test("Agent 单列对话的导航预算跟随设置与应用助手实际占宽�
   const agentShell = { classList: classes(), getBoundingClientRect: () => ({ width: 924 }) };
   const panel = { hidden: true, getBoundingClientRect: () => ({ width: 400 }) };
   const applicationPanel = { getBoundingClientRect: () => ({ width: workspaceWidth - applicationExtra }) };
-  const elements = new Map([["app-shell", shell], ["main-workspace", main], ["page-chat", { hidden: true }],
+  const elements = new Map<string, object>([["app-shell", shell], ["main-workspace", main], ["page-chat", { hidden: true }],
     ["sidebar-resize", {}], ["page-agent", page], ["agent-workspace", workspace],
     ["agent-primary", primary], ["agent-page-shell", agentShell], ["agent-panel", panel], ["agent-application", applicationPanel]]);
-  const documentRef = { getElementById: (id) => elements.get(id) ?? null };
-  const windowRef = { getComputedStyle: (target) => target === page ? { paddingLeft: "10px", paddingRight: "0px" }
+  const documentRef = { getElementById: (id: string) => elements.get(id) ?? null };
+  const windowRef = { getComputedStyle: (target: { hidden?: boolean; getBoundingClientRect?: () => { width: number; }; }) => target === page ? { paddingLeft: "10px", paddingRight: "0px" }
     : target === primary ? { paddingLeft: "0px", paddingRight: "24px" } : { paddingLeft: "16px", paddingRight: "36px" } };
   const context = vm.createContext({ document: { getElementById: () => null }, window: {} });
   vm.runInContext(source, context);
-  const captured = []; context.initPanelResize = (options) => { captured.push(options); return options; };
-  const controllers = context.initWorkspaceResize({ documentRef, windowRef });
+  const captured: CapturedResize[] = []; context.initPanelResize = (options: CapturedResize) => { captured.push(options); return options; };
+  const controllers: { sidebar: CapturedResize } = context.initWorkspaceResize({ documentRef, windowRef });
   assert.equal(captured.length, 1); assert.deepEqual(Object.keys(controllers), ["sidebar"]);
   for (const target of [page, agentShell, primary, panel, applicationPanel]) assert.ok(controllers.sidebar.watch.includes(target));
   const preference = setup({ defaultWidth: 232, minWidth: 175, maxWidth: 320, stored: 300 });
@@ -628,8 +644,8 @@ test("Agent 单列对话的导航预算跟随设置与应用助手实际占宽�
   assert.equal(controllers.sidebar.getMax(), 422, "助手收回动画完成前仍扣实际占宽");
   shellWidth = 1060;
   for (const [settingsWidth, assistantWidth, gap] of [[400, 0, 0], [200, 180, 10], [0, 360, 20], [200, 180, 10], [400, 0, 0]]) {
-    workspaceWidth = 900 - settingsWidth; applicationExtra = assistantWidth + gap;
-    const budget = 662 - settingsWidth - assistantWidth - gap;
+    workspaceWidth = 900 - settingsWidth!; applicationExtra = assistantWidth! + gap!;
+    const budget = 662 - settingsWidth! - assistantWidth! - gap!;
     assert.equal(controllers.sidebar.getMax(), budget, `设置${settingsWidth}/助手${assistantWidth}时跟随实际占宽`);
     preference.setMax(budget); assert.equal(preference.applied(), budget);
     assert.equal(preference.values.get(STORAGE_KEY), "300"); assert.equal(preference.writes.length, 0);
@@ -644,8 +660,8 @@ test("Agent 单列对话的导航预算跟随设置与应用助手实际占宽�
 
 test("群组设置实际轨道连续更新导航预算，夹紧和关闭都不覆盖偏好", () => {
   const classes = () => {
-    const names = new Set();
-    return { contains: (name) => names.has(name), toggle: (name, active) => active ? names.add(name) : names.delete(name) };
+    const names = new Set<string>();
+    return { contains: (name: string) => names.has(name), toggle: (name: string, active?: boolean) => active ? names.add(name) : names.delete(name) };
   };
   let settingsWidth = 0;
   const shell = { classList: classes(), getBoundingClientRect: () => ({ width: 1000 }) };
@@ -654,16 +670,16 @@ test("群组设置实际轨道连续更新导航预算，夹紧和关闭都不�
   const groupShell = { classList: classes(), getBoundingClientRect: () => ({ width: 800 }) };
   const primary = { getBoundingClientRect: () => ({ width: 800 - settingsWidth }) };
   const panel = { hidden: false, getBoundingClientRect: () => ({ width: 400 }) };
-  const elements = new Map([["app-shell", shell], ["main-workspace", workspace], ["page-chat", page],
+  const elements = new Map<string, object>([["app-shell", shell], ["main-workspace", workspace], ["page-chat", page],
     ["sidebar-resize", {}], ["page-group", groupPage], ["group-page-shell", groupShell],
     ["group-primary", primary], ["group-panel", panel]]);
-  const documentRef = { getElementById: (id) => elements.get(id) ?? null };
-  const windowRef = { getComputedStyle: (target) => target === primary
+  const documentRef = { getElementById: (id: string) => elements.get(id) ?? null };
+  const windowRef = { getComputedStyle: (target: { getBoundingClientRect: () => { width: number; }; }) => target === primary
     ? { paddingLeft: "24px", paddingRight: "24px" } : { paddingLeft: "0px", paddingRight: "0px" } };
   const context = vm.createContext({ document: { getElementById: () => null }, window: {} });
   vm.runInContext(source, context);
-  const captured = []; context.initPanelResize = (options) => { captured.push(options); return options; };
-  const controllers = context.initWorkspaceResize({ documentRef, windowRef });
+  const captured: CapturedResize[] = []; context.initPanelResize = (options: CapturedResize) => { captured.push(options); return options; };
+  const controllers: { sidebar: CapturedResize } = context.initWorkspaceResize({ documentRef, windowRef });
   assert.equal(captured.length, 1);
   for (const target of [groupPage, groupShell, primary, panel]) assert.ok(controllers.sidebar.watch.includes(target));
   const preference = setup({ defaultWidth: 232, minWidth: 175, maxWidth: 320, stored: 300 });
