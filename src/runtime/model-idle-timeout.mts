@@ -1,6 +1,11 @@
+import { objectFields } from "./type-boundary.mjs";
+import type { ModelConfig } from "../contracts/model.mjs";
+export type FetchPort = typeof globalThis.fetch;
+export interface IdleTimeoutDiagnostic { phase: string; idleTimeoutMs: number; elapsedMs: number; firstResponseMs: number | null; lastDataMs: number | null; chunkCount: number; receivedBytes: number }
+const nativeResponse = (value: unknown): boolean => value instanceof Response;
 export const DEFAULT_MODEL_IDLE_TIMEOUT_MS = 90_000;
 
-export function modelIdleTimeoutMs(config = {}) {
+export function modelIdleTimeoutMs(config: ModelConfig = {}) {
   const value = config.llmIdleTimeoutMs ?? config.llmTimeoutMs ?? DEFAULT_MODEL_IDLE_TIMEOUT_MS;
   if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647)
     throw new TypeError("模型无响应等待时间必须为正整数毫秒");
@@ -8,24 +13,25 @@ export function modelIdleTimeoutMs(config = {}) {
 }
 
 /** Watch transport inactivity, never the total duration or model response contents. */
-export function withModelIdleTimeout(fetchImpl, { idleTimeoutMs = DEFAULT_MODEL_IDLE_TIMEOUT_MS, onDiagnostic } = {}) {
+export function withModelIdleTimeout(fetchImpl: FetchPort, { idleTimeoutMs = DEFAULT_MODEL_IDLE_TIMEOUT_MS, onDiagnostic }: { idleTimeoutMs?: number; onDiagnostic?: (diagnostic: IdleTimeoutDiagnostic) => unknown | Promise<unknown> } = {}): FetchPort {
   modelIdleTimeoutMs({ llmIdleTimeoutMs: idleTimeoutMs });
   return async (input, init = {}) => {
-    const external = init.signal ?? input?.signal;
+    const external = init.signal ?? objectFields(input).signal as AbortSignal | null | undefined;
     external?.throwIfAborted();
     const controller = new AbortController(), started = performance.now();
-    let timer, reader, unreadErrorResponse, streamController, finished = false, firstResponseMs = null, lastDataMs = null;
+    let timer: ReturnType<typeof setTimeout> | undefined, reader: ReadableStreamDefaultReader<Uint8Array> | undefined, unreadErrorResponse: Response | undefined, streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let finished = false, firstResponseMs: number | null = null, lastDataMs: number | null = null;
     let chunkCount = 0, receivedBytes = 0;
     const cleanup = () => { clearTimeout(timer); external?.removeEventListener("abort", cancelled); };
     const finish = () => { finished = true; cleanup(); };
-    const stop = (reason) => {
+    const stop = (reason: unknown) => {
       if (finished) return;
       finish(); controller.abort(reason);
       try { streamController?.error(reason); } catch { /* The consumer may have already cancelled. */ }
       try { void (reader ? reader.cancel(reason) : unreadErrorResponse?.body?.cancel(reason))?.catch(() => {}); }
       catch { /* Cleanup must not delay cancellation. */ }
     };
-    const cancelled = () => stop(external.reason);
+    const cancelled = () => stop(external?.reason);
     const reset = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
@@ -38,13 +44,13 @@ export function withModelIdleTimeout(fetchImpl, { idleTimeoutMs = DEFAULT_MODEL_
         stop(error);
       }, idleTimeoutMs);
     };
-    const wait = async (operation) => {
+    const wait = async <T,>(operation: () => T | PromiseLike<T>): Promise<T> => {
       controller.signal.throwIfAborted();
-      let abort;
+      let abort = () => {};
       try {
         return await Promise.race([Promise.resolve().then(() => {
           controller.signal.throwIfAborted(); return operation();
-        }), new Promise((_, reject) => {
+        }), new Promise<never>((_, reject) => {
           abort = () => reject(controller.signal.reason);
           controller.signal.addEventListener("abort", abort, { once: true });
           if (controller.signal.aborted) abort();
@@ -65,7 +71,7 @@ export function withModelIdleTimeout(fetchImpl, { idleTimeoutMs = DEFAULT_MODEL_
         clearTimeout(timer); unreadErrorResponse = response;
       } else if (!response.body?.getReader) {
         // Some injected transports provide only text(); real Fetch responses use the stream below.
-        if (!response.body && !(response instanceof Response) && typeof response.text === "function") {
+        if (!response.body && !nativeResponse(response) && typeof response.text === "function") {
           return new Proxy(response, { get(target, key) {
             if (key === "text") return async () => {
               try { return await wait(() => target.text()); } finally { finish(); }
@@ -76,13 +82,13 @@ export function withModelIdleTimeout(fetchImpl, { idleTimeoutMs = DEFAULT_MODEL_
         }
         finish(); return response;
       }
-      if (!lazyErrorBody) reader = response.body.getReader();
-      const body = new ReadableStream({
+      if (!lazyErrorBody) reader = response.body!.getReader();
+      const body = new ReadableStream<Uint8Array>({
         start(value) { streamController = value; },
         async pull(value) {
           try {
-            if (!reader) { reader = response.body.getReader(); reset(); }
-            const next = await wait(() => reader.read());
+            if (!reader) { reader = response.body!.getReader(); reset(); }
+            const next = await wait(() => reader!.read());
             if (next.done) { finish(); value.close(); return; }
             if (next.value.byteLength > 0) {
               chunkCount++; receivedBytes += next.value.byteLength;

@@ -1,3 +1,7 @@
+import type { Stats } from "node:fs";
+import type { UnknownRecord } from "../contracts/json.mjs";
+import type { AgentStoragePort } from "../runtime/storage-port.mjs";
+import { objectFields, isArray, isInteger, errorField } from "../runtime/type-boundary.mjs";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
@@ -6,38 +10,39 @@ import { InputError } from "../requirements/core.mjs";
 import { hashValue } from "../development/development-contract.mjs";
 import { assertRequirementDraftSize } from "../requirements/requirement-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
+interface MigrationAgent { definition: UnknownRecord | null; architectures: (UnknownRecord & { version: number })[]; runs: (UnknownRecord & { id: string })[]; workspace: string | null; snapshots: Set<string> }
 
-const migrations = new Map();
+const migrations = new Map<string, Promise<void>>();
 const MARKER = "agents-layout.json";
 
-export function agentId(value) {
+export function agentId(value: unknown): string {
   if (typeof value !== "string" || !/^[\w-]{1,80}$/.test(value)) throw new InputError("Agent 标识无效");
   return value;
 }
 
-function parts(path) {
+function parts(path: unknown): string[] {
   if (typeof path !== "string" || path.includes("\\") || path.includes("\0")
     || path.split("/").some((part) => !part || part === "." || part === "..")) throw new InputError("Agent 存储路径无效");
   return path.split("/");
 }
 
-async function directory(path, create = false) {
+async function directory(path: string, create = false) {
   if (create) await mkdir(path, { mode: 0o700 });
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new InputError("Agent 存储目录必须是真实目录");
   return realpath(path);
 }
 
-async function ensureDirectory(path) {
+async function ensureDirectory(path: string) {
   try { return await directory(path); }
   catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    if (errorField(error, "code") !== "ENOENT") throw error;
     try { return await directory(path, true); }
-    catch (error) { if (error.code !== "EEXIST") throw error; return directory(path); }
+    catch (error) { if (errorField(error, "code") !== "EEXIST") throw error; return directory(path); }
   }
 }
 
-async function checkAtomicReplacement(path, previous, attempt, maxBytes) {
+async function checkAtomicReplacement(path: string, previous: Stats, attempt: number, maxBytes: number) {
   const replacement = await lstat(path);
   if (!replacement.isFile() || replacement.isSymbolicLink() || replacement.nlink !== 1
     || replacement.dev !== previous.dev || replacement.ino === previous.ino)
@@ -46,7 +51,7 @@ async function checkAtomicReplacement(path, previous, attempt, maxBytes) {
   if (attempt >= 2) throw new InputError("Agent 数据读取期间连续更新，请稍后重试");
 }
 
-async function readFile(path, maxBytes = Infinity) {
+async function readFile(path: string, maxBytes = Infinity): Promise<Buffer> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const info = await lstat(path);
     // A path stat can also finish against an inode unlinked by atomic rename.
@@ -70,23 +75,24 @@ async function readFile(path, maxBytes = Infinity) {
       return content;
     } finally { await handle.close(); }
   }
+  throw new InputError("Agent 数据读取期间连续更新，请稍后重试");
 }
 
-async function readJson(path, maxBytes) {
+async function readJson(path: string, maxBytes?: number): Promise<UnknownRecord | null> {
   try {
-    const value = JSON.parse((await readFile(path, maxBytes)).toString("utf8"));
+    const value: unknown = JSON.parse((await readFile(path, maxBytes)).toString("utf8"));
     if (!value || typeof value !== "object") throw new InputError("Agent 数据文件格式无效");
-    return value;
+    return value as UnknownRecord;
   }
   catch (error) {
-    if (error.code === "ENOENT") return null;
+    if (errorField(error, "code") === "ENOENT") return null;
     if (error instanceof InputError) throw error;
     throw new InputError("Agent 数据文件无法读取，请保留文件并检查后重试");
   }
 }
 
-async function atomicJson(path, value, signal) {
-  try { await readFile(path); } catch (error) { if (error.code !== "ENOENT") throw error; }
+async function atomicJson(path: string, value: unknown, signal?: AbortSignal) {
+  try { await readFile(path); } catch (error) { if (errorField(error, "code") !== "ENOENT") throw error; }
   const temporary = join(dirname(path), `.pending-${randomUUID()}.json`);
   try {
     const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -97,7 +103,7 @@ async function atomicJson(path, value, signal) {
   } finally { await rm(temporary, { force: true }); }
 }
 
-async function tree(source, destination) {
+async function tree(source: string, destination: string): Promise<void> {
   await directory(source);
   const sourceInfo = await lstat(source);
   await ensureDirectory(destination);
@@ -117,13 +123,13 @@ async function tree(source, destination) {
   await chmod(destination, sourceInfo.mode & 0o777);
 }
 
-async function entries(path) {
+async function entries(path: string) {
   try { await directory(path); return await readdir(path, { withFileTypes: true }); }
-  catch (error) { if (error.code === "ENOENT") return []; throw error; }
+  catch (error) { if (errorField(error, "code") === "ENOENT") return []; throw error; }
 }
 
-async function discardStaging(path) {
-  const visit = async (current) => {
+async function discardStaging(path: string) {
+  const visit = async (current: string): Promise<void> => {
     await chmod(current, 0o700);
     for (const entry of await readdir(current, { withFileTypes: true }))
       if (entry.isDirectory() && !entry.isSymbolicLink()) await visit(join(current, entry.name));
@@ -132,33 +138,34 @@ async function discardStaging(path) {
   await rm(path, { recursive: true, force: true });
 }
 
-function relocateSnapshot(value, id, dataDir, snapshots, originalDataDir) {
-  if (value === null) return null;
-  if (!value || typeof value.path !== "string" || typeof value.hash !== "string" || !Array.isArray(value.files)
-    || !/^[a-f0-9]{64}$/.test(value.hash) || ![dataDir, originalDataDir].some((root) => resolve(value.path) === join(root, "development-snapshots", value.hash)))
+function relocateSnapshot(input: unknown, id: string, dataDir: string, snapshots: Set<string>, originalDataDir: string) {
+  if (input === null) return null;
+  const value = objectFields(input);
+  if (!value || typeof value.path !== "string" || typeof value.hash !== "string" || !isArray(value.files)
+    || !/^[a-f0-9]{64}$/.test(value.hash) || ![dataDir, originalDataDir].some((root) => resolve(value.path as string) === join(root, "development-snapshots", value.hash as string)))
     throw new InputError("旧研发快照路径无效，迁移已停止，原文件保留");
   snapshots.add(value.hash);
   return { ...value, path: join(dataDir, "agents", id, "development", "snapshots", value.hash), agentId: id };
 }
 
-function relocate(value, id, dataDir, snapshots, originalDataDir) {
+function relocate(value: UnknownRecord, id: string, dataDir: string, snapshots: Set<string>, originalDataDir: string) {
   const result = structuredClone(value);
-  const snapshot = (value) => relocateSnapshot(value, id, dataDir, snapshots, originalDataDir);
+  const snapshot = (value: unknown) => relocateSnapshot(value, id, dataDir, snapshots, originalDataDir);
   // Business JSON can resemble a snapshot; only controller-owned references are relocated.
   for (const key of ["snapshot", "verifiedSnapshot"]) if (result[key] !== undefined) result[key] = snapshot(result[key]);
-  const relocatePackage = (value) => { if (value?.snapshot !== undefined) value.snapshot = snapshot(value.snapshot); };
+  const relocatePackage = (input: unknown) => { const value = objectFields(input); if (value.snapshot !== undefined) value.snapshot = snapshot(value.snapshot); };
   relocatePackage(result.package);
-  if (Array.isArray(result.deliveries)) for (const delivery of result.deliveries) relocatePackage(delivery?.package);
+  if (isArray(result.deliveries)) for (const delivery of result.deliveries) relocatePackage(objectFields(delivery).package);
   return result;
 }
 
-function legacyRequirement(value, id, origin) {
+function legacyRequirement(value: UnknownRecord, id: string, origin: string) {
   const date = origin === "architecture" ? value.createdAt : value.updatedAt ?? value.createdAt;
   return { id, name: value.name, draft: structuredClone(value.draft),
-    updatedAt: Number.isFinite(Date.parse(date)) ? date : "1970-01-01T00:00:00.000Z", _legacyFallback: origin };
+    updatedAt: Number.isFinite(Date.parse(date as string)) ? date : "1970-01-01T00:00:00.000Z", _legacyFallback: origin };
 }
 
-async function migrate(dataDir, legacyDataDir = dataDir) {
+async function migrate(dataDir: string, legacyDataDir = dataDir) {
   const originalDataDir = resolve(legacyDataDir);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   dataDir = await directory(dataDir);
@@ -170,51 +177,54 @@ async function migrate(dataDir, legacyDataDir = dataDir) {
   }
   const definitions = await readJson(join(dataDir, "agents.json"));
   const architectures = await readJson(join(dataDir, "architectures.json"));
-  if (definitions && (definitions.version !== 1 || !Array.isArray(definitions.agents))) throw new InputError("旧 Agent 定义格式无效，原文件保留");
-  if (architectures && (architectures.version !== 1 || !Array.isArray(architectures.records))) throw new InputError("旧架构记录格式无效，原文件保留");
-  const agents = new Map(), runIds = new Set(), architectureIds = new Set();
-  const recordFor = (id) => {
-    agentId(id);
+  if (definitions && (definitions.version !== 1 || !isArray(definitions.agents))) throw new InputError("旧 Agent 定义格式无效，原文件保留");
+  if (architectures && (architectures.version !== 1 || !isArray(architectures.records))) throw new InputError("旧架构记录格式无效，原文件保留");
+  const agents = new Map<string, MigrationAgent>(), runIds = new Set<string>(), architectureIds = new Set<string>();
+  const recordFor = (input: unknown): MigrationAgent => {
+    const id = agentId(input);
     if (!agents.has(id)) agents.set(id, { definition: null, architectures: [], runs: [], workspace: null, snapshots: new Set() });
-    return agents.get(id);
+    return agents.get(id)!;
   };
-  for (const agent of definitions?.agents ?? []) {
+  for (const raw of (definitions?.agents ?? []) as unknown[]) {
+    const agent = objectFields(raw);
     const item = recordFor(agent?.id);
     if (item.definition || typeof agent.name !== "string" || !agent.name.trim() || !textWithinLimit(agent.name, 120)
-      || typeof agent.draft?.goal?.value !== "string" || !agent.draft.goal.value.trim()
+      || typeof objectFields(objectFields(agent.draft).goal).value !== "string" || !(objectFields(objectFields(agent.draft).goal).value as string).trim()
       || typeof agent.instructions !== "string" || !agent.instructions.trim() || !textWithinLimit(agent.instructions, 12000)
-      || !Number.isSafeInteger(agent.revision) || agent.revision < 1
-      || !agent.draft || Array.isArray(agent.draft)
+      || !isInteger(agent.revision) || agent.revision < 1
+      || !agent.draft || isArray(agent.draft)
       || (agent.memory !== undefined && (typeof agent.memory !== "string" || !textWithinLimit(agent.memory, 12000) || agent.memory.includes("\0"))))
       throw new InputError("旧 Agent 定义格式无效，原文件保留");
     try { assertRequirementDraftSize(agent.draft); }
-    catch (error) { throw Object.assign(new InputError(error.message), { reason: error.reason, bytes: error.bytes, limitBytes: error.limitBytes }); }
+    catch (error) { throw Object.assign(new InputError(String(errorField(error, "message"))), { reason: errorField(error, "reason"), bytes: errorField(error, "bytes"), limitBytes: errorField(error, "limitBytes") }); }
     const profile = agent.profile;
-    if (profile !== undefined && (!profile || typeof profile !== "object" || Array.isArray(profile)
-      || typeof profile.name !== "string" || !profile.name.trim() || !textWithinLimit(profile.name, 120) || profile.name.includes("\0")
-      || typeof profile.description !== "string" || !textWithinLimit(profile.description, 240) || profile.description.includes("\0")
-      || typeof profile.icon !== "string" || !textWithinLimit(profile.icon, 16) || profile.icon.includes("\0")))
+    if (profile !== undefined && (!profile || typeof profile !== "object" || isArray(profile)
+      || typeof objectFields(profile).name !== "string" || !(objectFields(profile).name as string).trim() || !textWithinLimit(objectFields(profile).name, 120) || (objectFields(profile).name as string).includes("\0")
+      || typeof objectFields(profile).description !== "string" || !textWithinLimit(objectFields(profile).description, 240) || (objectFields(profile).description as string).includes("\0")
+      || typeof objectFields(profile).icon !== "string" || !textWithinLimit(objectFields(profile).icon, 16) || (objectFields(profile).icon as string).includes("\0")))
       throw new InputError("旧 Agent 展示资料格式无效，原文件保留");
     item.definition = agent;
   }
-  for (const record of architectures?.records ?? []) {
-    const item = recordFor(record?.agentId), key = record.agentId + ":" + record.version;
-    if (!Number.isSafeInteger(record.version) || record.version < 1 || architectureIds.has(key)) throw new InputError("旧架构记录格式无效，原文件保留");
-    architectureIds.add(key); item.architectures.push(record);
+  for (const raw of (architectures?.records ?? []) as unknown[]) {
+    const record = objectFields(raw);
+    const item = recordFor(record?.agentId), key = String(record.agentId) + ":" + String(record.version);
+    if (!isInteger(record.version) || record.version < 1 || architectureIds.has(key)) throw new InputError("旧架构记录格式无效，原文件保留");
+    architectureIds.add(key); item.architectures.push(record as UnknownRecord & { version: number });
   }
   for (const entry of await entries(join(dataDir, "development"))) {
     if (!entry.name.endsWith(".json")) continue;
-    const record = await readJson(join(dataDir, "development", entry.name));
+    const raw = await readJson(join(dataDir, "development", entry.name));
+    const record = objectFields(raw);
     const item = recordFor(record?.agentId);
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(record.id) || entry.name !== record.id + ".json" || runIds.has(record.id)
-      || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(record.agentId)
-      || (record.version !== undefined && (!Number.isSafeInteger(record.version) || record.version < 1))
-      || !Number.isSafeInteger(record.revision) || record.revision < 1 || typeof record.status !== "string" || !record.status.trim()
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(record.id as string) || entry.name !== record.id + ".json" || runIds.has(record.id as string)
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(record.agentId as string)
+      || (record.version !== undefined && (!isInteger(record.version) || record.version < 1))
+      || !isInteger(record.revision) || record.revision < 1 || typeof record.status !== "string" || !record.status.trim()
       || typeof record.createdAt !== "string" || typeof record.updatedAt !== "string"
       || !Number.isFinite(Date.parse(record.createdAt)) || !Number.isFinite(Date.parse(record.updatedAt))) throw new InputError("旧研发记录格式无效，原文件保留");
     hashValue(record);
-    runIds.add(record.id);
-    item.runs.push(relocate(record, record.agentId, dataDir, item.snapshots, originalDataDir));
+    runIds.add(record.id as string);
+    item.runs.push(relocate(record, record.agentId as string, dataDir, item.snapshots, originalDataDir) as UnknownRecord & { id: string });
   }
   for (const entry of await entries(join(dataDir, "agent-workspaces"))) {
     const item = recordFor(entry.name);
@@ -229,7 +239,7 @@ async function migrate(dataDir, legacyDataDir = dataDir) {
       const target = join(root, id);
       let exists = false;
       try { await directory(target); exists = true; }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
+      catch (error) { if (errorField(error, "code") !== "ENOENT") throw error; }
       if (exists) {
         const completed = await readJson(join(target, ".legacy-migrated.json"));
         if (completed?.version === 1) continue;
@@ -239,7 +249,7 @@ async function migrate(dataDir, legacyDataDir = dataDir) {
       if (item.definition) await atomicJson(join(temporary, "definition.json"), { version: 1, agent: item.definition });
       if (item.architectures.length) await atomicJson(join(temporary, "architecture.json"), { version: 1, records: item.architectures });
       const architecture = item.architectures.slice().sort((a, b) => b.version - a.version)
-        .find((record) => typeof record.name === "string" && record.name.trim() && typeof record.draft?.goal?.value === "string");
+        .find((record) => typeof record.name === "string" && record.name.trim() && typeof objectFields(objectFields(record.draft).goal).value === "string");
       const requirement = architecture ?? item.definition;
       if (requirement) await atomicJson(join(temporary, "requirements.json"), legacyRequirement(requirement, id, architecture ? "architecture" : "definition"));
       if (item.workspace) await tree(item.workspace, join(temporary, "workspace"));
@@ -252,7 +262,7 @@ async function migrate(dataDir, legacyDataDir = dataDir) {
           const source = join(dataDir, "development-workspaces", run.id);
           let found = false;
           try { await directory(join(dataDir, "development-workspaces")); await directory(source); found = true; }
-          catch (error) { if (error.code !== "ENOENT") throw error; }
+          catch (error) { if (errorField(error, "code") !== "ENOENT") throw error; }
           if (found) await tree(source, join(workspaces, run.id));
         }
         if (item.snapshots.size) {
@@ -269,8 +279,10 @@ async function migrate(dataDir, legacyDataDir = dataDir) {
   } finally { await discardStaging(staging); }
 }
 
-export class AgentStorage {
-  constructor({ dataDir, legacyDataDir = dataDir }) {
+export class AgentStorage implements AgentStoragePort {
+  readonly dataDir: string;
+  readonly ready: Promise<void>;
+  constructor({ dataDir, legacyDataDir = dataDir }: { dataDir: string; legacyDataDir?: string }) {
     if (typeof dataDir !== "string" || !dataDir || dataDir.includes("\0")) throw new InputError("Agent 存储目录无效");
     if (typeof legacyDataDir !== "string" || !legacyDataDir || legacyDataDir.includes("\0")) throw new InputError("旧 Agent 存储目录无效");
     this.dataDir = resolve(dataDir);
@@ -279,7 +291,7 @@ export class AgentStorage {
       migrations.set(this.dataDir, pending);
       void pending.finally(() => { if (migrations.get(this.dataDir) === pending) migrations.delete(this.dataDir); }).catch(() => {});
     }
-    this.ready = migrations.get(this.dataDir);
+    this.ready = migrations.get(this.dataDir)!;
     this.ready.catch(() => {});
   }
 
@@ -295,7 +307,7 @@ export class AgentStorage {
     return result.sort();
   }
 
-  async directory(id, subpath = "", { create = false } = {}) {
+  async directory(id: string, subpath = "", { create = false } = {}) {
     agentId(id); await this.ready;
     let current = await directory(this.dataDir);
     for (const part of ["agents", id, ...(subpath ? parts(subpath) : [])]) {
@@ -305,20 +317,20 @@ export class AgentStorage {
     return current;
   }
 
-  async path(id, file, create = false) {
-    const names = parts(file), name = names.pop();
+  async path(id: string, file: string, create = false) {
+    const names = parts(file), name = names.pop()!;
     return join(await this.directory(id, names.join("/"), { create }), name);
   }
 
-  async readJson(id, file, { maxBytes } = {}) {
+  async readJson(id: string, file: string, { maxBytes }: { maxBytes?: number } = {}) {
     try { return await readJson(await this.path(id, file), maxBytes); }
-    catch (error) { if (error.code === "ENOENT") return null; throw error; }
+    catch (error) { if (errorField(error, "code") === "ENOENT") return null; throw error; }
   }
 
-  async jsonFiles(id, subpath) {
+  async jsonFiles(id: string, subpath: string) {
     let root;
     try { root = await this.directory(id, subpath); }
-    catch (error) { if (error.code === "ENOENT") return []; throw error; }
+    catch (error) { if (errorField(error, "code") === "ENOENT") return []; throw error; }
     const files = [];
     for (const entry of await readdir(root, { withFileTypes: true })) {
       if (entry.name.startsWith(".pending-") && entry.name.endsWith(".json")) continue;
@@ -330,21 +342,21 @@ export class AgentStorage {
     return files.sort();
   }
 
-  async writeJson(id, file, value, { signal } = {}) {
+  async writeJson(id: string, file: string, value: unknown, { signal }: { signal?: AbortSignal | undefined } = {}) {
     await atomicJson(await this.path(id, file, true), value, signal);
   }
 
-  async removeFile(id, file) {
+  async removeFile(id: string, file: string) {
     let path;
     try { path = await this.path(id, file); await readFile(path); }
-    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    catch (error) { if (errorField(error, "code") === "ENOENT") return; throw error; }
     await rm(path);
   }
 
-  async removeDirectory(id, subpath) {
+  async removeDirectory(id: string, subpath: string) {
     let path;
     try { path = await this.directory(id, subpath); }
-    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    catch (error) { if (errorField(error, "code") === "ENOENT") return; throw error; }
     await rm(path, { recursive: true });
   }
 }
