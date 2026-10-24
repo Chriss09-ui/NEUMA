@@ -1,3 +1,8 @@
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import type { ProjectChild } from "./project-port.mjs";
+import { errorField, objectFields, isInteger, isArray } from "../runtime/type-boundary.mjs";
+export interface HelperOptions { platform?: NodeJS.Platform; arch?: string; helperPath?: string | undefined }
+interface SpawnProjectOptions extends HelperOptions { spawnImpl?: typeof spawn; nodePath?: string; stopTimeoutMs?: number; killTimeoutMs?: number }
 import { spawn } from "node:child_process";
 import { access, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -12,36 +17,36 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const ENV_KEYS = new Set(["PATH", "HOME", "USER", "LANG", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PATHEXT"]);
 const DESKTOP_KEYS = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CURRENT_DESKTOP"]);
 
-export function projectEnvironment(source = process.env, { desktop = false } = {}) {
+export function projectEnvironment(source: NodeJS.ProcessEnv = process.env, { desktop = false } = {}) {
   return Object.fromEntries(Object.entries(source).filter(([key, value]) => value
     && (ENV_KEYS.has(key.toUpperCase()) || desktop && DESKTOP_KEYS.has(key.toUpperCase()))));
 }
 
-export function projectHelperPath({ platform = process.platform, arch = process.arch } = {}) {
+export function projectHelperPath({ platform = process.platform, arch = process.arch }: HelperOptions = {}) {
   if (!["win32", "linux"].includes(platform) || !["x64", "arm64"].includes(arch)) throw new InputError("当前系统没有可用的项目管理辅助程序。");
   return join(ROOT, "native", "projects", "bin", `${platform}-${arch}`, platform === "win32" ? "neuma-projects.exe" : "neuma-projects");
 }
 
-export async function requireProjectHelper(options = {}) {
+export async function requireProjectHelper(options: HelperOptions = {}) {
   const path = options.helperPath || projectHelperPath(options);
   try { await access(path, constants.X_OK); }
   catch { throw new InputError("项目管理辅助程序尚未安装，请使用包含对应平台程序的完整 NEUMA 安装包。"); }
   return path;
 }
 
-async function isFile(path) {
+async function isFile(path: string) {
   try { await access(path, constants.R_OK); return await realpath(path); } catch { return null; }
 }
 
 // Package-manager .cmd shims are not executable files. Prefer their real Node entry point.
-export async function resolveProjectProgram(command, args, { platform = process.platform, env = projectEnvironment(), nodePath = process.execPath } = {}) {
+export async function resolveProjectProgram(command: string, args: string[], { platform = process.platform, env = projectEnvironment(), nodePath = process.execPath }: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv | undefined; nodePath?: string } = {}) {
   if (command === "node") return { command: nodePath, args };
   if (platform !== "win32" || !["npm", "pnpm", "yarn"].includes(command)) return { command, args };
   const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] || "";
   const bases = [...new Set([dirname(nodePath), ...pathValue.split(platform === "win32" ? ";" : delimiter).filter(Boolean)])];
-  const entries = { npm: ["npm/bin/npm-cli.js", "corepack/dist/npm.js"], pnpm: ["pnpm/bin/pnpm.cjs", "corepack/dist/pnpm.js"], yarn: ["yarn/bin/yarn.js", "corepack/dist/yarn.js"] };
+  const entries: Record<string, string[]> = { npm: ["npm/bin/npm-cli.js", "corepack/dist/npm.js"], pnpm: ["pnpm/bin/pnpm.cjs", "corepack/dist/pnpm.js"], yarn: ["yarn/bin/yarn.js", "corepack/dist/yarn.js"] };
   for (const base of bases) {
-    for (const entry of entries[command]) for (const parent of [join(base, "node_modules"), join(base, "..")]) {
+    for (const entry of entries[command]!) for (const parent of [join(base, "node_modules"), join(base, "..")]) {
       const cli = await isFile(join(parent, entry));
       if (cli) return { command: nodePath, args: [cli, ...args] };
     }
@@ -51,28 +56,28 @@ export async function resolveProjectProgram(command, args, { platform = process.
   throw new InputError(`没有找到 ${command} 的可执行入口，请确认该项目的包管理器已经安装。`);
 }
 
-export function validateBatchArguments(args) {
+export function validateBatchArguments(args: unknown[]) {
   // cmd expands % variables even inside quoted strings. Refuse such arguments instead of changing their meaning.
   if (args.some((arg) => typeof arg !== "string" || /[%"\r\n\0]/.test(arg))) {
     throw new InputError("Windows 批处理参数不能含百分号、双引号或换行，请使用项目的 Node 或 PowerShell 入口。");
   }
 }
 
-function supervisedChild(supervisor, { stopTimeoutMs = 3000, killTimeoutMs = 1000 } = {}) {
-  const child = new EventEmitter();
+function supervisedChild(supervisor: ChildProcess, { stopTimeoutMs = 3000, killTimeoutMs = 1000 } = {}) {
+  const child: ProjectChild & { stdout: PassThrough; stderr: PassThrough } = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), pid: null as number | null, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null, kill: (_signal?: NodeJS.Signals | number) => false });
   // A spawn failure can arrive before an asynchronous caller installs its error handler.
   child.on("error", () => {});
   child.stdout = new PassThrough(); child.stderr = new PassThrough();
   child.pid = null; child.exitCode = null; child.signalCode = null;
   child.managedPids = []; child.supervisor = supervisor; child.jobManaged = true;
-  let buffer = "", finished = false, launcherExited = false, stopRequested = false, forced = false, treeEmpty = false, stopPromise;
+  let buffer = "", finished = false, launcherExited = false, stopRequested = false, forced = false, treeEmpty = false, stopPromise: Promise<void> | undefined;
   const stopError = () => new InputError("未能确认项目进程树已全部停止，请重新查询运行状态。");
   const forceSupervisor = () => {
     if (finished || forced) return;
     forced = true;
     try { supervisor.kill("SIGKILL"); } catch { /* A close event is still required; kill success is not termination proof. */ }
   };
-  const finish = (code, signal) => {
+  const finish = (code: number | null, signal: NodeJS.Signals | null) => {
     if (finished) return;
     finished = true; child.exitCode = code; child.signalCode = signal;
     child.stdout.end(); child.stderr.end(); child.emit("exit", code, signal); child.emit("close", code, signal);
@@ -90,8 +95,8 @@ function supervisedChild(supervisor, { stopTimeoutMs = 3000, killTimeoutMs = 100
   child.stopTree = () => {
     if (stopPromise) return stopPromise;
     if (finished) return treeEmpty ? Promise.resolve() : Promise.reject(stopError());
-    stopPromise = new Promise((resolve, reject) => {
-      let deadline;
+    stopPromise = new Promise<void>((resolve, reject) => {
+      let deadline: NodeJS.Timeout | undefined;
       const cleanup = () => { clearTimeout(grace); clearTimeout(deadline); child.removeListener("close", closed); };
       const closed = () => { cleanup(); treeEmpty ? resolve() : reject(stopError()); };
       child.once("close", closed);
@@ -110,10 +115,10 @@ function supervisedChild(supervisor, { stopTimeoutMs = 3000, killTimeoutMs = 100
     let index;
     while ((index = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
-      let frame;
-      try { frame = JSON.parse(line); } catch { child.emit("error", new InputError("项目管理辅助程序返回了无效状态。")); child.kill(); continue; }
-      if (frame.event === "started" && Number.isSafeInteger(frame.pid) && frame.pid > 0) { child.pid = frame.pid; child.managedPids = [frame.pid]; child.emit("spawn"); }
-      else if (frame.event === "members" && Array.isArray(frame.pids)) child.managedPids = frame.pids.filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+      let frame: Record<string, unknown>;
+      try { frame = objectFields(JSON.parse(line)); } catch { child.emit("error", new InputError("项目管理辅助程序返回了无效状态。")); child.kill(); continue; }
+      if (frame.event === "started" && isInteger(frame.pid) && frame.pid > 0) { child.pid = frame.pid; child.managedPids = [frame.pid]; child.emit("spawn"); }
+      else if (frame.event === "members" && isArray(frame.pids)) child.managedPids = frame.pids.filter((pid): pid is number => isInteger(pid) && pid > 0);
       else if (frame.event === "stdout" && typeof frame.data === "string") child.stdout.write(Buffer.from(frame.data, "base64"));
       else if (frame.event === "stderr" && typeof frame.data === "string") child.stderr.write(Buffer.from(frame.data, "base64"));
       else if (frame.event === "launcherExit" && !launcherExited) { launcherExited = true; child.emit("launcherExit", frame.code); }
@@ -127,10 +132,10 @@ function supervisedChild(supervisor, { stopTimeoutMs = 3000, killTimeoutMs = 100
   return child;
 }
 
-export function spawnProject(command, args, options = {}, { spawnImpl = spawn, platform = process.platform, helperPath, nodePath = process.execPath,
-  stopTimeoutMs = 3000, killTimeoutMs = 1000 } = {}) {
+export function spawnProject(command: string, args: string[], options: SpawnOptions = {}, { spawnImpl = spawn, platform = process.platform, helperPath, nodePath = process.execPath,
+  stopTimeoutMs = 3000, killTimeoutMs = 1000 }: SpawnProjectOptions = {}): ProjectChild | Promise<ProjectChild> {
   if (platform !== "win32") {
-    const child = spawnImpl(command === "node" ? nodePath : command, args, options);
+    const child: ChildProcess & { neumaClosed?: boolean } = spawnImpl(command === "node" ? nodePath : command, args, options);
     child.once("close", () => { child.neumaClosed = true; });
     return child;
   }
@@ -138,20 +143,20 @@ export function spawnProject(command, args, options = {}, { spawnImpl = spawn, p
     const resolved = await resolveProjectProgram(command, args, { platform, env: options.env, nodePath });
     if ([".cmd", ".bat"].includes(extname(resolved.command).toLowerCase())) validateBatchArguments([resolved.command, ...resolved.args]);
     const helper = await requireProjectHelper({ platform, helperPath });
-    const supervisor = spawnImpl(helper, ["manage", options.cwd, resolved.command, ...resolved.args], {
+    const supervisor = spawnImpl(helper, ["manage", String(options.cwd), resolved.command, ...resolved.args], {
       ...options, detached: false, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     return supervisedChild(supervisor, { stopTimeoutMs, killTimeoutMs });
   })();
 }
 
-export function projectProcessGroupAlive(child) {
-  if (!Number.isSafeInteger(child?.pid) || child.pid < 1) return false;
+export function projectProcessGroupAlive(child: ProjectChild | null | undefined) {
+  if (!child || !isInteger(child.pid) || child.pid < 1) return false;
   try { process.kill(-child.pid, 0); return true; }
-  catch (error) { if (error.code === "ESRCH") return false; return true; }
+  catch (error) { if (errorField(error, "code") === "ESRCH") return false; return true; }
 }
 
-export async function stopProjectProcess(child, { platform = process.platform, stopTimeoutMs = 1500, killTimeoutMs = 1000 } = {}) {
+export async function stopProjectProcess(child: ProjectChild | null | undefined, { platform = process.platform, stopTimeoutMs = 1500, killTimeoutMs = 1000 } = {}) {
   if (!child) return;
   if (child.stopTree) return child.stopTree();
   if (!child.pid) return;
@@ -162,9 +167,9 @@ export async function stopProjectProcess(child, { platform = process.platform, s
   let closed = Boolean(child.neumaClosed), forced = false;
   const onClose = () => { closed = true; };
   child.once("close", onClose);
-  const kill = (signal) => {
-    try { process.kill(-child.pid, signal); return true; }
-    catch (error) { if (error.code !== "ESRCH") throw error; return false; }
+  const kill = (signal: NodeJS.Signals | number) => {
+    try { process.kill(-child.pid!, signal); return true; }
+    catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; return false; }
   };
   try {
     kill("SIGTERM");

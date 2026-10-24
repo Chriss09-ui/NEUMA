@@ -1,3 +1,10 @@
+import { objectFields as fields } from "../runtime/type-boundary.mjs";
+import type { NeumaTool } from "../runtime/pi-port.mjs";
+import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
+import type { GroupRecord, GroupTask, GroupSender, GroupJob, GroupChild, WorkRequest, GroupCapability, MemberCard, GroupIntent, ReplyRequest, ReplySubmission, TurnSubmission } from "../contracts/collaboration.mjs";
+import type { CollaborationService } from "./groups.mjs";
+interface GroupToolContext { groupId: string; taskId: string; agentId: string; generation: number; signal: AbortSignal }
+interface CapabilityPage { agentId: string; capabilityVersion: string | null; offset: number; nextOffset: number | null }
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { id, text, event, message, now, fingerprint, conflict } from "./group-store.mjs";
@@ -8,31 +15,31 @@ import { publicGroupMessages } from "./group-messages.mjs";
 
 const string = (maxLength = 4000) => ({ type: "string", maxLength });
 const identifier = { type: "string", maxLength: 80 };
-const schema = (properties, required = []) => ({ type: "object", properties, required, additionalProperties: false });
-const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
+const schema = (properties: Record<string, ToolSchema>, required: string[] = []): ToolSchema => ({ type: "object", properties, required, additionalProperties: false });
+const result = (value: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
 const replyRequestSchema = schema({ recipientId: identifier, kind: { type: "string", enum: ["question", "handoff", "confirmation"] } }, ["recipientId", "kind"]);
-const objectFields = (value, allowed, label) => {
+function objectFields(value: unknown, allowed: string[], label: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !allowed.includes(key))) throw new InputError(`${label}格式无效`);
 };
-export function normalizeReplyRequest(value) {
+export function normalizeReplyRequest(value: unknown): ReplyRequest | undefined {
   if (value === undefined) return undefined;
   objectFields(value, ["recipientId", "kind"], "接话请求");
-  if (!["question", "handoff", "confirmation"].includes(value.kind)) throw new InputError("接话请求类型无效");
+  if (typeof value.kind !== "string" || !["question", "handoff", "confirmation"].includes(value.kind)) throw new InputError("接话请求类型无效");
   return { recipientId: id(value.recipientId, "接话成员"), kind: value.kind };
 }
-const replyReferences = (value) => {
+const replyReferences = (value: Record<string, unknown>) => {
   const replyRequest = normalizeReplyRequest(value.replyRequest);
   const replyRecipientId = value.replyRecipientId !== undefined ? id(value.replyRecipientId, "引用成员") : replyRequest?.recipientId;
   if (replyRequest && replyRecipientId !== replyRequest.recipientId) throw new InputError("引用成员与接话目标必须一致");
   return { ...(replyRecipientId ? { replyRecipientId } : {}), ...(replyRequest ? { replyRequest } : {}) };
 };
-export const groupTaskAllowsNetwork = (record, task) => task.taskAllowNetwork !== false && groupConversationTasks(record, task).every((value) => value.taskAllowNetwork !== false)
+export const groupTaskAllowsNetwork = (record: Pick<GroupRecord, "tasks"> & { messages: { taskId: string | null; content: string; sender: { type: string } }[] }, task: GroupTask) => task.taskAllowNetwork !== false && groupConversationTasks(record, task).every((value) => value.taskAllowNetwork !== false)
   && networkAllowed(task.goal, ...groupConversationTasks(record, task).map((value) => value.goal), ...groupConversationMessages(record, task)
     .filter((value) => ["user", "main"].includes(value.sender?.type)).map((value) => value.content));
-export const groupTurnMessages = (record, task) => groupConversationMessages(record, task, publicGroupMessages(record))
+export const groupTurnMessages = (record: GroupRecord, task: GroupTask) => groupConversationMessages(record, task, publicGroupMessages(record))
   .filter((value) => value.taskId !== task.id).concat(record.messages.filter((value) => value.taskId === task.id)).sort((a, b) => a.seq - b.seq);
-const requiresNetwork = (capabilityId, capability) => capability?.requiresNetwork === true || ["web_search", "web_fetch"].includes(capabilityId);
-const checkTaskNetwork = (record, task, capabilityId, capability) => {
+const requiresNetwork = (capabilityId: string | undefined, capability?: GroupCapability) => capability?.requiresNetwork === true || ["web_search", "web_fetch"].includes(capabilityId ?? "");
+const checkTaskNetwork = (record: GroupRecord, task: GroupTask, capabilityId?: string, capability?: GroupCapability) => {
   if (requiresNetwork(capabilityId, capability) && !groupTaskAllowsNetwork(record, task)) throw new InputError("本次用户任务禁止联网，不能派发该联网能力");
 };
 export const GROUP_SYSTEM = `你是长期协作群的平等成员。群外的主 Agent 只做全局管理，不是群成员，不承担实际工作。
@@ -50,7 +57,7 @@ export const GROUP_SYSTEM = `你是长期协作群的平等成员。群外的主
 工具 list_group_materials/read_group_material/read_group_material_image 只读取本群共享材料；可用 read_group_artifact 读取成员已分享的成果。不能依靠未分享的私人材料或记忆回答。
 输入原件保留。可写文件时将成果放在本次任务专属子目录，使用 publish_group_artifact 分享真实文件快照。工具成功才表示发布；不能声称外部发送、联网或定时任务已经执行。`;
 
-export function intentTool(capture) {
+export function intentTool(capture: (intent: GroupIntent) => void): NeumaTool {
   return { name: "submit_group_intent", label: "提交对话或工作意向", description: "普通对话用 interaction:conversation，reply 只写你本人的第一人称答复，replyStatus 表明已回答或需补充；participate 和 willingToIntegrate 必须 false，integratorId 必须空。回复对象已由平台 replyRouting 固定，不填写旧兼容字段 replyAudience。replyRecipientId 只引用一位非自己的群成员；只有明确向其提出新问题、交接或要求确认才填 replyRequest 以请求有限只读接话，普通提及不填写。实际任务用 task；integratorId 是支持的临时整合者，空表示尚未决定。此阶段不能执行业务或宣称已执行。", executionMode: "sequential",
     parameters: schema({ participate: { type: "boolean" }, contribution: string(500), willingToIntegrate: { type: "boolean" }, integratorId: identifier,
       interaction: { type: "string", enum: ["task", "conversation"] }, reply: string(), replyStatus: { type: "string", enum: ["complete", "needs_input"] },
@@ -63,15 +70,15 @@ export function intentTool(capture) {
       const contribution = text(value.contribution, "贡献说明", 500, !value.participate);
       const integratorId = value.integratorId ? id(value.integratorId, "整合者") : null;
       const interaction = value.interaction ?? "task";
-      if (!["task", "conversation"].includes(interaction)) throw new InputError("交互类型无效");
-      if (value.replyStatus !== undefined && !["complete", "needs_input"].includes(value.replyStatus)) throw new InputError("对话回复状态无效");
+      if (typeof interaction !== "string" || !["task", "conversation"].includes(interaction)) throw new InputError("交互类型无效");
+      if (value.replyStatus !== undefined && (typeof value.replyStatus !== "string" || !["complete", "needs_input"].includes(value.replyStatus))) throw new InputError("对话回复状态无效");
       if (interaction === "conversation" && (value.participate || value.willingToIntegrate || integratorId)) throw new InputError("直接对话不能同时认领工作或选择整合者");
       const reply = text(value.reply, "对话回复", 4000, interaction !== "conversation");
       let replyAudience;
       if (value.replyAudience !== undefined) {
-        const audience = value.replyAudience;
+        const audience = fields(value.replyAudience);
         if (!audience || typeof audience !== "object" || Array.isArray(audience) || Object.keys(audience).some((key) => !["mode", "memberIds"].includes(key))
-          || !["single", "members"].includes(audience.mode) || !Array.isArray(audience.memberIds) || !audience.memberIds.length || audience.memberIds.length > 64) throw new InputError("回复对象格式无效");
+          || typeof audience.mode !== "string" || !["single", "members"].includes(audience.mode) || !Array.isArray(audience.memberIds) || !audience.memberIds.length || audience.memberIds.length > 64) throw new InputError("回复对象格式无效");
         const memberIds = [...new Set(audience.memberIds.map((value) => id(value, "回复成员")))];
         if (audience.mode === "single" && memberIds.length !== 1) throw new InputError("单人回复只能指定一位成员");
         replyAudience = { mode: audience.mode, memberIds };
@@ -85,25 +92,26 @@ export function intentTool(capture) {
     } };
 }
 
-export function replyTool(capture) {
+export function replyTool(capture: (reply: ReplySubmission) => void): NeumaTool {
   return { name: "submit_group_reply", label: "提交本人接话", description: "只读回应群成员明确发给你的问题、交接或确认。reply 只写你本人面向对方的答复，不重复前置 @ 或署名；平台默认引用来源成员。replyStatus 用 complete、needs_input 或 declined，不代表已完成业务工作。needs_input 只表示需要对方面前的人补充，不可同时填写 replyRequest；向同伴追问用 complete 加 replyRequest，平台等待该同伴回答。只有明确需要另一成员回答的新问题、交接或确认才填写 replyRequest，收到确认不用再次确认。此工具不能认领、执行任务、引用业务产物或宣称文件/联网/业务动作已经执行。", executionMode: "sequential",
     parameters: schema({ reply: string(), replyStatus: { type: "string", enum: ["complete", "needs_input", "declined"] }, replyRecipientId: identifier, replyRequest: replyRequestSchema }, ["reply"]),
     execute: async (_call, value, signal) => {
       signal?.throwIfAborted();
       objectFields(value, ["reply", "replyStatus", "replyRecipientId", "replyRequest"], "接话提交");
       const reply = text(value.reply, "接话回复", 4000), replyStatus = value.replyStatus === undefined ? "complete" : value.replyStatus;
-      if (!["complete", "needs_input", "declined"].includes(replyStatus)) throw new InputError("接话回复状态无效");
+      if (typeof replyStatus !== "string" || !["complete", "needs_input", "declined"].includes(replyStatus)) throw new InputError("接话回复状态无效");
       if (replyStatus === "needs_input" && value.replyRequest !== undefined) throw new InputError("需要群成员补充时请用 complete 加 replyRequest；needs_input 仅用于请对方面前的人补充");
       capture({ reply, replyStatus, ...replyReferences(value) });
       return { ...result({ submitted: true }), terminate: true };
     } };
 }
 
-export function memberCapabilityTool(service, { groupId, taskId, agentId, generation, signal, onRead = () => {} }) {
-  const snapshots = new Map();
+export function memberCapabilityTool(service: CollaborationService, { groupId, taskId, agentId, generation, signal, onRead = () => {} }: GroupToolContext & { onRead?: (page: CapabilityPage) => void }): NeumaTool {
+  const snapshots = new Map<string, MemberCard>();
   return { name: "read_group_member_capabilities", label: "读取成员完整能力卡", description: "只读本群指定成员的完整公开能力卡；text 是卡片 JSON，按 nextOffset 续读至 null 才完整。不读取凭据、私聊、记忆或私人文件。",
     executionMode: "sequential", parameters: schema({ agentId: identifier, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 8000 } }, ["agentId"]),
-    execute: async (call, params, toolSignal) => {
+    execute: async (call, raw, toolSignal) => {
+      const params = fields(raw);
       signal.throwIfAborted(); toolSignal?.throwIfAborted();
       if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).some((key) => !["agentId", "offset", "limit"].includes(key))) throw new InputError("成员能力分页参数无效");
       const target = id(params.agentId, "成员"), record = await service.store.get(groupId);
@@ -113,25 +121,27 @@ export function memberCapabilityTool(service, { groupId, taskId, agentId, genera
       if (!current) throw new InputError("成员已离群，请重新检查当前成员");
       if (offset === 0) snapshots.set(target, current);
       const member = snapshots.get(target);
-      if (!member || member.capabilityVersion !== current.capabilityVersion) throw new InputError("成员能力版本已变化或尚未开始读取，请从 offset 0 重新读卡");
+      if (!member || member!.capabilityVersion !== current.capabilityVersion) throw new InputError("成员能力版本已变化或尚未开始读取，请从 offset 0 重新读卡");
       const read = createContextReadTool(() => ({ member }));
-      const page = JSON.parse((await read.execute(call, { section: "member", offset, limit: params.limit ?? 8000 }, toolSignal ?? signal)).content[0].text);
+      const content = (await read.execute(call, { section: "member", offset, limit: params.limit ?? 8000 }, toolSignal ?? signal)).content[0];
+      if (content?.type !== "text") throw new InputError("成员能力分页响应无效");
+      const page = JSON.parse(content.text);
       service.guard(await service.store.get(groupId), taskId, agentId, generation);
-      const value = { agentId: target, capabilityVersion: member.capabilityVersion ?? null, ...page };
+      const value = { agentId: target, capabilityVersion: member!.capabilityVersion ?? null, ...page };
       onRead(value); return result(value);
     } };
 }
 
 const requestProperties = { capabilityId: string(160), capabilityVersion: string(160), inputs: string(), expectedOutput: string(), acceptance: string() };
-const workRequest = ({ capabilityId, capabilityVersion, inputs, expectedOutput, acceptance }) => {
+const workRequest = ({ capabilityId, capabilityVersion, inputs, expectedOutput, acceptance }: Record<string, unknown>): WorkRequest => {
   if (capabilityVersion && !capabilityId) throw new InputError("能力版本必须与能力 ID 一起引用");
   return { ...(capabilityId ? { capabilityId: text(capabilityId, "能力 ID", 160), ...(capabilityVersion ? { capabilityVersion: text(capabilityVersion, "能力版本", 160) } : {}) } : {}),
     ...(inputs !== undefined ? { inputs: text(inputs, "协助输入", 4000, true) } : {}),
     ...(expectedOutput !== undefined ? { expectedOutput: text(expectedOutput, "期望输出", 4000, true) } : {}),
     ...(acceptance !== undefined ? { acceptance: text(acceptance, "完成条件", 4000, true) } : {}) };
 };
-const requestMatches = (child, request) => ["title", "description", "required", "capabilityId", "capabilityVersion", "inputs", "expectedOutput", "acceptance"].every((field) => child[field] === request[field]);
-const checkCapability = (member, request) => {
+const requestMatches = (child: GroupChild, request: WorkRequest & { title: string; description: string; required: boolean }) => ["title", "description", "required", "capabilityId", "capabilityVersion", "inputs", "expectedOutput", "acceptance"].every((field) => fields(child)[field] === fields(request)[field]);
+const checkCapability = (member: MemberCard | undefined, request: WorkRequest) => {
   if (!request.capabilityId) return;
   if (!request.capabilityVersion) throw new InputError("请引用完整能力卡中的 capabilityVersion");
   if (member?.capabilityVersion !== request.capabilityVersion) throw new InputError("成员能力版本已变化，请重新读取完整能力卡");
@@ -141,9 +151,9 @@ const checkCapability = (member, request) => {
   return capability;
 };
 
-export function groupTools(service, { groupId, taskId, agentId, generation, job, signal, capture }) {
-  let receipt;
-  const completeReads = new Map(), readProgress = new Map();
+export function groupTools(service: CollaborationService, { groupId, taskId, agentId, generation, job, signal, capture }: GroupToolContext & { job: GroupJob; capture: (value: TurnSubmission) => void }): NeumaTool[] {
+  let receipt: { id: string; hash: string } | null | undefined;
+  const completeReads = new Map<string, string | null>(), readProgress = new Map<string, { version: string | null; nextOffset: number | null }>();
   const memberTool = memberCapabilityTool(service, { groupId, taskId, agentId, generation, signal, onRead: (page) => {
     if (page.offset === 0) { completeReads.delete(page.agentId); readProgress.set(page.agentId, { version: page.capabilityVersion, nextOffset: 0 }); }
     const current = readProgress.get(page.agentId);
@@ -151,49 +161,51 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
     current.nextOffset = page.nextOffset;
     if (page.nextOffset === null) completeReads.set(page.agentId, page.capabilityVersion);
   } });
-  const checkRead = (target, request) => {
+  const checkRead = (target: string, request: WorkRequest) => {
     if (request.capabilityId && completeReads.get(target) !== request.capabilityVersion) throw new InputError("请先分页读取接收成员的完整当前能力卡，再引用能力派发");
   };
-  const mutate = (action) => service.store.change(groupId, (record) => {
+  const mutate = (action: (record: GroupRecord, task: GroupTask, sender: GroupSender) => unknown) => service.store.change(groupId, (record) => {
     signal.throwIfAborted(); const task = service.guard(record, taskId, agentId, generation);
     task.toolReceipts ??= [];
-    const prior = receipt && task.toolReceipts.find((value) => value.id === receipt.id);
-    if (prior) { if (prior.hash !== receipt.hash) throw conflict("工具调用标识内容冲突"); return prior.result; }
-    const sender = { type: "agent", id: agentId, name: task.participants.find((value) => value.id === agentId).name };
+    const currentReceipt = receipt;
+    const prior = currentReceipt && task.toolReceipts.find((value) => value.id === currentReceipt.id);
+    if (prior) { if (prior.hash !== currentReceipt!.hash) throw conflict("工具调用标识内容冲突"); return prior.result; }
+    const sender = { type: "agent", id: agentId, name: task.participants.find((value) => value.id === agentId)!.name };
     const value = action(record, task, sender);
     if (receipt) task.toolReceipts.push({ ...receipt, result: value });
     return value;
   });
-  const tool = (name, description, properties, required, action) => ({ name, label: description, description, executionMode: "sequential", parameters: schema(properties, required),
+  const tool = (name: string, description: string, properties: Record<string, ToolSchema>, required: string[], action: (params: Record<string, unknown>) => unknown): NeumaTool => ({ name, label: description, description, executionMode: "sequential", parameters: schema(properties, required),
     execute: async (call, params, toolSignal) => {
       signal.throwIfAborted(); toolSignal?.throwIfAborted();
       receipt = call ? { id: `${job.id}:${call}`, hash: fingerprint({ name, params }) } : null;
-      try { return result(await action(params)); } finally { receipt = null; }
+      try { return result(await action(fields(params))); } finally { receipt = null; }
     } });
-  const requireMember = (record, task, target) => {
+  const requireMember = (record: GroupRecord, task: GroupTask, target: string) => {
     id(target, "接收成员");
     if (!record.group.memberIds.includes(target) || !task.participants.some((value) => value.id === target)) throw new InputError("只能唤起本轮已就绪的群成员；群外能力请提出调配请求");
   };
-  const childFor = (task) => task.children.find((value) => value.id === job.childId);
-  const tools = [
+  const childFor = (task: GroupTask) => task.children.find((value) => value.id === job.childId);
+  const tools: NeumaTool[] = [
     memberTool,
     tool("read_group_context", "查看本群成员功能、当前任务、分工与已分享成果。", {}, [], async () => {
       const view = await service.getGroup(groupId);
       return { members: view.members, task: view.tasks.find((value) => value.id === taskId), artifacts: view.artifacts, materials: view.materials };
     }),
     tool("read_group_messages", "按顺序阅读本群消息；after 是上一批最后 seq。", { after: { type: "integer", minimum: 0 } }, [], async ({ after = 0 }) => {
-      if (!Number.isSafeInteger(after) || after < 0) throw new InputError("消息位置无效");
+      if (typeof after !== "number" || !Number.isSafeInteger(after) || after < 0) throw new InputError("消息位置无效");
       const record = await service.store.get(groupId), task = service.guard(record, taskId, agentId, generation), history = groupTurnMessages(record, task);
       const messages = history.filter((value) => value.seq > after).slice(0, 30);
       return { messages, nextAfter: messages.at(-1)?.seq ?? after, more: history.some((value) => value.seq > (messages.at(-1)?.seq ?? after)) };
     }),
     tool("send_group_message", "在后台给群内指定成员发工作信息；省略 recipientId 仅记录内部协作资料，不唤醒全员。面向你的结果请通过 submit_group_turn 最终交付。", { content: string(), recipientId: identifier }, ["content"], ({ content, recipientId }) => mutate((record, task, sender) => {
-      const target = recipientId || null; if (target) requireMember(record, task, target);
+      const target = recipientId ? id(recipientId, "接收成员") : null; if (target) requireMember(record, task, target);
       const posted = message(record, sender, text(content, "群消息", 4000), { taskId, recipientId: target, visibility: "internal", kind: "coordination" });
       if (target && target !== agentId) service.queue(task, target, { kind: "message", messageId: posted.id });
       return { messageId: posted.id, queued: Boolean(target && target !== agentId) };
     })),
-    tool("ask_group_member", "向本群成员询问信息；答案随后返回。需要答案才能继续时结束本轮并等待。", { agentId: identifier, question: string() }, ["agentId", "question"], ({ agentId: target, question }) => mutate((record, task, sender) => {
+    tool("ask_group_member", "向本群成员询问信息；答案随后返回。需要答案才能继续时结束本轮并等待。", { agentId: identifier, question: string() }, ["agentId", "question"], ({ agentId: rawTarget, question }) => mutate((record, task, sender) => {
+      const target = id(rawTarget, "接收成员");
       requireMember(record, task, target); if (target === agentId) throw new InputError("不能向自己排入提问");
       const posted = message(record, sender, text(question, "问题", 4000), { taskId, recipientId: target, visibility: "internal", kind: "coordination" });
       const child = childFor(task); if (child) child.pendingQuestions.push(posted.id);
@@ -201,7 +213,8 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
         parentQuestionId: job.kind === "question" ? job.messageId : null, status: "waiting" });
       service.queue(task, target, { kind: "question", messageId: posted.id }); return { questionId: posted.id, queued: true };
     })),
-    tool("request_group_help", "请求本群成员承担一个明确的协助子任务；接收者自愿接受、需输入或 declined。显式能力须先完整读卡并引用当前版本。", { agentId: identifier, title: string(500), description: string(), required: { type: "boolean" }, ...requestProperties }, ["agentId", "title", "description"], async ({ agentId: target, title, description, required = true, ...fields }) => {
+    tool("request_group_help", "请求本群成员承担一个明确的协助子任务；接收者自愿接受、需输入或 declined。显式能力须先完整读卡并引用当前版本。", { agentId: identifier, title: string(500), description: string(), required: { type: "boolean" }, ...requestProperties }, ["agentId", "title", "description"], async ({ agentId: rawTarget, title, description, required = true, ...fields }) => {
+      const target = id(rawTarget, "接收成员");
       const request = { title: text(title, "子任务", 500), description: text(description, "子任务说明", 4000), required: required !== false, ...workRequest(fields) };
       const cards = await service.validateTaskCapabilities(groupId, taskId, generation);
       checkRead(target, request); const capability = checkCapability(cards.find((value) => value.id === target), request);
@@ -218,7 +231,7 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
           child.status = "queued"; service.queue(task, target, { childId: child.id });
         }
         if (parent && parent.id !== child.id && !parent.dependsOn.includes(child.id)) {
-          const reaches = (node, visited = new Set()) => node?.id === parent.id || node && !visited.has(node.id) && (visited.add(node.id), node.dependsOn.some((ref) => reaches(task.children.find((value) => value.id === ref), visited)));
+          const reaches = (node: GroupChild | undefined, visited = new Set<string>()): boolean => node?.id === parent.id || !!node && !visited.has(node.id) && (visited.add(node.id), node.dependsOn.some((ref) => reaches(task.children.find((value) => value.id === ref), visited)));
           if (reaches(child)) throw new InputError("任务依赖会互相等待，请改为提问或调整分工");
           parent.dependsOn.push(child.id);
         }
@@ -233,7 +246,7 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
         const candidates = task.participants.filter((member) => {
           if (!request.capabilityId) return true;
           const card = cards.find((value) => value.id === member.id), capability = card?.capabilities?.find((value) => value.id === request.capabilityId);
-          return capability?.scope === "group_task" && capability.availability === "callable" && (!request.capabilityVersion || card.capabilityVersion === request.capabilityVersion)
+          return capability?.scope === "group_task" && capability.availability === "callable" && (!request.capabilityVersion || card!.capabilityVersion === request.capabilityVersion)
             && (!requiresNetwork(request.capabilityId, capability) || groupTaskAllowsNetwork(record, task));
         });
         if (request.capabilityId && !candidates.length && !groupTaskAllowsNetwork(record, task) && cards.some((member) => member.capabilities?.some((capability) => capability.id === request.capabilityId && requiresNetwork(request.capabilityId, capability)))) throw new InputError("本次用户任务禁止联网，没有可派发该能力的离线成员");
@@ -251,18 +264,18 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
         if (child.assigneeId && child.assigneeId !== agentId) return { claimed: false, assigneeId: child.assigneeId };
         if (["completed", "cancelled"].includes(child.status)) return { claimed: false, status: child.status };
         if (child.capabilityId) {
-          const member = cards.find((value) => value.id === agentId), request = { capabilityId: child.capabilityId, capabilityVersion: child.capabilityVersion ?? member.capabilityVersion };
+          const member = cards.find((value) => value.id === agentId), request = { capabilityId: child.capabilityId, capabilityVersion: child.capabilityVersion ?? member!.capabilityVersion };
           checkRead(agentId, request); const capability = checkCapability(member, request);
-          checkTaskNetwork(record, task, child.capabilityId, capability); child.capabilityVersion = member.capabilityVersion;
+          checkTaskNetwork(record, task, child.capabilityId, capability); child.capabilityVersion = member!.capabilityVersion;
         }
-        child.assigneeId = agentId; child.status = "queued"; service.queue(task, agentId, { childId });
-        event(record, "task", { taskId, childId, agentId }); return { claimed: true, assigneeId: agentId };
+        child.assigneeId = agentId; child.status = "queued"; service.queue(task, agentId, { childId: id(childId, "子任务") });
+        event(record, "task", { taskId, childId: id(childId, "子任务"), agentId }); return { claimed: true, assigneeId: agentId };
       });
     }),
     tool("publish_group_artifact", "把自己实际生成的工作文件发布为本群只读成果快照。", { path: string(1000) }, ["path"], ({ path }) => service.publishArtifact(groupId, taskId, agentId, generation, path)),
     tool("read_group_artifact", "按 id 读取本群已分享的成果；长文本用 nextOffset 续读。", { id: identifier, offset: { type: "integer", minimum: 0 } }, ["id"], async ({ id: artifactId, offset = 0 }) => {
-      if (!Number.isSafeInteger(offset) || offset < 0) throw new InputError("读取位置无效");
-      const { artifact, content } = await service.artifact(groupId, artifactId);
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new InputError("读取位置无效");
+      const { artifact, content } = await service.artifact(groupId, id(artifactId, "产物"));
       if (offset > content.length) throw new InputError("读取位置超出产物长度");
       return { artifact, content: content.slice(offset, offset + 24000), nextOffset: offset + 24000 < content.length ? offset + 24000 : null };
     }),
@@ -275,7 +288,7 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
       execute: async (_call, value, toolSignal) => {
         signal.throwIfAborted(); toolSignal?.throwIfAborted();
         objectFields(value, ["status", "result", "reason", "artifactIds", "replyRecipientId", "replyRequest"], "工作提交");
-        if (!["complete", "waiting", "needs_input", "declined", "partial"].includes(value.status)) throw new InputError("提交状态无效");
+        if (typeof value.status !== "string" || !["complete", "waiting", "needs_input", "declined", "partial"].includes(value.status)) throw new InputError("提交状态无效");
         const references = replyReferences(value);
         if ((references.replyRecipientId || references.replyRequest) && (job.kind !== "integration" || value.status === "waiting")) throw new InputError("只有最终整合的非 waiting 公开交付可以引用成员或请求公开接话；工作依赖请继续使用内部提问队列");
         const body = text(value.result, "结果", 12000, !["complete", "partial"].includes(value.status));
@@ -296,17 +309,17 @@ export function groupTools(service, { groupId, taskId, agentId, generation, job,
         return { ...result({ submitted: true }), terminate: true };
       } },
   ];
-  const rename = { list_materials: "list_group_materials", read_material: "read_group_material", read_material_image: "read_group_material_image" };
-  return [...tools, ...service.materials.tools(groupId).map((value) => ({ ...value, name: rename[value.name], description: value.description.replaceAll("当前 Agent", "当前群"),
-    ...(value.name === "read_material" ? { resolveFile: async (id, callSignal) => {
+  const rename: Record<string, string> = { list_materials: "list_group_materials", read_material: "read_group_material", read_material_image: "read_group_material_image" };
+  return [...tools, ...service.materials.tools(groupId).map((value) => ({ ...value, name: rename[value.name]!, description: value.description.replaceAll("当前 Agent", "当前群"),
+    ...(value.name === "read_material" ? { resolveFile: async (id: string, callSignal?: AbortSignal) => {
       callSignal?.throwIfAborted(); signal.throwIfAborted();
       service.guard(await service.store.get(groupId), taskId, agentId, generation);
       await service.requireMaterial(groupId, id); return service.materials.raw(groupId, id);
     } } : {}),
-    execute: async (...args) => {
+    execute: async (...args: Parameters<NeumaTool["execute"]>) => {
       signal.throwIfAborted(); const record = await service.store.get(groupId); service.guard(record, taskId, agentId, generation);
       if (value.name === "list_materials") return result(await service.sharedMaterials(groupId));
-      await service.requireMaterial(groupId, args[1]?.id);
+      await service.requireMaterial(groupId, id(fields(args[1]).id, "材料"));
       return value.execute(...args);
     } }))];
 }

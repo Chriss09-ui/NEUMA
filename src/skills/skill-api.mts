@@ -1,6 +1,9 @@
+import type { SkillManager } from "./skill-manager.mjs";
+import type { UnknownRecord } from "../contracts/json.mjs";
+interface RouteOptions { method: string; path: string; manager: SkillManager; readBody(limit?: number): Promise<UnknownRecord>; pickFolder(options: { purpose: "source" | "import"; signal?: AbortSignal | undefined }): Promise<unknown>; signal?: AbortSignal | undefined }
 import { InputError } from "../requirements/core.mjs";
 
-export async function routeSkills({ method, path, manager, readBody, pickFolder, signal }) {
+export async function routeSkills({ method, path, manager, readBody, pickFolder, signal }: RouteOptions) {
   const options = { signal };
   if (method === "GET" && path === "/api/skills") return { value: await manager.list(options) };
   if (method === "POST" && path === "/api/skills/scan") {
@@ -17,7 +20,7 @@ export async function routeSkills({ method, path, manager, readBody, pickFolder,
   }
   if (method === "POST" && path === "/api/skills/pick-folder") {
     const { purpose } = await readBody();
-    if (!["source", "import"].includes(purpose)) throw new InputError("请选择查找目录或导入文件夹");
+    if (purpose !== "source" && purpose !== "import") throw new InputError("请选择查找目录或导入文件夹");
     return { value: await pickFolder({ purpose, signal }) };
   }
   if (method === "POST" && path === "/api/skills/import/preview")

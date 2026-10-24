@@ -15,9 +15,9 @@ on error number -128
 end try`;
 
 export function createProjectFolderPicker({ platform = process.platform, run = runFile, inspect = stat, helperPath,
-  helper = requireProjectHelper } = {}) {
+  helper = requireProjectHelper }: { platform?: NodeJS.Platform; run?: typeof runFile; inspect?: typeof stat; helperPath?: string; helper?: typeof requireProjectHelper } = {}) {
   let selecting = false;
-  return async ({ signal, prompt = "选择要添加到 NEUMA 的项目文件夹" } = {}) => {
+  return async ({ signal, prompt = "选择要添加到 NEUMA 的项目文件夹" }: { signal?: AbortSignal | undefined; prompt?: string } = {}) => {
     signal?.throwIfAborted();
     if (!["darwin", "win32", "linux"].includes(platform)) throw new InputError("当前系统暂不支持选择窗口，请手动填写项目路径。");
     if (selecting) throw new InputError("文件夹选择窗口已经打开，请先完成或取消当前选择。");

@@ -1,3 +1,9 @@
+import type { ProjectRecord, ProjectCommand, ProjectLaunch } from "../contracts/project.mjs";
+import type { ProjectRun, ProjectChild, ProjectSpawner } from "./project-port.mjs";
+import { errorField, objectFields } from "../runtime/type-boundary.mjs";
+const spawnIsAsync = (value: ProjectChild | Promise<ProjectChild>): value is Promise<ProjectChild> => typeof objectFields(value).then === "function";
+type ScriptProject = Pick<ProjectRecord, "root"> & { launch: ProjectLaunch };
+interface ScriptOptions { spawnImpl?: typeof spawn; env?: NodeJS.ProcessEnv | undefined; blockedPort?: number; onReady?: (run: ProjectRun) => void | Promise<void>; platform?: NodeJS.Platform; projectSpawn?: ProjectSpawner }
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
@@ -5,13 +11,13 @@ import { InputError } from "../requirements/core.mjs";
 import { validateScriptCommand } from "./project-inspection.mjs";
 import { spawnProject } from "./project-platform.mjs";
 
-function portOccupied(value, signal) {
+function portOccupied(value: string, signal?: AbortSignal): Promise<boolean> {
   if (signal?.aborted) return Promise.resolve(false);
   const url = new URL(value);
   return new Promise((resolve) => {
     let finished = false;
     const socket = createConnection({ host: url.hostname.replace(/^\[|\]$/g, ""), port: Number(url.port || 80) });
-    const finish = (occupied) => {
+    const finish = (occupied: boolean) => {
       if (finished) return;
       finished = true; signal?.removeEventListener("abort", abort); socket.destroy(); resolve(occupied);
     };
@@ -23,7 +29,7 @@ function portOccupied(value, signal) {
   });
 }
 
-async function health(value, signal) {
+async function health(value: string, signal?: AbortSignal) {
   if (signal?.aborted) return { ready: false, occupied: false };
   try {
     const response = await fetch(value, { redirect: "manual", signal: signal
@@ -35,18 +41,18 @@ async function health(value, signal) {
   }
 }
 
-function drain(child) {
+function drain(child: ProjectChild) {
   child.stdout?.resume(); child.stderr?.resume();
 }
 
-function cancelled(run) {
+function cancelled(run: ProjectRun) {
   return run.monitorController?.signal.aborted || run.stopping || run.status === "stopped";
 }
 
-async function monitor(project, run, onReady) {
-  const signal = run.monitorController.signal;
+async function monitor(project: ScriptProject, run: ProjectRun, onReady?: ScriptOptions["onReady"]) {
+  const signal = run.monitorController!.signal;
   while (!signal.aborted && !run.stopping && run.ownsService && !run.startupFailed) {
-    const states = await Promise.all(project.launch.healthUrls.map((url) => health(url, signal)));
+    const states = await Promise.all(project.launch!.healthUrls!.map((url) => health(url, signal)));
     if (cancelled(run) || run.startupFailed) return;
     const ready = states.every((state) => state.ready);
     if (ready && run.launcherExited && run.launcherExitCode === 0) {
@@ -65,16 +71,16 @@ async function monitor(project, run, onReady) {
   }
 }
 
-export async function startScriptServices(project, run, { spawnImpl = spawn, env, blockedPort, onReady, platform = process.platform,
-  projectSpawn = (command, args, options) => spawnProject(command, args, options, { spawnImpl, platform }) } = {}) {
+export async function startScriptServices(project: ScriptProject, run: ProjectRun, { spawnImpl = spawn, env, blockedPort, onReady, platform = process.platform,
+  projectSpawn = (command, args, options) => spawnProject(command, args, options, { spawnImpl, platform }) }: ScriptOptions = {}) {
   run.background = true; run.ownsService = false;
   run.monitorController = new AbortController();
   if (run.stopping || run.status === "stopped") { run.monitorController.abort(); return run; }
-  const addresses = [project.launch.url, ...project.launch.healthUrls];
+  const addresses = [project.launch.url!, ...project.launch.healthUrls!];
   if (addresses.some((url) => Number(new URL(url).port || 80) === Number(blockedPort))) {
     throw new InputError("项目地址不能使用 NEUMA 自身的服务端口");
   }
-  const states = await Promise.all(project.launch.healthUrls.map((url) => health(url, run.monitorController.signal)));
+  const states = await Promise.all(project.launch!.healthUrls!.map((url) => health(url, run.monitorController!.signal)));
   if (cancelled(run)) return run;
   if (states.every((state) => state.ready)) {
     run.status = "external"; run.url = project.launch.url;
@@ -89,14 +95,14 @@ export async function startScriptServices(project, run, { spawnImpl = spawn, env
     const spawned = projectSpawn(project.launch.command, project.launch.args, {
       cwd: project.root, shell: false, detached: platform !== "win32", env, stdio: ["ignore", "pipe", "pipe"],
     });
-    child = spawned?.then ? await spawned : spawned;
+    child = spawnIsAsync(spawned) ? await spawned : spawned;
   } catch {
     run.status = "failed"; run.startupFailed = true; run.ownsService = false;
     throw new InputError("项目启动脚本未能执行，请检查本地运行环境。");
   }
   run.launcher = child; run.launcherExited = false; run.launcherExitCode = null;
-  run.launcherDone = new Promise((resolve) => {
-    const finish = (code, failed = false) => {
+  run.launcherDone = new Promise<void>((resolve) => {
+    const finish = (code: number | null, failed = false) => {
       if (run.launcherExited) return;
       run.launcherExited = true; run.launcherExitCode = code;
       if (failed && !child.pid) run.ownsService = false;
@@ -129,28 +135,28 @@ export async function startScriptServices(project, run, { spawnImpl = spawn, env
   return run;
 }
 
-async function finishLauncher(run) {
+async function finishLauncher(run: ProjectRun) {
   if (run.launcher?.jobManaged) return;
   if (!run.launcher || run.launcherExited) return;
-  try { run.launcher.kill("SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
-  let timer;
+  try { run.launcher.kill("SIGTERM"); } catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; }
+  let timer: NodeJS.Timeout | undefined;
   await Promise.race([run.launcherDone, new Promise((resolve) => { timer = setTimeout(resolve, 1000); timer.unref(); })]);
   clearTimeout(timer);
   if (!run.launcherExited) {
-    try { run.launcher.kill("SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    try { run.launcher.kill("SIGKILL"); } catch (error) { if (errorField(error, "code") !== "ESRCH") throw error; }
     await run.launcherDone;
   }
 }
 
-async function executeStop(project, launch, projectSpawn, env) {
+async function executeStop(project: Pick<ProjectRecord, "root">, launch: ProjectCommand, projectSpawn: ProjectSpawner, env: NodeJS.ProcessEnv | undefined) {
   let child;
   try {
     const spawned = projectSpawn(launch.command, launch.args, { cwd: project.root, shell: false, detached: false,
       env, stdio: ["ignore", "pipe", "pipe"] });
-    child = spawned?.then ? await spawned : spawned;
+    child = spawnIsAsync(spawned) ? await spawned : spawned;
   }
   catch { throw new InputError("项目停止脚本未能执行，请检查本地运行环境。"); }
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* Best effort after timeout; retain ownership for retry. */ }
       reject(new InputError("项目停止脚本超时，仍保留运行记录，可以再次尝试停止。"));
@@ -161,8 +167,8 @@ async function executeStop(project, launch, projectSpawn, env) {
   });
 }
 
-export async function stopScriptServices(project, run, { spawnImpl = spawn, env, platform = process.platform,
-  projectSpawn = (command, args, options) => spawnProject(command, args, options, { spawnImpl, platform }) } = {}) {
+export async function stopScriptServices(project: Pick<ProjectRecord, "root" | "launch">, run: ProjectRun, { spawnImpl = spawn, env, platform = process.platform,
+  projectSpawn = (command, args, options) => spawnProject(command, args, options, { spawnImpl, platform }) }: ScriptOptions = {}) {
   if (run.stopPromise) return run.stopPromise;
   run.stopping = true; run.monitorController?.abort();
   run.stopPromise = (async () => {
@@ -172,11 +178,11 @@ export async function stopScriptServices(project, run, { spawnImpl = spawn, env,
     }
     try {
       await finishLauncher(run);
-      const stop = await validateScriptCommand(project.root, project.launch.stop, { platform });
+      const stop = await validateScriptCommand(project.root, project.launch!.stop, { platform });
       await executeStop(project, stop, projectSpawn, env);
       if (run.launcher?.stopTree) await run.launcher.stopTree();
       for (let attempt = 0; attempt < 5; attempt++) {
-        const occupied = await Promise.all(project.launch.healthUrls.map((url) => portOccupied(url)));
+        const occupied = await Promise.all(project.launch!.healthUrls!.map((url) => portOccupied(url)));
         if (occupied.every((value) => !value)) {
           run.status = "stopped"; run.url = null; run.pageOpened = false; run.openError = null; run.error = null; run.ownsService = false;
           return run;

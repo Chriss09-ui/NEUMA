@@ -75,11 +75,16 @@ export async function checkPreviewRelease(root, options = {}) {
   const entries = artifact ? [...ENTRY_FILES, "src/materials/material-parser-child.mjs", "src/services/node-service-worker.mjs",
     "src/services/python-service-worker.py", "src/services/mcp-bridge.mjs", "public/application-frame-bridge.js", "public/style.css"] : ENTRY_FILES;
   for (const path of entries) {
-    try {
-      const info = await lstat(join(root, path));
-      if (!info.isFile() || info.size < 1) throw new Error();
-      await access(join(root, path), constants.R_OK);
-    } catch { failures.push(`缺少可读的入口文件：${path}`); }
+    const candidates = artifact ? [path] : [...new Set([path,
+      path.replace(/\.mjs$/, ".mts").replace(/\.cjs$/, ".cts").replace(/\.js$/, ".ts")])];
+    let readable = false;
+    for (const candidate of candidates) try {
+      const info = await lstat(join(root, candidate));
+      if (!info.isFile() || info.size < 1) continue;
+      await access(join(root, candidate), constants.R_OK);
+      readable = true; break;
+    } catch { /* Mixed source trees may use the corresponding TypeScript entry. */ }
+    if (!readable) failures.push(`缺少可读的入口文件：${path}`);
   }
   return { ok: failures.length === 0, failures };
 }

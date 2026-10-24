@@ -1,3 +1,6 @@
+import { objectFields } from "./runtime/type-boundary.mjs";
+import type { ModelConfig } from "./contracts/model.mjs";
+export interface SettingsConfig extends ModelConfig { jevApiKey?: string; jevModel?: string; jevConfigured?: boolean }
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
@@ -14,14 +17,14 @@ const FIELDS = {
 };
 const SECRET_FIELDS = new Set(["apiKey", "jevApiKey"]);
 const CLEARABLE = new Set(["apiKey", "jevApiKey", "modelProfile"]);
-const fileWrites = new Map();
+const fileWrites = new Map<string, Promise<void>>();
 
-function secretHint(value) {
+function secretHint(value: string | undefined) {
   if (!value) return { set: false, hint: "" };
   return { set: true, hint: value.length >= 12 ? value.slice(-4) : "" };
 }
 
-export function settingsView(config) {
+export function settingsView(config: SettingsConfig) {
   return {
     chatUrl: config.chatUrl || "",
     model: config.model || "",
@@ -36,7 +39,7 @@ export function settingsView(config) {
   };
 }
 
-export function configEnv(config) {
+export function configEnv(config: SettingsConfig) {
   return {
     NEUMA_LLM_CHAT_URL: config.chatUrl || "",
     NEUMA_LLM_MODEL: config.model || "",
@@ -48,7 +51,7 @@ export function configEnv(config) {
   };
 }
 
-function checkChatUrl(value) {
+function checkChatUrl(value: string) {
   try {
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search
@@ -59,13 +62,13 @@ function checkChatUrl(value) {
 }
 
 // Values are written unquoted into .env, so anything that changes dotenv parsing is rejected.
-export function settingsUpdates(body) {
-  const updates = {};
+export function settingsUpdates(body: Record<string, unknown>) {
+  const updates: Record<string, string> = {};
   if (body.modelProfile !== undefined) updates.NEUMA_LLM_MODEL_PROFILE = body.modelProfile === null ? "" : JSON.stringify(checkedModelProfile(body.modelProfile));
   for (const [field, name] of Object.entries(FIELDS)) {
     if (body[field] === undefined || body[field] === null) continue;
     if (typeof body[field] !== "string") throw new InputError("配置项必须是文字");
-    const value = body[field].trim();
+    const value = (body[field] as string).trim();
     if (SECRET_FIELDS.has(field) && !value) continue;
     if (value.length > 500 || /[\s"'`#\\]/.test(value)) throw new InputError("配置项包含不支持的字符或过长");
     if (field === "chatUrl") checkChatUrl(value);
@@ -79,13 +82,13 @@ export function settingsUpdates(body) {
     if (!Array.isArray(body.clear) || body.clear.some((item) => !CLEARABLE.has(item))) {
       throw new InputError("无法识别要清除的配置项");
     }
-    for (const field of body.clear) updates[field === "modelProfile" ? "NEUMA_LLM_MODEL_PROFILE" : FIELDS[field]] = "";
+    for (const field of body.clear) updates[field === "modelProfile" ? "NEUMA_LLM_MODEL_PROFILE" : FIELDS[field as keyof typeof FIELDS]] = "";
   }
   if (!Object.keys(updates).length) throw new InputError("没有需要保存的修改");
   return updates;
 }
 
-function* envEntries(content) {
+function* envEntries(content: string) {
   let start = 0;
   while (start < content.length) {
     const newline = content.indexOf("\n", start);
@@ -94,10 +97,10 @@ function* envEntries(content) {
     let comment = "";
     if (name !== undefined) {
       let valueStart = start + line.indexOf("=") + 1;
-      while ([" ", "\t", "\r"].includes(content[valueStart])) valueStart++;
+      while ([" ", "\t", "\r"].includes(content[valueStart]!)) valueStart++;
       let commentStart = valueStart;
-      if (["\"", "'", "`"].includes(content[valueStart])) {
-        const closing = content.indexOf(content[valueStart], valueStart + 1);
+      if (["\"", "'", "`"].includes(content[valueStart]!)) {
+        const closing = content.indexOf(content[valueStart]!, valueStart + 1);
         // Native dotenv treats an unclosed quote as a single-line literal value.
         if (closing >= 0) {
           const followingNewline = content.indexOf("\n", closing + 1);
@@ -108,7 +111,7 @@ function* envEntries(content) {
       const marker = content.indexOf("#", commentStart);
       if (marker >= 0 && marker < end) {
         let suffix = marker;
-        while (suffix > commentStart && [" ", "\t"].includes(content[suffix - 1])) suffix--;
+        while (suffix > commentStart && [" ", "\t"].includes(content[suffix - 1]!)) suffix--;
         comment = content.slice(suffix, end);
       }
     }
@@ -118,10 +121,10 @@ function* envEntries(content) {
   }
 }
 
-async function replaceEnvFile(path, updates) {
+async function replaceEnvFile(path: string, updates: Record<string, string>) {
   let content = "";
   try { content = await readFile(path, "utf8"); }
-  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  catch (error) { if (objectFields(error).code !== "ENOENT") throw error; }
   const pending = new Map(Object.entries(updates));
   const next = [];
   for (const { name, raw, comment, suffix } of envEntries(content)) {
@@ -146,7 +149,7 @@ async function replaceEnvFile(path, updates) {
   }
 }
 
-export async function writeEnvFile(path, updates) {
+export async function writeEnvFile(path: string, updates: Record<string, string>) {
   const file = resolve(path), values = { ...updates };
   const result = (fileWrites.get(file) ?? Promise.resolve()).then(() => replaceEnvFile(file, values));
   const queued = result.catch(() => {});

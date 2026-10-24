@@ -1,3 +1,8 @@
+import { objectFields } from "../runtime/type-boundary.mjs";
+import type { MaterialUpload } from "../materials/material-port.mjs";
+import type { CollaborationService } from "../collaboration/groups.mjs";
+import type { EvidenceMessage } from "../contracts/requirements.mjs";
+interface MaterialOperation { controller: AbortController; done: Promise<void>; finish(): void }
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
@@ -7,10 +12,10 @@ import { GroupStorage, id } from "../collaboration/group-store.mjs";
 import { MaterialStore } from "../materials/material-store.mjs";
 import { MAX_MATERIAL_BYTES, materialId, materialName } from "../materials/material-formats.mjs";
 
-const names = { list_materials: "list_main_materials", read_material: "read_main_material", read_material_image: "read_main_material_image" };
+const names: Record<string, string> = { list_materials: "list_main_materials", read_material: "read_main_material", read_material_image: "read_main_material_image" };
 const cancelled = () => new DOMException("主对话材料传递已停止", "AbortError");
 
-function refsOf(values) {
+function refsOf(values: unknown) {
   if (!Array.isArray(values) || values.length > 10) throw new InputError("每轮最多传递10份主对话材料");
   const ids = values.map((value) => materialId(typeof value === "string" ? value : value?.id));
   if (new Set(ids).size !== ids.length) throw new InputError("主对话材料引用不能重复");
@@ -18,7 +23,9 @@ function refsOf(values) {
 }
 
 export class MainMaterials {
-  constructor({ dataDir, collaboration, storage = new GroupStorage({ dataDir: join(dataDir, "main-materials") }), materials } = {}) {
+  storage: GroupStorage; materials: MaterialStore; collaboration: Pick<CollaborationService, "importMaterial"> | undefined;
+  operations: Set<MaterialOperation>; closing: Promise<PromiseSettledResult<unknown>[]> | null; epoch: number; ready: Promise<void>;
+  constructor({ dataDir, collaboration, storage = new GroupStorage({ dataDir: join(dataDir, "main-materials") }), materials }: { dataDir: string; collaboration?: Pick<CollaborationService, "importMaterial">; storage?: GroupStorage; materials?: MaterialStore }) {
     this.storage = storage;
     this.materials = materials ?? new MaterialStore({ storage });
     this.collaboration = collaboration;
@@ -26,33 +33,33 @@ export class MainMaterials {
     this.ready = Promise.resolve(storage.ready); this.ready.catch(() => {});
   }
 
-  async upload(conversationId, options) {
+  async upload(conversationId: string, options: MaterialUpload) {
     id(conversationId, "主对话"); await this.ready; await this.closing;
     return this.materials.upload(conversationId, options);
   }
 
-  async list(conversationId) {
+  async list(conversationId: string) {
     id(conversationId, "主对话"); await this.ready;
     return this.materials.list(conversationId);
   }
 
-  async resolve(conversationId, attachmentIds = []) {
+  async resolve(conversationId: string, attachmentIds: unknown = []) {
     id(conversationId, "主对话"); const refs = refsOf(attachmentIds); await this.ready;
     return this.materials.resolve(conversationId, refs);
   }
 
-  tools(conversationId) {
+  tools(conversationId: string) {
     id(conversationId, "主对话");
-    return this.materials.tools(conversationId).map((tool) => ({ ...tool, name: names[tool.name],
+    return this.materials.tools(conversationId).map((tool) => ({ ...tool, name: names[tool.name]!,
       description: tool.description.replaceAll("当前 Agent", "当前主对话") }));
   }
 
-  async measure(conversationId, attachmentIds, { signal } = {}) {
+  async measure(conversationId: string, attachmentIds: unknown, { signal }: { signal?: AbortSignal | undefined } = {}): Promise<EvidenceMessage[]> {
     const descriptors = await this.resolve(conversationId, attachmentIds);
-    const evidence = [];
+    const evidence: EvidenceMessage[] = [];
     for (const descriptor of descriptors) {
       signal?.throwIfAborted();
-      const facts = { materialId: descriptor.id, name: descriptor.name, bytes: descriptor.size, kind: descriptor.kind };
+      const facts: Record<string, unknown> = { materialId: descriptor.id, name: descriptor.name, bytes: descriptor.size, kind: descriptor.kind };
       try {
         const parsed = await this.materials.parsed(conversationId, descriptor, signal);
         let characters = 0;
@@ -68,7 +75,7 @@ export class MainMaterials {
     return evidence;
   }
 
-  async forward(conversationId, groupId, attachmentIds, { mutationId, signal } = {}) {
+  async forward(conversationId: string, groupId: string, attachmentIds: unknown, { mutationId, signal }: { mutationId?: string | undefined; signal?: AbortSignal | undefined } = {}) {
     id(conversationId, "主对话"); id(groupId, "群"); id(mutationId, "操作");
     const refs = refsOf(attachmentIds), epoch = this.epoch;
     if (!refs.length) throw new InputError("请选择至少一份主对话材料");
@@ -77,7 +84,9 @@ export class MainMaterials {
     if (typeof this.collaboration?.importMaterial !== "function") throw new InputError("群材料传递尚未就绪");
     const controller = new AbortController();
     const activeSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-    const operation = { controller }; operation.done = new Promise((resolve) => { operation.finish = resolve; });
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    const operation: MaterialOperation = { controller, done, finish };
     this.operations.add(operation);
     try {
       const descriptors = await this.resolve(conversationId, refs); activeSignal.throwIfAborted();
@@ -122,7 +131,7 @@ export class MainMaterials {
       return { attachmentIds: forwarded };
     } catch (error) {
       if (activeSignal.aborted) throw cancelled();
-      if (error instanceof InputError || error?.name === "AbortError") throw error;
+      if (error instanceof InputError || objectFields(error).name === "AbortError") throw error;
       throw new InputError("主对话材料未能传递，请检查材料后重试");
     } finally { this.operations.delete(operation); operation.finish(); }
   }
