@@ -6,12 +6,12 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { checkRelease, NATIVE_ARTIFACTS } from "../scripts/check-release.mjs";
 
-async function fixture(t) {
+async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "neuma-release-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const manifest = { name: "@fixture/neuma", version: "0.1.0", files: ["src/"], dependencies: { fixture: "1.0.0" } };
   const lock = { name: manifest.name, version: manifest.version, packages: { "": manifest } };
-  for (const [name, value] of [["package.json", manifest], ["package-lock.json", lock], ["npm-shrinkwrap.json", lock]])
+  for (const [name, value] of [["package.json", manifest], ["package-lock.json", lock], ["npm-shrinkwrap.json", lock]] as const)
     await writeFile(join(root, name), JSON.stringify(value));
   return { root, manifest, lock };
 }
@@ -28,7 +28,7 @@ test("发布记录字段、版本与辅助程序摘要须匹配；合成记录�
   const { root } = await fixture(t);
   const bytes = Buffer.from("synthetic artifact; never executable proof");
   const digest = createHash("sha256").update(bytes).digest("hex");
-  const evidence = { version: "0.1.0", artifacts: {}, systems: {} };
+  const evidence: { version: string; artifacts: Record<string, string>; systems: Record<string, { checkedAt: string; evidence: string; checks: Record<string, boolean> }> } = { version: "0.1.0", artifacts: {}, systems: {} };
   for (const path of NATIVE_ARTIFACTS) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await writeFile(join(root, path), bytes); await chmod(join(root, path), 0o755);
@@ -39,7 +39,7 @@ test("发布记录字段、版本与辅助程序摘要须匹配；合成记录�
       Object.fromEntries(["installedTarball", "sdkLocalModel", "dataUpgrade", "migration", "projectLifecycle", "folderPicker", "isolation", "cancellation", "nodeMinimum"].map((key) => [key, true])) };
   const path = join(root, "native", "verification.json"); await writeFile(path, JSON.stringify(evidence));
   assert.equal((await checkRelease(root)).ok, true);
-  evidence.version = "old"; evidence.systems["win32-x64"].checks.isolation = false; evidence.artifacts[NATIVE_ARTIFACTS[0]] = "invalid";
+  evidence.version = "old"; evidence.systems["win32-x64"]!.checks.isolation = false; evidence.artifacts[NATIVE_ARTIFACTS[0]!] = "invalid";
   await writeFile(path, JSON.stringify(evidence));
   const result = await checkRelease(root);
   assert.equal(result.ok, false);

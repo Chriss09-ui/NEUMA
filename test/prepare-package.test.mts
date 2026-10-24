@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkSourceLocks } from "../scripts/build.mjs";
 
-async function fixture(t, dependencies) {
+async function fixture(t: test.TestContext, dependencies: { parser?: string; }) {
   const root = await mkdtemp(join(tmpdir(), "neuma-prepare-package-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const manifest = { name: "fixture-package", version: "1.0.0", dependencies: { parser: "4.10.2" } };
@@ -19,12 +19,12 @@ async function fixture(t, dependencies) {
 test("准备安装包复制一致的锁文件，不修改依赖", async (t) => {
   const { root, lock, run } = await fixture(t, { parser: "4.10.2" });
   await run();
-  assert.deepEqual(JSON.parse(await readFile(join(root, "npm-shrinkwrap.json"))), lock);
+  assert.deepEqual(JSON.parse(String(await readFile(join(root, "npm-shrinkwrap.json")))), lock);
 });
 
 test("开发编译依赖与锁文件不一致时不能覆盖发布锁", async (t) => {
   const { root, run } = await fixture(t, { parser: "4.10.2" });
-  const manifest = JSON.parse(await readFile(join(root, "package.json")));
+  const manifest = JSON.parse(String(await readFile(join(root, "package.json"))));
   manifest.devDependencies = { typescript: "7.0.2" };
   await writeFile(join(root, "package.json"), JSON.stringify(manifest));
   await assert.rejects(run(), /版本或依赖不一致/);

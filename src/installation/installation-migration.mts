@@ -1,3 +1,10 @@
+import type { Stats } from "node:fs";
+import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
+type Fields = Record<string, unknown>;
+interface MigrationLimits { bytes: number; fileBytes: number; jsonBytes: number; entries: number }
+interface MigrationEntry { name: string; directory: boolean; mode: number; identity: string; size: number }
+interface Relocation { sourceDir: string; staging: string; dataDir: string; signal?: AbortSignal | undefined; checkedSnapshots: Map<string, { hash: string; files: unknown }> }
+export interface MigrationOptions { from?: unknown; dataDir?: unknown; acquireLock?: (path: string) => Promise<() => unknown | Promise<unknown>>; signal?: AbortSignal | undefined; maxBytes?: number; maxFileBytes?: number; maxJsonBytes?: number; maxFiles?: number }
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, rmdir } from "node:fs/promises";
@@ -12,25 +19,25 @@ export const MIGRATION_LIMITS = Object.freeze({ bytes: 256 * 1024 * 1024, fileBy
   jsonBytes: 8 * 1024 * 1024, entries: 20000 });
 const credentials = /^(?:\.env(?:\..*)?|\.npmrc|\.netrc|credentials?(?:\..*)?|secrets?(?:\..*)?|auth(?:\..*)?|tokens?(?:\..*)?|passwords?(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore))$/i;
 const transient = /^(?:\.DS_Store|\.pending-.*|\.write-.*|\.agents-migration-.*|\.installation-migration-.*|\.instance(?:[.-].*)?|projects-[\w-]+\.tmp|pending-[\w-]+)$/;
-const safeRunId = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value);
-const missing = (error) => error.code === "ENOENT";
-const ignored = (name, prefix) => credentials.test(name) || transient.test(name)
+const safeRunId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value);
+const missing = (error: unknown) => objectFields(error).code === "ENOENT";
+const ignored = (name: string, prefix: string) => credentials.test(name) || transient.test(name)
   || (name === "pi" && (prefix === "" || /^agents\/[\w-]+\/$/.test(prefix)));
-const metadata = (name) => /^(?:agents\.json|architectures\.json|agents-layout\.json|projects\.json|project-add-failures\.json|development\/[^/]+\.json|agents\/[^/]+\/(?:definition\.json|requirements\.json|architecture\.json|deleted\.json|conversations\/saved\.json|conversations\/records\/[^/]+\.json|development\/records\/[^/]+\.json))$/.test(name);
-const abort = (signal) => signal?.throwIfAborted();
+const metadata = (name: string) => /^(?:agents\.json|architectures\.json|agents-layout\.json|projects\.json|project-add-failures\.json|development\/[^/]+\.json|agents\/[^/]+\/(?:definition\.json|requirements\.json|architecture\.json|deleted\.json|conversations\/saved\.json|conversations\/records\/[^/]+\.json|development\/records\/[^/]+\.json))$/.test(name);
+const abort = (signal?: AbortSignal) => signal?.throwIfAborted();
 
-function inputPath(value, label) {
+function inputPath(value: unknown, label: string) {
   if (typeof value !== "string" || !value || value.includes("\0")) throw new InputError(`${label}路径无效`);
   return resolve(value);
 }
 
-async function directory(path) {
+async function directory(path: string) {
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new InputError("迁移目录必须是真实目录，不能是链接");
   return realpath(path);
 }
 
-async function canonicalDestination(path) {
+async function canonicalDestination(path: string) {
   const tail = [];
   let parent = path;
   while (true) {
@@ -42,18 +49,18 @@ async function canonicalDestination(path) {
   }
 }
 
-function contains(root, path) {
+function contains(root: string, path: string) {
   const child = relative(root, path);
   return child === "" || (child !== ".." && !child.startsWith(".." + sep) && !isAbsolute(child));
 }
 
-function identity(info) {
+function identity(info: Stats) {
   return [info.dev, info.ino, info.size, info.mode, info.mtimeMs, info.ctimeMs].join(":");
 }
 
-async function inventory(root, limits, signal) {
-  const entries = [], counts = { files: 0, bytes: 0, skipped: 0 };
-  const visit = async (path, prefix = "") => {
+async function inventory(root: string, limits: MigrationLimits, signal?: AbortSignal) {
+  const entries: MigrationEntry[] = [], counts = { files: 0, bytes: 0, skipped: 0 };
+  const visit = async (path: string, prefix = "") => {
     await directory(path);
     for (const entry of (await readdir(path, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       abort(signal);
@@ -76,7 +83,7 @@ async function inventory(root, limits, signal) {
   return { entries, ...counts };
 }
 
-async function copyFile(source, destination, entry, limits, signal) {
+async function copyFile(source: string, destination: string, entry: MigrationEntry, limits: MigrationLimits, signal?: AbortSignal) {
   const from = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
   let to;
   try {
@@ -101,7 +108,7 @@ async function copyFile(source, destination, entry, limits, signal) {
   } finally { await to?.close(); await from.close(); }
 }
 
-async function readJson(path, limit) {
+async function readJson(path: string, limit: number): Promise<Fields | null> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -109,9 +116,9 @@ async function readJson(path, limit) {
     if (!info.isFile() || info.nlink !== 1 || info.size > limit) throw new InputError("迁移元数据类型无效或超过大小限制");
     const bytes = await handle.readFile();
     if (bytes.length > limit) throw new InputError("迁移元数据超过大小限制");
-    const value = JSON.parse(bytes.toString("utf8"));
+    const value: unknown = JSON.parse(bytes.toString("utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new InputError("迁移元数据格式无效");
-    return value;
+    return value as Fields;
   } catch (error) {
     if (missing(error)) return null;
     if (error instanceof InputError) throw error;
@@ -119,7 +126,7 @@ async function readJson(path, limit) {
   } finally { await handle?.close(); }
 }
 
-async function writeJson(path, value, limit, signal) {
+async function writeJson(path: string, value: unknown, limit: number, signal?: AbortSignal) {
   const bytes = Buffer.from(JSON.stringify(value, null, 2));
   if (bytes.length > limit) throw new InputError("迁移后的元数据超过大小限制");
   const temporary = join(dirname(path), `.pending-${randomUUID()}.json`);
@@ -130,11 +137,12 @@ async function writeJson(path, value, limit, signal) {
   } finally { await rm(temporary, { force: true }); }
 }
 
-async function relocateRecord(record, id, { sourceDir, staging, dataDir, signal, checkedSnapshots }) {
-  const snapshot = async (value) => {
-    if (value === null) return null;
-    if (!value || value.agentId !== id || typeof value.path !== "string" || !/^[a-f0-9]{64}$/.test(value.hash) || !Array.isArray(value.files)
-      || ![sourceDir, staging].some((root) => resolve(value.path) === join(root, "agents", id, "development", "snapshots", value.hash)))
+async function relocateRecord(record: Fields, id: string, { sourceDir, staging, dataDir, signal, checkedSnapshots }: Relocation) {
+  const snapshot = async (input: unknown) => { const value = objectFields(input); return await relocateSnapshot(value, input); };
+  const relocateSnapshot = async (value: Fields, input: unknown) => {
+    if (input === null) return null;
+    if (!value || value.agentId !== id || typeof value.path !== "string" || (typeof value.hash !== "string" || !/^[a-f0-9]{64}$/.test(value.hash)) || !Array.isArray(value.files)
+      || ![sourceDir, staging].some((root) => resolve(value.path as string) === join(root, "agents", id, "development", "snapshots", value.hash as string)))
       throw new InputError("研发快照路径或 Agent 身份无效，迁移已停止");
     abort(signal);
     const key = `${id}:${value.hash}`;
@@ -150,16 +158,16 @@ async function relocateRecord(record, id, { sourceDir, staging, dataDir, signal,
   };
   // Only controller references move; user examples and execution output remain unchanged.
   for (const key of ["snapshot", "verifiedSnapshot"]) if (record[key] !== undefined) record[key] = await snapshot(record[key]);
-  const relocatePackage = async (value) => { if (value?.snapshot !== undefined) value.snapshot = await snapshot(value.snapshot); };
+  const relocatePackage = async (input: unknown) => { const value = objectFields(input); if (value.snapshot !== undefined) value.snapshot = await snapshot(value.snapshot); };
   await relocatePackage(record.package);
-  if (Array.isArray(record.deliveries)) for (const delivery of record.deliveries) await relocatePackage(delivery?.package);
+  if (Array.isArray(record.deliveries)) for (const delivery of record.deliveries) await relocatePackage(objectFields(delivery).package);
 }
 
-async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal }) {
+async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal }: Omit<Relocation, "checkedSnapshots"> & { limits: MigrationLimits }) {
   // AgentStorage normalizes copies only; constructing DevelopmentStore would alter running records.
   const storage = new AgentStorage({ dataDir: staging, legacyDataDir: sourceDir });
   await storage.ready;
-  const ids = await storage.agentIds(), runIds = new Set(), checkedSnapshots = new Map();
+  const ids = await storage.agentIds(), runIds = new Set<string>(), checkedSnapshots: Relocation["checkedSnapshots"] = new Map();
   const library = new AgentLibrary({ dataDir: staging, storage });
   await library.list();
   for (const id of ids) {
@@ -168,24 +176,24 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
     const deleted = await readJson(join(staging, "agents", id, "deleted.json"), limits.jsonBytes);
     if (deleted && deleted.id !== id) throw new InputError("删除标记的 Agent 身份无效");
     if (definition && !deleted) {
-      const value = definition.agent;
+      const value = objectFields(definition.agent);
       if (definition.version !== 1 || value?.id !== id || typeof value.name !== "string" || !value.name.trim() || value.name.length > 120
-        || typeof value.draft?.goal?.value !== "string" || !value.draft.goal.value.trim() || JSON.stringify(value.draft).length > 60000
+        || typeof objectFields(objectFields(value.draft).goal).value !== "string" || !(objectFields(objectFields(value.draft).goal).value as string).trim() || JSON.stringify(value.draft).length > 60000
         || typeof value.instructions !== "string" || !value.instructions.trim() || value.instructions.length > 12000
-        || !Number.isSafeInteger(value.revision) || value.revision < 1
+        || !isInteger(value.revision) || value.revision < 1
         || (value.memory !== undefined && (typeof value.memory !== "string" || value.memory.length > 12000 || value.memory.includes("\0"))))
         throw new InputError("Agent 定义格式或身份无效");
-      if (value.profile !== undefined && (!value.profile || typeof value.profile.name !== "string" || !value.profile.name.trim()
-        || value.profile.name.length > 120 || value.profile.name.includes("\0") || typeof value.profile.description !== "string"
-        || value.profile.description.length > 240 || value.profile.description.includes("\0") || typeof value.profile.icon !== "string"
-        || value.profile.icon.length > 16 || value.profile.icon.includes("\0"))) throw new InputError("Agent 展示资料格式无效");
+      if (value.profile !== undefined && (!value.profile || typeof objectFields(value.profile).name !== "string" || !(objectFields(value.profile).name as string).trim()
+        || (objectFields(value.profile).name as string).length > 120 || (objectFields(value.profile).name as string).includes("\0") || typeof objectFields(value.profile).description !== "string"
+        || (objectFields(value.profile).description as string).length > 240 || (objectFields(value.profile).description as string).includes("\0") || typeof objectFields(value.profile).icon !== "string"
+        || (objectFields(value.profile).icon as string).length > 16 || (objectFields(value.profile).icon as string).includes("\0"))) throw new InputError("Agent 展示资料格式无效");
     }
     const architecture = await readJson(join(staging, "agents", id, "architecture.json"), limits.jsonBytes);
     if (architecture) {
       const versions = new Set();
       if (architecture.version !== 1 || !Array.isArray(architecture.records)) throw new InputError("架构记录格式无效");
-      for (const record of architecture.records) {
-        if (record?.agentId !== id || !Number.isSafeInteger(record.version) || record.version < 1 || versions.has(record.version))
+      for (const entry of architecture.records) { const record = objectFields(entry);
+        if (record?.agentId !== id || !isInteger(record.version) || record.version < 1 || versions.has(record.version))
           throw new InputError("架构记录的 Agent 身份或版本无效");
         versions.add(record.version);
       }
@@ -201,9 +209,9 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
     for (const name of entries) {
       if (!name.endsWith(".json") || name.startsWith(".pending-")) continue;
       const path = join(records, name), record = await readJson(path, limits.jsonBytes);
-      if (!safeRunId(record?.id) || record.agentId !== id || name !== record.id + ".json" || runIds.has(record.id)
-        || (record.version !== undefined && (!Number.isSafeInteger(record.version) || record.version < 1))
-        || !Number.isSafeInteger(record.revision) || record.revision < 1 || typeof record.status !== "string" || !record.status.trim()
+      if (!record || !safeRunId(record.id) || record.agentId !== id || name !== record.id + ".json" || runIds.has(record.id)
+        || (record.version !== undefined && (!isInteger(record.version) || record.version < 1))
+        || !isInteger(record.revision) || record.revision < 1 || typeof record.status !== "string" || !record.status.trim()
         || typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))
         || typeof record.updatedAt !== "string" || !Number.isFinite(Date.parse(record.updatedAt))) throw new InputError("研发记录身份或格式无效");
       hashValue(record); runIds.add(record.id);
@@ -213,19 +221,18 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
   }
   const projects = await readJson(join(staging, "projects.json"), Math.min(limits.jsonBytes, 2_000_000));
   if (projects && (projects.version !== 1 || !Array.isArray(projects.projects)
-    || projects.projects.some((item) => !item?.id || typeof item.root !== "string" || !isAbsolute(item.root))))
+    || projects.projects.some((raw: unknown) => { const item = objectFields(raw); return !item.id || typeof item.root !== "string" || !isAbsolute(item.root); })))
     throw new InputError("项目记录格式无效，迁移已停止");
   const failures = await readJson(join(staging, "project-add-failures.json"), limits.jsonBytes);
-  if (failures && (failures.version !== 1 || !Array.isArray(failures.failures) || failures.failures.some((record) =>
-    !record || typeof record.id !== "string" || typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))
+  if (failures && (failures.version !== 1 || !Array.isArray(failures.failures) || failures.failures.some((input: unknown) => { const record = objectFields(input); return !input || typeof record.id !== "string" || typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))
     || typeof record.name !== "string" || typeof record.path !== "string" || typeof record.message !== "string"
-    || typeof record.diagnostic?.stage !== "string" || typeof record.diagnostic.reason !== "string" || !Number.isSafeInteger(record.diagnostic.retries))))
+    || typeof objectFields(record.diagnostic).stage !== "string" || typeof objectFields(record.diagnostic).reason !== "string" || !isInteger(objectFields(record.diagnostic).retries); })))
     throw new InputError("项目失败记录格式无效，迁移已停止");
   return ids.length;
 }
 
-async function discard(path) {
-  const writable = async (current) => {
+async function discard(path: string) {
+  const writable = async (current: string): Promise<void> => {
     await chmod(current, 0o700);
     for (const entry of await readdir(current, { withFileTypes: true })) if (entry.isDirectory() && !entry.isSymbolicLink()) await writable(join(current, entry.name));
   };
@@ -233,28 +240,28 @@ async function discard(path) {
   catch (error) { if (!missing(error)) throw error; }
 }
 
-async function defaultLock(dataDir) {
+async function defaultLock(dataDir: string) {
   const { acquireDataLock } = await import("./instance-lock.mjs");
   const lock = await acquireDataLock(dataDir, { purpose: "migration" });
   return () => lock.release();
 }
 
 /** Copy source data without loading its live stores or copying model credentials. */
-export async function migrateInstallation({ from, dataDir, acquireLock = defaultLock, signal,
+export async function migrateInstallation({ from, dataDir: requestedDataDir, acquireLock = defaultLock, signal,
   maxBytes = MIGRATION_LIMITS.bytes, maxFileBytes = MIGRATION_LIMITS.fileBytes,
-  maxJsonBytes = MIGRATION_LIMITS.jsonBytes, maxFiles = MIGRATION_LIMITS.entries } = {}) {
+  maxJsonBytes = MIGRATION_LIMITS.jsonBytes, maxFiles = MIGRATION_LIMITS.entries }: MigrationOptions = {}) {
   let sourceDir = await directory(inputPath(from, "来源"));
   try { sourceDir = await directory(join(sourceDir, ".neuma")); }
   catch (error) { if (!missing(error)) throw error; }
   if (basename(sourceDir) !== ".neuma" && !(await readdir(sourceDir)).some((name) => ["agents", "agents.json", "agents-layout.json", "projects.json"].includes(name)))
     throw new InputError("来源目录中没有找到 NEUMA 数据");
-  dataDir = await canonicalDestination(inputPath(dataDir, "目标"));
+  const dataDir = await canonicalDestination(inputPath(requestedDataDir, "目标"));
   if (contains(sourceDir, dataDir) || contains(dataDir, sourceDir)) throw new InputError("迁移来源和目标不能相同或互相包含");
   const limits = { bytes: maxBytes, fileBytes: maxFileBytes, jsonBytes: maxJsonBytes, entries: maxFiles };
-  if (Object.values(limits).some((value) => !Number.isSafeInteger(value) || value < 1) || typeof acquireLock !== "function")
+  if (Object.values(limits).some((value) => !isInteger(value) || value < 1) || typeof acquireLock !== "function")
     throw new InputError("迁移预算或锁接口无效");
-  const releases = [];
-  let staging;
+  const releases: (() => unknown | Promise<unknown>)[] = [];
+  let staging: string | null = null;
   try {
     for (const path of [sourceDir, dataDir].sort()) {
       const release = await acquireLock(path);

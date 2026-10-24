@@ -44,18 +44,18 @@ export const TEST_LAYERS = Object.freeze({
   browser: Object.freeze(["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "sidebar-layout.test.mjs"]),
 });
 
-export function selectTestFiles(layer, availableFiles) {
+export function selectTestFiles(layer: string, availableFiles: Iterable<string>) {
   if (!Object.hasOwn(TEST_LAYERS, layer)) throw new Error("测试层必须是 unit、integration 或 browser");
   const available = [...new Set(availableFiles)].filter((name) => name.endsWith(".test.mjs")).sort();
   const known = new Set(Object.values(TEST_LAYERS).flat());
   const unclassified = available.filter((name) => !known.has(name));
-  const selected = new Set(TEST_LAYERS[layer]);
+  const selected = new Set(TEST_LAYERS[layer as keyof typeof TEST_LAYERS]);
   if (layer === "integration") for (const name of unclassified) selected.add(name);
   return { files: available.filter((name) => selected.has(name)), unclassified,
     missing: [...known].filter((name) => !available.includes(name)).sort() };
 }
 
-export function testEnvironment(layer, source) {
+export function testEnvironment(layer: string, source: NodeJS.ProcessEnv) {
   if (!Object.hasOwn(TEST_LAYERS, layer)) throw new Error("测试层必须是 unit、integration 或 browser");
   const env = { ...source };
   if (layer === "browser") env.NEUMA_REQUIRE_BROWSER_TESTS = "1";
@@ -64,7 +64,7 @@ export function testEnvironment(layer, source) {
 }
 
 async function main() {
-  const [layer, ...options] = process.argv.slice(2);
+  const [layer = "all", ...options] = process.argv.slice(2);
   if (options.some((option) => option !== "--list") || options.length > 1)
     throw new Error("用法：node scripts/run-tests.mjs <unit|integration|browser> [--list]");
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -89,7 +89,7 @@ async function main() {
   process.stdout.write(`测试层 ${layer}：${files.length} 个文件${options.includes("--list") ? "（仅列出）" : ""}\n`);
   if (options.includes("--list")) { for (const file of files) process.stdout.write(`test/${file}\n`); return; }
   const started = performance.now();
-  const code = await new Promise((done, reject) => {
+  const code = await new Promise<number>((done, reject) => {
     const child = spawn(process.execPath, ["--test", "--test-concurrency=1", ...files.map((file) => `test/${file}`)], {
       cwd: ROOT, env: layer === "all" ? process.env : testEnvironment(layer, process.env), stdio: "inherit", windowsHide: true,
     });

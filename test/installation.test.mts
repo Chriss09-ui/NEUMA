@@ -1,3 +1,8 @@
+import type { RequestHandlerOptions } from "../src/server.mjs";
+import type { HttpResponse } from "../src/runtime/http-port.mjs";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { callFixture } from "./helpers/m7-test-boundaries.mjs";
+import { listeningAddress } from "./helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { copyFile, cp, mkdtemp, readFile, rm, writeFile, readdir, mkdir, symlink } from "node:fs/promises";
@@ -11,14 +16,14 @@ import { acquireDataLock, DataDirectoryBusyError } from "../src/installation/ins
 import { parseCliArgs } from "../src/installation/installation-cli.mjs";
 import { readInstallationSettings, startLocalApplication } from "../src/installation/installation-runtime.mjs";
 
-async function temporary(t) {
+async function temporary(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "neuma-install-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
 
-function stubHandler({ instanceId }) {
-  const handler = (_req, response) => { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: true, state: "ready", instanceId })); };
+function stubHandler({ instanceId }: Pick<RequestHandlerOptions, "instanceId">) {
+  const handler = (_req: unknown, response: Pick<HttpResponse, "writeHead" | "end">) => { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: true, state: "ready", instanceId })); };
   handler.ready = Promise.resolve();
   handler.dispose = async () => {};
   return handler;
@@ -29,14 +34,14 @@ test("CLI 拒绝依赖不支持的 Node 版本，并接受各版本线边界", a
   const cli = fileURLToPath(new URL("../bin/neuma.cjs", import.meta.url));
   for (const [version, supported] of [["22.19.0", false], ["22.22.1", false], ["22.22.2", true],
     ["22.23.0", true], ["23.0.0", false], ["24.14.9", false], ["24.15.0", true],
-    ["25.0.0", false], ["26.0.0", true], ["27.0.0", true]]) {
+    ["25.0.0", false], ["26.0.0", true], ["27.0.0", true]] as const) {
     await writeFile(preload, `Object.defineProperty(process.versions, "node", { value: ${JSON.stringify(version)} });\n`);
     const result = spawnSync(process.execPath, ["--require", preload, cli, "--version"], {
       cwd: root, env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT }, encoding: "utf8", timeout: 5000,
     });
-    assert.equal(result.status, supported ? 0 : 1, version);
-    if (supported) assert.match(result.stdout, /^\d+\.\d+\.\d+-preview\.\d+\n$/, version);
-    else { assert.match(result.stderr, /22\.22\.2.*24\.15.*26\+/, version); assert.equal(result.stdout, "", version); }
+    assert.equal(result.status, supported ? 0 : 1, version!);
+    if (supported) assert.match(result.stdout, /^\d+\.\d+\.\d+-preview\.\d+\n$/, version!);
+    else { assert.match(result.stderr, /22\.22\.2.*24\.15.*26\+/, version!); assert.equal(result.stdout, "", version!); }
   }
 });
 
@@ -67,19 +72,19 @@ test("数据锁在目录创建前互斥，释放后可以再次取得", async (t
 test("端口冲突时不创建存储，也不修改数据目录", async (t) => {
   const root = await temporary(t), dataDir = join(root, "data");
   const occupying = createServer(); occupying.listen(0, "127.0.0.1"); await once(occupying, "listening");
-  t.after(() => new Promise((done) => occupying.close(done)));
+  t.after(() => new Promise<void>((done, reject) => occupying.close(error => error ? reject(error) : done())));
   let created = false;
-  await assert.rejects(startLocalApplication({ dataDir, port: occupying.address().port,
-    env: {}, createHandler() { created = true; return stubHandler({}); } }), /端口/);
+  await assert.rejects(startLocalApplication({ dataDir, port: listeningAddress(occupying).port,
+    env: {}, createHandler() { created = true; return callFixture(stubHandler, undefined, [{}]); } }), /端口/);
   assert.equal(created, false); assert.deepEqual(await readdir(root), []);
   const lock = await acquireDataLock(dataDir); await lock.release();
 });
 
 test("就绪前返回503，初始化完成后才可用，关闭只清理一次", async (t) => {
   const root = await temporary(t);
-  let release, observedPort, disposed = 0, entered;
-  const enteredHandler = new Promise((done) => { entered = done; });
-  const ready = new Promise((done) => { release = done; });
+  let release: (() => void) | undefined, observedPort: number | undefined, disposed = 0, entered: () => void;
+  const enteredHandler = new Promise<void>((done) => { entered = done; });
+  const ready = new Promise<void>((done) => { release = done; });
   const pending = startLocalApplication({ dataDir: root, port: 0, env: {}, createHandler(options) {
     observedPort = options.port;
     const handler = stubHandler(options); handler.ready = ready;
@@ -87,7 +92,7 @@ test("就绪前返回503，初始化完成后才可用，关闭只清理一次",
   } });
   await enteredHandler;
   assert.equal((await fetch(`http://127.0.0.1:${observedPort}/api/health`)).status, 503);
-  release(); const app = await pending; t.after(() => app.dispose());
+  release!(); const app = await pending; t.after(() => app.dispose());
   assert.equal((await fetch(`${app.url}api/health`)).status, 200);
   await Promise.all([app.dispose(), app.dispose()]); assert.equal(disposed, 1);
   const lock = await acquireDataLock(root); await lock.release();
@@ -99,18 +104,18 @@ test("初始化失败清理实例锁和端口，原配置不变", async (t) => {
   const before = await readFile(join(root, "installation.json"), "utf8");
   let port, disposed = 0;
   await assert.rejects(startLocalApplication({ dataDir: root, port: 0, env: {}, createHandler(options) {
-    port = options.port; const handler = stubHandler(options);
+    port = options.port; const handler = callFixture(stubHandler, undefined, [options]);
     handler.ready = Promise.reject(new Error("合成存储损坏")); handler.dispose = async () => { disposed++; }; return handler;
   } }), /合成存储损坏/);
   assert.equal(disposed, 1); assert.equal(await readFile(join(root, "installation.json"), "utf8"), before);
   const lock = await acquireDataLock(root); await lock.release();
-  const server = createServer(); server.listen(port, "127.0.0.1"); await once(server, "listening"); await new Promise((done) => server.close(done));
+  const server = createServer(); server.listen(port, "127.0.0.1"); await once(server, "listening"); await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
 });
 
 test("明确指定端口保存为下次默认，不读取模型凭据到测试输出", async (t) => {
   const root = await temporary(t);
   const reserved = createServer(); reserved.listen(0, "127.0.0.1"); await once(reserved, "listening");
-  const port = reserved.address().port; await new Promise((done) => reserved.close(done));
+  const port = listeningAddress(reserved).port; await new Promise<void>((done, reject) => reserved.close(error => error ? reject(error) : done()));
   const first = await startLocalApplication({ dataDir: root, port, rememberPort: true, env: {}, createHandler: stubHandler });
   await first.dispose(); assert.deepEqual(await readInstallationSettings(root), { port });
   const second = await startLocalApplication({ dataDir: root, env: {}, createHandler: stubHandler });
@@ -123,18 +128,18 @@ test("实际CLI从中文空格目录启动，重复启动复用，Ctrl+C退出",
   const root = await temporary(t), dataDir = join(root, "用户 数据");
   const cli = fileURLToPath(new URL("../bin/neuma.cjs", import.meta.url));
   const reservation = createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
-  const port = reservation.address().port; await new Promise((done) => reservation.close(done));
+  const port = listeningAddress(reservation).port; await new Promise<void>((done, reject) => reservation.close(error => error ? reject(error) : done()));
   const childOptions = { cwd: root, env: { PATH: process.env.PATH,
-    SYSTEMROOT: process.env.SYSTEMROOT, NODE_OPTIONS: "--max-old-space-size=128" }, stdio: ["ignore", "pipe", "pipe"] };
+    SYSTEMROOT: process.env.SYSTEMROOT, NODE_OPTIONS: "--max-old-space-size=128" }, stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"] };
   const child = spawn(process.execPath, [cli, "--no-open", "--data-dir", dataDir, "--port", String(port)], childOptions);
   let output = "", error = "";
-  child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { error += chunk; });
+  child.stdout.on("data", (chunk: string) => { output += chunk; }); child.stderr.on("data", (chunk: string) => { error += chunk; });
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
-  await new Promise((done, reject) => {
+  await new Promise<void>((done, reject) => {
     const timer = setTimeout(() => reject(new Error(`CLI 未就绪：${error}`)), 8000);
     const data = () => { if (output.includes("Ctrl+C")) { clearTimeout(timer); child.stdout.removeListener("data", data); done(); } };
     child.stdout.on("data", data);
-    child.once("exit", (code) => { clearTimeout(timer); if (!output.includes("Ctrl+C")) reject(new Error(`CLI提前退出${code}：${error}`)); });
+    child.once("exit", (code: unknown) => { clearTimeout(timer); if (!output.includes("Ctrl+C")) reject(new Error(`CLI提前退出${code}：${error}`)); });
     data();
   });
   const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json();
@@ -142,7 +147,7 @@ test("实际CLI从中文空格目录启动，重复启动复用，Ctrl+C退出",
   const page = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(page.status, 200); assert.match(await page.text(), /app\.js/);
   const duplicate = spawn(process.execPath, [cli, "--no-open", "--data-dir", dataDir], childOptions);
-  let duplicateOutput = ""; duplicate.stdout.on("data", (chunk) => { duplicateOutput += chunk; });
+  let duplicateOutput = ""; duplicate.stdout.on("data", (chunk: string) => { duplicateOutput += chunk; });
   assert.equal((await once(duplicate, "exit"))[0], 0); assert.match(duplicateOutput, /已在运行/);
   const ended = once(child, "exit"); child.kill("SIGINT"); assert.equal((await ended)[0], 0);
   assert.equal(await readInstallationSettings(dataDir).then((value) => value.port), port);
@@ -153,24 +158,24 @@ test("源码入口可以启动，不被循环模块等待卡住", {
 }, async (t) => {
   const root = await temporary(t);
   const source = fileURLToPath(new URL("../", import.meta.url));
-  const dependencySource = JSON.parse(await readFile(join(source, ".neuma-build.json"), "utf8")).sourceRoot;
+  const dependencySource = JSON.parse(String(await readFile(join(source, ".neuma-build.json"), "utf8"))).sourceRoot;
   await copyFile(join(source, "package.json"), join(root, "package.json"));
   await cp(join(source, "src"), join(root, "src"), { recursive: true });
   await cp(join(source, "public"), join(root, "public"), { recursive: true });
   for (const dependency of ["marked", "katex"])
     await cp(join(dependencySource, "node_modules", dependency), join(root, "node_modules", dependency), { recursive: true });
-  const manifest = JSON.parse(await readFile(join(source, "package.json"), "utf8"));
+  const manifest = JSON.parse(String(await readFile(join(source, "package.json"), "utf8")));
   for (const dependency of Object.keys(manifest.dependencies).filter((name) => !["marked", "katex"].includes(name))) {
     const destination = join(root, "node_modules", dependency); await mkdir(dirname(destination), { recursive: true });
     await symlink(join(dependencySource, "node_modules", dependency), destination, "dir");
   }
   const child = spawn(process.execPath, [join(root, "src", "server.mjs")], { cwd: root,
     env: { PATH: process.env.PATH, PORT: "0", NODE_OPTIONS: "--max-old-space-size=128" },
-    stdio: ["ignore", "pipe", "pipe"] });
+    stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"] });
   let output = "", error = "";
   child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { error += chunk; });
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
-  const url = await new Promise((done, reject) => {
+  const url = await new Promise<string>((done, reject) => {
     const timer = setTimeout(() => reject(new Error(`源码入口未启动：${error}`)), 8000);
     const received = () => {
       const match = output.match(/http:\/\/127\.0\.0\.1:\d+\//);
@@ -192,15 +197,15 @@ test("源码入口可以启动，不被循环模块等待卡住", {
 
 test("启动等待期间取消，初始化结束后不发布实例并释放锁", async (t) => {
   const root = await temporary(t), controller = new AbortController();
-  let entered, ready, disposed = 0;
-  const started = new Promise((done) => { entered = done; });
+  let entered!: () => void, ready: (() => void) | undefined, disposed = 0;
+  const started = new Promise<void>((done) => { entered = done; });
   const pending = startLocalApplication({ dataDir: root, port: 0, env: {}, signal: controller.signal,
     createHandler(options) {
       const handler = stubHandler(options);
-      handler.ready = new Promise((done) => { ready = done; });
+      handler.ready = new Promise<void>((done) => { ready = done; });
       handler.dispose = async () => { disposed++; };
       entered(); return handler;
     } });
-  await started; controller.abort(); ready(); await assert.rejects(pending, { name: "AbortError" });
+  await started; controller.abort(); ready!(); await assert.rejects(pending, { name: "AbortError" });
   assert.equal(disposed, 1); const lock = await acquireDataLock(root); await lock.release();
 });

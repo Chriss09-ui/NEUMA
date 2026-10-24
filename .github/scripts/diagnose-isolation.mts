@@ -1,3 +1,4 @@
+import { objectFields, isInteger } from "../../src/runtime/type-boundary.mjs";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -5,7 +6,7 @@ import { DevelopmentExecutor } from "../../src/development/development-executor.
 
 let remainingBytes = 16384, printed = 0;
 const loaderWrapper = fileURLToPath(new URL("./windows-loader.exe", import.meta.url));
-const report = (line) => {
+const report = (line: string) => {
   if (printed >= 128) return;
   const match = /^NEUMA_ISOLATION_FAIL line=(\d{1,6}) win32=(\d{1,10})$/.exec(line.trim());
   if (match) { printed += 1; console.log(`NEUMA_ISOLATION_FAIL line=${match[1]} win32=${match[2]}`); return; }
@@ -25,7 +26,7 @@ const executor = new DevelopmentExecutor({ spawnImpl: (command, args, options) =
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
     const part = bytes.subarray(0, remainingBytes); remainingBytes -= part.length;
     pending += part.toString("utf8");
-    const lines = pending.split("\n"); pending = lines.pop().slice(-512);
+    const lines = pending.split("\n"); pending = lines.pop()!.slice(-512);
     for (const line of lines) report(line);
   });
   child.once("close", () => report(pending));
@@ -37,10 +38,10 @@ const sandboxRun = executor.sandboxRun.bind(executor);
 // bounded status fields rather than raw output, which may contain OS paths.
 executor.sandboxRun = async (input) => {
   const result = await sandboxRun(input);
-  let canary;
-  try { canary = JSON.parse(result.stdout); } catch {}
+  let canary: Record<string, unknown> | undefined;
+  try { canary = objectFields(JSON.parse(result.stdout)); } catch {}
   const status = ["passed", "failed", "error", "not_run"].includes(result.status) ? result.status : "unknown";
-  const exitCode = Number.isSafeInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode <= 0xffffffff ? result.exitCode : null;
+  const exitCode = isInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode <= 0xffffffff ? result.exitCode : null;
   const observed = Object.fromEntries(checks.map((key) => [key, typeof canary?.[key] === "boolean" ? canary[key] : null]));
   console.log(JSON.stringify({ canaryStatus: status, exitCode, checks: observed }));
   return result;
