@@ -27,7 +27,7 @@ export const TEST_LAYERS = Object.freeze({
     "build/release.test.mjs", "requirements/requirements-ui.test.mjs", "ui/runtime-view.test.mjs", "server.test.mjs",
     "runtime/session-shutdown.test.mjs", "runtime/settings-ui.test.mjs", "runtime/settings.test.mjs", "ui/shell.test.mjs",
     "ui/select-menu.test.mjs", "installation/skills-api.test.mjs", "installation/skills-splitter.test.mjs", "installation/skills-ui.test.mjs", "installation/skills.test.mjs", "ui/state.test.mjs", "requirements/task-spec-schema.test.mjs", "build/test-layers.test.mjs", "development/value-schema-rules.test.mjs",
-    "build/hygiene-leftovers.test.mjs", "build/hygiene-tests.test.mjs",
+    "build/hygiene-leftovers.test.mjs", "build/hygiene-tests.test.mjs", "build/hygiene-docs.test.mjs",
   ]),
   // R5 起显式登记全部集成测试（原 integration 兜底发现改为登记基线，运行器兜底仍保留防漏测）；
   // 新增集成测试必须在此登记，hygiene 的测试登记检查会拒绝新遗漏。

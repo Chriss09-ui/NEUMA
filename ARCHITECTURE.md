@@ -214,14 +214,15 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 
 ## 10. 构建与验证
 
-实现：`scripts/build.mjs`（唯一自有 JS 引导器）、`scripts/build-core.mts`、`tsconfig*.json`、`scripts/run-tests.mts`。测试：`build-pipeline.test.mts`、`test-layers.test.mts`、`typescript-boundaries.test.mts`、`m4/m5 边界测试`。
+实现：`scripts/build.mjs`（唯一自有 JS 引导器）、`scripts/build-core.mts`、`tsconfig*.json`、`scripts/run-tests.mts`、hygiene 检查模块（`scripts/hygiene*.mts`）。测试：`build-pipeline.test.mts`、`test-layers.test.mts`、`typescript-boundaries.test.mts`、`m4/m5 边界测试`、`hygiene-*.test.mts`。
 
 - 自有后端、前端、测试、安装和维护代码全部严格 TypeScript 编译，`allowJs` / `noCheck` 关闭。Node `.mts`、浏览器 `.ts`、CLI `.cts` 分别发射为 `.mjs`、`.js`、`.cjs`；运行产物位于 `dist/ts-build/package/`，保持安装包层级。源码根不能直接打包，使用 `npm run package:pack`；不手改 dist。`skipLibCheck` 仅用于锁定 Pi 依赖的上游声明错误，不适用于自有共享声明。
 - 构建检查自有 TS 的覆盖、入口、静态资源、执行权限和源码摘要，拒绝遗留自有 JS、编译错误、冲突及陈旧产物；五组配置隔离共享声明、Node、浏览器 ESM、iframe 普通脚本和测试环境。构建失败使上一代产物失去有效标记。
 - 测试命令先构建再运行产物目录中的测试。`scripts/run-tests.mts` 维护 unit / integration / browser 分层清单，递归发现 `test/` 及其领域子目录，条目以相对 `test/` 根的完整路径标识（不同目录的同名文件不冲突）；顶层仅保留 server 组装测试与 native-check 固定引用的 4 个入口。unit、integration 默认移除外部浏览器环境变量并关闭外部浏览器；browser 保留显式启用机制（`NEUMA_REQUIRE_BROWSER_TESTS=1` / `NEUMA_TEST_BROWSER`），macOS 默认只尝试 Dia，无界面参数兼容性待验证；跳过、未运行或启动失败不能记作通过。运行保持串行（`--test-concurrency=1`）。`test/types/` 下的编译期反例只编译不执行；`test/helpers/`、`test/fixtures/` 不进入运行集合。`.github/workflows/native-check.yml` 固定引用 4 个测试的编译产物路径。
+- 仓库规范检查 `npm run check:hygiene`（`scripts/hygiene*.mts`，由 `scripts/build.mjs` 的 hygiene 分支临时严格编译执行，无 dist 源码树可运行，只读不执行应用模块）：模块依赖用 TypeScript 官方 API 解析，区分运行时与纯类型依赖，规则覆盖未解析导入、契约运行时导入、R3 提取模块反向依赖、组装入口导入者、`src/architecture/` → `src/agents/` 跨域运行时边界、运行时依赖环登记（当前 2 组）与非字面量动态导入按文件计数登记；测试登记要求发现集合与 TEST_LAYERS 完全对应（混合层文件例外须登记理由）；文档引用校验 README/AGENTS/ARCHITECTURE 的仓库内链接（本地文档库引用不判错）；明确残留拒绝同名 JS 产物与未迁移自有 JS。全部例外必须写明理由，失效时同样报错。
 - 模型协议测试使用本机模拟接口，不调用真实模型服务；外部检索和业务服务用可控替身。测试通过不表示真实业务模型质量或外部服务集成已验收。
 - CI（`.github/workflows/typescript-check.yml`）：Mac ARM64、Node 22.22.2 / 24.15.0 / 26.3.0 的代码与包检查。发布验证当前只覆盖 Mac ARM64；Linux/Windows 打包与既有原生工作流不在当前收口范围。安装版只运行已编译 JS，不依赖 TypeScript 或源码仓库依赖；打包、解包 smoke 和独立生产依赖安装验证同一编译代次。
-- 每日验证入口：`npm run typecheck`（最快类型检查）、`npm run test:unit` / `test:integration`（分层）、`npm test`（全量回归，提交或推送前执行）、`npm run package:pack` / `test:package:smoke` / `test:package:install`（涉及包内容时）。页面检查优先使用 Codex 内置浏览器；仅明确需要外部浏览器验收时运行 `npm run test:browser`。
+- 每日验证入口：`npm run typecheck`（最快类型检查）、`npm run check:hygiene`（仓库规范检查，已接入 Mac CI）、`npm run test:unit` / `test:integration`（分层）、`npm test`（全量回归，提交或推送前执行）、`npm run package:pack` / `test:package:smoke` / `test:package:install`（涉及包内容时）。页面检查优先使用 Codex 内置浏览器；仅明确需要外部浏览器验收时运行 `npm run test:browser`。
 
 ## 11. 跨领域不变量
 
