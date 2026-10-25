@@ -41,6 +41,7 @@ export const TEST_LAYERS = Object.freeze({
     "installation/installation.test.mjs", "collaboration/main-context-integration.test.mjs", "runtime/materials-runner.test.mjs", "agents/materials.test.mjs",
     "runtime/model-connection.test.mjs", "runtime/pi-runtime.test.mjs", "runtime/pi-session-state.test.mjs", "development/development-session-recovery.test.mjs", "build/prepare-package.test.mjs", "ui/rich-text-assets.test.mjs", "project-platform.test.mjs",
     "projects/project-script-runtime.test.mjs", "projects/projects.test.mjs", "installation/skills-boundaries.test.mjs",
+    "build/hygiene-graph.test.mjs",
   ]),
   // The build-view file also has two state checks, and is intentionally present in integration.
   browser: Object.freeze(["agents/agent-artifact-document.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]),

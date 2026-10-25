@@ -1,9 +1,11 @@
 import { hygieneSourceRoot, type HygieneResult } from "./hygiene-tree.mjs";
 import { checkLeftoverFiles } from "./hygiene-leftovers.mjs";
+import { checkModuleDependencies } from "./hygiene-graph.mjs";
 
 // 仓库规范检查入口。由 scripts/build.mjs 的 hygiene 分支临时严格编译后调用，也可以从 dist 产物直接运行。
 // 每个检查只读源码树，不启动后台、模型或外部服务，不修改任何文件。
 const CHECKS: { name: string; run: (root: string) => Promise<HygieneResult> }[] = [
+  { name: "模块依赖", run: checkModuleDependencies },
   { name: "明确残留", run: checkLeftoverFiles },
 ];
 
