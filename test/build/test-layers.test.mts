@@ -9,10 +9,10 @@ test("分层清单覆盖实际测试文件，快速组不包含真实执行或�
   for (const layer of Object.values(layers)) assert.deepEqual<NonNullable<typeof layer>["missing"]>(layer.missing, []);
   assert.deepEqual(layers.unit!.files.filter((name) => layers.integration!.files.includes(name) || layers.browser!.files.includes(name)), []);
   assert.ok(layers.unit!.files.includes("requirements/core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration-ui.test.mjs"));
-  for (const name of ["agent-prototype.test.mjs", "runtime/pi-runtime.test.mjs", "development-executor.test.mjs", "runtime/materials-runner.test.mjs", "project-platform.test.mjs"])
+  for (const name of ["agents/agent-prototype.test.mjs", "runtime/pi-runtime.test.mjs", "development-executor.test.mjs", "runtime/materials-runner.test.mjs", "project-platform.test.mjs"])
     assert.ok(layers.integration!.files.includes(name), `${name} 必须归入集成组`);
-  assert.deepEqual(layers.browser!.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]);
-  assert.deepEqual(layers.browser!.files.filter((name) => layers.integration!.files.includes(name)), ["agent-build-view.test.mjs"]);
+  assert.deepEqual(layers.browser!.files, ["agents/agent-artifact-document.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]);
+  assert.deepEqual(layers.browser!.files.filter((name) => layers.integration!.files.includes(name)), ["agents/agent-build-view.test.mjs"]);
 });
 
 test("递归发现以相对 test 根的完整路径标识，嵌套与同名文件互不冲突，辅助目录不进入运行集合", async () => {

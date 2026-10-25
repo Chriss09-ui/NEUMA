@@ -10,10 +10,10 @@ export const TEST_LAYERS = Object.freeze({
   unit: Object.freeze([
     "installation/source-launcher.test.mjs", "build/typescript-boundaries.test.mjs", "build/m4-architecture-boundaries.test.mjs", "build/m4-development-boundaries.test.mjs",
     "runtime/model-context.test.mjs", "architecture/architecture-model-context.test.mjs",
-    "application-ui.test.mjs", "application-context-ui.test.mjs", "application-assistant-ui.test.mjs", "application-context.test.mjs", "runtime/web-capabilities.test.mjs", "agent-connections.test.mjs",
-    "agent-api.test.mjs", "agent-attachments.test.mjs", "agent-avatar.test.mjs", "agent-conversations.test.mjs",
-    "agent-details.test.mjs", "agent-library.test.mjs", "agent-runtime.test.mjs", "runtime/agent-scheduler.test.mjs",
-    "agents-ui.test.mjs", "architecture/architecture-contract.test.mjs", "architecture/architecture-platform.test.mjs", "architecture/platform-contract.test.mjs", "architecture/architecture-research.test.mjs", "build/browser-selection.test.mjs",
+    "applications/application-ui.test.mjs", "applications/application-context-ui.test.mjs", "applications/application-assistant-ui.test.mjs", "applications/application-context.test.mjs", "runtime/web-capabilities.test.mjs", "agents/agent-connections.test.mjs",
+    "agents/agent-api.test.mjs", "agents/agent-attachments.test.mjs", "agents/agent-avatar.test.mjs", "agents/agent-conversations.test.mjs",
+    "agents/agent-details.test.mjs", "agents/agent-library.test.mjs", "agents/agent-runtime.test.mjs", "runtime/agent-scheduler.test.mjs",
+    "agents/agents-ui.test.mjs", "architecture/architecture-contract.test.mjs", "architecture/architecture-platform.test.mjs", "architecture/platform-contract.test.mjs", "architecture/architecture-research.test.mjs", "build/browser-selection.test.mjs",
     "architecture/architecture-review-progress.test.mjs", "architecture/architecture-reference-selectors.test.mjs", "architecture/architecture-native-finding-closure.test.mjs",
     "ui/chat-ui.test.mjs", "ui/rich-text.test.mjs", "collaboration-api.test.mjs", "collaboration-ui.test.mjs", "requirements/core.test.mjs",
     "development/development-api.test.mjs", "development/development-case-schema.test.mjs", "development/development-context.test.mjs", "development/development-contract.test.mjs", "development/development-diagnostics.test.mjs", "development/development-fixtures.test.mjs", "development/development-store.test.mjs",
@@ -30,18 +30,18 @@ export const TEST_LAYERS = Object.freeze({
   integration: Object.freeze([
     "build/build-pipeline.test.mjs", "controller-storage-boundaries.test.mjs",
     "runtime/model-context-native.test.mjs",
-    "application-store.test.mjs", "application-resources.test.mjs", "application-service.test.mjs", "requirements/input-framing-integration.test.mjs",
-    "development/node-action.test.mjs", "application-delivery-integration.test.mjs", "dashboard-application-integration.test.mjs", "agent-web-runtime.test.mjs", "python-gateway-integration.test.mjs",
-    "agent-attachments-api.test.mjs", "agent-build-view.test.mjs", "agent-collaboration-runtime.test.mjs",
-    "agent-material-runtime.test.mjs", "agent-prototype.test.mjs", "agent-active-runtime.test.mjs", "agent-storage.test.mjs",
+    "applications/application-store.test.mjs", "applications/application-resources.test.mjs", "applications/application-service.test.mjs", "requirements/input-framing-integration.test.mjs",
+    "development/node-action.test.mjs", "applications/application-delivery-integration.test.mjs", "applications/dashboard-application-integration.test.mjs", "agents/agent-web-runtime.test.mjs", "python-gateway-integration.test.mjs",
+    "agents/agent-attachments-api.test.mjs", "agents/agent-build-view.test.mjs", "agent-collaboration-runtime.test.mjs",
+    "agents/agent-material-runtime.test.mjs", "agents/agent-prototype.test.mjs", "agents/agent-active-runtime.test.mjs", "agents/agent-storage.test.mjs",
     "architecture/architecture-integration.test.mjs", "architecture/architecture.test.mjs", "architecture/architecture-recorded-failures.test.mjs", "architecture/architecture-deferred-verification.test.mjs", "architecture/architecture-confirmed-context.test.mjs", "requirements/requirement-calculation-integration.test.mjs", "requirements/requirement-consultation-history.test.mjs", "development/development-delivery.test.mjs",
     "development-executor.test.mjs", "development/development-fixture-integration.test.mjs", "development/development-integration.test.mjs", "development/development-artifacts.test.mjs", "development/development-file-tools.test.mjs", "groups-integration.test.mjs",
-    "installation/installation.test.mjs", "main-context-integration.test.mjs", "runtime/materials-runner.test.mjs", "materials.test.mjs",
+    "installation/installation.test.mjs", "main-context-integration.test.mjs", "runtime/materials-runner.test.mjs", "agents/materials.test.mjs",
     "runtime/model-connection.test.mjs", "runtime/pi-runtime.test.mjs", "runtime/pi-session-state.test.mjs", "development/development-session-recovery.test.mjs", "build/prepare-package.test.mjs", "ui/rich-text-assets.test.mjs", "project-platform.test.mjs",
     "project-script-runtime.test.mjs", "projects.test.mjs", "installation/skills-boundaries.test.mjs",
   ]),
   // The build-view file also has two state checks, and is intentionally present in integration.
-  browser: Object.freeze(["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]),
+  browser: Object.freeze(["agents/agent-artifact-document.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]),
 });
 
 export function selectTestFiles(layer: string, availableFiles: Iterable<string>) {
