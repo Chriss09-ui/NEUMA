@@ -34,6 +34,7 @@ jobs:
         run: node -e "if(process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Preview requires macOS ARM64')"
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck
+      - run: npm run check:hygiene
       - run: npm run build
       - name: Run all tests from this compiled generation
         run: node dist/ts-build/package/scripts/run-tests.mjs all

@@ -141,6 +141,7 @@ npm run test:browser       # 显式启用外部浏览器验收
 npm test                   # 原有全量入口，默认关闭外部浏览器
 npm run release:preview:check
 npm run typecheck         # 严格检查全部自有 TypeScript
+npm run check:hygiene     # 仓库规范检查：模块依赖、测试登记、文档引用、误生成文件
 npm run build             # 生成同一目录布局的运行产物
 npm run package:pack      # 编译、检查并打包到 dist/npm/
 npm run test:package:smoke # 解包启动检查，复用开发依赖
