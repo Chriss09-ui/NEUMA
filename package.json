@@ -40,6 +40,7 @@
     "start": "node scripts/build.mjs start",
     "build": "node scripts/build.mjs",
     "typecheck": "node scripts/build.mjs typecheck",
+    "check:hygiene": "node scripts/build.mjs hygiene",
     "test": "node scripts/build.mjs test all",
     "test:unit": "node scripts/build.mjs test unit",
     "test:integration": "node scripts/build.mjs test integration",

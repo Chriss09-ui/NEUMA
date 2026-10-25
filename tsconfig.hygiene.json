@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": { "noEmit": false, "skipLibCheck": false, "allowJs": false },
+  "include": ["scripts/hygiene.mts"],
+  "exclude": []
+}
