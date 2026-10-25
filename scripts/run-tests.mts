@@ -27,21 +27,64 @@ export const TEST_LAYERS = Object.freeze({
     "build/release.test.mjs", "requirements/requirements-ui.test.mjs", "ui/runtime-view.test.mjs", "server.test.mjs",
     "runtime/session-shutdown.test.mjs", "runtime/settings-ui.test.mjs", "runtime/settings.test.mjs", "ui/shell.test.mjs",
     "ui/select-menu.test.mjs", "installation/skills-api.test.mjs", "installation/skills-splitter.test.mjs", "installation/skills-ui.test.mjs", "installation/skills.test.mjs", "ui/state.test.mjs", "requirements/task-spec-schema.test.mjs", "build/test-layers.test.mjs", "development/value-schema-rules.test.mjs",
-    "build/hygiene-leftovers.test.mjs",
+    "build/hygiene-leftovers.test.mjs", "build/hygiene-tests.test.mjs",
   ]),
+  // R5 起显式登记全部集成测试（原 integration 兜底发现改为登记基线，运行器兜底仍保留防漏测）；
+  // 新增集成测试必须在此登记，hygiene 的测试登记检查会拒绝新遗漏。
   integration: Object.freeze([
-    "build/build-pipeline.test.mjs", "collaboration/controller-storage-boundaries.test.mjs",
-    "runtime/model-context-native.test.mjs",
-    "applications/application-store.test.mjs", "applications/application-resources.test.mjs", "applications/application-service.test.mjs", "requirements/input-framing-integration.test.mjs",
-    "development/node-action.test.mjs", "applications/application-delivery-integration.test.mjs", "applications/dashboard-application-integration.test.mjs", "agents/agent-web-runtime.test.mjs", "services/python-gateway-integration.test.mjs",
-    "agents/agent-attachments-api.test.mjs", "agents/agent-build-view.test.mjs", "collaboration/agent-collaboration-runtime.test.mjs",
-    "agents/agent-material-runtime.test.mjs", "agents/agent-prototype.test.mjs", "agents/agent-active-runtime.test.mjs", "agents/agent-storage.test.mjs",
-    "architecture/architecture-integration.test.mjs", "architecture/architecture.test.mjs", "architecture/architecture-recorded-failures.test.mjs", "architecture/architecture-deferred-verification.test.mjs", "architecture/architecture-confirmed-context.test.mjs", "requirements/requirement-calculation-integration.test.mjs", "requirements/requirement-consultation-history.test.mjs", "development/development-delivery.test.mjs",
-    "development-executor.test.mjs", "development/development-fixture-integration.test.mjs", "development/development-integration.test.mjs", "development/development-artifacts.test.mjs", "development/development-file-tools.test.mjs", "collaboration/groups-integration.test.mjs",
-    "installation/installation.test.mjs", "collaboration/main-context-integration.test.mjs", "runtime/materials-runner.test.mjs", "agents/materials.test.mjs",
-    "runtime/model-connection.test.mjs", "runtime/pi-runtime.test.mjs", "runtime/pi-session-state.test.mjs", "development/development-session-recovery.test.mjs", "build/prepare-package.test.mjs", "ui/rich-text-assets.test.mjs", "project-platform.test.mjs",
-    "projects/project-script-runtime.test.mjs", "projects/projects.test.mjs", "installation/skills-boundaries.test.mjs",
-    "build/hygiene-graph.test.mjs",
+    "agents/agent-active-runtime.test.mjs", "agents/agent-attachments-api.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-capabilities.test.mjs",
+    "agents/agent-material-runtime.test.mjs", "agents/agent-prototype.test.mjs", "agents/agent-storage.test.mjs", "agents/agent-web-runtime.test.mjs",
+    "agents/materials.test.mjs", "agents/workspace-utf8-nul.test.mjs", "applications/application-artifact-download.test.mjs",
+    "applications/application-contract-errors.test.mjs", "applications/application-delivery-integration.test.mjs", "applications/application-errors.test.mjs",
+    "applications/application-manifest-diagnostics.test.mjs", "applications/application-resources.test.mjs", "applications/application-service.test.mjs",
+    "applications/application-store.test.mjs", "applications/dashboard-application-integration.test.mjs", "applications/task-artifacts.test.mjs",
+    "architecture/architecture-confirmed-context.test.mjs", "architecture/architecture-consultation.test.mjs", "architecture/architecture-decision-evidence.test.mjs",
+    "architecture/architecture-deferred-verification.test.mjs", "architecture/architecture-delegation-wire.test.mjs",
+    "architecture/architecture-design-integration.test.mjs", "architecture/architecture-design-pipeline.test.mjs", "architecture/architecture-design-stages.test.mjs",
+    "architecture/architecture-development-reference-carry.test.mjs", "architecture/architecture-development-revision.test.mjs",
+    "architecture/architecture-evidence-pagination-capacity.test.mjs", "architecture/architecture-evidence-reader.test.mjs",
+    "architecture/architecture-feedback-capacity.test.mjs", "architecture/architecture-feedback-closure-reuse.test.mjs",
+    "architecture/architecture-feedback-ledger.test.mjs", "architecture/architecture-feedback-offline-regression.test.mjs",
+    "architecture/architecture-feedback-review-routing.test.mjs", "architecture/architecture-fidelity-context.test.mjs",
+    "architecture/architecture-fidelity-progress.test.mjs", "architecture/architecture-fidelity-rejected-reference.test.mjs",
+    "architecture/architecture-fidelity-revision.test.mjs", "architecture/architecture-guard-continuation.test.mjs",
+    "architecture/architecture-handoff-capacity.test.mjs", "architecture/architecture-handoff-verification.test.mjs",
+    "architecture/architecture-historical-planning-reference.test.mjs", "architecture/architecture-integration.test.mjs",
+    "architecture/architecture-main-review-checkpoint-contract.test.mjs", "architecture/architecture-main-review-checkpoint.test.mjs",
+    "architecture/architecture-module-output-limit.test.mjs", "architecture/architecture-module-recovery.test.mjs",
+    "architecture/architecture-part-error-diagnostics.test.mjs", "architecture/architecture-platform-claims.test.mjs",
+    "architecture/architecture-prior-findings.test.mjs", "architecture/architecture-recorded-failures.test.mjs", "architecture/architecture-repair-evidence.test.mjs",
+    "architecture/architecture-review-batch-contract.test.mjs", "architecture/architecture-review-batches.test.mjs",
+    "architecture/architecture-review-evidence.test.mjs", "architecture/architecture-review-parts-native-closure.test.mjs",
+    "architecture/architecture-review-parts.test.mjs", "architecture/architecture-review-prompt.test.mjs", "architecture/architecture-review-recovery.test.mjs",
+    "architecture/architecture-review-revision.test.mjs", "architecture/architecture-revision-recovery.test.mjs",
+    "architecture/architecture-secondary-structured-submission.test.mjs", "architecture/architecture-submission-continuation.test.mjs",
+    "architecture/architecture-submission-repair.test.mjs", "architecture/architecture-thought.test.mjs", "architecture/architecture-tool-diagnostics.test.mjs",
+    "architecture/architecture-unsubmitted-draft.test.mjs", "architecture/architecture.test.mjs", "architecture/requirement-fidelity-execution-facts.test.mjs",
+    "architecture/requirement-fidelity-recovery.test.mjs", "architecture/requirement-fidelity-reference-contract.test.mjs",
+    "architecture/requirement-fidelity-selectors.test.mjs", "architecture/requirement-fidelity.test.mjs", "build/build-pipeline.test.mjs",
+    "build/hygiene-graph.test.mjs", "build/prepare-package.test.mjs", "collaboration/agent-collaboration-runtime.test.mjs",
+    "collaboration/controller-storage-boundaries.test.mjs", "collaboration/group-layout.test.mjs", "collaboration/groups-integration.test.mjs",
+    "collaboration/main-context-integration.test.mjs", "collaboration/prompt-identity.test.mjs", "development-executor.test.mjs",
+    "development/acceptance-delivery-integration.test.mjs", "development/acceptance-execution-facts.test.mjs", "development/acceptance-verification.test.mjs",
+    "development/activation-business-verification.test.mjs", "development/conversation-verification.test.mjs", "development/development-activation-checks.test.mjs",
+    "development/development-artifacts.test.mjs", "development/development-case-facts.test.mjs", "development/development-delivery.test.mjs",
+    "development/development-file-tools.test.mjs", "development/development-fixture-integration.test.mjs", "development/development-fixture-text-integration.test.mjs",
+    "development/development-index-contract.test.mjs", "development/development-input-admission.test.mjs", "development/development-integration.test.mjs",
+    "development/development-plan-diagnostics.test.mjs", "development/development-planning-blocker.test.mjs", "development/development-planning-draft-recovery.test.mjs",
+    "development/development-planning-recovery.test.mjs", "development/development-planning-tool-failures.test.mjs", "development/development-session-recovery.test.mjs",
+    "development/development-submission-continuation.test.mjs", "development/development-task-order.test.mjs", "development/development-test-material-audit.test.mjs",
+    "development/development-tool-inputs.test.mjs", "development/managed-development-integration.test.mjs", "development/managed-workflow-verification.test.mjs",
+    "development/node-action.test.mjs", "development/raw-json-input-integration.test.mjs", "installation/installation.test.mjs",
+    "installation/skills-boundaries.test.mjs", "project-platform.test.mjs", "projects/project-script-runtime.test.mjs", "projects/projects.test.mjs",
+    "requirements/input-framing-integration.test.mjs", "requirements/requirement-calculation-integration.test.mjs",
+    "requirements/requirement-consultation-history.test.mjs", "requirements/requirement-consultation.test.mjs", "requirements/requirement-limits.test.mjs",
+    "requirements/requirement-sessions.test.mjs", "requirements/unicode-text-contract.test.mjs", "runtime/materials-runner.test.mjs",
+    "runtime/model-connection.test.mjs", "runtime/model-context-native.test.mjs", "runtime/model-idle-timeout.test.mjs", "runtime/model-profile.test.mjs",
+    "runtime/pi-runtime.test.mjs", "runtime/pi-session-state.test.mjs", "runtime/pi-submission-contract.test.mjs", "runtime/tool-input-diagnostics.test.mjs",
+    "services/agent-services-ui.test.mjs", "services/connections-protocols.test.mjs", "services/managed-application.test.mjs", "services/managed-services.test.mjs",
+    "services/python-gateway-integration.test.mjs", "services/service-data-migrations.test.mjs", "services/service-dependencies.test.mjs",
+    "services/service-gateway.test.mjs", "services/service-workflows.test.mjs", "ui/rich-text-assets.test.mjs", "ui/sidebar-motion.test.mjs"
   ]),
   // The build-view file also has two state checks, and is intentionally present in integration.
   browser: Object.freeze(["agents/agent-artifact-document.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]),
@@ -59,11 +102,12 @@ export function selectTestFiles(layer: string, availableFiles: Iterable<string>)
 }
 
 // 递归发现全部测试入口，以相对 test 根的完整路径标识；发现、分类、--list 与实际启动共用该集合。
-export async function discoverTestFiles(): Promise<string[]> {
-  const root = resolve(ROOT, "test");
+// root 默认为运行器自身根；源码检查（hygiene）以显式传入的源码根调用，不依赖进程工作目录。
+export async function discoverTestFiles(root: string = ROOT): Promise<string[]> {
+  const directory = resolve(root, "test");
   const files: string[] = [];
   const walk = async (relative: string) => {
-    for (const entry of await readdir(resolve(root, relative), { withFileTypes: true })) {
+    for (const entry of await readdir(resolve(directory, relative), { withFileTypes: true })) {
       const child = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.isDirectory()) await walk(child);
       else if (entry.isFile() && (entry.name.endsWith(".test.mjs") || entry.name.endsWith(".test.mts")))
