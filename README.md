@@ -159,9 +159,30 @@ src/
 ├── installation/      命令行、安装、数据迁移与实例锁
 ├── architecture/      方案设计、契约校验与独立评估
 ├── development/       研发流程、验收、工作区与交付
+├── verification/      验收契约与输入拒绝证据
 ├── agents/            智能体定义、持久化与保存记录
 ├── applications/      应用交付、独立资源来源、持久任务与状态
 ├── requirements/      需求澄清、模型服务与响应流
+├── main/              主 Agent 长期对话与全局管理
+├── collaboration/     群组协作、认领与公开/内部消息
+├── connections/       HTTP/MCP/OAuth 通用连接与凭据仓库
+├── services/          托管服务、流程控制器与专属网关
+├── materials/         上传材料解析与 Agent 间共享
 ├── projects/          本机项目登记、检查与运行管理
+├── skills/            本机 Skill 管理（独立维护边界）
+├── contracts/         跨领域共享声明
 └── runtime/           Pi 会话与原生隔离适配
 ```
+
+各领域的职责边界、状态归属、关键约束和验证入口见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 文档
+
+- [AGENTS.md](AGENTS.md)：日常开发约定与验证要求。
+- [ARCHITECTURE.md](ARCHITECTURE.md)：当前架构基线，按主题组织。
+- [docs/user-guide.md](docs/user-guide.md)：用户使用说明。
+- [docs/agent-capabilities-and-services.md](docs/agent-capabilities-and-services.md)：智能体能力、连接与运行。
+- [docs/connections-guide.md](docs/connections-guide.md)：连接配置指南。
+- [docs/npm-installation.md](docs/npm-installation.md)：npm 安装与验收细节。
+- [docs/development-layer-design.md](docs/development-layer-design.md)：研发层五阶段设计。
+- `docs/history/` 与 `本地测试记录/`：历史档案与冻结验证证据，非当前规范。
