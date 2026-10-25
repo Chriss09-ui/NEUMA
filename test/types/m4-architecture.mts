@@ -15,3 +15,17 @@ export function versionSpecificFields(design: ArchitectureDesign) {
   // @ts-expect-error Legacy and v2 architecture have no modern execution choice.
   return design.execution.hosting;
 }
+import type { ArchitectureControllerPort } from "../../src/agents/prototype-port.mjs";
+// 消费者端口只要求实际调用的方法集合：最小替身无需完整 ArchitectureDesigner 即可通过严格类型检查。
+export function minimalArchitectureControllerDouble(): ArchitectureControllerPort {
+  return {
+    async get() { return null; },
+    async getVersion() { return null; },
+    async save(record) { void record; },
+    async design(definition) { void definition; throw new Error("minimal double"); },
+    async markReady(record) { return record; },
+    async remove() {},
+    ready: Promise.resolve(),
+    persistence: Promise.resolve(),
+  };
+}

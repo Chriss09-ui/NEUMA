@@ -29,8 +29,10 @@ export interface PrototypeSession { agentId: string; revision: number; connectio
   refreshWeb?: boolean; hasImages?: boolean; runtimeEvidence: UnknownRecord[]; done: Promise<void>; finish(): void }
 export type MaterialTool = NeumaTool & { resolveFile?: (id: string, signal?: AbortSignal) => Promise<{ path: string; name: string; mimeType: string; size?: number }> };
 export interface CapabilityInput { capability: string; args: unknown; signal?: AbortSignal | undefined }
+// PrototypeAgents 只调用架构控制器的这些方法，server 组装另读取 ready/persistence；端口保持与实际消费集合一致，不引入第二种实现的扩展机制。
+export type ArchitectureControllerPort = Pick<ArchitectureDesigner, "get" | "getVersion" | "save" | "design" | "markReady" | "remove" | "ready" | "persistence">;
 export interface PrototypeOptions { config: ModelConfig; cwd: string; dataDir: string; sessionFactory?: SessionFactory; fidelitySessionFactory?: SessionFactory;
-  architecture?: ArchitectureDesigner; development?: DevelopmentController; storage?: AgentStorage; materials?: MaterialStore; connections?: AgentConnectionStore;
+  architecture?: ArchitectureControllerPort; development?: DevelopmentController; storage?: AgentStorage; materials?: MaterialStore; connections?: AgentConnectionStore;
   connectionOptions?: Omit<ConstructorParameters<typeof AgentConnectionStore>[0], "dataDir" | "storage">; web?: WebCapabilityPort; applications?: ApplicationService;
   services?: ManagedServiceManager; enforceRequirementConfirmation?: boolean }
 export interface PromptInput { agentId: string; sessionId: string; message?: string; history?: unknown; attachments?: unknown; applicationContext?: unknown; source?: unknown; scope?: unknown }

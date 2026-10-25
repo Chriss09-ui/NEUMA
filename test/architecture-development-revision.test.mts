@@ -1,4 +1,5 @@
 import type { StoredArchitectureRecord } from "../src/architecture/architecture-controller-port.mjs";
+import type { ArchitectureDesigner } from "../src/architecture/architecture.mjs";
 import { callFixture } from "./helpers/m7-test-boundaries.mjs";
 import { objectFields } from "../src/runtime/type-boundary.mjs";
 import type { PiSessionOptions } from "../src/runtime/pi-port.mjs";
@@ -76,7 +77,7 @@ async function fixture(t: test.TestContext, { development }: { development?: unk
   const agents = new PrototypeAgents(agentOptions);
   t.after(async () => { await agents.close(); await rm(root, { recursive: true, force: true }); });
   const definition = { id: "revision", name: "固定修订助手", draft: validDraft(), fingerprint: "fixed-requirements" };
-  return { agents, designer: agents.architecture, prompts, state, definition };
+  return { agents, designer: agents.architecture as ArchitectureDesigner, prompts, state, definition };
 }
 
 async function failedRun(f: Awaited<ReturnType<typeof fixture>>, architecture: StoredArchitectureRecord, overrides = {}) {
