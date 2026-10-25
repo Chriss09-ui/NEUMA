@@ -8,7 +8,7 @@ test("分层清单覆盖实际测试文件，快速组不包含真实执行或�
   assert.deepEqual([...new Set(Object.values(layers).flatMap((layer) => layer.files))].sort(), files);
   for (const layer of Object.values(layers)) assert.deepEqual<NonNullable<typeof layer>["missing"]>(layer.missing, []);
   assert.deepEqual(layers.unit!.files.filter((name) => layers.integration!.files.includes(name) || layers.browser!.files.includes(name)), []);
-  assert.ok(layers.unit!.files.includes("requirements/core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration-ui.test.mjs"));
+  assert.ok(layers.unit!.files.includes("requirements/core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration/collaboration-ui.test.mjs"));
   for (const name of ["agents/agent-prototype.test.mjs", "runtime/pi-runtime.test.mjs", "development-executor.test.mjs", "runtime/materials-runner.test.mjs", "project-platform.test.mjs"])
     assert.ok(layers.integration!.files.includes(name), `${name} 必须归入集成组`);
   assert.deepEqual(layers.browser!.files, ["agents/agent-artifact-document.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]);
