@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 // Classify whole files. Files mixing doubles and real SDK/process execution belong in integration.
+// test/ 顶层只保留 server 组装测试和 native-check.yml 固定引用的四个入口；其余测试按领域子目录存放，条目使用相对 test 根的路径。
 export const TEST_LAYERS = Object.freeze({
   unit: Object.freeze([
     "installation/source-launcher.test.mjs", "build/typescript-boundaries.test.mjs", "build/m4-architecture-boundaries.test.mjs", "build/m4-development-boundaries.test.mjs",

@@ -149,7 +149,7 @@ npm run test:package:install # 独立临时安装生产依赖并启动
 
 测试命令自动构建并运行产物目录中的测试，构建失败或产物过期会停止执行。请使用 `package:pack` 生成安装包；源码目录直接 `npm pack`／`npm publish` 会被保护入口拒绝。打包本身不会公开发布。
 
-前三个命令加 `-- --list` 可只查看文件清单。分类按文件维护在 `scripts/run-tests.mts`，运行产物为同名 `.mjs`；混有真实执行的文件归入集成组，新文件未登记时提示并默认加入集成组。模块和集成命令始终关闭外部浏览器。浏览器命令运行现有 4 个文件中的浏览器验收及附带状态检查，保留 `NEUMA_TEST_BROWSER` 指定的程序；macOS 默认只尝试 Dia，当前无界面参数兼容性仍待验证，不能把未运行或失败的浏览器检查当作通过。模型协议测试使用本机模拟接口，不调用真实模型服务。
+前三个命令加 `-- --list` 可只查看文件清单。测试按领域存放在 `test/` 的子目录（runtime、build、ui、installation、requirements、architecture、development、agents、applications、collaboration、services、projects），顶层仅保留 server 组装测试和原生工作流固定引用的 4 个入口。分类按文件维护在 `scripts/run-tests.mts`，运行产物为同名 `.mjs`；混有真实执行的文件归入集成组，新文件未登记时提示并默认加入集成组。模块和集成命令始终关闭外部浏览器。浏览器命令运行现有 4 个文件中的浏览器验收及附带状态检查，保留 `NEUMA_TEST_BROWSER` 指定的程序；macOS 默认只尝试 Dia，当前无界面参数兼容性仍待验证，不能把未运行或失败的浏览器检查当作通过。模型协议测试使用本机模拟接口，不调用真实模型服务。
 
 ```text
 src/
