@@ -363,7 +363,11 @@ export class ManagedServiceManager {
   }
   async close({ permanent = false } = {}) {
     this.closed = true; this.lifecycle.abort(); await Promise.allSettled([...this.starting.values(), ...this.preparing.values()]);
-    await Promise.all([...this.workers.values()].map((worker) => worker.stop("backend_stopped"))); await this.tail;
+    // worker 停止失败不得跳过 tail 或把临时关闭固化成永久关闭：记录失败、继续清理、最后抛出（R6）。
+    const failures: unknown[] = [];
+    await Promise.allSettled([...this.workers.values()].map((worker) => worker.stop("backend_stopped").catch((error: unknown) => { failures.push(error); })));
+    try { await this.tail; } catch (error) { failures.push(error); }
     if (!permanent) { this.closed = false; this.lifecycle = new AbortController(); }
+    if (failures.length) throw failures[0];
   }
 }
