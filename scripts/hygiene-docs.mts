@@ -21,8 +21,10 @@ export async function checkDocReferences(root: string, documents: readonly { pat
       for (const match of lines[index]!.matchAll(/\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
         const text = match[1]!, target = match[2]!;
         if (target.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
-        let decoded = target;
-        try { decoded = decodeURIComponent(target); } catch { /* 保留原样，按字面路径核对 */ }
+        // 先分离章节再解码，使文件名中的 %23 仍按字面井号核对。
+        const fragment = target.indexOf("#");
+        let decoded = fragment === -1 ? target : target.slice(0, fragment);
+        try { decoded = decodeURIComponent(decoded); } catch { /* 保留原样，按字面路径核对 */ }
         if (decoded.startsWith("docs/") && !REPO_DOC_PREFIXES.some((prefix) => decoded.startsWith(prefix))) { localLibrary++; continue; }
         checked++;
         if (!(await exists(root, decoded)))
