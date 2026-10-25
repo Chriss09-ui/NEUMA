@@ -1,12 +1,12 @@
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
-import type { RequirementIssue, IssueDecision, EvidenceMessage, RequirementDraft, Consultation } from "../src/contracts/requirements.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import type { RequirementIssue, IssueDecision, EvidenceMessage, RequirementDraft, Consultation } from "../../src/contracts/requirements.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { consultationGate, evaluateConsultation, newConsultation } from "../src/requirements/consultation.mjs";
-import { emptyTaskSpec } from "../src/requirements/task-spec.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
-import type { PreflightResponse } from "../src/contracts/requirements.mjs";
+import { consultationGate, evaluateConsultation, newConsultation } from "../../src/requirements/consultation.mjs";
+import { emptyTaskSpec } from "../../src/requirements/task-spec.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
+import type { PreflightResponse } from "../../src/contracts/requirements.mjs";
 
 const answer = { id: "user_answer", role: "user" as EvidenceMessage["role"], content: "只有前三项是专属后台操作，查询状态和下载结果由平台网关提供；不做页面。" };
 const historicalIssue = () => ({ id: "operation_classification", owner: "user" as RequirementIssue["owner"], blocking: true,

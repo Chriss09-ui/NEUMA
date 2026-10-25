@@ -1,17 +1,17 @@
-import type { PreflightInput } from "../src/requirements/requirement-provider-port.mjs";
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
-import { fixtureChatRequest, fixtureString, type FixtureChatRequest } from "./helpers/http-model.mjs";
-import type { RequirementDraft, RequirementIssue, IssueDecision, PreflightResponse } from "../src/contracts/requirements.mjs";
+import type { PreflightInput } from "../../src/requirements/requirement-provider-port.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import { fixtureChatRequest, fixtureString, type FixtureChatRequest } from "../helpers/http-model.mjs";
+import type { RequirementDraft, RequirementIssue, IssueDecision, PreflightResponse } from "../../src/contracts/requirements.mjs";
 type TurnResult = Awaited<ReturnType<typeof processTurn>>;
 import test from "node:test";
 import assert from "node:assert/strict";
-import { processTurn, emptyDraft } from "../src/requirements/core.mjs";
-import { consultationGate } from "../src/requirements/consultation.mjs";
-import { calculateRequirementDerivation } from "../src/requirements/requirement-calculations.mjs";
-import { substantiveRequirementHash } from "../src/requirements/task-spec.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { processTurn, emptyDraft } from "../../src/requirements/core.mjs";
+import { consultationGate } from "../../src/requirements/consultation.mjs";
+import { calculateRequirementDerivation } from "../../src/requirements/requirement-calculations.mjs";
+import { substantiveRequirementHash } from "../../src/requirements/task-spec.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 
 const platform = { version: 1, runtime: {} };
 const issue = (): RequirementIssue => ({ id: "capacity_proof", owner: "system", stage: "requirements", blocking: true,

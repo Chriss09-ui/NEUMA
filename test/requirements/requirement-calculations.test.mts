@@ -1,17 +1,17 @@
-import { recordArray } from "./helpers/m7-test-boundaries.mjs";
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
-import type { CalculationContext } from "../src/requirements/requirement-calculations.mjs";
-import type { RequirementDraft } from "../src/contracts/requirements.mjs";
+import { recordArray } from "../helpers/m7-test-boundaries.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
+import type { CalculationContext } from "../../src/requirements/requirement-calculations.mjs";
+import type { RequirementDraft } from "../../src/contracts/requirements.mjs";
 interface RawRequest { issueId: string; requirementIds: unknown; premises: { id: string; value: unknown; unit: string; source: { kind: string; reference: string; detail: string } }[]; expressions: { id: string; unit: string; formula: unknown }[]; toJSON?: () => unknown }
-import { failureFields } from "./helpers/failure-fields.mjs";
+import { failureFields } from "../helpers/failure-fields.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv } from "ajv";
-import { calculateRequirementDerivation, validateRequirementDerivations, replayRequirementDerivation, selectRequirementDerivations, calculationRequestSchema, CALCULATION_LIMITS } from "../src/requirements/requirement-calculations.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { contentHash } from "../src/requirements/task-spec.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
+import { calculateRequirementDerivation, validateRequirementDerivations, replayRequirementDerivation, selectRequirementDerivations, calculationRequestSchema, CALCULATION_LIMITS } from "../../src/requirements/requirement-calculations.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { contentHash } from "../../src/requirements/task-spec.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
 
 function context(): CalculationContext & { draft: RequirementDraft; requirementIds: string[]; issues: { id: string; owner: string; question: string; requirementIds: string[]; stage?: string }[] } {
   return { draft: validDraft("汇总有界记录"), platform: createPlatformSnapshot(), requirementIds: ["task", "deliverable"],

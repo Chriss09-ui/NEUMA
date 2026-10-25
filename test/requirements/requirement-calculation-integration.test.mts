@@ -1,24 +1,24 @@
-import { fixtureString } from "./helpers/http-model.mjs";
-import type { FixtureChatRequest } from "./helpers/http-model.mjs";
-import type { RequirementDraft, RequirementIssue, SystemCheck, PreflightAssessment, PreflightResponse, CalculationRequest, Consultation, RequirementDerivation } from "../src/contracts/requirements.mjs";
-import type { ProviderIntegrations } from "../src/requirements/requirement-provider-port.mjs";
-import { recordArray } from "./helpers/m7-test-boundaries.mjs";
-import { fixtureChatRequest } from "./helpers/http-model.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
-import { failureFields } from "./helpers/failure-fields.mjs";
+import { fixtureString } from "../helpers/http-model.mjs";
+import type { FixtureChatRequest } from "../helpers/http-model.mjs";
+import type { RequirementDraft, RequirementIssue, SystemCheck, PreflightAssessment, PreflightResponse, CalculationRequest, Consultation, RequirementDerivation } from "../../src/contracts/requirements.mjs";
+import type { ProviderIntegrations } from "../../src/requirements/requirement-provider-port.mjs";
+import { recordArray } from "../helpers/m7-test-boundaries.mjs";
+import { fixtureChatRequest } from "../helpers/http-model.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
+import { failureFields } from "../helpers/failure-fields.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv } from "ajv";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { calculateRequirementDerivation } from "../src/requirements/requirement-calculations.mjs";
-import { consultationGate, currentDeferredIssues, evaluateConsultation, newConsultation, preflightRequirementIds, validateIssueDecisions } from "../src/requirements/consultation.mjs";
-import { safePreflightDiagnostic } from "../src/requirements/preflight-diagnostics.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { calculateRequirementDerivation } from "../../src/requirements/requirement-calculations.mjs";
+import { consultationGate, currentDeferredIssues, evaluateConsultation, newConsultation, preflightRequirementIds, validateIssueDecisions } from "../../src/requirements/consultation.mjs";
+import { safePreflightDiagnostic } from "../../src/requirements/preflight-diagnostics.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 
 type CalculationChat = { messages: { content?: FixtureChatRequest["messages"][number]["content"] }[] };
-interface CalculationPayload { derivations?: RequirementDerivation[]; systemBases: { basisHash: string }[]; decisionSchema: import("../src/contracts/tools.mjs").ToolSchema; knownIssues: RequirementIssue[] }
+interface CalculationPayload { derivations?: RequirementDerivation[]; systemBases: { basisHash: string }[]; decisionSchema: import("../../src/contracts/tools.mjs").ToolSchema; knownIssues: RequirementIssue[] }
 
 const draft = (): RequirementDraft => ({ ...validDraft("完整核对有界记录"), taskSpec: { version: 1, items: [] } });
 const problem = (): RequirementIssue => ({ id: "capacity", owner: "system", stage: "requirements", blocking: true,

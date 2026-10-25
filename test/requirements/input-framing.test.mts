@@ -1,8 +1,8 @@
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { applicationTaskInput, canonicalGatewayRequest, managedRunMessage, INPUT_CAPACITY_SCOPE, INPUT_FRAMING_FACTS, measureConnectionFraming, normalizeVerificationContext } from "../src/applications/input-framing.mjs";
+import { applicationTaskInput, canonicalGatewayRequest, managedRunMessage, INPUT_CAPACITY_SCOPE, INPUT_FRAMING_FACTS, measureConnectionFraming, normalizeVerificationContext } from "../../src/applications/input-framing.mjs";
 
 const uuid = "00000000-0000-4000-8000-000000000000";
 const snapshot = () => ({ agentId: "server_bound", version: 17, profile: "f".repeat(64), connections: [

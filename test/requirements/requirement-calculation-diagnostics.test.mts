@@ -1,18 +1,18 @@
-import type { RequirementIssue } from "../src/contracts/requirements.mjs";
-import type { FixtureModelRequest } from "./helpers/m7-test-boundaries.mjs";
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
-import { recordArray } from "./helpers/m7-test-boundaries.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
-import type { TestFailure } from "./helpers/m7-test-boundaries.mjs";
+import type { RequirementIssue } from "../../src/contracts/requirements.mjs";
+import type { FixtureModelRequest } from "../helpers/m7-test-boundaries.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import { recordArray } from "../helpers/m7-test-boundaries.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
+import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateRequirementDerivation, safeCalculationPath, safeCalculationRejection } from "../src/requirements/requirement-calculations.mjs";
-import { preflightRejection, safePreflightDiagnostic } from "../src/requirements/preflight-diagnostics.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { contentHash, substantiveRequirementHash } from "../src/requirements/task-spec.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { calculateRequirementDerivation, safeCalculationPath, safeCalculationRejection } from "../../src/requirements/requirement-calculations.mjs";
+import { preflightRejection, safePreflightDiagnostic } from "../../src/requirements/preflight-diagnostics.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { contentHash, substantiveRequirementHash } from "../../src/requirements/task-spec.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 
 const issue: RequirementIssue = { id: "capacity", owner: "system", stage: "requirements", blocking: true, question: "边界是否足够？", impact: "决定承载路径",
   requirementIds: ["task", "deliverable"], checks: ["platform.runtime"] };

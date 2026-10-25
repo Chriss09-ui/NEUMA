@@ -1,22 +1,22 @@
-import { fixtureText } from "./helpers/m7-test-boundaries.mjs";
-import type { PreflightResponse } from "../src/contracts/requirements.mjs";
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
-import type { Providers } from "../src/requirements/requirement-provider-port.mjs";
-import type { EvidenceMessage } from "../src/contracts/requirements.mjs";
-import { recordArray } from "./helpers/m7-test-boundaries.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
+import { fixtureText } from "../helpers/m7-test-boundaries.mjs";
+import type { PreflightResponse } from "../../src/contracts/requirements.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import type { Providers } from "../../src/requirements/requirement-provider-port.mjs";
+import type { EvidenceMessage } from "../../src/contracts/requirements.mjs";
+import { recordArray } from "../helpers/m7-test-boundaries.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
-import { RequirementSessions } from "../src/requirements/requirement-sessions.mjs";
-import { createRequestHandler, type RequestHandler } from "../src/server.mjs";
-import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight, withPreflight } from "./helpers/consultation.mjs";
+import { RequirementSessions } from "../../src/requirements/requirement-sessions.mjs";
+import { createRequestHandler, type RequestHandler } from "../../src/server.mjs";
+import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight, withPreflight } from "../helpers/consultation.mjs";
 
 async function folder(t: test.TestContext) {
   const dataDir = await mkdtemp(join(tmpdir(), "neuma-requirement-sessions-"));
@@ -59,7 +59,7 @@ test("相同文字的新请求重新核实系统阻断，同请求重放不新�
   const source = providers(); source.preflight! = async (): Promise<PreflightResponse> => {
     calls++;
     const assessed = await sufficientPreflight();
-    const pending: import("../src/contracts/requirements.mjs").RequirementIssue = { id: "runtime", owner: "system", stage: "requirements", blocking: true,
+    const pending: import("../../src/contracts/requirements.mjs").RequirementIssue = { id: "runtime", owner: "system", stage: "requirements", blocking: true,
       question: "需由系统核实当前环境", impact: "决定当前环境能否运行", requirementIds: ["task"],
       checks: ["platform.managedRuntime", "runtime.managed.platform"] };
     return { ...assessed, verdict: prepared ? "sufficient" : "blocked", issues: prepared ? [] : [pending], reviewedIssues: [pending],

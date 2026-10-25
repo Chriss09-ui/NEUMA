@@ -1,14 +1,14 @@
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
-import { fixtureChatRequest, fixtureString, type FixtureChatRequest } from "./helpers/http-model.mjs";
-import type { RequirementDraft, RequirementIssue, IssueDecision, PreflightResponse } from "../src/contracts/requirements.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import { fixtureChatRequest, fixtureString, type FixtureChatRequest } from "../helpers/http-model.mjs";
+import type { RequirementDraft, RequirementIssue, IssueDecision, PreflightResponse } from "../../src/contracts/requirements.mjs";
 type TurnResult = Awaited<ReturnType<typeof processTurn>>;
-import { failureFields } from "./helpers/failure-fields.mjs";
+import { failureFields } from "../helpers/failure-fields.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { processTurn, emptyDraft, CONFIRMATION_QUESTION } from "../src/requirements/core.mjs";
-import { contentHash, emptyTaskSpec, substantiveRequirementHash } from "../src/requirements/task-spec.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
+import { processTurn, emptyDraft, CONFIRMATION_QUESTION } from "../../src/requirements/core.mjs";
+import { contentHash, emptyTaskSpec, substantiveRequirementHash } from "../../src/requirements/task-spec.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
 
 const platform = { version: 1 };
 const options = (requestId: string, signal?: AbortSignal) => ({ enforceConsultation: true, platform, requestId, signal });

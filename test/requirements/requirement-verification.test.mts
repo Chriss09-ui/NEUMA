@@ -1,9 +1,9 @@
-import { callFixture } from "./helpers/m7-test-boundaries.mjs";
+import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRequirementSystemVerifier, SYSTEM_REQUIREMENT_CHECKS } from "../src/agents/requirement-verification.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { designHash } from "../src/architecture/architecture-contract.mjs";
+import { createRequirementSystemVerifier, SYSTEM_REQUIREMENT_CHECKS } from "../../src/agents/requirement-verification.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { designHash } from "../../src/architecture/architecture-contract.mjs";
 
 const system = (id: string, checks: string[]|undefined, extra = {}) => ({ id, owner: "system", blocking: true,
   question: "请核实本问题实际引用的宿主事实", checks, ...extra });

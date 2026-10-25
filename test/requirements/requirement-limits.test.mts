@@ -1,12 +1,12 @@
-import type { TestFailure } from "./helpers/m7-test-boundaries.mjs";
+import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { textLength, textWithinLimit, truncateText } from "../src/runtime/text-length.mjs";
+import { textLength, textWithinLimit, truncateText } from "../../src/runtime/text-length.mjs";
 import { assertRequirementDraftSize, REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_RECORD_MAX_BYTES,
-  REQUIREMENT_CONVERSATION_MAX_BYTES, REQUIREMENT_LIMITS } from "../src/requirements/requirement-limits.mjs";
-import { requirementItems } from "../src/architecture/architecture-contract.mjs";
-import { normalizeDraft } from "../src/requirements/core.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
+  REQUIREMENT_CONVERSATION_MAX_BYTES, REQUIREMENT_LIMITS } from "../../src/requirements/requirement-limits.mjs";
+import { requirementItems } from "../../src/architecture/architecture-contract.mjs";
+import { normalizeDraft } from "../../src/requirements/core.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
 
 test("字符数、UTF16位置和UTF8字节各自有明确口径，截取不会拆开代理对", () => {
   const text = "A😀𠀀中文";

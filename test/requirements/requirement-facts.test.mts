@@ -1,4 +1,4 @@
-import type { RequirementDerivation } from "../src/contracts/requirements.mjs";
+import type { RequirementDerivation } from "../../src/contracts/requirements.mjs";
 interface FactModelPayload extends Record<string, unknown> {
   trustedFacts: ReturnType<typeof projectRequirementFacts>; derivations: RequirementDerivation[];
   hostExecution: { calculationCalls: number; issuedReceiptIds: string[]; activeReceiptIds: string[] };
@@ -9,24 +9,24 @@ interface FactModelPayload extends Record<string, unknown> {
 function factPayload(value: unknown): FactModelPayload {
   const fields = objectFields(value); assert.ok(Array.isArray(fields.trustedFacts)); return value as FactModelPayload;
 }
-import { callFixture, recordArray } from "./helpers/m7-test-boundaries.mjs";
-import { fixtureString } from "./helpers/http-model.mjs";
-import type { RequirementDraft, RequirementIssue } from "../src/contracts/requirements.mjs";
-import { fixtureChatRequest, type FixtureChatRequest } from "./helpers/http-model.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
-import { failureFields } from "./helpers/failure-fields.mjs";
+import { callFixture, recordArray } from "../helpers/m7-test-boundaries.mjs";
+import { fixtureString } from "../helpers/http-model.mjs";
+import type { RequirementDraft, RequirementIssue } from "../../src/contracts/requirements.mjs";
+import { fixtureChatRequest, type FixtureChatRequest } from "../helpers/http-model.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
+import { failureFields } from "../helpers/failure-fields.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv } from "ajv";
-import { projectRequirementFacts, checkedFactProgress, requirementProofScope, trustedFactProgressSchema } from "../src/requirements/requirement-facts.mjs";
-import { systemProgressSchema } from "../src/requirements/requirement-progress.mjs";
-import { INPUT_FRAMING_FACTS, measureConnectionFraming } from "../src/applications/input-framing.mjs";
-import { createRequirementSystemVerifier } from "../src/agents/requirement-verification.mjs";
-import { calculateRequirementDerivation } from "../src/requirements/requirement-calculations.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { projectRequirementFacts, checkedFactProgress, requirementProofScope, trustedFactProgressSchema } from "../../src/requirements/requirement-facts.mjs";
+import { systemProgressSchema } from "../../src/requirements/requirement-progress.mjs";
+import { INPUT_FRAMING_FACTS, measureConnectionFraming } from "../../src/applications/input-framing.mjs";
+import { createRequirementSystemVerifier } from "../../src/agents/requirement-verification.mjs";
+import { calculateRequirementDerivation } from "../../src/requirements/requirement-calculations.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 
 const snapshot = () => ({ agentId: "alpha", version: 0, profile: "legacy", connections: [] });
 const evidence = (value: unknown) => ({ source: "platform", reference: "platform.runtime", detail: JSON.stringify(value) });

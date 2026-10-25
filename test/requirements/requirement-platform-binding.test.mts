@@ -1,15 +1,15 @@
-import type { Providers } from "../src/requirements/requirement-provider-port.mjs";
-import { recordArray } from "./helpers/m7-test-boundaries.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
+import type { Providers } from "../../src/requirements/requirement-provider-port.mjs";
+import { recordArray } from "../helpers/m7-test-boundaries.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { processTurn, emptyDraft, CONFIRMATION_QUESTION } from "../src/requirements/core.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { contentHash, emptyTaskSpec, substantiveRequirementHash } from "../src/requirements/task-spec.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
-import type { RequirementDraft } from "../src/contracts/requirements.mjs";
+import { processTurn, emptyDraft, CONFIRMATION_QUESTION } from "../../src/requirements/core.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { contentHash, emptyTaskSpec, substantiveRequirementHash } from "../../src/requirements/task-spec.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
+import type { RequirementDraft } from "../../src/contracts/requirements.mjs";
 
 const policyPlatform = makeProviders({}).getPlatform;
 const taskDraft = (offline = false): RequirementDraft => ({ ...validDraft("逐项核对清单并保存结果"), taskSpec: emptyTaskSpec(),
