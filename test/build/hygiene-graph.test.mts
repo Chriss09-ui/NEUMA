@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { buildDependencyGraph, checkGraphRules, runtimeCycleMembers, type DependencyEdge, type DependencyGraph } from "../../scripts/hygiene-graph.mjs";
 
 const edge = (source: string, target: string, category: "runtime" | "type" = "runtime"): DependencyEdge =>
@@ -81,9 +84,9 @@ test("TS 解析区分运行时、类型导入、字面量与非字面量动态�
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   await mkdir(join(root, "src"), { recursive: true });
   for (const name of ["other", "second", "third", "fourth", "side", "default", "plain", "mixed", "star", "dyn", "inline"])
-    await writeFile(join(root, `src/${name}.mts`), "export const Value = 1;\nexport type Port = string;\n");
+    await writeFile(join(root, `src/${name}.mts`), "export const Value = 1;\nexport type Port = string;\nexport type Only = string;\nexport type Thing = string;\nexport default Value;\n");
   await writeFile(join(root, "tsconfig.node.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: "es2023",
-    module: "nodenext", moduleResolution: "nodenext", allowJs: false, skipLibCheck: false }, include: ["src/**/*.mts"] }));
+    module: "nodenext", moduleResolution: "nodenext", verbatimModuleSyntax: true, allowJs: false, skipLibCheck: false }, include: ["src/**/*.mts"] }));
   await writeFile(join(root, "src/sample.mts"), `import type { Port } from "./other.mjs";
 import { type Only } from "./second.mjs";
 import { Value } from "./third.mjs";
@@ -94,6 +97,7 @@ export type { Port } from "./plain.mjs";
 export { Value } from "./mixed.mjs";
 export * from "./star.mjs";
 const dyn = await import("./dyn.mjs");
+declare const somePath: string;
 const computed = await import(somePath);
 type Inline = import("./inline.mjs").Thing;
 `);
@@ -101,7 +105,7 @@ type Inline = import("./inline.mjs").Thing;
   const graph = await buildDependencyGraph(root, { projects: ["node"], typescriptRoot: sourceRoot });
   const categories = (target: string) => graph.edges.filter((item) => item.source === "src/sample.mts" && item.target === `src/${target}.mts`).map((item) => item.category);
   assert.deepEqual(categories("other"), ["type"]);
-  assert.deepEqual(categories("second"), ["type"]);
+  assert.deepEqual(categories("second"), ["runtime"]);
   assert.deepEqual(categories("third"), ["runtime"]);
   assert.deepEqual(categories("fourth"), ["runtime"]);
   assert.deepEqual(categories("side"), ["runtime"]);
@@ -113,6 +117,38 @@ type Inline = import("./inline.mjs").Thing;
   assert.deepEqual(categories("inline"), ["type"]);
   assert.equal(graph.nonLiteralImports.get("src/sample.mts"), 1);
   assert.deepEqual(graph.unresolved, []);
+});
+
+test("内联 type 与空导入按真实编译产物保留运行时环，声明级类型导入不参与", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-hygiene-import-emit-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(join(root, "src"));
+  await writeFile(join(root, "tsconfig.node.json"), JSON.stringify({ compilerOptions: { strict: true, target: "es2023",
+    module: "nodenext", moduleResolution: "nodenext", verbatimModuleSyntax: true, allowJs: false, skipLibCheck: false,
+    rootDir: "src", outDir: "output" }, include: ["src/**/*.mts"] }));
+  await writeFile(join(root, "src/a.mts"), `import { type Port } from "./b.mjs";
+import {} from "./c.mjs";
+import type { Label } from "./d.mjs";
+type Hint = import("./e.mjs").Hint;
+export function run(input: Port): Label | Hint { return input; }
+`);
+  for (const [name, type] of [["b", "Port"], ["c", "Empty"], ["d", "Label"], ["e", "Hint"]])
+    await writeFile(join(root, `src/${name}.mts`), `import { run } from "./a.mjs";\nexport type ${type} = string;\nexport const link = () => run;\n`);
+  const sourceRoot = JSON.parse(String(await readFile(new URL("../../.neuma-build.json", import.meta.url), "utf8"))).sourceRoot;
+  const require = createRequire(join(sourceRoot, "package.json"));
+  const compiler = join(dirname(require.resolve("typescript/package.json")), "bin/tsc");
+  await promisify(execFile)(process.execPath, [compiler, "-p", join(root, "tsconfig.node.json")], { cwd: root });
+  const emitted = await readFile(join(root, "output/a.mjs"), "utf8");
+  assert.match(emitted, /import\s*\{\s*\}\s*from\s*["']\.\/b\.mjs["']/);
+  assert.match(emitted, /import\s*\{\s*\}\s*from\s*["']\.\/c\.mjs["']/);
+  assert.doesNotMatch(emitted, /["']\.\/[de]\.mjs["']/);
+
+  const graph = await buildDependencyGraph(root, { projects: ["node"], typescriptRoot: sourceRoot });
+  assert.deepEqual(graph.unresolved, []);
+  assert.deepEqual(runtimeCycleMembers(graph).map((members) => members.sort()), [["src/a.mts", "src/b.mts", "src/c.mts"]]);
+  const violations = checkGraphRules(graph).violations.filter((violation) => violation.rule === "依赖/运行时环");
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /src\/a\.mts/);
 });
 
 test("真实源码树依赖图通过全部规则", async () => {

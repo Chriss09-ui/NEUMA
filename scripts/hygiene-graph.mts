@@ -72,11 +72,8 @@ export async function buildDependencyGraph(root: string, { projects = PROJECTS, 
           else {
             // TS7 运行时在 ImportClause 上提供 isTypeOnly（import type 声明），声明文件未列出，这里以结构读取。
             const clauseTypeOnly = (clause as unknown as { isTypeOnly?: boolean }).isTypeOnly === true;
-            const hasValueBinding = !clauseTypeOnly && (Boolean(clause.name)
-              || clause.namedBindings?.kind === ast.SyntaxKind.NamespaceImport
-              || (clause.namedBindings?.kind === ast.SyntaxKind.NamedImports
-                && clause.namedBindings.elements.some((element) => !element.isTypeOnly)));
-            category = hasValueBinding ? "runtime" : "type";
+            // verbatimModuleSyntax 下，全内联 type 的普通导入发射为 import {}，仍加载目标模块。
+            category = clauseTypeOnly ? "type" : "runtime";
           }
         } else if ((declaration as TypeScriptAst.ExportDeclaration).isTypeOnly) category = "type";
         imports.push({ specifier, category, line: sourceFile.getLineAndCharacterOfPosition(statement.getStart(sourceFile)).line + 1 });
