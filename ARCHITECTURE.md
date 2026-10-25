@@ -3,6 +3,7 @@
 - 本文是当前正式架构基线，按主题描述各领域的职责、调用关系、状态归属、关键约束和验证入口。2026-10-25 由按日期追加的编年版整理而来；整理前的原文逐字冻结于 [docs/history/architecture-chronicle-2026-10.md](docs/history/architecture-chronicle-2026-10.md)，仅用于追溯规则演进和当时的验证记录。
 - [docs/history](docs/history) 与 `AGENT_PROTOTYPE.md` 中的档案没有规范效力，其中的临时取舍不能覆盖本文或限制技术选型；`本地测试记录/` 同属冻结历史证据。与当前源码不一致时，以源码和对应测试为准，并更新本文。
 - 文中"当前""本版"是对现有实现的描述，不是永久架构要求。修改 Agent 的架构、构建、执行、会话或交互前先读本文（[AGENTS.md](AGENTS.md) 同样要求）；修改研发层节点、上下文、预算、验收或交付时，同步更新 [docs/development-layer-design.md](docs/development-layer-design.md)。
+- 2026-10-25 按源码基线 `e4f1974` 核对执行适配、连接与文档入口；后续代码变更按 AGENTS 的文档同步表更新对应主题。本次文档核对不代表重新执行全部业务、安装或平台认证。
 
 ## 1. 总览
 
@@ -12,9 +13,9 @@
 
 - **light**：当前模型、公共联网、材料读取及专属目录文本工具即可满足；允许任务内上下文，也可生成供用户下载的 HTML/SVG 文件。无托管页面或操作代码时，评估通过后从候选 `instructions` 直接生成定义。
 - **workflow**：存在需要实现的步骤协调、持久状态或恢复机制。架构通过后进入研发。
-- **custom**：需要专用工具、服务或代码。当前研发适配支持 Node 内置模块的本地程序。
+- **custom**：需要专用工具、服务或代码。研发按已评审的 `execution` 选择内置 Node 动作或受管 JavaScript/Python 服务；Docker 路径还要求本机引擎与真实环境验收。
 
-schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无页面）；旧 v1 的 `node-json` 交付保持兼容。生成代码经可信启动层以 stdin/stdout NDJSON 使用 ctx 能力桥，不直接联网或监听端口。
+旧 v1 研发保留 `node-json`，v2 使用 `node-action`；v3 在 `execution.hosting=builtin` 时使用 `node-action`，在受管或 Docker 托管时使用 `managed-service`，语言与托管位置必须保持已评审选择。页面独立可选。生成程序通过固定启动层和 ctx 能力桥访问宿主能力，不自行联网或监听端口；受管依赖由平台核实并安装锁定工件，不由生成程序安装。
 
 执行域与入口：
 
@@ -34,7 +35,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 - 退出顺序：停止接收新操作 → 取消请求/模型/目录窗口和受管任务 → 等待持久化与项目关闭 → 释放端口及数据锁。
 - `installation-migration` 是不同数据根间的显式复制迁移：持双端锁、分块复制、校验元数据和快照、成功后整体 rename 发布；目标非空拒绝，凭据、模型配置与 SDK 临时数据不复制。
 - 平台辅助程序：macOS 隔离用 `sandbox-exec`（已实际验证）；Linux 辅助程序在 Ubuntu 24.04/26.04、x64/ARM64 云端原生检查通过；Windows LPAC/Job Object 已编译、真实隔离启动仍在验证。项目管理（Job Object/进程组/`/proc` 扫描）与生成程序隔离不复用权限。缺文件、缺系统能力或探测失败均明确阻塞执行，不提供无隔离回退。
-- 本机 Skill 管理（`src/skills/`，`/api/skills`）是独立维护页面：受控目录发现、编辑、导入、回收。它不属于任何 Agent 的运行工具目录；`controlledResources()` 继续返回空 Skills/Extensions/宿主指令，管理索引不注入工作会话。
+- 本机 Skill 管理（`src/skills/`，`/api/skills`）是独立维护页面：受控目录发现、编辑、导入、回收。它不属于任何 Agent 的运行工具目录；`controlledResources()` 不发现宿主 Skills、Prompts 或 AGENTS 文件，只提供程序指定的系统提示与 NEUMA 内置受控扩展；管理索引不注入工作会话。
 
 ## 3. 需求层
 
@@ -118,7 +119,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 ### 4.7 模型输入投影与提交通道
 
 - 模型输入按当前职责选择，不以窗口尚有余量为由重复展开全部资料：需求、当前候选、分工、阻断与必要事实优先内联，完整结构、详细规程、平台证据和其他历史按 `contextIndex` 经 `read_model_context` 精确读取（JSON Pointer、绑定原文摘要的分页、一次至多八项、正文合计 24000 字符）。该工具只访问当前节点保留的 JSON。架构及需求复核在新消息进入 SDK 前投影；不改写旧原生历史、不重开会话或追加预算。
-- 需求澄清以 `evidenceMessages` 为消息正文来源；当前用户话和上一追问已有原始编号时仅传编号，不合并不同编号的同文证据。研发规划、开发、评审分别选择字段，`read_development_context` 支持可选 `pointer`；`full/summary/paged/session` 标明投递状态；首包上限开发 24000 字符、规划/评审 64000 字符，同时受模型窗口二分之一约束。
+- 需求澄清以 `evidenceMessages` 为消息正文来源；当前用户话和上一追问已有原始编号时仅传编号，不合并不同编号的同文证据。研发规划、开发、评审分别选择字段，`read_development_context` 支持可选 `pointer`；`full/summary/paged/session` 标明投递状态；首包字符额度为角色上限与 `max(4096, floor(contextWindow / 2))` 的较小值，角色上限开发 24000、规划/评审 64000，未知模型窗口按 32768 处理。
 - 结构化提交：正常结束时唯一完整 JSON 对象，必须严格匹配本轮明确开放的终止工具参数，或用 `{submission:{name,arguments}}` 指定出口；边界 256 KiB / 32 层 / 100000 节点。宿主禁止类型转换并执行同一提交处理器、版本检查、语义校验、独立评审及真实验收。读取、写文件、搜索和外部操作不开放正文执行；未知工具、批量指令、歧义、异常结束、截断及围栏均不执行。五类显式提交控制器共用 `pi-submission-contract`。
 - 工具参数诊断复用共享严格同源校验，给声明字段路径、预期与实际类型、允许值和边界；未知参数名和参数值不进入安全诊断；多种可选结构按鉴别字段独立定位。诊断按条数和字符限额裁剪并保留真实总数。
 - 架构正常停止但未正式提交时可在原会话内明确提醒一次（计入原预算）；再次未交记为系统提交未完成，网络错误、截断、取消及预算耗尽不据此盲续。
@@ -143,9 +144,9 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 
 **用例与夹具**：研发动作、输入拒绝、页面资源检查区分记录。`node-action` 输入受 128 KiB 协议限制；`node-check` 只读快照与临时 scratch 检查真实资源和页面共享逻辑，不获得业务 ctx、网络或用户工作目录；`input-rejection` 调用同一输入校验器、`actionExecuted:false`，不能以拒绝证据替代实际执行用例。声明式 JSON 夹具只允许常量、对象、数组、定量重复、重复索引/文本及 JSON 编码（每份 12000 字节、256 节点、12 层，单次重复最多 10000 条，总展开 100000 节点，单值 1 MiB、每用例 4 MiB），另有 `concat`/`join`/`measure` 纯操作。启用前业务验收用例（`activationCases`）绑定自身 `host-business` 条目，与研发 `cases` 共用 200 例总额和全局唯一编号。
 
-**验收与激活**：九类验收适配器分别公开实际执行事实和规则（动作测试、目录探测、文件/环境探针、静态评审、对话观察、输入契约、真实宿主业务、交付评审等）；`acceptance-contract` 台账绑定需求、架构、计划、代码和逐项证据。`host-business` 按冻结 `activationChecks` 在隔离真实 Node/Python 环境运行选定用例，使用真实文件与不可变任务产物，不用替身返回值冒充宿主行为；真实功能失败进入原研发修复流程（原修复预算），重新执行通过后才可激活。激活执行文件往返及不可变快照校验、实际隔离启动；缺少或失败证据阻止激活。交付包不可变，缺陷标记与运行检查另存；最终保存期间取消不能成为完成，已切换的新定义会回退且与架构可用状态共同撤销（仅匹配本次架构版本、候选摘要及研发编号）。已激活定义使用 `mode=designed` + `developmentRef` + `execution`，经 `run_developed_workflow` 调用已验证 Node 入口。
+**验收与激活**：九类验收适配器分别公开实际执行事实和规则（动作测试、目录探测、文件/环境探针、静态评审、对话观察、输入契约、真实宿主业务、交付评审等）；`acceptance-contract` 台账绑定需求、架构、计划、代码和逐项证据。`host-business` 按冻结 `activationChecks` 在隔离真实 Node/Python 环境运行选定用例，使用真实文件与不可变任务产物，不用替身返回值冒充宿主行为；真实功能失败进入原研发修复流程（原修复预算），重新执行通过后才可激活。激活执行文件往返及不可变快照校验、实际隔离启动；缺少或失败证据阻止激活。交付包不可变，缺陷标记与运行检查另存；最终保存期间取消不能成为完成，已切换的新定义会回退且与架构可用状态共同撤销（仅匹配本次架构版本、候选摘要及研发编号）。已激活定义使用 `mode=designed` + `developmentRef` + `execution`，经 `run_developed_workflow` 调用对应的已验证执行适配。
 
-**执行器与隔离**：macOS `sandbox-exec` 经实际探测保留；Windows LPAC/Job Object、Linux Landlock/seccomp 分派。支持 Node 内置模块、单个 JSON 输出；任务经 stdin 固定启动层恢复 `process.argv[2]`，不自动安装依赖或执行任意 Shell。用户运行目录仅在架构需要时挂入；只读能力不授予写权限，隐藏/凭据文件和链接阻断挂载。运行工作目录文件单个最多 20 MiB（与上传材料同限），代码快照保留单文件 2 MiB、总量 10 MiB、200 文件限制。Linux 云端原生检查已过；Windows 真实隔离启动仍在验证；原生检查不代表三平台完整安装与桌面验收完成。
+**执行适配与隔离**：内置 Node 路径使用 Node 内置模块；旧 `node-json` 经 stdin 固定启动层恢复 `process.argv[2]`、输出单个 JSON，`node-action` 经受控能力桥执行。两者不自行安装依赖或执行任意 Shell。受管 JavaScript/Python 的语言环境与锁定依赖由平台准备；Docker 路径须核实镜像摘要、本机引擎和实际隔离启动。macOS `sandbox-exec` 经实际探测保留；原生辅助程序另有 Windows LPAC/Job Object、Linux Landlock/seccomp 分派，不等同于扩大受管服务的 Mac ARM64 支持范围。用户运行目录仅在架构需要时挂入；只读能力不授予写权限，隐藏/凭据文件和链接阻断挂载。运行工作目录文件单个最多 20 MiB（与上传材料同限），代码快照保留单文件 2 MiB、总量 10 MiB、200 文件限制。Linux 云端原生检查已过；Windows 真实隔离启动仍在验证；原生检查不代表三平台完整安装与桌面验收完成。
 
 **记录布局**：`.neuma/agents/<id>/development/` 下 `records/`（研发记录）、`workspaces/<runId>/code|planning/`、`snapshots/`、`planning-snapshots/`、`sessions/<runId>/<bindingHash>/`（原生 JSONL，目录 0700、文件 0600）。任务、预算、代码、待消费阶段结果和证据引用由控制器原子发布；启动时 running 变为 interrupted，继续核对实际代码、冻结计划、材料和会话。删除 Agent 清理研发元数据但保留文件。
 
@@ -163,7 +164,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 
 **托管服务与流程**：受管通道支持 JavaScript 和 Python（锁定摘要的 CPython 3.13 工件按需准备；依赖锁定版本 + 完整性校验，运行代码不能自行安装或获得宿主凭据）。默认请求上限十分钟、每进程 512 MiB；临时目录、输出、日志有额度，取消和超时回收。服务按智能体、交付版本和私聊/具体群隔离。流程控制器保存步骤依赖、批次条目、检查点及结果引用；只有可重复操作允许自动重试，外部结果无法确定时进入 `needs_review`，需要用户核实或明确接受重试。
 
-**连接**：声明、用户配置、发现和验证记录分开。HTTP 与 MCP Streamable HTTP 经统一适配器；支持匿名、令牌、请求头密钥、Basic 及授权码/PKCE。macOS 钥匙串持有凭据仓库主密钥，配置只保存加密凭据引用；旧明文连接在使用或更新时迁移，失败保留原记录并停止；凭据不进入需求、模型、代码快照和页面返回。业务动作 method/path 来自已评审设计；连接测试只用无副作用安全 GET，无安全测试时保留 `configured/unverified`，仍可按已设计操作发起首次真实请求并如实记录。每次保存生成配置版本，清除使旧 generation 失效。
+**连接**：声明、用户配置、发现和验证记录分开。HTTP 与 MCP Streamable HTTP 经统一适配器；支持匿名、令牌、请求头密钥、Basic 及授权码/PKCE。macOS 钥匙串持有凭据仓库主密钥，配置只保存加密凭据引用；旧明文连接在使用或更新时迁移，失败保留原记录并停止；凭据不进入需求、模型、代码快照和页面返回。HTTP 的 method/path 或 MCP 的 tool/resourceUri 来自已评审设计。测试只执行标记为 `safeTest` 的无副作用读取；GET/HEAD 可按只读语义核对，POST 等操作还须显式 `readOnly:true`，旧 v2 仍按原仅 GET 契约验证。无安全测试时保留 `configured/unverified`，仍可按已设计操作发起首次真实请求并如实记录。每次保存生成配置版本，清除使旧 generation 失效。
 
 **公共联网**：默认具备公开网页搜索与正文读取（Tavily 无 Key + Exa 免费备用，内部切换无需回退授权；专属搜索失败回退公共底座时检查用户 fallback consent）。缓存按 Agent 和私聊/群任务隔离，五分钟失效；公开地址校验拒绝本机、内网、保留地址及不安全重定向。委派任务的可信 `taskAllowNetwork` 从本轮用户原话计算；工作工具同时遵守该策略、Agent 原需求和本轮任务文字，任一禁止即不联网。
 
@@ -248,7 +249,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 | 本文 | 当前架构基线（职责、约束、状态归属、验证入口） | 现行 |
 | [docs/development-layer-design.md](docs/development-layer-design.md) | 研发层五阶段详细设计 | 现行（AGENTS 指定同步维护） |
 | [docs/user-guide.md](docs/user-guide.md)、[docs/agent-capabilities-and-services.md](docs/agent-capabilities-and-services.md)、[docs/connections-guide.md](docs/connections-guide.md)、[docs/npm-installation.md](docs/npm-installation.md) | 用户说明、能力与连接、安装 | 现行说明 |
-| [docs/typescript-migration-plan.md](docs/typescript-migration-plan.md) 及 `typescript-m*-results.md` | TypeScript 迁移计划与各阶段验证证据 | 迁移证据 |
-| [docs/repository-organization-plan.md](docs/repository-organization-plan.md) | 仓库整理实施方案（R1–R6） | 待实施计划 |
+| [docs/typescript-migration-plan.md](docs/typescript-migration-plan.md) 及 `typescript-m*-results.md` | 已完成迁移的范围、当前入口与各阶段证据；原始方案另行冻结 | M0–M8 已实施，仅 Mac ARM64 发布验证 |
+| [docs/repository-organization-plan.md](docs/repository-organization-plan.md) | 仓库整理 R1、R3–R6 的完成状态、实现入口与实施证据 | 已实施，原始方案另行冻结 |
 | [docs/history/architecture-chronicle-2026-10.md](docs/history/architecture-chronicle-2026-10.md) 及 docs/history 其他档案 | 本文前身的编年原文、各次改造交付记录 | 历史档案，无规范效力 |
 | `AGENT_PROTOTYPE.md`、`本地测试记录/` | 原型档案、本机测试冻结证据 | 历史档案，无规范效力 |
