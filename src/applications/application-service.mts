@@ -55,10 +55,10 @@ export class ApplicationService {
   running: Map<string, RunningTask>; submitting: Set<Submission>; stateWrites: Set<StateWrite>;
   epoch: number; closing: Promise<void> | null; ready: Promise<void>; workflows: WorkflowController<{ item: RunningTask }>;
   workflowReady: Promise<unknown>; unsubscribe: () => void;
-  constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources() }: { agents: ApplicationAgents; store?: ApplicationTaskStore; resources?: ApplicationResourcesPort }) {
+  constructor({ agents, store = new ApplicationTaskStore({ storage: agents.storage }), resources = new ApplicationResources(), workflows }: { agents: ApplicationAgents; store?: ApplicationTaskStore; resources?: ApplicationResourcesPort; workflows?: WorkflowController<{ item: RunningTask }> }) {
     this.agents = agents; this.store = store; this.resources = resources;
     this.running = new Map(); this.submitting = new Set(); this.stateWrites = new Set(); this.epoch = 0; this.closing = null; this.ready = store.ready;
-    this.workflows = new WorkflowController<{ item: RunningTask }>({ rootDir: join(objectFields(agents).dataDir as string ?? agents.storage.dataDir!, "workflows"),
+    this.workflows = workflows ?? new WorkflowController<{ item: RunningTask }>({ rootDir: join(objectFields(agents).dataDir as string ?? agents.storage.dataDir!, "workflows"),
       runAction: (options) => this.runManaged(options.context!.item, options),
       onChange: async (record) => {
         const item = [...this.running.values()].find((item) => item.task.workflowId === record.id);
@@ -368,7 +368,10 @@ export class ApplicationService {
       outcomes.push(...await Promise.allSettled(late.map((task) => this.cancel(task.agentId, task.id, "interrupted"))));
       await Promise.allSettled(running.map((item) => item.done));
       await Promise.allSettled([...this.stateWrites].map((item) => item.done));
-      await this.workflows.close(); await this.resources.closeAll(); await this.store.settle();
+      // workflows、页面资源与存储互不依赖：任一收尾失败不跳过其余，按发生顺序统一抛出（R6）。
+      for (const step of [() => this.workflows.close(), () => this.resources.closeAll(), () => this.store.settle()]) {
+        try { await step(); } catch (error) { outcomes.push({ status: "rejected" as const, reason: error }); }
+      }
       const failure = outcomes.find((outcome) => outcome.status === "rejected");
       if (failure) throw failure.reason;
     })().finally(() => { this.closing = null; });
