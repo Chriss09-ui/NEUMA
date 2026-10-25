@@ -55,6 +55,22 @@ export function selectTestFiles(layer: string, availableFiles: Iterable<string>)
     missing: [...known].filter((name) => !available.includes(name)).sort() };
 }
 
+// 递归发现全部测试入口，以相对 test 根的完整路径标识；发现、分类、--list 与实际启动共用该集合。
+export async function discoverTestFiles(): Promise<string[]> {
+  const root = resolve(ROOT, "test");
+  const files: string[] = [];
+  const walk = async (relative: string) => {
+    for (const entry of await readdir(resolve(root, relative), { withFileTypes: true })) {
+      const child = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(child);
+      else if (entry.isFile() && (entry.name.endsWith(".test.mjs") || entry.name.endsWith(".test.mts")))
+        files.push(child.replace(/\.test\.mts$/, ".test.mjs"));
+    }
+  };
+  await walk("");
+  return [...new Set(files)].sort();
+}
+
 export function testEnvironment(layer: string, source: NodeJS.ProcessEnv) {
   if (!Object.hasOwn(TEST_LAYERS, layer)) throw new Error("测试层必须是 unit、integration 或 browser");
   const env = { ...source };
@@ -78,8 +94,7 @@ async function main() {
     const { assertFreshBuild } = await import("./build.mjs");
     await assertFreshBuild(ROOT);
   }
-  const entries = await readdir(new URL("../test/", import.meta.url), { withFileTypes: true });
-  const available = entries.filter((entry) => entry.isFile()).map((entry) => entry.name.replace(/\.test\.mts$/, ".test.mjs"));
+  const available = await discoverTestFiles();
   const { files, unclassified, missing } = layer === "all"
     ? { files: available.filter((name) => name.endsWith(".test.mjs")).sort(), unclassified: [], missing: [] }
     : selectTestFiles(layer, available);

@@ -1,12 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdir } from "node:fs/promises";
-import { TEST_LAYERS, selectTestFiles, testEnvironment } from "../scripts/run-tests.mjs";
+import { TEST_LAYERS, selectTestFiles, testEnvironment, discoverTestFiles } from "../scripts/run-tests.mjs";
 
 test("分层清单覆盖实际测试文件，快速组不包含真实执行或浏览器混合文件", async () => {
-  const files = (await readdir(new URL("./", import.meta.url))).filter((name) => name.endsWith(".test.mjs"));
+  const files = await discoverTestFiles();
   const layers = Object.fromEntries(["unit", "integration", "browser"].map((layer) => [layer, selectTestFiles(layer, files)]));
-  assert.deepEqual([...new Set(Object.values(layers).flatMap((layer) => layer.files))].sort(), files.sort());
+  assert.deepEqual([...new Set(Object.values(layers).flatMap((layer) => layer.files))].sort(), files);
   for (const layer of Object.values(layers)) assert.deepEqual<NonNullable<typeof layer>["missing"]>(layer.missing, []);
   assert.deepEqual(layers.unit!.files.filter((name) => layers.integration!.files.includes(name) || layers.browser!.files.includes(name)), []);
   assert.ok(layers.unit!.files.includes("core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration-ui.test.mjs"));
@@ -14,6 +13,19 @@ test("分层清单覆盖实际测试文件，快速组不包含真实执行或�
     assert.ok(layers.integration!.files.includes(name), `${name} 必须归入集成组`);
   assert.deepEqual(layers.browser!.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "sidebar-layout.test.mjs"]);
   assert.deepEqual(layers.browser!.files.filter((name) => layers.integration!.files.includes(name)), ["agent-build-view.test.mjs"]);
+});
+
+test("递归发现以相对 test 根的完整路径标识，嵌套与同名文件互不冲突，辅助目录不进入运行集合", async () => {
+  const discovered = await discoverTestFiles();
+  assert.ok(discovered.every((name) => name.endsWith(".test.mjs")));
+  assert.ok(discovered.every((name) => !["helpers/", "fixtures/", "types/"].some((prefix) => name.startsWith(prefix))));
+  const nested = ["runtime/core.test.mjs", "core.test.mjs"];
+  assert.deepEqual(selectTestFiles("unit", nested).files, ["core.test.mjs"]);
+  const integration = selectTestFiles("integration", nested);
+  assert.deepEqual(integration.files, ["runtime/core.test.mjs"]);
+  assert.deepEqual(integration.unclassified, ["runtime/core.test.mjs"]);
+  assert.deepEqual(selectTestFiles("unit", []).files, []);
+  assert.deepEqual(selectTestFiles("integration", ["helpers/model.mjs", "fixtures/case.json", "types/m4-architecture.mts"]).files, []);
 });
 
 test("未登记的新测试默认进入集成组并提供分类提示，不把夹具当成测试", () => {
