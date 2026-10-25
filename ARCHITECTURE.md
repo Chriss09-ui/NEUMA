@@ -151,7 +151,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 
 ## 6. 运行与交付
 
-实现：`src/applications/`（交付、资源、任务存储）、`src/services/`（托管服务、流程、网关）、`src/connections/`、`src/agents/agent-connections.mts`、`src/agents/agent-capabilities.mts`。测试：`application-*.test.mts`、`service-*.test.mts`、`connections-protocols.test.mts`、`agent-connections.test.mts`、`agent-capabilities.test.mts`、`agent-active-runtime.test.mts`。
+实现：`src/applications/`（交付、资源、任务存储）、`src/services/`（托管服务、流程、网关）、`src/connections/`、`src/agents/agent-connections.mts`、`src/agents/agent-capabilities.mts`、`src/agents/agent-workspace.mts`（专属工作目录的路径约束、有界读取、脱敏文本与文件工具构造）。测试：`application-*.test.mts`、`service-*.test.mts`、`connections-protocols.test.mts`、`agent-connections.test.mts`、`agent-capabilities.test.mts`、`agent-active-runtime.test.mts`。
 
 **激活版本与更新候选**：实际运行使用 `definition.architectureRef` 指定的精确历史版本与 `candidateHash`，不选任意通过记录。`activeRuntime` 独立提供已激活架构、研发记录和应用摘要。构建锁暂停新的私聊、群执行及应用动作；有合法活动交付时，构建事件中断旧后台任务但保留旧页面资源实例；新版通过原交付检查并原子激活后才切换引用；已有回滚保留记忆、资料与旧定义。失败、取消或未完成的新候选不使已激活定义失去批准依据。
 
