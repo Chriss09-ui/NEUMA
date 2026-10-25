@@ -1717,11 +1717,12 @@ export class PrototypeAgents {
       try { await this.applications.close(); } catch (error) { failures.push(error); }
       const stopped = await Promise.allSettled([this.runtimeReady, this.gateway?.close(), this.connections?.close?.(), this.services?.close()]);
       for (const item of stopped) if (item.status === "rejected") failures.push(item.reason);
-      for (const step of [() => this.materials.close(), () => this.development.close(), () => this.services?.close()]) {
+      for (const step of [() => this.materials.close(), () => this.development.close()]) {
         try { await step(); } catch (error) { failures.push(error); }
       }
       await Promise.allSettled([...builds, ...sessions].map((item) => item.session?.abort()));
       await Promise.allSettled([...builds.map((item) => item.done), ...sessions.filter((item) => item.busy).map((item) => item.done)]);
+      try { await this.services?.close(); } catch (error) { failures.push(error); }
       for (const item of sessions) { try { item.session?.dispose(); } catch (error) { failures.push(error); } }
       this.sessions.clear(); this.collaborationSessions.clear();
       try { await this.activities.persistence; } catch (error) { failures.push(error); }

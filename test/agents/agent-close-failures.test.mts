@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
 import { AgentScheduler } from "../../src/runtime/agent-scheduler.mjs";
+import { fixtureDeferred } from "../helpers/m7-test-boundaries.mjs";
 
 // R6 生命周期审计：PrototypeAgents.close 的组合清理在并发、重复与组件失败下的行为。
 // 夹具只替换 close() 实际触达的字段，不启动模型或进程。
@@ -51,6 +52,35 @@ test("并发关闭共享同一次清理，不重复释放会话或组件", async
   assert.equal(records.services, 2);
   assert.equal(records.persistence, 1);
   assert.equal(agents.sessions.size, 0);
+});
+
+test("第二次服务关闭等待构建和忙碌会话排空，并先于会话释放", { timeout: 5000 }, async (t) => {
+  for (const pending of ["build", "session"]) await t.test(pending, { timeout: 2000 }, async (t) => {
+    const events: string[] = [];
+    const drained = fixtureDeferred<void>(), aborted = fixtureDeferred<void>();
+    let servicesCloses = 0;
+    const { agents } = await fixture(t, { services: { close: async () => { events.push(`services:${++servicesCloses}`); } } });
+    const double = sessionDouble({ dispose: () => { events.push("session:dispose"); } });
+    double.session.abort = async () => { double.calls.aborts++; events.push("session:abort"); aborted.resolve(); };
+    const session = sessionEntry(double, { busy: true });
+    const build = { controller: new AbortController(), cancelled: false, done: Promise.resolve() };
+    const done = drained.promise.then(() => { events.push(`${pending}:done`); });
+    if (pending === "build") build.done = done;
+    else session.done = done;
+    agents.builds.set("building-agent", build);
+    agents.sessions.set("session-a", session);
+    const closing = agents.close();
+    try {
+      await aborted.promise;
+      // 让中止操作的微任务排空，但继续扣住 done，防止第二次关闭抢在等待结束前执行。
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(servicesCloses, 1, "构建或忙碌会话尚未排空时不能第二次关闭服务");
+      assert.equal(double.calls.disposals, 0);
+      drained.resolve();
+      await closing;
+      assert.deepEqual(events, ["services:1", "session:abort", `${pending}:done`, "services:2", "session:dispose"]);
+    } finally { drained.resolve(); await closing; }
+  });
 });
 
 test("成功关闭后再次关闭保持幂等，不抛错也不复活状态", async (t) => {
