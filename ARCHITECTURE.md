@@ -201,7 +201,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 
 ## 9. 前端与交互
 
-实现：`public/`（浏览器 `.ts` 编译为 `.js`）。测试：`chat-ui.test.mts`、`rich-text.test.mts`、`sidebar-*.test.mts`、`group-*.test.mts`、`application-*-ui.test.mts`、`settings-ui.test.mts` 等。
+实现：`public/`（浏览器 `.ts` 编译为 `.js`）。测试：`ui/chat-ui.test.mts`、`ui/rich-text.test.mts`、`ui/sidebar-*.test.mts`、`collaboration/group-*.test.mts`、`applications/application-*-ui.test.mts`、`runtime/settings-ui.test.mts` 等；共享界面基础测试在 `test/ui/`，明显属于业务领域的界面测试放在对应领域目录。
 
 - 前端只消费 NEUMA 自有接口、状态、文本和结果协议（流协议 `status` / `done.result` / `error`，`context` 事件按需展开右侧面板），不依赖 Pi SDK 原生事件或对象。只显示简洁进度，不暴露内部提示词、模型思考或工具参数。
 - `rich-text.js` 提供共享显示层：Marked 解析 + DOM 白名单呈现，KaTeX 排版行内/独立公式；原始 HTML 只作文字展示，Markdown 图片只显示替代文字；链接限制安全协议与已知内部路由；依赖版本固定，资源由本机静态服务提供。历史在显示时解析，保存与传给模型的消息不变。
@@ -218,7 +218,7 @@ schemaVersion=2/3 的 workflow/custom 研发统一使用 `node-action`（可无�
 
 - 自有后端、前端、测试、安装和维护代码全部严格 TypeScript 编译，`allowJs` / `noCheck` 关闭。Node `.mts`、浏览器 `.ts`、CLI `.cts` 分别发射为 `.mjs`、`.js`、`.cjs`；运行产物位于 `dist/ts-build/package/`，保持安装包层级。源码根不能直接打包，使用 `npm run package:pack`；不手改 dist。`skipLibCheck` 仅用于锁定 Pi 依赖的上游声明错误，不适用于自有共享声明。
 - 构建检查自有 TS 的覆盖、入口、静态资源、执行权限和源码摘要，拒绝遗留自有 JS、编译错误、冲突及陈旧产物；五组配置隔离共享声明、Node、浏览器 ESM、iframe 普通脚本和测试环境。构建失败使上一代产物失去有效标记。
-- 测试命令先构建再运行产物目录中的测试。`scripts/run-tests.mts` 维护 unit / integration / browser 分层清单（当前扫描 `test/` 顶层）：unit、integration 默认移除外部浏览器环境变量并关闭外部浏览器；browser 保留显式启用机制（`NEUMA_REQUIRE_BROWSER_TESTS=1` / `NEUMA_TEST_BROWSER`），macOS 默认只尝试 Dia，无界面参数兼容性待验证；跳过、未运行或启动失败不能记作通过。运行保持串行（`--test-concurrency=1`）。`test/types/` 下的编译期反例只编译不执行。`.github/workflows/native-check.yml` 固定引用 4 个测试的编译产物路径。
+- 测试命令先构建再运行产物目录中的测试。`scripts/run-tests.mts` 维护 unit / integration / browser 分层清单，递归发现 `test/` 及其领域子目录，条目以相对 `test/` 根的完整路径标识（不同目录的同名文件不冲突）；顶层仅保留 server 组装测试与 native-check 固定引用的 4 个入口。unit、integration 默认移除外部浏览器环境变量并关闭外部浏览器；browser 保留显式启用机制（`NEUMA_REQUIRE_BROWSER_TESTS=1` / `NEUMA_TEST_BROWSER`），macOS 默认只尝试 Dia，无界面参数兼容性待验证；跳过、未运行或启动失败不能记作通过。运行保持串行（`--test-concurrency=1`）。`test/types/` 下的编译期反例只编译不执行；`test/helpers/`、`test/fixtures/` 不进入运行集合。`.github/workflows/native-check.yml` 固定引用 4 个测试的编译产物路径。
 - 模型协议测试使用本机模拟接口，不调用真实模型服务；外部检索和业务服务用可控替身。测试通过不表示真实业务模型质量或外部服务集成已验收。
 - CI（`.github/workflows/typescript-check.yml`）：Mac ARM64、Node 22.22.2 / 24.15.0 / 26.3.0 的代码与包检查。发布验证当前只覆盖 Mac ARM64；Linux/Windows 打包与既有原生工作流不在当前收口范围。安装版只运行已编译 JS，不依赖 TypeScript 或源码仓库依赖；打包、解包 smoke 和独立生产依赖安装验证同一编译代次。
 - 每日验证入口：`npm run typecheck`（最快类型检查）、`npm run test:unit` / `test:integration`（分层）、`npm test`（全量回归，提交或推送前执行）、`npm run package:pack` / `test:package:smoke` / `test:package:install`（涉及包内容时）。页面检查优先使用 Codex 内置浏览器；仅明确需要外部浏览器验收时运行 `npm run test:browser`。
