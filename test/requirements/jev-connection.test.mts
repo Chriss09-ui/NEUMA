@@ -1,9 +1,9 @@
-import type { TestFailure } from "./helpers/m7-test-boundaries.mjs";
+import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerConnectionProbeTests } from "./helpers/connection-probe.mjs";
-import { testJevConnection } from "../src/model-connection.mjs";
-import { InputError, ProviderError } from "../src/requirements/core.mjs";
+import { registerConnectionProbeTests } from "../helpers/connection-probe.mjs";
+import { testJevConnection } from "../../src/model-connection.mjs";
+import { InputError, ProviderError } from "../../src/requirements/core.mjs";
 
 const config = Object.freeze({
   jevApiKey: "synthetic-jev-key", jevModel: "jev-1.13.0", jevConfigured: true,

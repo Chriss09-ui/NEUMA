@@ -1,14 +1,14 @@
-import {callFixture,recordArray} from "./helpers/m7-test-boundaries.mjs";
-import {fixtureString} from "./helpers/http-model.mjs";
-import type {EvidenceMessage} from "../src/contracts/requirements.mjs";
-import { fixtureChatRequest, type FixtureChatRequest } from "./helpers/http-model.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
-import { failureFields } from "./helpers/failure-fields.mjs";
+import {callFixture,recordArray} from "../helpers/m7-test-boundaries.mjs";
+import {fixtureString} from "../helpers/http-model.mjs";
+import type {EvidenceMessage} from "../../src/contracts/requirements.mjs";
+import { fixtureChatRequest, type FixtureChatRequest } from "../helpers/http-model.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
+import { failureFields } from "../helpers/failure-fields.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv } from "ajv";
-import { normalizeTaskSpec, taskSpecDiagnostic, taskSpecSchema, validateTaskEvidence } from "../src/requirements/task-spec.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
+import { normalizeTaskSpec, taskSpecDiagnostic, taskSpecSchema, validateTaskEvidence } from "../../src/requirements/task-spec.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
 
 const evidence = [{ messageId: "user_1", quote: "逐项检查" }];
 const item = (kind = "user") => ({ id: "coverage", dimension: "processing", content: "逐项检查", applicability: "applies", critical: true,

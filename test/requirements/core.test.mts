@@ -1,11 +1,11 @@
-import type { Providers } from "../src/requirements/requirement-provider-port.mjs";
-import type { TestFailure } from "./helpers/m7-test-boundaries.mjs";
+import type { Providers } from "../../src/requirements/requirement-provider-port.mjs";
+import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CONFIRMATION_QUESTION, decideNext, emptyDraft, normalizeDraft, processTurn, ProviderError } from "../src/requirements/core.mjs";
-import { REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS } from "../src/requirements/requirement-limits.mjs";
-import { emptyTaskSpec } from "../src/requirements/task-spec.mjs";
-import { withPreflight } from "./helpers/consultation.mjs";
+import { CONFIRMATION_QUESTION, decideNext, emptyDraft, normalizeDraft, processTurn, ProviderError } from "../../src/requirements/core.mjs";
+import { REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS } from "../../src/requirements/requirement-limits.mjs";
+import { emptyTaskSpec } from "../../src/requirements/task-spec.mjs";
+import { withPreflight } from "../helpers/consultation.mjs";
 
 function completeDraft() {
   const draft = emptyDraft();

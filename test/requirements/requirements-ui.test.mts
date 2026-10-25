@@ -1,6 +1,6 @@
-import { pageElement } from "../public/page-elements.js";
-import { errorInfo } from "../public/ui-types.js";
-import type { Message, AgentProfile } from "../public/ui-types.js";
+import { pageElement } from "../../public/page-elements.js";
+import { errorInfo } from "../../public/ui-types.js";
+import type { Message, AgentProfile } from "../../public/ui-types.js";
 interface LegacyRequirement {id:string;name:string;draft:{name?:{value:string;source?:string};goal:{value:string;source?:string}};profile?:Partial<AgentProfile>;updatedAt?:string;persisted?:boolean;dirty?:boolean;pendingSync?:boolean;localBackup?:boolean}
 interface RequirementBody {name:string;draft:LegacyRequirement["draft"];updatedAt:string;importOnly?:boolean;messages:Message[];userMessages:string[];mutationId:string}
 interface LegacyConversation {schemaVersion:number;messages:Message[]}
@@ -11,12 +11,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
-import * as state from "../public/state.js";
-import { renderAgentAvatar } from "../public/agent-avatar.js";
-import type { DisplayAgent } from "../public/ui-types.js";
+import * as state from "../../public/state.js";
+import { renderAgentAvatar } from "../../public/agent-avatar.js";
+import type { DisplayAgent } from "../../public/ui-types.js";
 
 const sources = await Promise.all(["chat-ui.js", "agent-runtime.js", "app.js"].map(async (file) =>
-  (await readFile(new URL(`../public/${file}`, import.meta.url), "utf8"))
+  (await readFile(new URL(`../../public/${file}`, import.meta.url), "utf8"))
     .replace(/^import[\s\S]*?;\n/gm, "").replace(/^export /gm, "")));
 const settle = () => new Promise(setImmediate);
 const result = (overrides = {}) => ({

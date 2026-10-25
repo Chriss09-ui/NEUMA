@@ -1,22 +1,22 @@
-import { callFixture, fixtureText } from "./helpers/m7-test-boundaries.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
+import { callFixture, fixtureText } from "../helpers/m7-test-boundaries.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ApplicationService } from "../src/applications/application-service.mjs";
-import { ManagedServiceManager } from "../src/services/managed-service-manager.mjs";
-import { applicationTaskInput, managedRunMessage, INPUT_FRAMING_FACTS } from "../src/applications/input-framing.mjs";
-import { createRequirementSystemVerifier } from "../src/agents/requirement-verification.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { designHash } from "../src/architecture/architecture-contract.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { processTurn, emptyDraft } from "../src/requirements/core.mjs";
-import { RequirementSessions } from "../src/requirements/requirement-sessions.mjs";
-import { advanceRequirement, prepareRequirement } from "../src/main/main-requirements.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { ApplicationService } from "../../src/applications/application-service.mjs";
+import { ManagedServiceManager } from "../../src/services/managed-service-manager.mjs";
+import { applicationTaskInput, managedRunMessage, INPUT_FRAMING_FACTS } from "../../src/applications/input-framing.mjs";
+import { createRequirementSystemVerifier } from "../../src/agents/requirement-verification.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { designHash } from "../../src/architecture/architecture-contract.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { processTurn, emptyDraft } from "../../src/requirements/core.mjs";
+import { RequirementSessions } from "../../src/requirements/requirement-sessions.mjs";
+import { advanceRequirement, prepareRequirement } from "../../src/main/main-requirements.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 
 const uuid = "00000000-0000-4000-8000-000000000000";
 const snapshot = (agentId: string) => ({ agentId, version: 9, profile: "f".repeat(64), connections: [

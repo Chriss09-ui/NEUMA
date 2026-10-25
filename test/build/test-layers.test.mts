@@ -8,7 +8,7 @@ test("分层清单覆盖实际测试文件，快速组不包含真实执行或�
   assert.deepEqual([...new Set(Object.values(layers).flatMap((layer) => layer.files))].sort(), files);
   for (const layer of Object.values(layers)) assert.deepEqual<NonNullable<typeof layer>["missing"]>(layer.missing, []);
   assert.deepEqual(layers.unit!.files.filter((name) => layers.integration!.files.includes(name) || layers.browser!.files.includes(name)), []);
-  assert.ok(layers.unit!.files.includes("core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration-ui.test.mjs"));
+  assert.ok(layers.unit!.files.includes("requirements/core.test.mjs")); assert.ok(layers.unit!.files.includes("collaboration-ui.test.mjs"));
   for (const name of ["agent-prototype.test.mjs", "runtime/pi-runtime.test.mjs", "development-executor.test.mjs", "runtime/materials-runner.test.mjs", "project-platform.test.mjs"])
     assert.ok(layers.integration!.files.includes(name), `${name} 必须归入集成组`);
   assert.deepEqual(layers.browser!.files, ["agent-artifact-document.test.mjs", "agent-build-view.test.mjs", "agent-layout.test.mjs", "ui/sidebar-layout.test.mjs"]);
@@ -29,10 +29,10 @@ test("递归发现以相对 test 根的完整路径标识，嵌套与同名文�
 });
 
 test("未登记的新测试默认进入集成组并提供分类提示，不把夹具当成测试", () => {
-  const files = ["new-feature.test.mjs", "core.test.mjs", "helpers.mjs"];
+  const files = ["new-feature.test.mjs", "isolation-native.test.mjs", "helpers.mjs"];
   const selected = selectTestFiles("integration", files);
   assert.deepEqual(selected.files, ["new-feature.test.mjs"]); assert.deepEqual(selected.unclassified, ["new-feature.test.mjs"]);
-  assert.deepEqual(selectTestFiles("unit", files).files, ["core.test.mjs"]);
+  assert.deepEqual(selectTestFiles("unit", files).files, ["isolation-native.test.mjs"]);
   assert.equal(selectTestFiles("browser", files).files.includes("new-feature.test.mjs"), false);
   assert.throws(() => selectTestFiles("unknown", files), /测试层/);
   assert.equal(new Set(Object.values(TEST_LAYERS).flat()).has("new-feature.test.mjs"), false);

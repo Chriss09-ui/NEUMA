@@ -1,15 +1,15 @@
-import { fixtureChatRequest, fixtureString, type FixtureChatRequest } from "./helpers/http-model.mjs";
-import type { CalculationFormula, RequirementIssue } from "../src/contracts/requirements.mjs";
-import { objectFields } from "../src/runtime/type-boundary.mjs";
+import { fixtureChatRequest, fixtureString, type FixtureChatRequest } from "../helpers/http-model.mjs";
+import type { CalculationFormula, RequirementIssue } from "../../src/contracts/requirements.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv } from "ajv";
-import { CAPACITY_PROOF_EXAMPLE as example, CAPACITY_PROOF_GUIDANCE, REQUIREMENT_STAGE_GUIDANCE } from "../src/requirements/requirement-capacity-guidance.mjs";
-import { calculateRequirementDerivation, calculationRequestSchema } from "../src/requirements/requirement-calculations.mjs";
-import { makeProviders } from "../src/requirements/providers.mjs";
-import { createPlatformSnapshot } from "../src/architecture/platform-contract.mjs";
-import { validDraft } from "./helpers/architecture.mjs";
-import { sufficientPreflight } from "./helpers/consultation.mjs";
+import { CAPACITY_PROOF_EXAMPLE as example, CAPACITY_PROOF_GUIDANCE, REQUIREMENT_STAGE_GUIDANCE } from "../../src/requirements/requirement-capacity-guidance.mjs";
+import { calculateRequirementDerivation, calculationRequestSchema } from "../../src/requirements/requirement-calculations.mjs";
+import { makeProviders } from "../../src/requirements/providers.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 
 const asciiJson = (input: unknown) => JSON.stringify(input).replace(/[\u007f-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 type VoteRow = { label: string; votes: number };

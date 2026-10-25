@@ -1,15 +1,15 @@
-import {fixtureToolAt} from "./helpers/m7-test-boundaries.mjs";
-import {objectFields} from "../src/runtime/type-boundary.mjs";
-import type {SessionEvent,SessionMessage} from "../src/runtime/pi-port.mjs";
-import type {ToolResult} from "../src/contracts/tools.mjs";
+import {fixtureToolAt} from "../helpers/m7-test-boundaries.mjs";
+import {objectFields} from "../../src/runtime/type-boundary.mjs";
+import type {SessionEvent,SessionMessage} from "../../src/runtime/pi-port.mjs";
+import type {ToolResult} from "../../src/contracts/tools.mjs";
 interface RoutingRecord {options:PiSessionOptions;disposed:boolean;aborted:boolean;compaction?:boolean;payload?:unknown;stopReason?:string;release?:()=>void}
 interface DriverInput {record:RoutingRecord;session:{messages:SessionMessage[]};submit:(value:unknown)=>Promise<ToolResult>;emit:(event:SessionEvent)=>void}
-import type { PiSessionOptions } from "../src/runtime/pi-port.mjs";
+import type { PiSessionOptions } from "../../src/runtime/pi-port.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyRequirementInput } from "../src/main/requirement-routing.mjs";
-import { ProviderError } from "../src/requirements/core.mjs";
-import type { UnknownRecord } from "../src/contracts/json.mjs";
+import { classifyRequirementInput } from "../../src/main/requirement-routing.mjs";
+import { ProviderError } from "../../src/requirements/core.mjs";
+import type { UnknownRecord } from "../../src/contracts/json.mjs";
 
 const deferred = () => { let resolve!:()=>void; const promise = new Promise<void>((done) => { resolve = done; }); return { promise, resolve }; };
 const requirement = { agentId: "draft-one", status: "needs_input", lastQuestion: "希望交付什么形式的结果？",
