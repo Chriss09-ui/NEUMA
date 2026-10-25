@@ -1712,18 +1712,20 @@ export class PrototypeAgents {
       this.scheduler.cancelAll();
       for (const build of builds) { build.cancelled = true; build.controller.abort(); }
       for (const item of sessions) { item.cancelled = true; item.controller?.abort(); }
-      let applicationFailure;
-      try { await this.applications.close(); } catch (error) { applicationFailure = error; }
+      // 各独立资源的清理互不依赖：任一失败只记录并继续，最后统一抛出，避免跳过其余释放（R6）。
+      const failures: unknown[] = [];
+      try { await this.applications.close(); } catch (error) { failures.push(error); }
       const stopped = await Promise.allSettled([this.runtimeReady, this.gateway?.close(), this.connections?.close?.(), this.services?.close()]);
-      applicationFailure ??= stopped.find((item) => item.status === "rejected")?.reason;
-      await this.materials.close();
-      await this.development.close();
+      for (const item of stopped) if (item.status === "rejected") failures.push(item.reason);
+      for (const step of [() => this.materials.close(), () => this.development.close(), () => this.services?.close()]) {
+        try { await step(); } catch (error) { failures.push(error); }
+      }
       await Promise.allSettled([...builds, ...sessions].map((item) => item.session?.abort()));
       await Promise.allSettled([...builds.map((item) => item.done), ...sessions.filter((item) => item.busy).map((item) => item.done)]);
-      await this.services?.close();
-      for (const item of sessions) item.session?.dispose(); this.sessions.clear(); this.collaborationSessions.clear();
-      await this.activities.persistence;
-      if (applicationFailure) throw applicationFailure;
+      for (const item of sessions) { try { item.session?.dispose(); } catch (error) { failures.push(error); } }
+      this.sessions.clear(); this.collaborationSessions.clear();
+      try { await this.activities.persistence; } catch (error) { failures.push(error); }
+      if (failures.length) throw failures[0];
     })().finally(() => { this.closing = null; });
     return this.closing;
   }

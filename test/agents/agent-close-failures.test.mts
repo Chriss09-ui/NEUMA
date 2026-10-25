@@ -62,3 +62,37 @@ test("成功关闭后再次关闭保持幂等，不抛错也不复活状态", as
   assert.equal(double.calls.disposals, 1);
   assert.equal(agents.sessions.size, 0);
 });
+
+test("materials 清理失败时其余资源继续清理且失败可见", async (t) => {
+  const { agents, records } = await fixture(t, { materials: { close: async () => { throw new Error("材料清理失败"); } } });
+  const first = sessionDouble(), second = sessionDouble();
+  agents.sessions.set("session-a", sessionEntry(first));
+  agents.sessions.set("session-b", sessionEntry(second));
+  await assert.rejects(agents.close(), /材料清理失败/);
+  assert.equal(records.development, 1);
+  assert.equal(first.calls.disposals, 1); assert.equal(second.calls.disposals, 1);
+  assert.equal(records.persistence, 1);
+  assert.equal(agents.sessions.size, 0);
+});
+
+test("services 第二次停止失败时仍释放会话并保持失败可见", async (t) => {
+  let servicesCloses = 0;
+  const { agents, records } = await fixture(t, { services: { close: async () => { if (++servicesCloses === 2) throw new Error("服务停止失败"); } } });
+  const double = sessionDouble();
+  agents.sessions.set("session-a", sessionEntry(double));
+  await assert.rejects(agents.close(), /服务停止失败/);
+  assert.equal(double.calls.disposals, 1);
+  assert.equal(records.persistence, 1);
+  assert.equal(agents.sessions.size, 0);
+});
+
+test("单个会话 dispose 抛出时其余会话仍释放且失败可见", async (t) => {
+  const { agents, records } = await fixture(t);
+  const broken = sessionDouble({ dispose: () => { throw new Error("会话释放失败"); } }), healthy = sessionDouble();
+  agents.sessions.set("session-a", sessionEntry(broken));
+  agents.sessions.set("session-b", sessionEntry(healthy));
+  await assert.rejects(agents.close(), /会话释放失败/);
+  assert.equal(healthy.calls.disposals, 1);
+  assert.equal(records.persistence, 1);
+  assert.equal(agents.sessions.size, 0);
+});
