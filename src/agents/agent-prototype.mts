@@ -13,7 +13,7 @@ import type { ConnectionSnapshot, ConnectionDefinition } from "../contracts/conn
 import type { DevelopmentRunRecord, DevelopmentPackage, ArchitectureReference, PassedDevelopmentArchitecture } from "../development/development-controller-types.mjs";
 import type { StoredArchitectureRecord } from "../architecture/architecture-controller-port.mjs";
 import type { AgentDefinition, AgentProfile, ActivationBinding, ActivationTransaction, DeliveryHistoryEntry, PrototypeSession, BuildContext,
-  PrototypeOptions, CollaborationOptions, PromptInput, PromptOptions, CapabilityInput, MaterialTool } from "./prototype-port.mjs";
+  PrototypeOptions, CollaborationOptions, PromptInput, PromptOptions, CapabilityInput, MaterialTool, ArchitectureControllerPort } from "./prototype-port.mjs";
 import { objectFields, isRecord, isInteger, errorField } from "../runtime/type-boundary.mjs";
 import { checkedConsultation, checkedStoredDraft, checkedRequirementHandoff } from "../requirements/consultation-storage.mjs";
 import { checkedStoredArchitectureRecord, checkedPassedArchitecture } from "../architecture/architecture-storage-boundary.mjs";
@@ -209,7 +209,7 @@ function requireSuccess(session: PiSessionPort, state: Partial<PrototypeSession>
 export class PrototypeAgents {
   config: ModelConfig; cwd: string; dataDir: string; sessionFactory: SessionFactory;
   storage: AgentStorage; materials: MaterialStore; connections: AgentConnectionStore; services: ManagedServiceManager; web: WebCapabilityPort;
-  dataMigrations: ServiceDataMigrations; library: AgentLibrary; architecture: ArchitectureDesigner; development: DevelopmentController;
+  dataMigrations: ServiceDataMigrations; library: AgentLibrary; architecture: ArchitectureControllerPort; development: DevelopmentController;
   enforceRequirementConfirmation: boolean; applications: ApplicationService; gateway: ServiceGateway;
   agents: Map<string, AgentDefinition>; sessions: Map<string, PrototypeSession>; collaborationSessions: Map<string, PrototypeSession>;
   builds: Map<string, BuildContext>; removing: Set<string>; dataTransitions: Set<string>; lifecycleListeners: Set<(event: { type: string; agentId: string }) => unknown>;

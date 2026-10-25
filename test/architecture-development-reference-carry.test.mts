@@ -281,8 +281,8 @@ test("显式恢复来源、全部绑定或耗尽依据不符时不复用该候�
   for (const [name, change] of changes) await t.test(name, async (t) => {
     const { f, source, interrupted } = await interruptedRepair(t);
     callFixture(change, undefined, [interrupted, source]);
-    f.agents.architecture.records.set(`${source!.agentId!}:${source!.version!}`, source!);
-    f.agents.architecture.records.set(`${interrupted!.agentId!}:${interrupted!.version!}`, interrupted!);
+    (f.agents.architecture as ArchitectureDesigner).records.set(`${source!.agentId!}:${source!.version!}`, source!);
+    (f.agents.architecture as ArchitectureDesigner).records.set(`${interrupted!.agentId!}:${interrupted!.version!}`, interrupted!);
     f.state.draftSuffix = "";
     const start = f.prompts.length; await f.agents.build(f.input);
     const first = f.prompts[start];
@@ -328,7 +328,7 @@ test("缺失、结构非法、摘要或快照不匹配的当前草稿不复用�
     interrupted!.diagnostic!.reason = "api_error"; callFixture(change, undefined, [interrupted]);
     if (name === "hash") {
       // Normal persistence rejects corrupt metadata; exercise that recovery rejection in memory.
-      f.agents.architecture.records.set(`${interrupted!.agentId!}:${interrupted!.version!}`, interrupted!);
+      (f.agents.architecture as ArchitectureDesigner).records.set(`${interrupted!.agentId!}:${interrupted!.version!}`, interrupted!);
     } else await f.agents.architecture.save(interrupted!);
     f.state.interruptReview = false;
     const start = f.prompts.length; await f.agents.build(f.input);
@@ -353,7 +353,7 @@ test("来源或需求/平台/运行能力/确认/后续义务绑定改变时不�
     const rejected = await f.agents.build(f.input), changed = structuredClone(rejected.architecture); callFixture(mutate, undefined, [changed]);
     if (name === "platform") {
       // Keep the intentionally invalid test record in memory; normal save rightly rejects its metadata.
-      f.agents.architecture.records.set(`${changed!.agentId!}:${changed!.version!}`, changed!);
+      (f.agents.architecture as ArchitectureDesigner).records.set(`${changed!.agentId!}:${changed!.version!}`, changed!);
     } else await f.agents.architecture.save(changed!);
     f.state.reject = false;
     const start = f.prompts.length; await f.agents.build(f.input);
