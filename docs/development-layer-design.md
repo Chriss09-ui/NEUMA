@@ -122,7 +122,7 @@ Node 动作和 `node-check` 使用真实操作系统隔离，只读代码快照�
 
 受管服务的 manifest 固定语言、host、入口、公开/内部操作、schema、连接、依赖锁、资源、数据版本及可选 workflow。直接托管依赖只接受允许来源的纯 JavaScript 包或匹配平台的 Python wheel，解析结果须有真实版本、下载地址及摘要，安装器验证工件；复杂系统依赖走受控 Docker。Python 必须由实际 Python 进程验证；本机没有真实 Docker 引擎验证时不能宣称容器已交付。
 
-服务按 Agent、交付版本和私聊/群范围隔离，沿用全局工作槽及同 Agent 串行规则。默认请求上限 **600,000 ms**、内存 **512 MiB**；主机监控和容器硬限制分别报告，不互相冒充。服务的临时范围和日志有界，关闭网页不停止后端服务；后台退出负责回收进程与受管容器。实际环境和依赖由 [服务管理器](../src/services/managed-service-manager.mts)、[服务契约](../src/services/service-contract.mts) 及 [依赖管理](../src/services/service-dependencies.mts) 处理。
+服务按 Agent、交付版本和私聊/群范围隔离，沿用全局工作槽及同 Agent 串行规则。默认请求上限 **600,000 ms**、内存 **512 MiB**；主机监控和容器硬限制分别报告，不互相冒充。服务的临时范围和日志有界，关闭网页不停止后端服务；后台退出负责回收进程与受管容器。停止时台账保存失败仍执行全部匹配进程的终止；验收收尾分别尝试关闭流程控制器、停止各服务作用域和删除临时流程目录，最后报告清理错误。实际环境和依赖由 [服务管理器](../src/services/managed-service-manager.mts)、[服务契约](../src/services/service-contract.mts) 及 [依赖管理](../src/services/service-dependencies.mts) 处理。
 
 流程控制器保存冻结步骤、依赖、尝试次数、检查点和结果引用。等待用户输入不持续占用工作进程；继续时核对版本及幂等编号。非幂等步骤在失败或重启后无法确认副作用时进入 `needs_review`，需要核实完成结果或明确授权重试，不自动重放或扩大动作权限。实现见 [workflow-controller.mts](../src/services/workflow-controller.mts)。
 

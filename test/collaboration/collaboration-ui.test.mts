@@ -1774,6 +1774,31 @@ test("停止旧群任务的迟到回执不能作废新群加载，随后仍可�
   assert.ok(requests.includes("/api/groups/two/messages"));
 });
 
+test("归档旧群的迟到回执不破坏新群加载或错误反馈", async () => {
+  for (const succeeds of [true, false]) {
+    const first = detail(), second = detail("two", "新的小组");
+    let releaseArchive!: () => void, releaseSecond!: () => void;
+    const ui = await readyGroup(first, { request: (path, options) => {
+      if (path === "/api/groups/one" && options.method === "POST") return new Promise<Response>((resolve) => {
+        releaseArchive = () => resolve(succeeds ? Response.json({ ...first, group: { ...first.group, archived: true } })
+          : Response.json({ error: "旧群归档失败" }, { status: 500 }));
+      });
+      if (path === "/api/groups/two") return new Promise<Response>((resolve) => { releaseSecond = () => resolve(Response.json(second)); });
+      return undefined;
+    } });
+    await ui.get("group-archive").click(); await settle();
+    await ui.route({ page: "group", groupId: "two" }); await settle();
+    releaseArchive(); await settle();
+    assert.doesNotMatch(ui.text("group-error"), /旧群归档失败/);
+    releaseSecond(); await settle();
+    assert.equal(ui.text("group-title"), "新的小组"); assert.match(ui.text("group-messages"), /新的小组的初稿/);
+    assert.equal(ui.get("group-send").disabled, false);
+    assert.equal(ui.get("group-archive").disabled, false);
+    for (const callback of ui.timers.values()) callback(); await settle();
+    assert.ok(ui.requests.some(({ path }) => path === "/api/groups/two/events?after=1"));
+  }
+});
+
 test("切换群组后迟到的旧群响应不能覆盖新群，新的任务可以独立发起", async () => {
   let release: ((value?:Response)=>void)|undefined; const writes: WireBody[] = [];
   const ui = setup(groupsSource, async (path: string, options:RequestInit = {}) => {

@@ -8,8 +8,11 @@ interface FrameReply {requestId:string;result:{materials:Material[];taskId?:stri
 interface FixtureEvent {type:string;source?:unknown;origin?:string;data?:unknown;detail?:{agentId?:string|null;active?:boolean};preventDefault?:()=>void}
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import vm from "node:vm";
+import { AgentConnectionStore } from "../../src/agents/agent-connections.mjs";
 import { createApplicationApi } from "../../public/application-api.js";
 import { installApplicationHostBridge } from "../../public/application-bridge.js";
 import { applicationMode, createApplicationWorkspace } from "../../public/application-workspace.js";
@@ -399,6 +402,52 @@ test("连接保存期间的新输入和其他Agent的表单不被迟到回执覆
   await view.show("two"); const other = input(container, "secret"); other.value = "other-agent"; await other.dispatchEvent({ type: "input" });
   release!({ version: 1, connection: { id: "model", configured: true } }); await saving;
   assert.equal(other.value, "other-agent"); await view.show("one"); assert.equal(input(container, "secret").value, "newer");
+});
+
+async function storedConnectionView(t: test.TestContext) {
+  const dataDir = await mkdtemp(join(tmpdir(), "neuma-connection-refresh-ui-"));
+  const store = new AgentConnectionStore({ dataDir, credentialKeySource: async () => Buffer.alloc(32, 7) });
+  t.after(async () => { await store.close(); await rm(dataDir, { recursive: true, force: true }); });
+  await store.save("one", { id: "model", kind: "model", baseUrl: "https://old.example/v1/chat/completions", model: "old-model", authType: "none" });
+  const ui = dom(), container = ui.get("connections");
+  const api = createApplicationApi(async (path, options) => {
+    assert.equal(path, "/api/agents/one/connections");
+    try { return Response.json(options?.body ? await store.save("one", JSON.parse(String(options.body))) : await store.list("one")); }
+    catch (caught) { const failure = objectFields(caught); return Response.json({ error: failure.message, reason: failure.reason }, { status: Number(failure.statusCode) || 500 }); }
+  });
+  const view = createConnectionView<FixtureElement>({ document: ui.document, container, api });
+  await view.show("one");
+  const refresh = () => descendants(container).find((node) => node.textContent === "刷新连接状态")!.click();
+  const submit = () => descendants(container).find((node) => node.tag === "form")!.dispatchEvent({ type: "submit", preventDefault() {} });
+  return { store, container, refresh, submit };
+}
+
+test("未编辑的连接刷新后显示其他窗口的新配置，后续保存保留这些更新", async (t) => {
+  const { store, container, refresh, submit } = await storedConnectionView(t);
+  await store.save("one", { id: "model", baseUrl: "https://new.example/v1/chat/completions", model: "server-model" });
+  await refresh();
+  assert.equal(input(container, "baseUrl").value, "https://new.example/v1/chat/completions");
+  assert.equal(input(container, "model").value, "server-model");
+  input(container, "model").value = "edited-model"; await input(container, "model").dispatchEvent({ type: "input" });
+  await submit();
+  const saved = (await store.list("one")).connections[0]!;
+  assert.equal(saved.baseUrl, "https://new.example/v1/chat/completions"); assert.equal(saved.model, "edited-model");
+});
+
+test("连接草稿刷新后不能覆盖其他窗口的新配置，放弃修改可恢复最新配置", async (t) => {
+  const { store, container, refresh, submit } = await storedConnectionView(t);
+  input(container, "model").value = "local-draft"; await input(container, "model").dispatchEvent({ type: "input" });
+  input(container, "secret").value = "synthetic-unsaved-secret"; await input(container, "secret").dispatchEvent({ type: "input" });
+  await store.save("one", { id: "model", baseUrl: "https://new.example/v1/chat/completions", model: "server-model" });
+  await refresh(); await submit();
+  const saved = (await store.list("one")).connections[0]!;
+  assert.equal(saved.baseUrl, "https://new.example/v1/chat/completions"); assert.equal(saved.model, "server-model");
+  assert.equal(input(container, "model").value, "local-draft");
+  assert.equal(input(container, "secret").value, "synthetic-unsaved-secret");
+  assert.match(text(container), /已改变|已更新/);
+  await descendants(container).find((node) => node.textContent === "放弃修改并刷新")!.click();
+  assert.equal(input(container, "baseUrl").value, "https://new.example/v1/chat/completions");
+  assert.equal(input(container, "model").value, "server-model"); assert.equal(input(container, "secret").value, "");
 });
 
 test("通用连接根据定义显示字段，动态资源发现与授权不丢失用户草稿", async () => {

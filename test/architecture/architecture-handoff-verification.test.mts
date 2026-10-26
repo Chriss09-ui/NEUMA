@@ -1,5 +1,5 @@
 import { fixtureText } from "../helpers/m7-test-boundaries.mjs";
-import { callFixture } from "../helpers/m7-test-boundaries.mjs";
+import { callFixture, recordArray } from "../helpers/m7-test-boundaries.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import type { SessionMessage } from "../../src/runtime/pi-port.mjs";
 import { fixtureTools } from "../helpers/m7-test-boundaries.mjs";
@@ -14,6 +14,9 @@ import { createServer } from "node:http";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { verifyArchitectureHandoff } from "../../src/architecture/architecture-handoff-verification.mjs";
 import { handoffChecker } from "../helpers/handoff.mjs";
+import { validDraft, validDesign } from "../helpers/architecture.mjs";
+import { fixtureChatRequest, fixtureRequirements, fixtureText as modelText } from "../helpers/http-model.mjs";
+import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import type { PiSessionOptions,RegisteredTool, VerificationSessionFactory } from "../../src/runtime/pi-port.mjs";
 
 const requirements = [{ id: "extension", text: "扩展名1至16字符，包含点并转小写。" }];
@@ -156,4 +159,76 @@ test("真实Pi主会话返需先触发独立检查，被认定候选新增限制
   await assert.rejects(callFixture(designer.role, designer, [{ role: "designer", submitName: "submit_architecture", parameters, systemPrompt: "固定测试", payload: { requirements }, allowHandoff: true,
     validate: (value: unknown) => value, onProgress() {} }]), (error: TestFailure) => error.diagnostic!.reason === "handoff_evaluation_incomplete" && error.diagnostic!.modelCalls === 3);
   assert.deepEqual(requests.slice(4), ["main", "checker", "checker"], "检查器第3次格式修复在发送前阻止，不能增开额度");
+});
+
+for (const failBudgetSave of [false, true]) test(`正式主独评返需复核${failBudgetSave ? "记账保存失败时不发送请求" : "请求前持久化共享预算"}`, { timeout: 15000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-handoff-budget-"));
+  const definition = { id: "handoff-budget", name: "返需复核预算", fingerprint: "fixed-requirements", draft: validDraft() };
+  const requests: { role: string; savedModelCalls: unknown }[] = [];
+  let designer: ArchitectureDesigner, serverError: unknown;
+  const savedCalls = async () => {
+    const saved = await designer.storage.readJson(definition.id, "architecture.json");
+    return objectFields(recordArray(objectFields(saved).records).at(-1)?.reviewProgressCheckpoint).modelCalls;
+  };
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
+      const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8"));
+      const checker = body.tools!.some((tool) => tool.function.name === "submit_handoff_necessity");
+      requests.push({ role: checker ? "checker" : "reviewer", savedModelCalls: await savedCalls() });
+      const payload = objectFields(JSON.parse(modelText(body.messages.findLast((message) => message.role === "user")!.content)));
+      let name: string, value: unknown;
+      if (checker) {
+        name = "submit_handoff_necessity";
+        value = { contextHash: payload.contextHash, decisions: recordArray(payload.proposal).map((issue) => ({ issueId: issue.id,
+          classification: "user_choice", reason: "固定复核认为仍需用户明确目标", references: issue.references })) };
+      } else {
+        const requirements = fixtureRequirements(payload.requirements), index = requirements.findIndex((item) => item.id === "goal");
+        assert.ok(index >= 0);
+        name = "request_requirements";
+        value = { issues: [{ id: "clarify_goal", question: "请明确交付目标", impact: "决定交付内容", requirementIds: ["goal"],
+          references: [{ source: "requirements", path: `/${index}/text`, quote: requirements[index]!.text }] }] };
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(`data: ${JSON.stringify({ id: "handoff-budget", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{
+        index: 0, id: `call_${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(value) },
+      }] }, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`);
+    } catch (error) { serverError = error; response.writeHead(500); response.end("fixture failure"); }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const config = { llmConfigured: true, chatUrl: `http://127.0.0.1:${listeningAddress(server).port}/v1/chat/completions`, model: "fixture-model", apiKey: "fixture-only" };
+  const nativeSession = async (options: PiSessionOptions) => { const session = await createPiSession(options); session.setAutoRetryEnabled(false); return session; };
+  designer = new ArchitectureDesigner({ config, cwd: root, dataDir: join(root, "data"), handoffSessionFactory: nativeSession,
+    sessionFactory: async (options) => {
+      const submit = fixtureTools(options.customTools).submit_architecture;
+      if (!submit) return nativeSession(options);
+      return { modelCallAccounting: true, messages: [] as SessionMessage[], subscribe: () => () => {}, dispose() {}, async abort() {},
+        async prompt(text: string) {
+          await options.onModelCall!({});
+          const payload = objectFields(JSON.parse(text));
+          await submit.execute("candidate", validDesign(fixtureRequirements(payload.requirements)));
+        } };
+    } });
+  t.after(async () => { await designer.persistence; server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+  await designer.ready;
+  if (failBudgetSave) {
+    const write = designer.storage.writeJson.bind(designer.storage);
+    designer.storage.writeJson = async (id, file, value, options) => {
+      if (file === "architecture.json" && Number(objectFields(recordArray(objectFields(value).records).at(-1)?.reviewProgressCheckpoint).modelCalls) > 1)
+        throw new Error("synthetic budget persistence failure");
+      return write(id, file, value, options);
+    };
+  }
+  if (failBudgetSave) {
+    await assert.rejects(designer.design(definition));
+    if (serverError) throw serverError;
+    assert.deepEqual(requests, [{ role: "reviewer", savedModelCalls: 1 }], "记账失败不能发送返需复核或追加主评审请求");
+    assert.equal(await savedCalls(), 1, "失败不能覆盖已持久化的真实用量");
+  } else {
+    const result = await designer.design(definition);
+    if (serverError) throw serverError;
+    assert.equal(result.status, "needs_input");
+    assert.deepEqual(requests, [{ role: "reviewer", savedModelCalls: 1 }, { role: "checker", savedModelCalls: 2 }]);
+    assert.equal(await savedCalls(), 2);
+  }
 });

@@ -7,6 +7,7 @@ import { objectFields, isRecord, isInteger, errorField, isArray } from "../runti
 interface ProfileOptions { profile?: string | null | undefined }
 interface ConnectionOptions extends ProfileOptions { requirements?: ConnectionDefinition[]; signal?: AbortSignal | undefined }
 interface AuthorizationContext { version: number; generation: string; profile: string }
+interface AuthorizationInitialization { agentId: string; connectionId: string; profile: string | undefined; cancelledProfiles: Set<string> }
 interface StoreOptions { dataDir?: string; storage?: CredentialStoragePort; fetchImpl?: typeof fetch; credentialKeySource?: () => Promise<Buffer>; vault?: VaultPort; resolveFile?: (agentId: string, reference: string, options: { signal?: AbortSignal | undefined }) => ReturnType<ConnectionFileResolver>; openBrowser?: (url: string) => Promise<void> }
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
@@ -115,6 +116,7 @@ function headers(connection: ConnectionRuntimeConfiguration) {
 
 export class AgentConnectionStore {
   declare storage: CredentialStoragePort; declare fetchImpl: typeof fetch; ready: Promise<void> | undefined; queues: Map<string, Promise<unknown>>; vault: VaultPort; resolveFile: StoreOptions["resolveFile"]; mcp: MCPAdapter; refreshes: Map<string, Promise<ConnectionCredentials>>; oauth: OAuthManager<AuthorizationContext>;
+  readonly authorizationInitializations = new Map<AbortController, AuthorizationInitialization>();
 
   constructor({ dataDir, storage = new AgentStorage({ dataDir: dataDir! }), fetchImpl = fetch, credentialKeySource, vault, resolveFile, openBrowser }: StoreOptions = {}) {
     Object.assign(this, { storage, fetchImpl }); this.ready = storage.ready; this.queues = new Map();
@@ -348,13 +350,41 @@ export class AgentConnectionStore {
     }, { profile: snapshot.profile });
     return { ...result, configurationChoices: choices, approvedOperations: requirement.operations?.map((item) => item.id) ?? [], requiresReview: true };
   }
-  async authorize(id: string, connectionId: string, { requirements = [], profile }: ConnectionOptions = {}) {
-    const record = await this.read(id, { profile }), entry = record.connections[connectionId], value = entry?.versions[entry.currentVersion];
-    if (!value || value.authType !== "oauth" || value.kind !== "business" || !requirements.some((item) => item.id === connectionId)) throw fail("authorization_not_designed", "请先保存已评审连接的登录配置");
-    return this.oauth.start(`${id}:${record.profile}:${connectionId}`, value.oauth ?? {}, { context: { version: value.version, generation: value.generation, profile: record.profile }, ...(value.protocol === "mcp" ? { resourceUrl: value.baseUrl } : {}) });
+  async authorize(id: string, connectionId: string, { requirements = [], profile, signal }: ConnectionOptions = {}) {
+    agentId(id); idValue(connectionId); signal?.throwIfAborted();
+    const controller = new AbortController(), active = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+    const initialization: AuthorizationInitialization = { agentId: id, connectionId, profile: profile ?? undefined, cancelledProfiles: new Set() };
+    const previous = [...this.authorizationInitializations].filter(([, item]) => item.agentId === id && item.connectionId === connectionId);
+    for (const [pending, item] of previous) {
+      if (item.profile === initialization.profile) pending.abort();
+      else if (initialization.profile !== undefined) item.cancelledProfiles.add(initialization.profile);
+    }
+    this.authorizationInitializations.set(controller, initialization);
+    try {
+      const record = await this.read(id, { profile }), entry = record.connections[connectionId], value = entry?.versions[entry.currentVersion];
+      initialization.profile = record.profile;
+      if (initialization.cancelledProfiles.has(record.profile)) controller.abort();
+      active.throwIfAborted();
+      for (const [pending, item] of previous) {
+        item.cancelledProfiles.add(record.profile);
+        if (item.profile === record.profile) pending.abort();
+      }
+      if (!value || value.authType !== "oauth" || value.kind !== "business" || !requirements.some((item) => item.id === connectionId)) throw fail("authorization_not_designed", "请先保存已评审连接的登录配置");
+      return await this.oauth.start(`${id}:${record.profile}:${connectionId}`, value.oauth ?? {}, { signal: active, context: { version: value.version, generation: value.generation, profile: record.profile }, ...(value.protocol === "mcp" ? { resourceUrl: value.baseUrl } : {}) });
+    } finally { this.authorizationInitializations.delete(controller); }
   }
   authorizationStatus(id: string, connectionId: string, { profile = "legacy" }: ProfileOptions = {}) { agentId(id); idValue(connectionId); return this.oauth.status(`${id}:${profile}:${connectionId}`); }
-  async cancelAuthorization(id: string, connectionId: string, { profile }: ProfileOptions = {}) { agentId(id); idValue(connectionId); const record = await this.read(id, { profile }); return this.oauth.cancel(`${id}:${record.profile}:${connectionId}`); }
+  async cancelAuthorization(id: string, connectionId: string, { profile }: ProfileOptions = {}) {
+    agentId(id); idValue(connectionId);
+    const initializing = [...this.authorizationInitializations].filter(([, item]) => item.agentId === id && item.connectionId === connectionId);
+    for (const [controller, item] of initializing) if (item.profile === (profile ?? undefined)) controller.abort();
+    const record = await this.read(id, { profile });
+    for (const [controller, item] of initializing) {
+      item.cancelledProfiles.add(record.profile);
+      if (item.profile === record.profile) controller.abort();
+    }
+    return this.oauth.cancel(`${id}:${record.profile}:${connectionId}`);
+  }
   async call(snapshot: ConnectionSnapshot, { connectionId, operationId, input = {} }: { connectionId: string; operationId: string; input?: unknown }, { requirements = [], signal, test = false, resolveFile, scope = "private" }: ConnectionOptions & { test?: boolean; resolveFile?: ConnectionFileResolver | undefined; scope?: string } = {}) {
     if (typeof scope !== "string" || scope === "group" || scope.length > 300 || /[\r\n\0]/.test(scope)) throw fail("invalid_connection_scope", "连接调用范围无效");
     const connection = await this.assertActive(snapshot, connectionId);
@@ -402,7 +432,10 @@ export class AgentConnectionStore {
       || (current.grantEpoch ?? 0) !== (reference.grantEpoch ?? 0) || (typeof reference.version !== "number" || !current.versions[reference.version])) throw fail("connection_revoked", "此结果绑定的连接授权已经撤销，已停止继续读取");
     const content = JSON.stringify(result.data); return { resultRef, offset, content: content.slice(offset, offset + length), totalLength: content.length, hasMore: offset + length < content.length };
   }
-  async close() { await Promise.all([this.oauth.close(), this.mcp.close()]); }
+  async close() {
+    for (const controller of this.authorizationInitializations.keys()) controller.abort();
+    await Promise.all([this.oauth.close(), this.mcp.close()]);
+  }
   async test(id: string, connectionId: string, { requirements = [], signal, profile }: ConnectionOptions = {}) {
     const snapshot = await this.snapshot(id, { profile }), connection = await this.assertActive(snapshot, connectionId);
     let result;
