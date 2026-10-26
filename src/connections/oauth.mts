@@ -41,8 +41,10 @@ async function tokenRequest(config: OAuthConfiguration, values: Record<string, s
 export async function oauthMetadata(config: OAuthConfiguration, { fetchImpl = fetch, signal, resourceUrl }: { fetchImpl?: typeof fetch; signal?: AbortSignal | undefined; resourceUrl?: string | undefined } = {}): Promise<ResolvedOAuth> {
   if (config.authorizationUrl && config.tokenUrl && config.clientId) return { ...config, authorizationUrl: oauthEndpoint(config.authorizationUrl), tokenUrl: oauthEndpoint(config.tokenUrl) };
   const guardedFetch: typeof fetch = async (url, options = {}) => {
+    signal?.throwIfAborted();
     oauthEndpoint(typeof url === "string" || url instanceof URL ? url : url.url);
     const response = await fetchImpl(url, { ...options, redirect: "manual", signal: signal ?? null });
+    signal?.throwIfAborted();
     if (response.status >= 300 && response.status < 400) throw fail("redirect_rejected", "授权发现不接受跨地址重定向");
     return response;
   };
@@ -69,53 +71,87 @@ export class OAuthManager<Context = unknown> {
   declare fetchImpl: typeof fetch; declare onAuthorized: OAuthManagerOptions<Context>["onAuthorized"]; declare openBrowser: OAuthManagerOptions<Context>["openBrowser"]; pending: Map<string, PendingAuthorization<Context>>;
   constructor({ fetchImpl = fetch, onAuthorized, openBrowser }: OAuthManagerOptions<Context>) { Object.assign(this, { fetchImpl, onAuthorized, openBrowser }); this.pending = new Map(); }
   async start(key: string, input: OAuthConfiguration, { signal, context, resourceUrl }: { signal?: AbortSignal | undefined; context?: Context; resourceUrl?: string } = {}) {
-    await this.cancel(key);
-    const controller = new AbortController(), active = AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60000), ...(signal ? [signal] : [])]);
-    let config = await oauthMetadata(input, { fetchImpl: this.fetchImpl, signal: active, resourceUrl });
+    signal?.throwIfAborted();
+    this.cancel(key);
+    const controller = new AbortController(), active = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
     const state = randomBytes(32).toString("base64url"), verifier = randomBytes(48).toString("base64url");
-    const record: PendingAuthorization<Context> = { state, status: "awaiting_authorization", context, config, controller, redirectUri: "" };
-    const server = createServer(async (request, response) => {
-      const address = new URL(request.url!, record.redirectUri);
-      if (request.method !== "GET" || request.headers.host !== new URL(record.redirectUri).host || address.pathname !== "/callback" || address.searchParams.get("state") !== state || record.status !== "awaiting_authorization"
-        || config.issuer && (config.issuerParameterSupported || address.searchParams.has("iss")) && address.searchParams.get("iss") !== config.issuer) {
-        response.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); response.end("授权请求无效，请返回 NEUMA 重新开始。"); return;
-      }
-      record.status = "exchanging";
-      try {
-        if (address.searchParams.has("error") || !address.searchParams.get("code")) throw fail("oauth_declined", "登录授权未完成");
-        const tokens = await tokenRequest(config, { grant_type: "authorization_code", code: address.searchParams.get("code")!, redirect_uri: record.redirectUri, code_verifier: verifier }, { fetchImpl: this.fetchImpl, signal: active });
-        active.throwIfAborted();
-        await this.onAuthorized(key, tokens, context, config, active); record.status = "authorized";
-        response.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" }); response.end("授权完成，可以关闭此窗口并返回 NEUMA。");
-      } catch (error) { record.status = "failed"; record.reason = typeof errorField(error, "reason") === "string" ? String(errorField(error, "reason")) : "oauth_failed"; response.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); response.end("授权未完成，请返回 NEUMA 检查连接配置并重试。"); }
-      finally { clearTimeout(record.timer); server.close(); }
-    });
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
-    record.server = server; const address = server.address(); if (!address || typeof address === "string") throw fail("invalid_oauth", "授权服务监听地址无效"); record.redirectUri = `http://127.0.0.1:${address.port}/callback`;
-    if (!config.clientId) {
-      try {
-        const registration = await registerClient(config.issuer!, { metadata: { issuer: config.issuer!, authorization_endpoint: config.authorizationUrl, token_endpoint: config.tokenUrl, registration_endpoint: config.registrationUrl!, response_types_supported: ["code"] },
-          clientMetadata: { client_name: "NEUMA", redirect_uris: [record.redirectUri], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
-          fetchFn: (url, options) => this.fetchImpl(oauthEndpoint(url), { ...options, redirect: "manual", signal: active }) });
-        if (!registration.client_id || registration.client_secret) throw fail("oauth_client_registration_required", "此服务要求另外注册客户端，请填写服务商提供的公开客户端编号");
-        config.clientId = registration.client_id;
-      } catch (error) { server.close(); throw errorField(error, "reason") ? error : fail("oauth_client_registration_required", "自动注册未完成，请填写服务商提供的客户端编号"); }
-    }
-    record.timer = setTimeout(() => { if (["awaiting_authorization", "exchanging"].includes(record.status)) { record.status = "expired"; server.close(); } }, 10 * 60000); record.timer.unref(); server.unref();
-    const authorization = new URL(config.authorizationUrl);
-    for (const [name, value] of Object.entries({ response_type: "code", client_id: config.clientId!, redirect_uri: record.redirectUri, state, code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url"), scope: (config.scopes ?? []).join(" "), ...(config.resource ? { resource: config.resource } : {}) })) authorization.searchParams.set(name, value);
+    const record: PendingAuthorization<Context> = { state, status: "awaiting_authorization", context, config: input, controller, redirectUri: "" };
+    // Register before discovery so cancellation and a superseding start own this initialization too.
     this.pending.set(key, record);
-    let browserOpened = false;
-    if (this.openBrowser) { try { await this.openBrowser(authorization.href); browserOpened = true; } catch { /* The verified URL remains available for a manual retry. */ } }
-    active.throwIfAborted();
-    return { status: record.status, authorizationUrl: authorization.href, redirectUri: record.redirectUri, browserOpened };
+    let rejectCancellation: (reason: unknown) => void = () => {};
+    const interrupted = new Promise<never>((_, reject) => { rejectCancellation = reject; });
+    void interrupted.catch(() => {});
+    const cleanup = () => { clearTimeout(record.timer); active.removeEventListener("abort", aborted); record.server?.close(); };
+    const aborted = () => {
+      record.status = errorField(active.reason, "name") === "TimeoutError" ? "expired" : "cancelled";
+      cleanup(); rejectCancellation(active.reason);
+    };
+    const wait = <T,>(operation: Promise<T>) => Promise.race([operation, interrupted]);
+    record.timer = setTimeout(() => controller.abort(new DOMException("登录授权已超时", "TimeoutError")), 10 * 60000); record.timer.unref();
+    active.addEventListener("abort", aborted, { once: true });
+    try {
+      if (active.aborted) aborted();
+      active.throwIfAborted();
+      const config = await wait(oauthMetadata(input, { fetchImpl: this.fetchImpl, signal: active, resourceUrl }));
+      active.throwIfAborted(); record.config = config;
+      const server = createServer(async (request, response) => {
+        const address = new URL(request.url!, record.redirectUri);
+        if (active.aborted || request.method !== "GET" || request.headers.host !== new URL(record.redirectUri).host || address.pathname !== "/callback" || address.searchParams.get("state") !== state || record.status !== "awaiting_authorization"
+          || config.issuer && (config.issuerParameterSupported || address.searchParams.has("iss")) && address.searchParams.get("iss") !== config.issuer) {
+          response.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); response.end("授权请求无效，请返回 NEUMA 重新开始。"); return;
+        }
+        record.status = "exchanging";
+        try {
+          if (address.searchParams.has("error") || !address.searchParams.get("code")) throw fail("oauth_declined", "登录授权未完成");
+          const tokens = await wait(tokenRequest(config, { grant_type: "authorization_code", code: address.searchParams.get("code")!, redirect_uri: record.redirectUri, code_verifier: verifier }, { fetchImpl: this.fetchImpl, signal: active }));
+          active.throwIfAborted();
+          await this.onAuthorized(key, tokens, context, config, active); record.status = "authorized";
+          response.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" }); response.end("授权完成，可以关闭此窗口并返回 NEUMA。");
+        } catch (error) {
+          if (!active.aborted) { record.status = "failed"; record.reason = typeof errorField(error, "reason") === "string" ? String(errorField(error, "reason")) : "oauth_failed"; }
+          response.writeHead(400, { "content-type": "text/plain; charset=utf-8" }); response.end("授权未完成，请返回 NEUMA 检查连接配置并重试。");
+        } finally { cleanup(); }
+      });
+      record.server = server;
+      await wait(new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          if (active.aborted) { server.close(); reject(active.reason); } else resolve();
+        });
+      }));
+      active.throwIfAborted();
+      const address = server.address(); if (!address || typeof address === "string") throw fail("invalid_oauth", "授权服务监听地址无效"); record.redirectUri = `http://127.0.0.1:${address.port}/callback`;
+      if (!config.clientId) {
+        try {
+          const registration = await wait(registerClient(config.issuer!, { metadata: { issuer: config.issuer!, authorization_endpoint: config.authorizationUrl, token_endpoint: config.tokenUrl, registration_endpoint: config.registrationUrl!, response_types_supported: ["code"] },
+            clientMetadata: { client_name: "NEUMA", redirect_uris: [record.redirectUri], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
+            fetchFn: (url, options) => { active.throwIfAborted(); return this.fetchImpl(oauthEndpoint(url), { ...options, redirect: "manual", signal: active }); } }));
+          active.throwIfAborted();
+          if (!registration.client_id || registration.client_secret) throw fail("oauth_client_registration_required", "此服务要求另外注册客户端，请填写服务商提供的公开客户端编号");
+          config.clientId = registration.client_id;
+        } catch (error) { throw errorField(error, "reason") ? error : fail("oauth_client_registration_required", "自动注册未完成，请填写服务商提供的客户端编号"); }
+      }
+      server.unref();
+      const authorization = new URL(config.authorizationUrl);
+      for (const [name, value] of Object.entries({ response_type: "code", client_id: config.clientId!, redirect_uri: record.redirectUri, state, code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url"), scope: (config.scopes ?? []).join(" "), ...(config.resource ? { resource: config.resource } : {}) })) authorization.searchParams.set(name, value);
+      let browserOpened = false;
+      active.throwIfAborted();
+      if (this.openBrowser) { try { await wait(this.openBrowser(authorization.href)); browserOpened = true; } catch { /* The verified URL remains available for a manual retry. */ } }
+      active.throwIfAborted();
+      return { status: record.status, authorizationUrl: authorization.href, redirectUri: record.redirectUri, browserOpened };
+    } catch (error) {
+      cleanup();
+      if (active.aborted) throw active.reason;
+      record.status = "failed"; record.reason = typeof errorField(error, "reason") === "string" ? String(errorField(error, "reason")) : "oauth_failed";
+      throw error;
+    }
   }
   status(key: string) { const record = this.pending.get(key); return { status: record?.status ?? "idle", ...(record?.reason ? { reason: record.reason } : {}) }; }
-  async cancel(key: string) { const record = this.pending.get(key); if (!record) return { status: "idle" }; clearTimeout(record.timer); record.controller.abort(); record.server?.close(); record.status = "cancelled"; return { status: "cancelled" }; }
+  cancel(key: string) { const record = this.pending.get(key); if (!record) return { status: "idle" }; clearTimeout(record.timer); record.controller.abort(); record.server?.close(); record.status = "cancelled"; return { status: "cancelled" }; }
   async close() { await Promise.all([...this.pending.keys()].map((key) => this.cancel(key))); }
 }
 export async function refreshOAuth(config: OAuthConfiguration, tokens: OAuthTokens, options: RequestOptions) {
   if (!tokens.refreshToken) throw fail("reauthorization_required", "登录已过期，请重新连接服务");
-  const next = await tokenRequest(config, { grant_type: "refresh_token", refresh_token: tokens.refreshToken }, options);
+  const next = await tokenRequest({ ...config, scopes: tokens.scopes ?? config.scopes }, { grant_type: "refresh_token", refresh_token: tokens.refreshToken }, options);
   return { ...tokens, ...next, refreshToken: next.refreshToken ?? tokens.refreshToken };
 }

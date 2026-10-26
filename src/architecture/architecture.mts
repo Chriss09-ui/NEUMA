@@ -656,8 +656,14 @@ export class ArchitectureDesigner {
       const proposals = validateHandoffProposal(input, context);
       let decision;
       try {
-        const handoffFactory = onStageModelCall ? async (options: PiSessionOptions) => {
-          const account = async (event: Parameters<NonNullable<PiSessionOptions["onModelCall"]>>[0] = {}) => { await options.onModelCall!(event); await onStageModelCall(event); };
+        const handoffFactory = onStageModelCall || onMainReviewBudget ? async (options: PiSessionOptions) => {
+          const account = async (event: Parameters<NonNullable<PiSessionOptions["onModelCall"]>>[0] = {}) => {
+            await options.onModelCall!(event);
+            try {
+              await onStageModelCall?.(event);
+              await onMainReviewBudget?.(turns);
+            } catch (error) { progressPersistenceError ??= error; abort(); throw error; }
+          };
           const child = await this.handoffSessionFactory({ ...options, onModelCall: account });
           if (!child.modelCallAccounting) {
             const prompt = child.prompt.bind(child);

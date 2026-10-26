@@ -1,7 +1,7 @@
 import type { FormElement, FormDocument } from "./form-dom.js";
 import type { ApplicationApi, ConnectionRequirement, ConnectionView } from "./ui-api-types.js";
 interface ConnectionDraft extends Record<string, unknown> { id: string; kind: string; provider: string; baseUrl: string; model: string; authType: string; headerName: string; allowFallback: boolean; secret: string; protocol: string; username: string; values: Record<string, unknown>; oauth: { scopes?: string | string[] | undefined; [key: string]: unknown } }
-interface ConnectionItem<E> { requirement: ConnectionRequirement; connection: ConnectionView | null | undefined; profile: string | undefined; busy: boolean; note: string; error: boolean; draft: ConnectionDraft; form?: E | null | undefined; fields?: Map<string, E> | undefined; controls?: Map<string, E | E> | undefined; status?: E | undefined; feedback?: E | undefined; save?: E | undefined; test?: E | undefined; clear?: E | undefined; authorize?: E | undefined; cancelAuth?: E | undefined; discover?: E | undefined; oauthDetails?: E | undefined; authorization?: E | undefined; discovery?: E | undefined; specification?: E | undefined; secret?: E | E | undefined }
+interface ConnectionItem<E> { requirement: ConnectionRequirement; connection: ConnectionView | null | undefined; profile: string | undefined; version: number; dirty: boolean; conflict: boolean; busy: boolean; note: string; error: boolean; draft: ConnectionDraft; form?: E | null | undefined; fields?: Map<string, E> | undefined; controls?: Map<string, E | E> | undefined; status?: E | undefined; feedback?: E | undefined; save?: E | undefined; test?: E | undefined; clear?: E | undefined; discard?: E | undefined; authorize?: E | undefined; cancelAuth?: E | undefined; discover?: E | undefined; oauthDetails?: E | undefined; authorization?: E | undefined; discovery?: E | undefined; specification?: E | undefined; secret?: E | E | undefined }
 interface ConnectionState<E> { entries: Map<string, ConnectionItem<E>>; versions: Map<string | undefined, number>; loaded: boolean; loading: boolean; version: number; error: string }
 import { errorInfo } from "./ui-types.js";
 import { createApplicationApi } from "./application-api.js";
@@ -15,7 +15,7 @@ export function connectionStatus(requirement: { required?: boolean | undefined }
   return requirement.required ? "必需待配置" : "可选";
 }
 
-export function createConnectionView<E extends FormElement<E> & {children:ArrayLike<unknown>;name?:string} = HTMLElement>({ document, api, container, onChange = () => {} }: { document: FormDocument<E>; api: ApplicationApi; container: E; onChange?: ((agentId: string) => unknown) | undefined }) {
+export function createConnectionView<E extends FormElement<E> & {children:ArrayLike<unknown>;name?:string;focus?():unknown} = HTMLElement>({ document, api, container, onChange = () => {} }: { document: FormDocument<E>; api: ApplicationApi; container: E; onChange?: ((agentId: string) => unknown) | undefined }) {
   const agents = new Map<string, ConnectionState<E>>();
   let currentId: string | null = null;
   const node = (tag:string, className: string, text = "") => {
@@ -25,18 +25,27 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
     if (!agents.has(id)) agents.set(id, { entries: new Map(), versions: new Map(), loaded: false, loading: false, version: 0, error: "" });
     return agents.get(id)!;
   };
-  function entry(id: string, requirement: ConnectionRequirement, connection: ConnectionView | undefined) {
+  const draftFor = (requirement: ConnectionRequirement, connection: ConnectionView | null | undefined): ConnectionDraft => ({ id: requirement.id, kind: requirement.kind,
+    provider: connection?.provider || (requirement.kind === "search" ? "tavily" : requirement.kind === "model" ? "openai-compatible" : "http-json"),
+    baseUrl: connection?.baseUrl || "", model: connection?.model || "", authType: connection?.authType || "bearer", headerName: connection?.headerName || "X-API-Key",
+    allowFallback: connection?.allowFallback === true, secret: "", protocol: requirement.protocol || connection?.protocol || "http",
+    username: connection?.username || "", values: { ...(connection?.values || {}) }, oauth: { ...(connection?.oauth || {}) } });
+  function entry(id: string, requirement: ConnectionRequirement, connection: ConnectionView | undefined, discard = false) {
     const owner = states(id), entryKey = `${requirement.profile || "legacy"}:${requirement.id}`, existing = owner.entries.get(entryKey);
+    const version = owner.versions.get(requirement.profile) ?? owner.version;
     if (existing) {
       if (JSON.stringify(existing.requirement.configFields) !== JSON.stringify(requirement.configFields) || existing.requirement.sourceLabel !== requirement.sourceLabel) { existing.form = null; existing.fields = new Map(); }
-      existing.connection = connection; existing.requirement = requirement; return existing;
+      existing.connection = connection; existing.requirement = requirement;
+      if (discard || !existing.dirty && !existing.busy) {
+        existing.draft = draftFor(requirement, connection); existing.version = version; existing.dirty = existing.conflict = false;
+        existing.note = ""; existing.error = false; existing.form = null; existing.fields = new Map(); existing.controls = new Map();
+      } else if (existing.version !== version) {
+        existing.conflict = existing.error = true; existing.note = "连接配置已更新，未保存输入已保留。可放弃修改并刷新后重新编辑。";
+      }
+      return existing;
     }
-    const item: ConnectionItem<E> = { requirement, connection, profile: requirement.profile, busy: false, note: "", error: false,
-      draft: { id: requirement.id, kind: requirement.kind, provider: connection?.provider || (requirement.kind === "search" ? "tavily"
-        : requirement.kind === "model" ? "openai-compatible" : "http-json"), baseUrl: connection?.baseUrl || "",
-        model: connection?.model || "", authType: connection?.authType || "bearer", headerName: connection?.headerName || "X-API-Key",
-        allowFallback: connection?.allowFallback === true, secret: "", protocol: requirement.protocol || connection?.protocol || "http",
-        username: connection?.username || "", values: { ...(connection?.values || {}) }, oauth: { ...(connection?.oauth || {}) } } };
+    const item: ConnectionItem<E> = { requirement, connection, profile: requirement.profile, version, dirty: false, conflict: false, busy: false, note: "", error: false,
+      draft: draftFor(requirement, connection) };
     owner.entries.set(entryKey, item); return item;
   }
   function field(item: ConnectionItem<E>, form: E, labelText: string, key: string, options: { choices?: [string, string][] | undefined; type?: string | undefined; placeholder?: string | undefined } = {}) {
@@ -52,6 +61,7 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
     if (options.placeholder) (control as E).placeholder = options.placeholder;
     control.addEventListener(options.type === "checkbox" || options.choices ? "change" : "input", () => {
       owner[property] = options.type === "checkbox" ? (control as E).checked : options.type === "number" ? Number(control.value) : control.value!;
+      item.dirty = true;
       item.note = "有尚未保存的修改。"; item.error = false; refresh(item);
     });
     item.fields! ??= new Map(); item.fields!.set(key, label); item.controls! ??= new Map(); item.controls!.set(key, control);
@@ -65,6 +75,7 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
     item.form.setAttribute("aria-busy", String(item.busy));
     item.save!.disabled = item.busy; item.test!.disabled = item.busy || !item.connection?.configured;
     item.clear!.disabled = item.busy || !item.connection?.configured;
+    if (item.discard) { item.discard.hidden = !item.conflict; item.discard.disabled = item.busy; }
     if (item.authorize) item.authorize.disabled = item.busy || !item.connection?.configured || item.connection.authType !== "oauth";
     if (item.cancelAuth) item.cancelAuth.disabled = item.busy || !item.connection?.configured;
     if (item.discover) item.discover.disabled = item.busy || !item.connection?.configured;
@@ -80,17 +91,21 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
   async function operate(id: string, item: ConnectionItem<E>, type: string) {
     if (item.busy) return;
     item.busy = true; item.error = false; item.note = type === "save" ? "正在保存…" : type === "test" ? "正在测试连接…" : "正在清除…"; refresh(item);
-    const submitted = structuredClone(item.draft);
+    const submitted = structuredClone(item.draft), submittedDraft = JSON.stringify(item.draft);
     if (typeof submitted.oauth.scopes === "string") submitted.oauth.scopes = submitted.oauth.scopes.split(/[\s,]+/).filter(Boolean);
     try {
-      const expectedVersion = states(id).versions.get(item.profile) ?? states(id).version;
+      const expectedVersion = type === "save" ? item.version : states(id).versions.get(item.profile) ?? states(id).version;
       const result = type === "save" ? await api.saveConnection(id, { ...submitted, expectedVersion, profile: item.profile, expectedProfile: item.profile })
         : type === "test" ? await api.testConnection(id, submitted.id, item.profile)
           : type === "authorize" ? await api.authorizeConnection(id, submitted.id, item.profile)
             : type === "cancelAuthorization" ? await api.cancelConnectionAuthorization(id, submitted.id, item.profile)
             : type === "discover" ? await api.discoverConnection(id, submitted.id, item.specification?.value!.trim() ? JSON.parse(item.specification.value!) : undefined, item.profile)
               : await api.removeConnection(id, submitted.id, expectedVersion, item.profile);
-      if (result.version !== undefined) { states(id).version = result.version; states(id).versions.set(item.profile, result.version); }
+      if (result.version !== undefined) {
+        states(id).version = result.version; states(id).versions.set(item.profile, result.version);
+        if (["save", "remove"].includes(type)) for (const other of states(id).entries.values())
+          if (other.profile === item.profile && other.version === expectedVersion && !other.conflict) other.version = result.version;
+      }
       if (type === "cancelAuthorization") { item.authorization!.replaceChildren(); item.note = "已取消本次登录授权。"; return; }
       if (type === "authorize") {
         const link = node("a", "secondary", "打开服务商登录页面"); link.href = result.authorizationUrl!; link.target = "_blank"; link.rel = "noopener noreferrer";
@@ -117,7 +132,9 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
       } else {
         item.connection = result.connection || result.connections?.find((value) => value.id === submitted.id) || item.connection;
         if (type === "save") {
-          const edited = JSON.stringify(item.draft) !== JSON.stringify(submitted);
+          const edited = JSON.stringify(item.draft) !== submittedDraft;
+          item.dirty = edited; item.conflict = false;
+          if (result.version !== undefined) item.version = result.version;
           if (item.draft.secret === submitted.secret) { item.draft.secret = ""; item.secret!.value = ""; }
           for (const definition of item.requirement.configFields || []) if (definition.type === "password" && item.draft.values[definition.key] === submitted.values[definition.key]) {
             item.draft.values[definition.key] = ""; const control = item.controls!.get(`values.${definition.key}`); if (control) control.value = "";
@@ -129,7 +146,9 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
         }
       }
       onChange(id);
-    } catch (caught) { const error = errorInfo(caught); item.error = true; item.note = `${error.message || "操作失败，请重试。"}${type === "save" ? " 输入已保留。" : ""}`; }
+    } catch (caught) { const error = errorInfo(caught); item.error = true;
+      if (error.reason === "connection_conflict") item.conflict = true;
+      item.note = `${error.message || "操作失败，请重试。"}${type === "save" ? " 输入已保留。" : ""}`; }
     finally { item.busy = false; refresh(item); }
   }
   function formFor(id: string, item: ConnectionItem<E>) {
@@ -174,6 +193,8 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
     item.save! = node("button", "primary", "保存"); item.save!.type = "submit";
     item.test! = node("button", "secondary", "测试连接"); item.test!.type = "button";
     item.clear! = node("button", "ghost-button", "清除配置"); item.clear!.type = "button";
+    item.discard = node("button", "ghost-button", "放弃修改并刷新"); item.discard.type = "button";
+    item.discard.addEventListener("click", () => load(id, item));
     if (item.draft.kind === "business") {
       item.authorize = node("button", "secondary", "登录授权"); item.authorize.type = "button";
       item.cancelAuth = node("button", "ghost-button", "取消登录"); item.cancelAuth.type = "button";
@@ -183,7 +204,7 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
       item.discover.addEventListener("click", () => operate(id, item, "discover")); footer.append(item.authorize, item.cancelAuth, item.discover);
     }
     item.feedback! = node("p", "connection-feedback muted-note small"); item.feedback!.setAttribute("role", "status"); item.feedback!.setAttribute("aria-live", "polite");
-    footer.append(item.save!, item.test!, item.clear!); form.append(footer, item.feedback!);
+    footer.append(item.save!, item.test!, item.clear!, item.discard); form.append(footer, item.feedback!);
     form.addEventListener("submit", (event) => { event.preventDefault(); return operate(id, item, "save"); });
     item.test!.addEventListener("click", () => operate(id, item, "test"));
     item.clear!.addEventListener("click", () => operate(id, item, "remove"));
@@ -205,8 +226,10 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
     for (const value of item.entries.values()) container.append(formFor(id, value));
     if (item.loaded && !item.entries.size) container.append(node("p", "muted-note", "当前需求没有专属连接配置项。需要接入外部服务时，可以让 NEUMA 帮你迭代需求。"));
   }
-  async function load(id: string) {
+  async function load(id: string, discard?: ConnectionItem<E>) {
     const item = states(id); if (item.loading) return;
+    const discardedDraft = discard ? JSON.stringify(discard.draft) : undefined;
+    let discarded = false;
     const wasLoaded = item.loaded;
     item.loading = true; item.error = ""; render(id);
     try {
@@ -219,14 +242,17 @@ export function createConnectionView<E extends FormElement<E> & {children:ArrayL
         for (const connection of section.connections || []) if (!requirements.some((requirement) => requirement.id === connection.id)) requirements.push({ id: connection.id, kind: connection.kind!, required: false });
         for (const requirement of requirements) if (["search", "model", "business"].includes(requirement.kind)) {
           currentKeys.add(`${section.profile || "legacy"}:${requirement.id}`);
-          entry(id, { ...requirement, profile: section.profile, sourceLabel: section.sourceLabel }, section.connections?.find((value) => value.id === requirement.id));
+          const existing = item.entries.get(`${section.profile || "legacy"}:${requirement.id}`);
+          const shouldDiscard = discard === existing && !!existing && JSON.stringify(existing.draft) === discardedDraft;
+          entry(id, { ...requirement, profile: section.profile, sourceLabel: section.sourceLabel }, section.connections?.find((value) => value.id === requirement.id), shouldDiscard);
+          discarded ||= shouldDiscard;
         }
       }
       for (const key of item.entries.keys()) if (!currentKeys.has(key)) item.entries.delete(key);
       item.loaded = true;
       if (wasLoaded) onChange(id);
     } catch (caught) { const error = errorInfo(caught); item.error = error.message || "连接配置读取失败。"; }
-    finally { item.loading = false; render(id); }
+    finally { item.loading = false; render(id); if (discarded && currentId === id) discard?.save?.focus?.(); }
   }
   return { async show(id: string) { currentId = id; render(id); if (!states(id).loaded) await load(id); },
     hide() { currentId = null; container.replaceChildren(); }, remove(id: string) { agents.delete(id); if (currentId === id) this.hide(); } };

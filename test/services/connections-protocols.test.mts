@@ -174,6 +174,86 @@ test("OAuth binds host, state, PKCE and connection generation without exposing t
   assert.equal(JSON.stringify(await store.list("alpha", requirements)).includes("oauth-fixture-secret"), false);
 });
 
+test("OAuth initialization respects connection cancellation, shutdown and request cancellation", async (t) => {
+  for (const stop of ["connection", "shutdown", "request"] as const) await t.test(stop, async (t) => {
+    let notifyEntered = () => {}, releaseDiscovery: (response: Response) => void = () => {};
+    const entered = new Promise<void>((resolve) => { notifyEntered = resolve; });
+    const discovery = new Promise<Response>((resolve) => { releaseDiscovery = resolve; });
+    let opened = 0;
+    const { store } = await fixture(t, { fetchImpl: async () => { notifyEntered(); return discovery; },
+      openBrowser: async () => { opened++; } });
+    const requirements = requirement([{ id: "read", method: "GET", path: "/read" }]);
+    await save(store, requirements, { authType: "oauth", oauth: { issuer: "https://login.example", clientId: "fixture" } });
+    const snapshot = await store.snapshot("alpha"), controller = new AbortController();
+    const authorizing = store.authorize("alpha", "data", { requirements, signal: controller.signal }).then(
+      (value) => ({ status: "fulfilled" as const, value }), (error: unknown) => ({ status: "rejected" as const, error }));
+    await entered;
+    if (stop === "connection") await store.cancelAuthorization("alpha", "data");
+    else if (stop === "shutdown") await store.close();
+    else controller.abort();
+    // A transport can deliver an already queued response after cancellation.
+    releaseDiscovery(Response.json({ issuer: "https://login.example", authorization_endpoint: "https://login.example/authorize",
+      token_endpoint: "https://login.example/token", response_types_supported: ["code"], code_challenge_methods_supported: ["S256"] }));
+    const result = await authorizing;
+    assert.equal(result.status, "rejected");
+    if (result.status === "rejected") assert.equal(objectFields(result.error).name, "AbortError");
+    assert.equal(opened, 0);
+    await assert.rejects(store.assertActive(snapshot, "data"), { reason: "authorization_required" });
+  });
+});
+
+test("OAuth cancellation owns the connection read before the manager starts", async (t) => {
+  for (const stop of ["connection", "shutdown"] as const) await t.test(stop, async (t) => {
+    let notifyEntered = () => {}, releaseRead = () => {}, blocked = false, opened = 0;
+    const entered = new Promise<void>((resolve) => { notifyEntered = resolve; });
+    const reading = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const { store } = await fixture(t, { openBrowser: async () => { opened++; } });
+    const requirements = requirement([{ id: "read", method: "GET", path: "/read" }]);
+    await save(store, requirements, { authType: "oauth", oauth: { clientId: "fixture",
+      authorizationUrl: "https://login.example/authorize", tokenUrl: "https://login.example/token" } });
+    const snapshot = await store.snapshot("alpha"), originalRead = store.storage.readJson.bind(store.storage);
+    store.storage.readJson = async (id, file, ...options) => {
+      if (!blocked && id === "alpha" && file === "private/connections.json") { blocked = true; notifyEntered(); await reading; }
+      return originalRead(id, file, ...options);
+    };
+    const authorizing = store.authorize("alpha", "data", { requirements }).then(
+      () => ({ status: "fulfilled" as const }), (error: unknown) => ({ status: "rejected" as const, error }));
+    await entered;
+    if (stop === "connection") await store.cancelAuthorization("alpha", "data");
+    else await store.close();
+    releaseRead();
+    const result = await authorizing;
+    assert.equal(result.status, "rejected");
+    if (result.status === "rejected") assert.equal(objectFields(result.error).name, "AbortError");
+    assert.equal(opened, 0);
+    await assert.rejects(store.assertActive(snapshot, "data"), { reason: "authorization_required" });
+  });
+});
+
+test("OAuth refresh without a scope response preserves the existing grant and current task", async (t) => {
+  let refreshes = 0, calls = 0;
+  const { store } = await fixture(t, { fetchImpl: async (url: string) => {
+    if (url === "https://login.example/token") {
+      refreshes++;
+      return Response.json({ access_token: "refreshed", token_type: "Bearer", expires_in: 3600 });
+    }
+    calls++; return Response.json({ items: [] });
+  } });
+  const requirements = requirement([{ id: "read", method: "GET", path: "/read" }]);
+  await save(store, requirements, { authType: "oauth", oauth: { clientId: "fixture",
+    authorizationUrl: "https://login.example/authorize", tokenUrl: "https://login.example/token" } });
+  await store.update("alpha", async (record) => { record.connections.data!.versions[1]!.credentialRef = await store.vault.put("alpha",
+    { tokens: { accessToken: "expired", refreshToken: "refresh", expiresAt: 1, scopes: ["read", "write"] } }); });
+  const snapshot = await store.snapshot("alpha");
+  assert.equal((await store.call(snapshot, { connectionId: "data", operationId: "read" }, { requirements })).status, "ok");
+  assert.equal((await store.call(snapshot, { connectionId: "data", operationId: "read" }, { requirements })).status, "ok");
+  assert.equal(refreshes, 1); assert.equal(calls, 2);
+  const current = (await store.read("alpha")).connections.data!;
+  const credentials = await store.vault.get("alpha", current.versions[current.currentVersion]!.credentialRef);
+  assert.deepEqual(credentials.tokens!.scopes, ["read", "write"]);
+  assert.deepEqual(await store.snapshot("alpha"), snapshot);
+});
+
 test("OAuth refresh is serialized and a narrower grant invalidates existing tasks", async (t) => {
   let refreshes = 0;
   const { store } = await fixture(t, { fetchImpl: async () => { refreshes++; return Response.json({ access_token: "refreshed", token_type: "Bearer", expires_in: 3600, scope: "read" }); } });

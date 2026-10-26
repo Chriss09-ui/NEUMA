@@ -25,6 +25,7 @@ let editing: Group | null = null, editorTrigger: HTMLElement | null = null, edit
 let listSequence = 0;
 let settingsGroupId: string | null = null, settingsSequence = 0, settingsTimer: number | null = null, removeSettingsListener: (() => void) | null = null;
 const drafts = new Map<string, ReturnType<ReturnType<typeof createGroupMentionComposer>["snapshot"]>>();
+const archivingGroups = new Set<string>();
 const newTaskDrafts = new Map<string, boolean>();
 const selectedConversations = new Map<string, string>();
 const avatarMembers = new Map<string, { id: string; profile: { icon: string } }>();
@@ -418,6 +419,7 @@ function render() {
   byId("group-purpose").textContent = group.purpose || ""; byId("group-purpose").hidden = !group.purpose;
   byId("group-message").placeholder = `给 ${group.name} 发消息…`;
   byId("group-archived").hidden = !group.archived; byId("group-archive").textContent = group.archived ? "取消归档" : "归档";
+  byId("group-archive").disabled = archivingGroups.has(group.id);
   byId("group-member-count").textContent = String(data.members?.length || 0);
   if (newTask) selectedTask = "";
   else {
@@ -562,11 +564,13 @@ async function saveEditor() {
   finally { editorSaving = false; byId("group-editor-save").disabled = false; }
 }
 async function archive() {
-  const group = data?.group; if (!group) return;
+  const group = data?.group; if (!group || archivingGroups.has(group.id)) return;
+  const current = () => route.page === "group" && route.groupId === group.id;
+  archivingGroups.add(group.id);
   byId("group-archive").disabled = true;
-  try { await api.updateGroup(group.id, { archived: !group.archived, expectedVersion: group.version, mutationId: crypto.randomUUID() }); await load(group.id); await list(); }
-  catch (caught) { const error = errorInfo(caught); notice(byId("group-error"), error.message, true); }
-  finally { byId("group-archive").disabled = false; }
+  try { await api.updateGroup(group.id, { archived: !group.archived, expectedVersion: group.version, mutationId: crypto.randomUUID() }); if (current()) await load(group.id); await list(); }
+  catch (caught) { const error = errorInfo(caught); if (current()) notice(byId("group-error"), error.message, true); }
+  finally { archivingGroups.delete(group.id); if (current()) byId("group-archive").disabled = false; }
 }
 async function poll() {
   if (polling || route.page !== "group" || !data || document.hidden) return;

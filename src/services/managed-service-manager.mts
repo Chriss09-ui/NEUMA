@@ -318,8 +318,12 @@ export class ManagedServiceManager {
   }
   async stop({ agentId, deliveryVersion, scopeId, reason = "service_stopped" }: { agentId: string; deliveryVersion?: string; scopeId?: string | undefined; reason?: string }) {
     const matches = (identity: ServiceIdentity) => identity.agentId === agentId && (deliveryVersion === undefined || identity.deliveryVersion === deliveryVersion) && (scopeId === undefined || identity.scopeId === scopeId);
-    await this.updateCatalog((catalog) => { for (const [key, identity] of Object.entries(catalog.desired)) if (matches(identity)) delete catalog.desired[key]; });
-    await Promise.all([...this.workers.values()].filter((worker) => matches(worker.identity)).map((worker) => worker.stop(reason)));
+    const failures: unknown[] = [];
+    try { await this.updateCatalog((catalog) => { for (const [key, identity] of Object.entries(catalog.desired)) if (matches(identity)) delete catalog.desired[key]; }); }
+    catch (error) { failures.push(error); }
+    const stopped = await Promise.allSettled([...this.workers.values()].filter((worker) => matches(worker.identity)).map(async (worker) => worker.stop(reason)));
+    for (const result of stopped) if (result.status === "rejected") failures.push(result.reason);
+    if (failures.length) throw failures[0];
   }
   async activate({ agentId, deliveryVersion, scopeId = "private", signal }: ServiceStartOptions) {
     await this.start({ agentId, deliveryVersion, scopeId, signal });

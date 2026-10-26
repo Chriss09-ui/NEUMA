@@ -108,6 +108,25 @@ test("stopped backend can restore only an activated delivery and close permits s
   await manager.stop(identity); assert.equal((await manager.restore()).length, 0);
 });
 
+test("service stop terminates every matching process even when catalog persistence fails", { skip: !supported }, async (t) => {
+  const { manager, codeDir } = await setup(t, "export function run(request){return request.input}");
+  const identity = { agentId: "stop-agent", deliveryVersion: "one" };
+  await manager.prepare({ ...identity, codeDir, manifest: manifest() });
+  const workers = [];
+  for (const scopeId of ["verification:stop-one", "verification:stop-two"]) {
+    assert.equal((await manager.run({ ...identity, scopeId, actionId: "add", input: { value: 1 }, persist: false })).status, "passed");
+    workers.push(await manager.start({ ...identity, scopeId, persist: false }));
+  }
+  await chmod(manager.rootDir, 0o500);
+  try {
+    await assert.rejects(manager.stop({ agentId: identity.agentId }), { code: "EACCES" });
+    for (const worker of workers) assert.throws(() => process.kill(worker.pid!, 0), { code: "ESRCH" });
+  } finally {
+    await chmod(manager.rootDir, 0o700);
+    await manager.stop({ agentId: identity.agentId });
+  }
+});
+
 
 test("Node service worker remains runnable as a standalone file", { timeout: 10000 }, async (t) => {
   const { copyFile } = await import("node:fs/promises");

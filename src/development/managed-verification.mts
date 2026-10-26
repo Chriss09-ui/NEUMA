@@ -42,7 +42,7 @@ export async function verifyManagedApplication({ services, executor, agentId, sn
     evidenceMode: "mock_capabilities", connectionVerified: false, browserVerified: false,
     pageResourcesChecked: validateResources, servicePrepared: false, summary: "没有实际执行服务验收" };
   const scopes = new Set<string>();
-  let deliveryVersion, workflowDirectory;
+  let deliveryVersion: string | undefined, workflowDirectory: string | undefined;
   const controllers: WorkflowController[] = [];
   try {
     validateApplicationManifest(applicationInput, { ...(validateResources ? { snapshot } : {}), allowUnverified: true });
@@ -165,8 +165,16 @@ export async function verifyManagedApplication({ services, executor, agentId, sn
     return { ...report, status: "error", summary: signal?.aborted ? "服务验收已取消" : "服务验收未完成；运行环境、契约或执行结果需要检查",
       reason: /^[a-z_]{1,80}$/.test(String(errorField(error, "reason") ?? "")) ? String(errorField(error, "reason")) : "service_verification_failed" };
   } finally {
-    for (const controller of controllers) await controller.close({ permanent: true });
-    if (deliveryVersion) for (const scopeId of scopes) await services.stop({ agentId, deliveryVersion, scopeId });
-    if (workflowDirectory) await rm(workflowDirectory, { recursive: true, force: true });
+    const failures: unknown[] = [];
+    const closed = await Promise.allSettled(controllers.map(async (controller) => controller.close({ permanent: true })));
+    for (const result of closed) if (result.status === "rejected") failures.push(result.reason);
+    if (deliveryVersion) {
+      const version = deliveryVersion;
+      const stopped = await Promise.allSettled([...scopes].map(async (scopeId) => services.stop({ agentId, deliveryVersion: version, scopeId })));
+      for (const result of stopped) if (result.status === "rejected") failures.push(result.reason);
+    }
+    try { if (workflowDirectory) await rm(workflowDirectory, { recursive: true, force: true }); }
+    catch (error) { failures.push(error); }
+    if (failures.length) throw failures[0];
   }
 }

@@ -3,7 +3,7 @@ import { recordArray } from "../helpers/m7-test-boundaries.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ManagedServiceManager } from "../../src/services/managed-service-manager.mjs";
@@ -46,4 +46,39 @@ test("workflow verification never invents user approval or ignores unused capabi
   assert.equal(extra.status, "failed"); assert.equal(extra.results[0]!.reason, "unused_capability_mocks");
   const duplicate = await verifyManagedApplication({ ...setup, cases: [{ ...setup.item, workflowInputs: [...setup.item.workflowInputs!, ...setup.item.workflowInputs!] }] });
   assert.equal(duplicate.status, "error");
+});
+
+test("workflow verification drains every service scope and removes temporary checkpoints after one stop fails", { skip: !supported }, async (t) => {
+  const setup = await fixture(t), scopes = new Set<string>(), stopped: string[] = [];
+  const run = setup.services.run.bind(setup.services), stop = setup.services.stop.bind(setup.services);
+  const failure = new Error("synthetic first scope cleanup failure");
+  let workflowDirectory: string | undefined;
+  t.after(async () => { if (workflowDirectory) await rm(workflowDirectory, { recursive: true, force: true }); });
+  setup.services.run = async (request) => {
+    assert.equal(typeof request.scopeId, "string"); scopes.add(request.scopeId!);
+    if (!workflowDirectory) {
+      const workflowId = objectFields(request).workflowId;
+      assert.equal(typeof workflowId, "string");
+      for (const entry of await readdir(tmpdir())) {
+        if (!entry.startsWith("neuma-workflow-verification-")) continue;
+        const candidate = join(tmpdir(), entry);
+        try { await stat(join(candidate, String(workflowId), "record.json")); workflowDirectory = candidate; break; }
+        catch (error) { if (objectFields(error).code !== "ENOENT") throw error; }
+      }
+      assert.ok(workflowDirectory, "运行时须存在本轮真实流程检查点");
+    }
+    return run(request);
+  };
+  setup.services.stop = async (identity) => {
+    const first = stopped.length === 0;
+    assert.equal(typeof identity.scopeId, "string"); stopped.push(identity.scopeId!);
+    await stop(identity);
+    if (first) throw failure;
+  };
+  await assert.rejects(verifyManagedApplication({ ...setup, cases: [setup.item, { ...setup.item, id: "second_report" }] }), (error) => error === failure);
+  assert.equal(scopes.size, 2);
+  assert.deepEqual(new Set(stopped), scopes, "首个停止错误不能跳过其他独立作用域");
+  assert.equal(setup.services.workers.size, 0);
+  assert.ok(workflowDirectory);
+  await assert.rejects(stat(workflowDirectory), { code: "ENOENT" });
 });
