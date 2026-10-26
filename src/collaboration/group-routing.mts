@@ -1,5 +1,5 @@
 import { objectFields as fields } from "../runtime/type-boundary.mjs";
-import type { NeumaTool } from "../runtime/pi-port.mjs";
+import type { NeumaTool } from "../runtime/execution-port.mjs";
 import type { GroupRoute, GroupMember, GroupMessage } from "../contracts/collaboration.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { id, text } from "./group-store.mjs";

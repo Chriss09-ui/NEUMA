@@ -19,6 +19,8 @@ import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
 import { resolvedModelProfile, modelProfileHash, modelOutputBudget } from "./model-limits.mjs";
 import { piSessionManager, piSessionPolicy } from "./pi-session-state.mjs";
 import { modelIdleTimeoutMs, withModelIdleTimeout } from "./model-idle-timeout.mjs";
+import { admitModelRequest } from "./model-admission.mjs";
+import type { ExecutionSession } from "./execution-port.mjs";
 type Failure = ReturnType<typeof classifyModelFailure>;
 interface RetryState { attempt: number; failed: boolean; failure?: Failure | null }
 interface ProjectSession { busy: boolean; usedAt: number; turn: ProjectTurn; session: PiSessionPort | null; cancelled?: boolean }
@@ -301,8 +303,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
     options?.signal?.throwIfAborted();
     if (connectionFailed) throw new Error("Model connection retries exhausted");
     // Runs on every HTTP attempt, including SDK retries and tool continuations.
-    await beforeModelRequest?.({ signal: options?.signal });
-    options?.signal?.throwIfAborted();
+    await admitModelRequest({ signal: options?.signal, check: () => beforeModelRequest?.({ signal: options?.signal }) });
     secureHistory();
     const headers = anonymousModel ? new Headers(options?.headers ?? (objectFields(input).headers as RequestInit["headers"])) : undefined;
     headers?.delete("authorization");
@@ -329,7 +330,7 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
         throw new Error("NEUMA_MODEL_CALL_BLOCKED");
       }
       options?.signal?.throwIfAborted();
-      try { await onModelCall?.({ signal: options?.signal, purpose, retryAttempt }); }
+      try { await admitModelRequest({ signal: options?.signal, persist: () => onModelCall?.({ signal: options?.signal, purpose, retryAttempt }) }); }
       catch (error) {
         lastRequestRejection = modelRequestRejection(error, { purpose, retryAttempt });
         halt(error); throw new Error("NEUMA_MODEL_CALL_BLOCKED");

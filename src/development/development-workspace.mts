@@ -1,7 +1,7 @@
 import type { BinaryLike } from "node:crypto";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
-import type { NeumaTool } from "../runtime/pi-port.mjs";
+import type { NeumaTool } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger, errorField } from "../runtime/type-boundary.mjs";
 export type DevelopmentSnapshot = { agentId: string; path: string; hash: string; files: { path: string; hash: string; size: number }[] }
 interface WorkspaceOptions { signal?: AbortSignal | undefined; readOnly?: boolean; allowedFiles?: string[] }

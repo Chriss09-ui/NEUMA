@@ -39,6 +39,13 @@ test("登记后的依赖结构通过全部规则", () => {
   assert.deepEqual(checkGraphRules(graphFrom(normalEdges, { nonLiteral: normalNonLiteral })).violations, []);
 });
 
+test("业务不能重新导入SDK类型或原生会话管理器", () => {
+  const graph = graphFrom([...normalEdges, edge("src/main/main-agent.mts", "src/runtime/pi-session-state.mts")], { nonLiteral: normalNonLiteral });
+  graph.externalImports = [{ source: "src/development/development.mts", target: "@earendil-works/pi-coding-agent", specifier: "@earendil-works/pi-coding-agent", line: 1, category: "type" }];
+  const failures = checkGraphRules(graph).violations;
+  assert.equal(failures.filter(failure => failure.rule === "依赖/运行接口").length, 2);
+});
+
 test("反向依赖、未登记入口、跨域边和契约运行时导入都被报告", () => {
   const violations = checkGraphRules(graphFrom([...normalEdges,
     edge("src/agents/agent-workspace.mts", "src/agents/agent-prototype.mts"),

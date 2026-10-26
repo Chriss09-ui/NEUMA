@@ -1,3 +1,5 @@
+import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { operationView } from "../runtime/operation-view.mjs";
 import type { MainAgentAgents, MainAgentCollaboration, MainAgentMaterials, MainAttachment, MainTaskView } from "./main-agent-port.mjs";
 export type { MainAgentAgents, MainAgentCollaboration, MainAgentMaterials } from "./main-agent-port.mjs";
 import type { ConversationMessage } from "../contracts/storage.mjs";
@@ -5,10 +7,16 @@ import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 import type { ProviderConfig, Providers } from "../requirements/requirement-provider-port.mjs";
 import type { MainRecord, MainRequirement, MainRequest, MainSource, MainAction, MainContext } from "../contracts/main.mjs";
 import type { ProviderDiagnostic } from "../contracts/requirements.mjs";
-import type { SessionFactory, PiSessionPort, Progress, NeumaTool } from "../runtime/pi-port.mjs";
+import type { SessionFactory, PiSessionPort, Progress, NeumaTool } from "../runtime/execution-port.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 interface ToolMetadata { mutationId: string; signal: AbortSignal; callId: string }
 interface MainPromptResult { reply: string; conversation: MainRecord; context: MainContext | null | undefined; actions: MainAction[]; sources: MainSource[] }
+interface MainExecutionOptions { signal?: AbortSignal | undefined; background?: boolean; onAccepted?: (record: MainRecord) => void }
+function acceptance() {
+  let resolve!: (record: MainRecord) => void, reject!: (error: unknown) => void;
+  const promise = new Promise<MainRecord>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
 interface MainTurn {
   conversationId: string; message: string; mutationId: string; fingerprint: string; attachmentIds: string[]; attachments: MainAttachment[];
   visibleAttachmentIds: Set<string>; onProgress: Progress; controller: AbortController; reply: string; sources: MainSource[]; actions: MainAction[]; operations: Map<string, unknown>;
@@ -17,10 +25,11 @@ interface MainTurn {
   pendingRequirement?: MainRequirement | undefined; requirementBefore?: Pick<MainRecord, "requirement" | "requirements" | "context"> | undefined;
   context?: MainContext | null | undefined; contextChanged?: boolean | undefined; requirementRoute?: string | undefined;
   failed?: boolean | undefined; failure?: ReturnType<typeof classifyModelFailure> | undefined;
+  accepted?: Promise<MainRecord>;
 }
 import { createHash, randomUUID } from "node:crypto";
 import { InputError, ProviderError } from "../requirements/core.mjs";
-import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { MAIN_PROMPT } from "./main-prompts.mjs";
 import { classifyRequirementInput } from "./requirement-routing.mjs";
@@ -399,7 +408,25 @@ export class MainAgent {
     return { context: result.context, ...(result.action ? { action: result.action } : {}) };
   }
 
-  async prompt(input: Record<string, unknown> = {}, onProgress: Progress = () => {}, { signal }: { signal?: AbortSignal | undefined } = {}): Promise<MainPromptResult> {
+  async submit(input: Record<string, unknown>, { signal }: { signal?: AbortSignal | undefined } = {}) {
+    const accepted = acceptance();
+    void this.prompt(input, () => {}, { signal, background: true, onAccepted: accepted.resolve }).then(
+      result => accepted.resolve(result.conversation), accepted.reject);
+    const record = await accepted.promise;
+    return this.operation(record.id, String(input.mutationId));
+  }
+
+  async operation(conversationId: string, mutationId: string, after?: string | null) {
+    mainId(mutationId, "请求");
+    const record = await this.store.get(conversationId), request = record.requests.find(item => item.mutationId === mutationId);
+    if (!request) throw new InputError("主对话请求不存在");
+    return operationView({ version: 1, domain: "main", ownerId: conversationId, operationId: mutationId, generation: request.assistantId },
+      record.version, { conversation: record, status: request.status, context: record.context ?? null, actions: record.messages.find(item => item.id === request.assistantId)!.actions, sources: record.messages.find(item => item.id === request.assistantId)!.sources,
+        reply: record.messages.find(item => item.id === request.assistantId)!.content, reason: request.diagnostic?.reason, error: !["running", "complete"].includes(request.status) ? requestError(request).message : null }, after);
+  }
+
+  async prompt(input: Record<string, unknown> = {}, onProgress: Progress = () => {}, options: MainExecutionOptions = {}): Promise<MainPromptResult> {
+    const { signal, onAccepted } = options;
     const conversationId = mainId(input.conversationId), mutationId = mainId(input.mutationId, "请求");
     const message = input.message === undefined ? "" : input.message, refs = input.attachmentIds === undefined ? [] : input.attachmentIds;
     if (!isArray(refs) || refs.length > 10 || new Set(refs).size !== refs.length) throw new InputError("每轮最多引用 10 份不同的材料");
@@ -415,11 +442,13 @@ export class MainAgent {
     const active = this.active.get(conversationId);
     if (active?.mutationId === mutationId) {
       if (active.fingerprint !== fingerprint) throw new InputError("这个请求标识已用于不同内容，请重新发送");
+      if (onAccepted && active.accepted) void active.accepted.then(onAccepted, () => {});
       return active.result!;
     }
     const previous = record.requests.find((item) => item.mutationId === mutationId);
     if (previous) {
       if (previous.hash !== fingerprint) throw new InputError("这个请求标识已用于不同内容，请重新发送");
+      onAccepted?.(record);
       if (previous.status !== "complete") throw requestError(previous);
       const assistant = record.messages.find((item) => item.id === previous.assistantId)!;
       return { reply: assistant.content, conversation: record, context: record.context ?? null, actions: assistant.actions, sources: assistant.sources };
@@ -429,12 +458,16 @@ export class MainAgent {
       visibleAttachmentIds: new Set(record.messages.flatMap((item) => item.role === "user" ? (item.attachments ?? []).map((ref) => ref.id) : [])),
       onProgress, controller: new AbortController(), reply: "", sources: [], actions: [], operations: new Map() };
     this.active.set(conversationId, ctx);
-    ctx.result = this.run(ctx, record, fingerprint, signal);
+    const accepted = acceptance(); ctx.accepted = accepted.promise; void accepted.promise.catch(() => {});
+    ctx.result = this.run(ctx, record, fingerprint, { ...options, onAccepted: saved => { accepted.resolve(saved); onAccepted?.(saved); } });
+    void ctx.result.catch(accepted.reject);
     return ctx.result;
   }
 
-  async run(ctx: MainTurn, record: MainRecord, fingerprint: string, signal?: AbortSignal): Promise<MainPromptResult> {
+  async run(ctx: MainTurn, record: MainRecord, fingerprint: string, { signal, background, onAccepted }: MainExecutionOptions): Promise<MainPromptResult> {
     let unsubscribe = () => {};
+    const lifecycle = new ExecutionLifecycle();
+    let primaryFailure: unknown;
     const abort = () => { ctx.controller.abort(); void ctx.session?.abort?.(); };
     signal?.addEventListener("abort", abort, { once: true });
     try {
@@ -443,7 +476,7 @@ export class MainAgent {
       this.guard(ctx);
       for (const attachment of ctx.attachments) ctx.visibleAttachmentIds.add(attachment.id);
       const now = new Date().toISOString(), userId = `msg_${randomUUID()}`, assistantId = `msg_${randomUUID()}`;
-      await this.store.update(ctx.conversationId, (next) => {
+      const accepted = await this.store.update(ctx.conversationId, (next) => {
         if (!next.messages.length && next.title === "新对话") next.title = ctx.message.trim().slice(0, 30) || "材料讨论";
         next.messages.push({ id: userId, role: "user", content: ctx.message.trim(), status: "sent", sources: [], actions: [],
           ...(ctx.attachments.length ? { attachments: ctx.attachments.map(({ id, name }) => ({ id, name })) } : {}), createdAt: now, updatedAt: now },
@@ -451,7 +484,9 @@ export class MainAgent {
         next.requests.push({ mutationId: ctx.mutationId, hash: fingerprint, userId, assistantId, status: "running" });
       });
       ctx.persisted = true;
-      if (signal?.aborted) abort(); this.guard(ctx);
+      if (background) signal?.removeEventListener("abort", abort);
+      onAccepted?.(accepted);
+      if (!background && signal?.aborted) abort(); this.guard(ctx);
       if (record.context?.type === "requirements" && record.context!.agentId === record.requirement?.agentId
         && record.requirement?.status === "ready" && !record.requirement!.confirmed && isMainConfirmation(ctx.message)) {
         await this.requirements(ctx, { mode: "continue" }); this.guard(ctx); ctx.reply = ctx.forcedReply!;
@@ -519,17 +554,27 @@ export class MainAgent {
       const safe = ctx.persistenceError ? failed("persistence_failed", "主 Agent 对话未能保存，已停止继续操作，已执行的操作与已有结果保留，请检查本机存储")
         : ctx.controller.signal.aborted ? failed("cancelled", "主 Agent 回复已停止，已执行的操作与已有结果保留")
         : error instanceof InputError || error instanceof ProviderError ? error : failed(classifyModelFailure(objectFields(error).message).reason, classifyModelFailure(objectFields(error).message).message);
+      primaryFailure = safe;
       if (ctx.persisted) await this.flush(ctx, objectFields(safe.diagnostic).reason === "cancelled" ? "cancelled" : "failed", (safe instanceof ProviderError ? safe.diagnostic : { stage: "main", reason: "invalid_request" }));
       throw safe;
     } finally {
-      clearTimeout(ctx.timer ?? undefined); signal?.removeEventListener("abort", abort); unsubscribe();
-      if (ctx.controller.signal.aborted) await Promise.resolve(ctx.session?.abort?.()).catch(() => {});
-      ctx.session?.dispose?.(); if (this.active.get(ctx.conversationId) === ctx) this.active.delete(ctx.conversationId);
+      lifecycle.own("active-turn", () => { if (this.active.get(ctx.conversationId) === ctx) this.active.delete(ctx.conversationId); });
+      lifecycle.own("session", () => ctx.session?.dispose?.());
+      lifecycle.own("abort", async () => { if (ctx.controller.signal.aborted) await ctx.session?.abort?.(); });
+      lifecycle.own("subscription", () => unsubscribe());
+      lifecycle.own("request-listener", () => signal?.removeEventListener("abort", abort));
+      lifecycle.own("save-timer", () => clearTimeout(ctx.timer ?? undefined));
+      await lifecycle.close(primaryFailure);
     }
   }
 
-  async cancel(conversationId: string) {
+  async cancel(conversationId: string, expected?: { operationId: string; generation: string }) {
     mainId(conversationId); const ctx = this.active.get(conversationId);
+    if (expected) {
+      const view = await this.operation(conversationId, expected.operationId);
+      if (view.operation.generation !== expected.generation || ctx && ctx.mutationId !== expected.operationId)
+        throw mainConversationFailure("conversation_conflict", "任务已经变化，旧窗口不能停止新回复");
+    }
     if (!ctx) return { cancelled: false, conversation: await this.store.get(conversationId) };
     ctx.controller.abort(); await Promise.resolve(ctx.session?.abort?.()).catch(() => {});
     await ctx.result!.catch(() => {}); return { cancelled: true, conversation: await this.store.get(conversationId) };

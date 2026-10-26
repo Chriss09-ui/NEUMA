@@ -1,7 +1,7 @@
 import type { MainMaterials } from "./main-materials.mjs";
 import type { ConversationMessage } from "../contracts/storage.mjs";
 import type { EvidenceMessage } from "../contracts/requirements.mjs";
-import type { NeumaTool, Progress } from "../runtime/pi-port.mjs";
+import type { NeumaTool, Progress } from "../runtime/execution-port.mjs";
 import type { MainRequirementAgents } from "./main-requirements.mjs";
 import type { CollaborationService } from "../collaboration/groups.mjs";
 import type { PromptOptions } from "../agents/prototype-port.mjs";

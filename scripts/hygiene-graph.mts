@@ -16,6 +16,7 @@ const PROJECTS = ["node", "browser", "frame"];
 export interface DependencyEdge { source: string; target: string; category: "runtime" | "type"; line: number; specifier: string }
 export interface DependencyGraph {
   edges: DependencyEdge[];
+  externalImports?: DependencyEdge[];
   runtimeDeps: Map<string, Set<string>>;
   externals: Set<string>;
   declarationTargets: Set<string>;
@@ -43,6 +44,7 @@ export async function buildDependencyGraph(root: string, { projects = PROJECTS, 
   const api = new sync.API({ cwd: root });
   const edges: DependencyEdge[] = [];
   const externals = new Set<string>();
+  const externalImports: DependencyEdge[] = [];
   const nonLiteralImports = new Map<string, number>();
   const unresolved: DependencyEdge[] = [];
   let scannedFiles = 0;
@@ -96,6 +98,7 @@ export async function buildDependencyGraph(root: string, { projects = PROJECTS, 
 
       for (const item of imports) {
         if (!item.specifier.startsWith(".")) {
+          externalImports.push({ source: file, target: item.specifier, ...item });
           externals.add(item.specifier.startsWith("@") ? item.specifier.split("/").slice(0, 2).join("/") : item.specifier.split("/")[0]!);
           continue;
         }
@@ -115,7 +118,7 @@ export async function buildDependencyGraph(root: string, { projects = PROJECTS, 
     if (!runtimeDeps.has(edge.source)) runtimeDeps.set(edge.source, new Set());
     runtimeDeps.get(edge.source)!.add(edge.target);
   }
-  return { edges, runtimeDeps, externals, declarationTargets: new Set(declarationIndex.values()), nonLiteralImports, unresolved, scannedFiles };
+  return { edges, externalImports, runtimeDeps, externals, declarationTargets: new Set(declarationIndex.values()), nonLiteralImports, unresolved, scannedFiles };
 }
 
 // —— 规则与例外（调整任一条都要求同步理由；例外失效同样报告） ——
@@ -214,6 +217,16 @@ export function checkGraphRules(graph: DependencyGraph): HygieneResult {
   for (const edge of graph.edges)
     if (edge.category === "runtime" && graph.declarationTargets.has(edge.target))
       message("契约运行时", edge.source, `运行时导入 ${edgeText(edge)} 指向仅声明文件 ${edge.target}，产物中不存在该模块`);
+
+  const sdkAdapters = new Set(["src/runtime/pi-port.mts", "src/runtime/pi-runtime.mts", "src/runtime/pi-session-state.mts",
+    "src/runtime/pi-file-tools.mts", "src/runtime/pi-skill-parser.mts", "src/runtime/model-profile.mts"]);
+  for (const edge of graph.externalImports ?? [])
+    if (edge.specifier.startsWith("@earendil-works/pi-") && !sdkAdapters.has(edge.source))
+      message("运行接口", edge.source, "业务模块必须使用 NEUMA execution-port，不得导入 Pi SDK 类型或实现");
+  for (const edge of graph.edges)
+    if (edge.source.startsWith("src/") && !edge.source.startsWith("src/runtime/")
+      && ["src/runtime/pi-port.mts", "src/runtime/pi-session-state.mts"].includes(edge.target))
+      message("运行接口", edge.source, "业务必须使用 execution-port 和 execution-history，不得取得原生会话管理器");
 
   for (const rule of ENTRY_IMPORT_RULES) {
     const importers = graph.edges.filter((edge) => edge.target === rule.target);

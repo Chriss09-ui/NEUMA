@@ -1,10 +1,13 @@
+import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { AgentOperations } from "./agent-operations.mjs";
+import type { ExecutionDispatch } from "../runtime/execution-attempt.mjs";
 import type { LegacyArchitectureConnection } from "../contracts/architecture.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { RequirementDraft, Consultation } from "../contracts/requirements.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
-import type { SessionFactory, PiSessionPort, NeumaTool, Progress } from "../runtime/pi-port.mjs";
+import type { SessionFactory, PiSessionPort, NeumaTool, Progress } from "../runtime/execution-port.mjs";
 import type { ApplicationManifest, ApplicationTask, ApplicationAction } from "../contracts/application.mjs";
 import type { ApplicationDescriptor } from "../applications/application-service.mjs";
 import type { ApplicationContext } from "../applications/application-context.mjs";
@@ -27,7 +30,7 @@ import { join, resolve } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { textLength, textWithinLimit, truncateText } from "../runtime/text-length.mjs";
 import { assertRequirementDraftSize, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS } from "../requirements/requirement-limits.mjs";
-import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { ArchitectureDesigner, architectureVerificationContext } from "../architecture/architecture.mjs";
 import { latestDevelopmentFailure, readHistoricalDevelopmentRun, savedDevelopmentRevisionSource, developmentFailureFromSavedSource,
   readHistoricalPlanningReference } from "../architecture/architecture-development-revision.mjs";
@@ -212,6 +215,7 @@ export class PrototypeAgents {
   dataMigrations: ServiceDataMigrations; library: AgentLibrary; architecture: ArchitectureControllerPort; development: DevelopmentController;
   enforceRequirementConfirmation: boolean; applications: ApplicationService; gateway: ServiceGateway;
   agents: Map<string, AgentDefinition>; sessions: Map<string, PrototypeSession>; collaborationSessions: Map<string, PrototypeSession>;
+  readonly operations: AgentOperations;
   builds: Map<string, BuildContext>; removing: Set<string>; dataTransitions: Set<string>; lifecycleListeners: Set<(event: { type: string; agentId: string }) => unknown>;
   scheduler: AgentScheduler; activities: ActivityStore; runtimeEpoch: number; modelCapabilityInstance: string;
   persistence: Promise<void>; ready: Promise<void>; runtimeReady: Promise<unknown>; closing: Promise<void> | null = null;
@@ -233,6 +237,12 @@ export class PrototypeAgents {
       sessionFactory: (options) => this.sessionFactory(options), fidelitySessionFactory });
     this.development = development ?? new DevelopmentController({ config, cwd, dataDir, storage, web: this.web, services: this.services,
       sessionFactory: (options) => this.sessionFactory(options), getArchitecture: (id) => this.getArchitecture(id) });
+    this.operations = new AgentOperations({ storage: this.storage,
+      build: (input, options) => this.build(input, options), develop: (id, options) => this.develop(id, options),
+      snapshot: async (id, receipt) => ({ agent: await this.get(id),
+        architecture: receipt.architectureVersion && this.architecture.getVersion ? await this.architecture.getVersion(id, receipt.architectureVersion) : await this.getArchitecture(id),
+        development: receipt.developmentId ? developmentSummary(await this.readDevelopmentRun(receipt.developmentId)) : await this.getDevelopment(id),
+        activeRuntime: await this.getActiveRuntime(id) }) });
     this.agents = new Map(); this.sessions = new Map(); this.builds = new Map(); this.removing = new Set(); this.dataTransitions = new Set();
     this.collaborationSessions = new Map(); this.lifecycleListeners = new Set();
     this.scheduler = new AgentScheduler();
@@ -401,7 +411,7 @@ export class PrototypeAgents {
   async develop(id: string, { resume = false, signal, onProgress = () => {} }: { resume?: boolean; signal?: AbortSignal | undefined; onProgress?: Progress } = {}) {
     validId(id);
     if (typeof resume !== "boolean") throw new InputError("研发恢复参数无效");
-    await this.ready; await this.closing; this.configured();
+    await this.ready; signal?.throwIfAborted(); if (signal && this.closing) throw new InputError("服务正在关闭"); await this.closing; this.configured();
     if (this.builds.has(id) || this.removing.has(id)) throw new InputError("这个 Agent 正在构建或移除，请等待完成");
     const context = { controller: new AbortController(), cancelled: false } as BuildContext;
     context.done = new Promise<void>((resolve) => { context.finish = resolve; });
@@ -804,7 +814,7 @@ export class PrototypeAgents {
     return checkedDeliveryHistory(record?.deliveries ?? []);
   }
   async changeService<T>(id: string, operation: (signal: AbortSignal) => Promise<T>, { signal }: { signal?: AbortSignal | undefined } = {}) {
-    await this.ready; await this.closing;
+    await this.ready; signal?.throwIfAborted(); if (signal && this.closing) throw new InputError("服务正在关闭"); await this.closing;
     if (this.builds.has(id) || this.removing.has(id)) throw new InputError("智能体正在更新，请等待完成");
     const controller = new AbortController(), context = { controller, cancelled: false } as BuildContext;
     context.done = new Promise<void>((done) => { context.finish = done; });
@@ -1029,7 +1039,7 @@ export class PrototypeAgents {
     };
   }
 
-  async applicationCapabilities({ task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, signal, check }: { task: Pick<ApplicationTask, "id" | "agentId" | "source" | "input" | "allowNetwork">; descriptor: { agent: Pick<AgentDefinition, "draft">; manifest: { stateVersion: number }; architecture?: { design?: { connections?: (ConnectionDefinition | LegacyArchitectureConnection)[] } | null | undefined } | null }; action: Pick<ApplicationAction, "connectionIds">; connectionSnapshot: ConnectionSnapshot; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; signal: AbortSignal; check: () => unknown | Promise<unknown> }): Promise<(input: CapabilityInput) => Promise<unknown>> {
+  async applicationCapabilities({ task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, signal, check, execution }: { task: Pick<ApplicationTask, "id" | "agentId" | "source" | "input" | "allowNetwork">; descriptor: { agent: Pick<AgentDefinition, "draft">; manifest: { stateVersion: number }; architecture?: { design?: { connections?: (ConnectionDefinition | LegacyArchitectureConnection)[] } | null | undefined } | null }; action: Pick<ApplicationAction, "connectionIds">; connectionSnapshot: ConnectionSnapshot; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; signal: AbortSignal; check: () => unknown | Promise<unknown>; execution?: () => ExecutionDispatch | undefined }): Promise<(input: CapabilityInput) => Promise<unknown>> {
     const root = workspaceRoot ?? await this.workspace(task.agentId);
     const guardWrite = async (file: unknown) => {
       if (task.source.scope !== "private") return;
@@ -1058,7 +1068,7 @@ export class PrototypeAgents {
         if (!webOptions.allowNetwork) throw new InputError("本轮要求不联网，未调用业务接口");
         if (typeof args.connectionId !== "string" || !action.connectionIds.includes(args.connectionId)) throw new InputError("动作没有声明这个连接依赖");
         if (typeof args.operationId !== "string") throw new InputError("动作连接操作标识无效");
-        return this.connections.call(connectionSnapshot, { connectionId: args.connectionId, operationId: args.operationId, input: args.input }, { requirements: (descriptor.architecture!.design!.connections ?? []).map(item => ({ ...item })),
+        return this.connections.call(connectionSnapshot, { connectionId: args.connectionId, operationId: args.operationId, input: args.input }, { execution: execution?.(), requirements: (descriptor.architecture!.design!.connections ?? []).map(item => ({ ...item })),
           signal: activeSignal, scope: task.source.scope, resolveFile: async (reference) => {
             if (typeof reference !== "string") throw new InputError("上传文件需要已授权的材料或产物引用");
             let source;
@@ -1232,8 +1242,20 @@ export class PrototypeAgents {
     return this.storage.directory(id, "workspace", { create: true });
   }
 
+  async submitOperation(kind: "build" | "development", input: Record<string, unknown>, { signal }: { signal?: AbortSignal | undefined } = {}) {
+    if (this.closing) throw new InputError("服务正在关闭");
+    const id = String(input.id ?? ""); validId(id);
+    const { mutationId, ...body } = input;
+    if (kind === "build") buildInput(body);
+    else if (Object.keys(body).some(key => !["id", "resume"].includes(key)) || typeof body.resume !== "boolean") throw new InputError("研发请求参数无效");
+    return this.operations.submit(id, kind, body, mutationId, signal);
+  }
+  currentOperation(id: string) { return this.operations.current(id); }
+  operation(id: string, operationId: string, after?: string | null) { return this.operations.view(id, operationId, after); }
+  cancelOperation(id: string, operationId: string, generation: string) { return this.operations.cancel(id, operationId, generation); }
+
   async build(input: unknown, { signal, onProgress = () => {} }: { signal?: AbortSignal | undefined; onProgress?: Progress } = {}) {
-    const definition = buildInput(input); await this.ready; await this.closing; signal?.throwIfAborted();
+    const definition = buildInput(input); await this.ready; signal?.throwIfAborted(); if (signal && this.closing) throw new InputError("服务正在关闭"); await this.closing; signal?.throwIfAborted();
     if (this.enforceRequirementConfirmation || definition.draft.taskSpec) {
       await this.library.pending.get(definition.id);
       const saved = await this.storage.readJson(definition.id, "requirements.json");
@@ -1444,7 +1466,7 @@ export class PrototypeAgents {
         for (const tool of this.materials.tools(agentId)) customTools.push({ ...tool,
           execute: async (callId, params, toolSignal, ...args) => {
             const activeSignal = toolSignal ? AbortSignal.any([toolSignal, item.controller.signal]) : item.controller.signal;
-            const result = await tool.execute(callId, params, activeSignal, ...args);
+            const result = await tool.execute(callId, params, activeSignal);
             if (result.content?.some((content) => content.type === "image")) item.hasImages = true;
             return result;
           } });
@@ -1516,12 +1538,15 @@ export class PrototypeAgents {
       }
       throw modelError("request_failed", errorField(error, "message"), { retries: item.retries ?? 0 });
     } finally {
-      signal?.removeEventListener("abort", cancelled);
-      // The factory can resolve after cancellation, when no session existed to abort.
-      if (signal?.aborted) await abortSession();
-      releaseSlot();
-      unsubscribe(); item.busy = false; item.usedAt = Date.now(); item.finish();
-      if (failed) { item.session?.dispose(); if (this.sessions.get(sessionId) === item) this.sessions.delete(sessionId); }
+      const lifecycle = new ExecutionLifecycle();
+      lifecycle.own("turn", () => { item.busy = false; item.usedAt = Date.now(); item.finish();
+        if (failed && this.sessions.get(sessionId) === item) this.sessions.delete(sessionId); });
+      if (failed) lifecycle.own("failed-session", () => item.session?.dispose());
+      lifecycle.own("subscription", () => unsubscribe());
+      lifecycle.own("slot", () => releaseSlot());
+      lifecycle.own("late-cancel", async () => { if (signal?.aborted) await abortSession(); });
+      lifecycle.own("abort-listener", () => signal?.removeEventListener("abort", cancelled));
+      await lifecycle.close();
     }
   }
 
@@ -1547,7 +1572,7 @@ export class PrototypeAgents {
       throw new InputError("群工具定义无效或与 Agent 业务权限冲突");
     if (role === "routing" && (customTools.length !== GROUP_ROUTING_TOOLS.size
       || customTools.some((tool) => !GROUP_ROUTING_TOOLS.has(tool.name)))) throw new InputError("群寻址仅允许平台上下文与寻址提交工具");
-    await this.ready; await this.closing;
+    await this.ready; signal?.throwIfAborted(); if (signal && this.closing) throw new InputError("服务正在关闭"); await this.closing;
     if (signal?.aborted || runtimeEpoch !== this.runtimeEpoch) throw modelError("cancelled");
     if (this.sessions.has(sessionId) || this.collaborationSessions.has(sessionId)) throw new InputError("当前任务正在处理，请等待完成或停止");
     const agent = this.agents.get(agentId);
@@ -1598,7 +1623,7 @@ export class PrototypeAgents {
         if (turnLimit || turns >= maxTurns) throw new ProviderError("群工作达到本轮模型次数上限", { stage: "collaboration", reason: "turn_limit" });
         const activeSignal = toolSignal ? AbortSignal.any([taskSignal, toolSignal]) : taskSignal;
         activeSignal.throwIfAborted();
-        const result = await tool.execute(callId, params, activeSignal, ...args);
+        const result = await tool.execute(callId, params, activeSignal);
         await checkReady();
         if (result?.terminate === true) { submitted = true; item.session?.setAutoCompactionEnabled?.(false); }
         return result;
@@ -1642,10 +1667,14 @@ export class PrototypeAgents {
       if (error instanceof InputError || error instanceof ProviderError) throw error;
       throw modelError("request_failed", errorField(error, "message"), { retries: item.retries });
     } finally {
-      signal?.removeEventListener("abort", abort);
-      if (taskSignal.aborted || item.cancelled) await abortSession();
-      try { unsubscribe(); unsubscribeTurns(); item.session?.dispose(); }
-      finally { releaseSlot(); item.busy = false; this.collaborationSessions.delete(sessionId); item.finish(); }
+      const lifecycle = new ExecutionLifecycle();
+      lifecycle.own("turn", () => { releaseSlot(); item.busy = false; this.collaborationSessions.delete(sessionId); item.finish(); });
+      lifecycle.own("session", () => item.session?.dispose());
+      lifecycle.own("turn-counter", () => unsubscribeTurns());
+      lifecycle.own("subscription", () => unsubscribe());
+      lifecycle.own("cancel", async () => { if (taskSignal.aborted || item.cancelled) await abortSession(); });
+      lifecycle.own("abort-listener", () => signal?.removeEventListener("abort", abort));
+      await lifecycle.close();
     }
   }
 
@@ -1708,6 +1737,7 @@ export class PrototypeAgents {
     if (this.closing) return this.closing;
     this.runtimeEpoch++;
     this.closing = (async () => {
+      const operationsClosing = this.operations.close();
       const builds = [...this.builds.values()], sessions = [...this.sessions.values(), ...this.collaborationSessions.values()];
       this.scheduler.cancelAll();
       for (const build of builds) { build.cancelled = true; build.controller.abort(); }
@@ -1722,6 +1752,7 @@ export class PrototypeAgents {
       }
       await Promise.allSettled([...builds, ...sessions].map((item) => item.session?.abort()));
       await Promise.allSettled([...builds.map((item) => item.done), ...sessions.filter((item) => item.busy).map((item) => item.done)]);
+      try { await operationsClosing; } catch (error) { failures.push(error); }
       try { await this.services?.close(); } catch (error) { failures.push(error); }
       for (const item of sessions) { try { item.session?.dispose(); } catch (error) { failures.push(error); } }
       this.sessions.clear(); this.collaborationSessions.clear();

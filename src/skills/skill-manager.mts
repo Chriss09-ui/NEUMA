@@ -1,3 +1,4 @@
+import { parseRuntimeSkill } from "../runtime/pi-skill-parser.mjs";
 import type { SkillSource, SkillSummary, SkillDiagnostic, SkillTrashRecord, SkillLocation } from "../contracts/skill.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { Stats } from "node:fs";
@@ -301,12 +302,7 @@ export class SkillManager {
       const leaf = basename(dirname(originalPath)) || "skill";
       const directory = join(temporary, leaf), file = join(directory, "SKILL.md");
       await mkdir(directory, { mode: 0o700 }); await writeExclusive(file, buffer);
-      const sdk = await import("@earendil-works/pi-coding-agent");
-      check(signal);
-      const result = sdk.loadSkills({ cwd: temporary, agentDir: temporary, skillPaths: [file], includeDefaults: false });
-      return { skill: result.skills[0] ? { ...result.skills[0], filePath: originalPath, baseDir: dirname(originalPath),
-        sourceInfo: sdk.createSyntheticSourceInfo(originalPath, { source: "catalog", baseDir: dirname(originalPath) }) } : null,
-        diagnostics: result.diagnostics.map((item) => ({ type: item.type, message: String(item.message).replaceAll(temporary, dirname(originalPath)) })) };
+      return await parseRuntimeSkill(temporary, file, originalPath, signal);
     } finally { await rm(temporary, { recursive: true, force: true }); }
   }
 

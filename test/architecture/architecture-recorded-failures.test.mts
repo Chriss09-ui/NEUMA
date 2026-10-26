@@ -1,4 +1,6 @@
 import type { ArchitectureRoleOptions } from "../../src/architecture/architecture-controller-port.mjs";
+import { SessionReplay } from "../helpers/session-replay.mjs";
+import { fixtureChatRequest } from "../helpers/http-model.mjs";
 import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 import { recordArray } from "../helpers/m7-test-boundaries.mjs";
 import type { FixtureModelRequest } from "../helpers/m7-test-boundaries.mjs";
@@ -68,12 +70,17 @@ test("回放首段结构错误和第二段合法正文，结构合法仍不等�
 test("真实Pi离线回放第二段合法结构化结果可正式返回修订，仍不自动判通过", { timeout: 15000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-recorded-failure-replay-")), requests: FixtureModelRequest[] = [], progress: Parameters<NonNullable<ArchitectureRoleOptions["onReviewProgress"]>>[0][] = [];
   const candidateHash = designHash({ recorded: "candidate" }), replies = reviewReplies(candidateHash);
+  const replay = new SessionReplay({ version: 1, kind: "deidentified-pattern", complete: false,
+    changes: "保留公开失败结构，业务正文和候选摘要由合成输入重建", protocol: "neuma-execution-v1" }, replies.map(answer => ({
+    role: "reviewer", stage: "review", tools: ["submit_architecture_review"], context: [candidateHash], answer,
+  })));
   let diagnostic, fidelityCalls = 0;
   const model = createServer(async (request, response) => {
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
     requests.push(JSON.parse(String(Buffer.concat(chunks))));
-    const value = replies[requests.length - 1];
-    if (!value) { response.writeHead(500); response.end("Recorded replay has no third model answer"); return; }
+    let value;
+    try { value = replay.next("reviewer", "review", fixtureChatRequest(String(Buffer.concat(chunks)))); }
+    catch { response.writeHead(400); response.end("Replay contract mismatch"); return; }
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.write(`data: ${JSON.stringify({ id: "recorded-local", choices: [{ index: 0, delta: { role: "assistant", content: JSON.stringify(value) }, finish_reason: "stop" }] })}\n\n`);
     response.end("data: [DONE]\n\n");
@@ -91,6 +98,7 @@ test("真实Pi离线回放第二段合法结构化结果可正式返回修订，
     onReviewProgress: (value) => { progress.push(structuredClone(value)); } });
   assert.equal(objectFields(result).verdict, "revise");
   assert.equal(requests.length, 2); assert.equal(diagnostic!.modelCalls!, 2); assert.equal(diagnostic!.submissionAttempts!, 1);
+  replay.assertConsumed();
   assert.equal(diagnostic!.unsubmittedDraftDiagnostics!.at(-1).reason, "schema_rejected");
   assert.equal(fidelityCalls, 0);
   const retained = progress.findLast((value) => value.origin === "semantic-rejected");

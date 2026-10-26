@@ -1,3 +1,4 @@
+import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import { feedbackLedger } from "./architecture-feedback-port.mjs";
 import type { ArchitectureOptions, ArchitectureRoleOptions, ArchitectureDesignOptions, StoredArchitectureRecord, Definition, ModuleConsultation, ArchitectureDiagnostic, ArchitectureRoleDiagnostic, HandoffResult } from "./architecture-controller-port.mjs";
@@ -6,15 +7,15 @@ import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import type { ArchitectureDesign, ArchitectureReview, ArchitectureIssue, RequirementItem, ArchitectureContext, ReviewDiagnosticIssue, ReviewDiagnostic, Capability, ArchitectureDecision } from "../contracts/architecture.mjs";
 import type { RequirementDraft, Consultation, RequirementIssue, EvidenceMessage } from "../contracts/requirements.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
-import type { AssistantSessionMessage, SessionMessage, SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress, PiSessionOptions, RawToolInput } from "../runtime/pi-port.mjs";
+import type { AssistantSessionMessage, SessionMessage, SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress, PiSessionOptions, RawToolInput } from "../runtime/execution-port.mjs";
 import type { AgentStoragePort } from "../runtime/storage-port.mjs";
 import { checkedStoredArchitectureRecord, checkedArchitectureDiagnostic } from "./architecture-storage-boundary.mjs";
 import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { basename } from "node:path";
 import { substantiveRequirementHash } from "../requirements/task-spec.mjs";
-import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
-import { readPiBoundSession } from "../runtime/pi-session-state.mjs";
+import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
+import { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { architectureModelOutputBudget } from "../runtime/model-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
@@ -356,7 +357,7 @@ export class ArchitectureDesigner {
     try {
       return await runArchitectureDesignPipeline({ record, context, binding, revision, repair, forceIntegration, signal, onProgress, sessionDirectory,
         validateProgramCandidate: async (candidate, { sessionStorage }) => {
-          await readPiBoundSession(await import("@earendil-works/pi-coding-agent"), { cwd: this.cwd, storage: sessionStorage, ...(signal ? { signal } : {}) });
+          await readExecutionHistory({ cwd: this.cwd, storage: sessionStorage, ...(signal ? { signal } : {}) });
           return validateDesign(candidate, context);
         },
         onSave: async (checkpoint) => {
@@ -464,6 +465,7 @@ export class ArchitectureDesigner {
     const rejectedReference = () => hasRejectedSubmission ? submissionRepair!.reference() : null;
     const unsubmittedDraft = createArchitectureUnsubmittedDraft({ schema: parameters,
       binding: { role, submitName, contextHash: designHash(payload), candidateHash: payload.candidateHash ?? null } });
+    let primaryFailure: unknown;
     let result: T | HandoffResult | undefined, session: PiSessionPort | undefined, unsubscribe = () => {}, failed = false, turns = initialModelCalls, retries = 0, retryError = "", turnLimit = false, truncated = false;
     let submissionAttempts = 0, lastSubmissionError: string | undefined, lastSubmissionIssue: (ReviewDiagnosticIssue & { allowedReferences?: string[] }) | undefined, lastSubmissionFingerprint: string | undefined, lastSubmissionDiagnostics: { total: unknown; truncated: unknown; issues: ReviewDiagnosticIssue[] } | undefined;
     const resumedIssue = objectFields(resumeSubmissionIssue);
@@ -676,6 +678,7 @@ export class ArchitectureDesigner {
           cwd: this.cwd, dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
           charge, signal });
       } catch (error) {
+      primaryFailure = error;
         if (objectFields(error).reason === "handoff_evaluation_incomplete") { handoffFailure = error; abort(); }
         throw error;
       }
@@ -1124,8 +1127,12 @@ export class ArchitectureDesigner {
       throw modelFailure(retryError || objectFields(error).message, details());
     } finally {
       unsubmittedDraft.clear();
-      signal?.removeEventListener("abort", abort); unsubscribe(); session?.dispose();
-      await onDiagnostics?.({ ...details(), status: signal?.aborted ? "cancelled" : result === undefined ? "incomplete" : "submitted" });
+      const lifecycle = new ExecutionLifecycle();
+      lifecycle.own("diagnostics", () => onDiagnostics?.({ ...details(), status: signal?.aborted ? "cancelled" : result === undefined ? "incomplete" : "submitted" }));
+      lifecycle.own("session", () => session?.dispose());
+      lifecycle.own("subscription", () => unsubscribe());
+      lifecycle.own("abort-listener", () => signal?.removeEventListener("abort", abort));
+      await lifecycle.close(primaryFailure);
     }
   }
 

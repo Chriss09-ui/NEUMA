@@ -3,7 +3,7 @@ import type { BinaryLike } from "node:crypto";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { JsonValue, UnknownRecord } from "../contracts/json.mjs";
 import type { DevelopmentPlan, DevelopmentCase, DevelopmentTask, DevelopmentApplication, DevelopmentArchitecture } from "../contracts/development.mjs";
-import type { NeumaTool, RegisteredTool } from "../runtime/pi-port.mjs";
+import type { NeumaTool, RegisteredTool } from "../runtime/execution-port.mjs";
 import type { PlanDiagnosticSource, PlanDiagnosticIssue } from "./development-plan-diagnostics.mjs";
 import { objectFields, isInteger, errorField } from "../runtime/type-boundary.mjs";
 interface PlanIndex extends UnknownRecord { caseFiles: string[]; activationCaseFiles?: string[] }

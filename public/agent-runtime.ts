@@ -1,3 +1,4 @@
+import { observeOperation, type OperationReference, type OperationView } from "./operation-view.js";
 import type { BrowserRequest } from "./ui-types.js";
 import type { AgentRuntime } from "./ui-api-types.js";
 import type { ActiveRuntime, AgentDefinition, ArchitectureView, BuildPresentation, DevelopmentView, FrontendError, Message, RequestOptions, RuntimeResult, RuntimeState, StreamOptions } from "./ui-types.js";
@@ -159,6 +160,7 @@ export function agentHistory(messages: Message[], revision: string | number) {
   return selected;
 }
 
+interface BuildObservation { running: boolean; interrupted: boolean; error: string | null; phase?: string; label?: string; result: import("./ui-types.js").RuntimeResult }
 export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntime {
   async function json<T>(path: string, body?: unknown, { signal }: RequestOptions = {}): Promise<T> {
     const options: RequestInit = body === undefined ? {} : {
@@ -177,6 +179,27 @@ export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntim
     return result;
   }
 
+  const pendingOperations = new Map<string, { input: string; mutationId: string }>();
+  const operationPath = (reference: OperationReference) => `/api/agents/${encodeURIComponent(reference.ownerId)}/operations/${encodeURIComponent(reference.operationId)}`;
+  async function watchOperation(reference: OperationReference, { signal, onProgress = () => {} }: StreamOptions = {}) {
+    const completed = await observeOperation(cursor => json<OperationView<BuildObservation>>(`${operationPath(reference)}${cursor ? `?after=${encodeURIComponent(cursor)}` : ""}`, undefined, { signal }), reference, {
+      signal, disconnected: () => onProgress({ type: "status", label: "连接中断，正在重新连接；后台任务继续执行。" }),
+      update(snapshot) {
+        onProgress({ type: "status", ...(snapshot.result.architecture ? { architecture: snapshot.result.architecture } : {}), ...(snapshot.result.development ? { development: snapshot.result.development } : {}), phase: snapshot.phase, label: snapshot.label || "正在处理，进度已保存…" });
+        return !snapshot.running;
+      },
+    });
+    if (completed.interrupted) throw new Error("后台进程曾中断，已保存进度保留，请按原条件继续。");
+    if (completed.error) throw new Error(completed.error);
+    return completed.result;
+  }
+  async function background(kind: "build" | "development", id: string, body: unknown, options: StreamOptions = {}) {
+    const key = `${kind}:${id}`, input = JSON.stringify(body), prior = pendingOperations.get(key);
+    const receipt = prior?.input === input ? prior : { input, mutationId: crypto.randomUUID() }; pendingOperations.set(key, receipt);
+    const accepted = await json<OperationView<BuildObservation>>(`/api/agents/${encodeURIComponent(id)}/operations`, { ...body as object, kind, mutationId: receipt.mutationId }, { signal: options.signal });
+    options.onProgress?.({ type: "operation", operation: accepted.operation });
+    const result = await watchOperation(accepted.operation, options); pendingOperations.delete(key); return result;
+  }
   async function stream(path: string, body: unknown, { signal, onProgress = () => {} }: StreamOptions = {}, options: ReplyOptions) {
     const response = await request(path, {
       method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" },
@@ -241,20 +264,25 @@ export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntim
     },
     getDevelopment: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/development`, undefined, options),
     develop: (id, { resume = false, ...options } = {}) => stream(`/api/agents/${encodeURIComponent(id)}/development/stream`, { resume }, options, {
-      isComplete: (result) => result?.development?.agentId === id
-        && ["completed", "blocked", "failed", "cancelled", "interrupted"].includes(result.development.status),
+      isComplete: result => result?.development?.agentId === id && ["completed", "blocked", "failed", "cancelled", "interrupted"].includes(result.development.status),
       incompleteMessage: "研发连接中断，完成情况尚未确认；正在核实已保存的进度。",
     }),
-    cancelDevelopment: (id) => json(`/api/agents/${encodeURIComponent(id)}/development/cancel`, {}),
-    cancelBuild: (id) => json(`/api/agents/${encodeURIComponent(id)}/build/cancel`, {}),
     build: (agent, { architectureRepair, ...options } = {}) => stream("/api/agents/build", { id: agent.id, name: agent.name, draft: agent.draft,
       ...(architectureRepair !== undefined ? { architectureRepair } : {}) }, options, {
-      isComplete: (result) => result?.architecture
-        ? result.architecture.agentId === agent.id && (result.architecture.status === "passed"
-          || Object.hasOwn(architectureLabels, result.architecture.status))
+      isComplete: result => result?.architecture ? result.architecture.agentId === agent.id && (result.architecture.status === "passed" || Object.hasOwn(architectureLabels, result.architecture.status))
         : result?.agent?.id === agent.id && result.agent.status === "ready",
       incompleteMessage: "生成连接中断，智能体尚未确认完成，请重新生成。",
     }),
+    startDevelopment: (id, { resume = false, ...options } = {}) => background("development", id, { resume }, options),
+    cancelDevelopment: (id) => json(`/api/agents/${encodeURIComponent(id)}/development/cancel`, {}),
+    cancelBuild: (id) => json(`/api/agents/${encodeURIComponent(id)}/build/cancel`, {}),
+    watchOperation,
+    cancelOperation: async reference => {
+      const result = await json<OperationView<BuildObservation>>(`${operationPath(reference)}/cancel`, { generation: reference.generation });
+      return result.snapshot!.result;
+    },
+    startBuild: (agent, { architectureRepair, ...options } = {}) => background("build", agent.id, { name: agent.name, draft: agent.draft,
+      ...(architectureRepair !== undefined ? { architectureRepair } : {}) }, options),
     turn: (body, options) => stream("/api/agents/turn", body, options, {
       isComplete: (result) => typeof result?.reply === "string" && result.status === "complete"
         && result.agentId === body.agentId && result.sessionId === body.sessionId,

@@ -4,7 +4,7 @@ import type { CollaborationService } from "./collaboration/groups.mjs";
 import type { PrototypeAgents } from "./agents/agent-prototype.mjs";
 import type { MainAgentAgents } from "./main/main-agent-port.mjs";
 import type { CollaborationAgents } from "./collaboration/groups.mjs";
-import type { ProjectManagerPort, Progress } from "./runtime/pi-port.mjs";
+import type { ProjectManagerPort, Progress } from "./runtime/execution-port.mjs";
 import type { ProjectManager } from "./projects/projects.mjs";
 import type { AgentStorage } from "./agents/agent-storage.mjs";
 import type { ApplicationService } from "./applications/application-service.mjs";
@@ -13,7 +13,7 @@ import type { ManagedServiceManager } from "./services/managed-service-manager.m
 import type { ServiceGateway } from "./services/service-gateway.mjs";
 import type { WebCapabilityPort } from "./runtime/web-capabilities.mjs";
 
-type Forwarded = "getConversation" | "saveConversation" | "getProfiles" | "getArchitecture" | "getDevelopment" |
+type Forwarded = "currentOperation" | "submitOperation" | "operation" | "cancelOperation" | "getConversation" | "saveConversation" | "getProfiles" | "getArchitecture" | "getDevelopment" |
   "getActiveRuntime" | "getMemory" | "setMemory" | "setProfile" | "remove" | "removeConversation" |
   "cancelBuild" | "cancelDevelopment" | "getAttachment" | "listAttachments" | "files" |
   "deliveryHistory" | "rollbackDelivery" | "changeService" | "previewTaskArtifact";
@@ -55,7 +55,7 @@ export interface ServerAgents extends ForwardedMethods, Omit<MainAgentAgents, "s
 }
 export type ServerProjects = ProjectManagerPort & Partial<Pick<ProjectManager, "load" | "configure" | "dispose">> & { pendingAdds?: { size: number } };
 
-type MainForwarded = "activateRequirements" | "cancel" | "createConversation" | "getConversation" | "listConversations" | "prompt" | "removeConversation";
+type MainForwarded = "submit" | "operation" | "activateRequirements" | "cancel" | "createConversation" | "getConversation" | "listConversations" | "prompt" | "removeConversation";
 export type ServerMainPort = { [K in MainForwarded]?: (...args: Parameters<MainAgent[K]>) => unknown | Promise<unknown> } & {
   ready?: Promise<unknown>; close?: MainAgent["close"]; materials?: MainAgentMaterials;
 };

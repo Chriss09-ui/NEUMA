@@ -1,3 +1,4 @@
+import { operationView } from "../runtime/operation-view.mjs";
 import type { ServerAgents } from "../server-port.mjs";
 import type { HttpRouteContext } from "../runtime/http-port.mjs";
 import type { PrototypeAgents } from "../agents/agent-prototype.mjs";
@@ -89,12 +90,13 @@ export async function routeApplication({ request, response, address, agents, rea
       }
       response.end(); return true;
     }
-    const operation = suffix.match(/^([\w-]{1,80})(?:\/(events|cancel|resume))?$/);
+    const operation = suffix.match(/^([\w-]{1,80})(?:\/(events|cancel|resume|view))?$/);
     if (operation) {
       const [, taskId, action] = operation as [string, string, string?];
       const task = await application.store!.get!(id, taskId);
       if (task.source.scope !== "private") throw new InputError("群操作任务请在对应群任务中查看");
       if (!action && method === "GET") return send({ task });
+      if (action === "view" && method === "GET") return send(operationView({ version: 1, domain: "application", ownerId: id, operationId: taskId, generation: String(task.resumeReceipts?.length ?? 0) }, task.sequence, { task }, address.searchParams.get("after")));
       if (action === "cancel" && method === "POST") { await readBody(); return send(await application.cancel!(id, taskId)); }
       if (action === "resume" && method === "POST") {
         const body = await readBody();

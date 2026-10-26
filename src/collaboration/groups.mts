@@ -2,7 +2,7 @@ import { objectFields } from "../runtime/type-boundary.mjs";
 import type { MaterialUpload } from "../materials/material-port.mjs";
 import type { Group, GroupArtifact, GroupTask, GroupMember, GroupRecord, GroupChild, WorkRequest, MemberCard, CollaborationLimits } from "../contracts/collaboration.mjs";
 import type { CollaborationOptions, MaterialTool } from "../agents/prototype-port.mjs";
-import type { Progress } from "../runtime/pi-port.mjs";
+import type { Progress } from "../runtime/execution-port.mjs";
 import type { RawMaterial, MaterialDescriptor } from "../contracts/material.mjs";
 export interface CollaborationAgents {
   ready?: Promise<unknown>;

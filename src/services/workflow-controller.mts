@@ -9,6 +9,7 @@ import { validateActionValue } from "../applications/application-contract.mjs";
 import { checkedIdentity, ServiceError, serviceHash } from "./service-contract.mjs";
 import { atomicJSON, privateDirectory, readJSON } from "./service-files.mjs";
 import { validateWorkflowDefinition } from "./workflow-contract.mjs";
+import { createExecutionAttempt, executionOutcome, isExecutionAttempt } from "../runtime/execution-attempt.mjs";
 
 function at(value: unknown, path = ""): unknown {
   for (const part of path.split(".").filter(Boolean)) {
@@ -41,6 +42,13 @@ export class WorkflowController<Context = unknown> {
     if (!isWorkflowRecordEnvelope(value) || value.id !== id) throw new ServiceError("workflow_definition_changed");
     const definition = validateWorkflowDefinition(value.definition);
     if (serviceHash(definition) !== value.definitionHash) throw new ServiceError("workflow_definition_changed");
+    for (const state of value.steps) for (const item of state.items) {
+      if (item.executions !== undefined && (!Array.isArray(item.executions)
+        || item.executions.some(attempt => !isExecutionAttempt(attempt))
+        || new Set(item.executions.map(attempt => attempt.id)).size !== item.executions.length
+        || item.executions.some((attempt, index, entries) => attempt.number > item.attempts || index > 0 && attempt.number <= entries[index - 1]!.number)))
+        throw new ServiceError("workflow_definition_changed");
+    }
     return { ...value, definition };
   }
   async resultFile(record: WorkflowRecord, value: unknown) {
@@ -82,14 +90,18 @@ export class WorkflowController<Context = unknown> {
     } else if (record.status === "needs_review") {
       if (typeof resolution.stepId !== "string" || typeof resolution.index !== "number" || !Number.isSafeInteger(resolution.index) || resolution.stepId !== record.waiting?.stepId || resolution.index !== record.waiting?.index) throw new ServiceError("workflow_resolution_required", "请先核实外部操作是否已经发生，再决定补记结果或重新执行");
       const state = record.steps.find((item) => item.id === resolution.stepId)!, item = state.items[resolution.index]!;
-      if (resolution.outcome === "completed") { item.resultRef = await this.resultFile(record, resolution.output); item.status = "completed"; }
-      else if (resolution.outcome === "retry" && resolution.explicitlyApproved === true) { item.status = "pending"; item.explicitRetry = true; }
+      const attempt = item.executions?.at(-1);
+      if (attempt && resolution.attemptId !== attempt.id) throw new ServiceError("workflow_resolution_required", "核实请求与当前执行尝试不一致，请刷新任务");
+      if (resolution.outcome === "completed") { item.resultRef = await this.resultFile(record, resolution.output); item.status = "completed";
+        if (attempt) Object.assign(attempt, { phase: "completed", resultRef: item.resultRef, resolution: "verified" }); }
+      else if (resolution.outcome === "retry" && resolution.explicitlyApproved === true) { item.status = "pending"; item.explicitRetry = true;
+        if (attempt) attempt.resolution = "retry_approved"; }
       else throw new ServiceError("invalid_workflow_resolution");
       state.status = "pending"; record.waiting = null;
     } else {
       for (const state of record.steps) for (const item of state.items) if (["failed", "running"].includes(item.status)) {
         const step = record.definition.steps.find((entry) => entry.id === state.id);
-        if (!step!.idempotent) throw new ServiceError("workflow_resolution_required");
+        if (!step!.idempotent && executionOutcome(item.executions?.at(-1)) !== "not_started") throw new ServiceError("workflow_resolution_required");
         item.status = "pending"; state.status = "pending";
         // A deliberate continuation may retry an interrupted idempotent attempt once.
         // Keep the recorded attempt count; ordinary failures still exhaust their budget.
@@ -132,14 +144,25 @@ export class WorkflowController<Context = unknown> {
           while (item.status !== "completed") {
             signal.throwIfAborted();
             if (item.attempts >= maxAttempts && !item.explicitRetry) { record.status = "failed"; state.status = "failed"; record.reason = "workflow_retry_budget_exhausted"; await this.save(record); return structuredClone(record); }
-            item.explicitRetry = false; item.attempts++; item.status = "running"; state.status = "running"; await this.save(record);
             const args = resolveInput(pending.input ?? { $input: "" }, { input, outputs, item: items[item.index], response });
+            item.explicitRetry = false; item.attempts++; item.status = "running"; state.status = "running";
+            const attempt = createExecutionAttempt(serviceHash([record.id, record.agentId, record.deliveryVersion, record.scopeId, pending.id, pending.actionId, item.index, args]), item.attempts);
+            (item.executions ??= []).push(attempt);
+            await this.save(record);
+            const execution = { id: attempt.id, beforeDispatch: async () => {
+              signal.throwIfAborted();
+              if (attempt.uncertain) throw new ServiceError("execution_outcome_unknown", "上次外部操作结果尚未核实，已阻止继续分派");
+              if (attempt.phase === "prepared") { attempt.phase = "dispatched"; await this.save(record); }
+              signal.throwIfAborted();
+            }, markUnknown: async () => { attempt.uncertain = true; await this.save(record); } };
             let result;
-            try { result = await this.runAction({ agentId: record.agentId, deliveryVersion: record.deliveryVersion, scopeId: record.scopeId, actionId: pending.actionId, input: args, signal, context, workflowId: record.id, stepId: pending.id, itemIndex: item.index }); }
+            try { await execution.beforeDispatch(); result = await this.runAction({ agentId: record.agentId, deliveryVersion: record.deliveryVersion, scopeId: record.scopeId, actionId: pending.actionId, input: args, signal, context, workflowId: record.id, stepId: pending.id, itemIndex: item.index, execution }); }
             catch (error) { result = { status: "error", reason: signal.aborted ? "cancelled" : String(errorField(error, "reason") ?? "workflow_action_error") }; }
-            if (result.status === "passed" && !signal.aborted) { item.resultRef = await this.resultFile(record, result.output); item.status = "completed"; await this.save(record); continue; }
+            if (attempt.uncertain) result = { status: "error", reason: "execution_outcome_unknown" };
+            if (result.status === "passed") { item.resultRef = await this.resultFile(record, result.output); item.status = "completed";
+              Object.assign(attempt, { phase: "completed", resultRef: item.resultRef }); await this.save(record); signal.throwIfAborted(); continue; }
             item.reason = result.reason ?? "workflow_action_failed"; item.status = "failed";
-            if (!pending.idempotent) { record.status = "needs_review"; state.status = "needs_review"; record.waiting = { stepId: pending.id, index: item.index, reason: item.reason }; await this.save(record); return structuredClone(record); }
+            if (!pending.idempotent) { record.status = "needs_review"; state.status = "needs_review"; record.waiting = { stepId: pending.id, index: item.index, attemptId: attempt.id, reason: item.reason }; await this.save(record); return structuredClone(record); }
             if (signal.aborted) throw new ServiceError("cancelled");
             await this.save(record);
           }
@@ -158,7 +181,7 @@ export class WorkflowController<Context = unknown> {
       record.status = "interrupted";
       for (const state of record.steps) for (const item of state.items) if (item.status === "running") {
         const step = record.definition.steps.find((entry) => entry.id === state.id);
-        if (!step!.idempotent) { record.status = "needs_review"; state.status = "needs_review"; record.waiting = { stepId: step!.id, index: item.index, reason: "execution_interrupted" }; }
+        if (!step!.idempotent && executionOutcome(item.executions?.at(-1)) !== "not_started") { record.status = "needs_review"; state.status = "needs_review"; record.waiting = { stepId: step!.id, index: item.index, ...(item.executions?.at(-1) ? { attemptId: item.executions.at(-1)!.id } : {}), reason: "execution_interrupted" }; }
       }
       await this.save(record); changed.push(record);
     }

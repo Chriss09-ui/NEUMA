@@ -220,7 +220,7 @@ class StreamingResponse extends EventEmitter {
 
 test("页面共享模块、小星核脚本和七张图形通过静态白名单加载，其他资源仍不可访问", async () => {
   const handler = createRequestHandler({ config: {}, providers: {} });
-  for (const path of ["/agent-avatar.js", "/agent-avatar-motion.js", "/page-elements.js", "/ui-types.js"]) {
+  for (const path of ["/agent-avatar.js", "/agent-avatar-motion.js", "/page-elements.js", "/ui-types.js", "/operation-view.js"]) {
     const result = await invoke(handler, "GET", path);
     assert.equal(result.status, 200); assert.match(checkedText(result.headers!["content-type"]), /^text\/javascript/);
     assert.ok(result.text.trim());

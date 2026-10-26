@@ -1,5 +1,5 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
-import type { ContextEvent } from "@earendil-works/pi-coding-agent";
+import type { ContextEvent } from "../runtime/execution-port.mjs";
 import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 function array(value: unknown): unknown[] { if (!isArray(value)) throw new TypeError("Model context list is invalid"); return value; }
 import { modelContextPacket, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";

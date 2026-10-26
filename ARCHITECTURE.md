@@ -24,7 +24,7 @@
 - **群协作**（`src/collaboration/`）：长期团队，成员自主认领、互相求助并整合成果。
 - **需求澄清**（`src/requirements/`）与**项目助手**（`src/projects/`）相互独立，不与工作 Agent 混用会话或权限。
 
-服务端源码在 `src/`，入口 `src/server.mts`；前端资源在 `public/`，测试在 `test/`，开发脚本在 `scripts/`。当前底座是 Node + 已锁定 Pi SDK；控制器以普通 Node 模块实现，未引入编排框架、数据库或遥测。框架、SDK 按能力比较，可以组合，不是固定升级顺序。
+服务端源码在 `src/`，入口 `src/server.mts`；前端资源在 `public/`，测试在 `test/`，开发脚本在 `scripts/`。当前底座是 Node + 已锁定 Pi SDK。业务使用 NEUMA 的 `execution-port`、`execution-runtime`、`execution-history`；Pi 原生事件映射、只读历史校验和原生文件工具留在运行适配边界。控制器以普通 Node 模块实现，未引入编排框架、数据库或遥测。框架、SDK 按能力比较，可以组合，不是固定升级顺序。
 
 ## 2. 系统入口与生命周期
 
@@ -36,6 +36,16 @@
 - `installation-migration` 是不同数据根间的显式复制迁移：持双端锁、分块复制、校验元数据和快照、成功后整体 rename 发布；目标非空拒绝，凭据、模型配置与 SDK 临时数据不复制。
 - 平台辅助程序：macOS 隔离用 `sandbox-exec`（已实际验证）；Linux 辅助程序在 Ubuntu 24.04/26.04、x64/ARM64 云端原生检查通过；Windows LPAC/Job Object 已编译、真实隔离启动仍在验证。项目管理（Job Object/进程组/`/proc` 扫描）与生成程序隔离不复用权限。缺文件、缺系统能力或探测失败均明确阻塞执行，不提供无隔离回退。
 - 本机 Skill 管理（`src/skills/`，`/api/skills`）是独立维护页面：受控目录发现、编辑、导入、回收。它不属于任何 Agent 的运行工具目录；`controlledResources()` 不发现宿主 Skills、Prompts 或 AGENTS 文件，只提供程序指定的系统提示与 NEUMA 内置受控扩展；管理索引不注入工作会话。
+
+### 2.1 执行、查看与资源所有权
+
+主对话先在 MainStore 同次原子提交用户消息、占位回复和幂等请求，再交接给服务端控制器。制作/研发的 `AgentOperations` 在 Agent 的 `operations/<mutationId>.json` 保存接受回执，再发布 `operations/current.json` 索引并启动原领域控制器；回执只定位代次、输入摘要、架构版本及研发编号，不参与审批、额度或交付判断。两次记录之间中断时，同编号查询显示已接受但中断，不自动执行。相同编号不同输入拒绝。
+
+页面使用提交、查看、精确停止三个接口职责；查看接口的重复 GET 构成订阅。`operation-view` 返回操作身份、代次、已提交快照游标；相同游标不返回正文，游标变化或来源不匹配返回 `reset` 和完整快照。当前使用快照重同步，不保留一份独立 token 事件日志；主对话仍按原定时合并保存。查询和刷新从不调用模型、build 或 resume。最终状态与回复先由原领域保存，再供查看。
+
+接受前由请求信号控制校验；接受后后台任务由服务端持有。显式停止带 `operationId` 和 `generation`，旧窗口不能误停新任务。页面观察取消只解绑查看；删除、设置关闭、父任务取消及服务退出仍传到真实执行。重启仅读取并按原领域规则标记中断，不自动重发。旧主对话 messages、build 和 development/stream 接口保留原请求绑定语义。
+
+`model-admission` 固定取消检查、领域持久记账、再次取消/绑定检查和分派的顺序；每个 HTTP 尝试的检查与逻辑轮次记账分开，各领域额度政策不变。`execution-lifecycle` 仅释放本次拥有的监听器、会话及工作槽，幂等关闭，某项失败仍清理其余资源。长期私聊的成功会话继续复用。
 
 ## 3. 需求层
 
@@ -162,7 +172,7 @@
 
 **专属 API/MCP 网关**：默认关闭、仅绑定回环地址；开启时选择动作范围并生成访问令牌；请求绑定交付版本，复用任务调度及权限检查。异步读取结束后同步核对本机授权修订号和当前活动交付绑定，撤权后旧证据失效。网关只接受当前授权、动作、任务、交付版本及产物索引，不接受任意路径。没有公网部署、原生数据库驱动、任意 stdio 命令安装、定时或外部事件触发承诺；Docker 本机未做真实引擎验收，模拟控制测试不能替代。
 
-**托管服务与流程**：受管通道支持 JavaScript 和 Python（锁定摘要的 CPython 3.13 工件按需准备；依赖锁定版本 + 完整性校验，运行代码不能自行安装或获得宿主凭据）。默认请求上限十分钟、每进程 512 MiB；临时目录、输出、日志有额度，取消和超时回收。服务按智能体、交付版本和私聊/具体群隔离。停止时即使服务台账保存失败，仍尝试终止全部匹配进程，最后报告错误；验收收尾分别清理各作用域与临时流程目录。流程控制器保存步骤依赖、批次条目、检查点及结果引用；只有可重复操作允许自动重试，外部结果无法确定时进入 `needs_review`，需要用户核实或明确接受重试。
+**托管服务与流程**：受管通道支持 JavaScript 和 Python（锁定摘要的 CPython 3.13 工件按需准备；依赖锁定版本 + 完整性校验，运行代码不能自行安装或获得宿主凭据）。默认请求上限十分钟、每进程 512 MiB；临时目录、输出、日志有额度，取消和超时回收。服务按智能体、交付版本和私聊/具体群隔离。停止时即使服务台账保存失败，仍尝试终止全部匹配进程，最后报告错误；验收收尾分别清理各作用域与临时流程目录。流程控制器保存步骤依赖、批次条目、检查点及结果引用；新增业务尝试使用独立 version=1 的 prepared/dispatched/completed 记录，保留尝试历史和绑定摘要。应用动作拥有自己的尝试，流程动作则由流程拥有，连接和模型应用工具沿用同一个分派屏障。没有分派标记只在新屏障记录中表示未执行；旧记录缺字段保持未知。HTTP/MCP 已调用后丢失回执或结果校验失败会持久标记 uncertain，阻止同次动作继续分派，动作代码吞掉异常也不能伪报完成。只有可重复操作允许自动重试，外部结果无法确定时进入 `needs_review`，需要用户核实或明确接受重试；新尝试的核实请求还须匹配 attemptId，旧记录继续使用原版本校验。
 
 **连接**：声明、用户配置、发现和验证记录分开。HTTP 与 MCP Streamable HTTP 经统一适配器；支持匿名、令牌、请求头密钥、Basic 及授权码/PKCE。OAuth 从初始化开始受取消和关闭控制，迟到的发现或回调不能恢复已取消授权；刷新响应省略 scope 时保留已有范围，显式收紧仍使旧任务失效。macOS 钥匙串持有凭据仓库主密钥，配置只保存加密凭据引用；旧明文连接在使用或更新时迁移，失败保留原记录并停止；凭据不进入需求、模型、代码快照和页面返回。HTTP 的 method/path 或 MCP 的 tool/resourceUri 来自已评审设计。测试只执行标记为 `safeTest` 的无副作用读取；GET/HEAD 可按只读语义核对，POST 等操作还须显式 `readOnly:true`，旧 v2 仍按原仅 GET 契约验证。无安全测试时保留 `configured/unverified`，仍可按已设计操作发起首次真实请求并如实记录。每次保存生成配置版本，清除使旧 generation 失效。
 
@@ -204,7 +214,7 @@
 
 实现：`public/`（浏览器 `.ts` 编译为 `.js`）。测试：`ui/chat-ui.test.mts`、`ui/rich-text.test.mts`、`ui/sidebar-*.test.mts`、`collaboration/group-*.test.mts`、`applications/application-*-ui.test.mts`、`runtime/settings-ui.test.mts` 等；共享界面基础测试在 `test/ui/`，明显属于业务领域的界面测试放在对应领域目录。
 
-- 前端只消费 NEUMA 自有接口、状态、文本和结果协议（流协议 `status` / `done.result` / `error`，`context` 事件按需展开右侧面板），不依赖 Pi SDK 原生事件或对象。只显示简洁进度，不暴露内部提示词、模型思考或工具参数。
+- 前端只消费 NEUMA 自有接口、状态、文本和结果协议；主对话与制作/研发页面使用已接受操作的快照续看，兼容流协议（`status` / `done.result` / `error`，`context` 事件按需展开右侧面板），不依赖 Pi SDK 原生事件或对象。只显示简洁进度，不暴露内部提示词、模型思考或工具参数。
 - `rich-text.js` 提供共享显示层：Marked 解析 + DOM 白名单呈现，KaTeX 排版行内/独立公式；原始 HTML 只作文字展示，Markdown 图片只显示替代文字；链接限制安全协议与已知内部路由；依赖版本固定，资源由本机静态服务提供。历史在显示时解析，保存与传给模型的消息不变。
 - 导航：主助理历史归入左侧 NEUMA 条目，各工作 Agent 历史归入自己的条目，群组展开任务话题；默认显示最近 4 条，可展开/收起；刷新恢复状态。聊天工作区不设独立历史列。群归档的迟到回执只更新原群，不能打断已切换群的加载、反馈或轮询。
 - 制作面板：尚未就绪的 Agent 工作区显示制作面板（需求确认、架构设计、独立评估、按需研发、运行交付），按实际事件与持久状态展示，不显示估算百分比；失败或终止提供原因、重试或继续研发。
@@ -220,6 +230,7 @@
 - 自有后端、前端、测试、安装和维护代码全部严格 TypeScript 编译，`allowJs` / `noCheck` 关闭。Node `.mts`、浏览器 `.ts`、CLI `.cts` 分别发射为 `.mjs`、`.js`、`.cjs`；运行产物位于 `dist/ts-build/package/`，保持安装包层级。源码根不能直接打包，使用 `npm run package:pack`；不手改 dist。`skipLibCheck` 仅用于锁定 Pi 依赖的上游声明错误，不适用于自有共享声明。
 - 构建检查自有 TS 的覆盖、入口、静态资源、执行权限和源码摘要，拒绝遗留自有 JS、编译错误、冲突及陈旧产物；五组配置隔离共享声明、Node、浏览器 ESM、iframe 普通脚本和测试环境。构建失败使上一代产物失去有效标记。
 - 测试命令先构建再运行产物目录中的测试。`scripts/run-tests.mts` 维护 unit / integration / browser 分层清单，递归发现 `test/` 及其领域子目录，条目以相对 `test/` 根的完整路径标识（不同目录的同名文件不冲突）；顶层仅保留 server 组装测试与 native-check 固定引用的 4 个入口。unit、integration 默认移除外部浏览器环境变量并关闭外部浏览器；browser 保留显式启用机制（`NEUMA_REQUIRE_BROWSER_TESTS=1` / `NEUMA_TEST_BROWSER`），macOS 默认只尝试 Dia，无界面参数兼容性待验证；跳过、未运行或启动失败不能记作通过。运行保持串行（`--test-concurrency=1`）。`test/types/` 下的编译期反例只编译不执行；`test/helpers/`、`test/fixtures/` 不进入运行集合。`.github/workflows/native-check.yml` 固定引用 4 个测试的编译产物路径。
+- 运行边界门禁同时检查类型与运行时依赖：Pi SDK 仅允许适配文件和模型目录解析导入，业务不能通过兼容 pi-port 或原生会话管理器绕过自有契约。回放脚本严格检查角色、阶段、工具、上下文和消费次数；默认仅使用合成或去标识案例，导出白名单不包含原始正文、凭据或思考。真实 SIGKILL 用例验证预算、分派与结果保存边界，离线证据不证明真实模型质量。
 - 仓库规范检查 `npm run check:hygiene`（`scripts/hygiene*.mts`，由 `scripts/build.mjs` 的 hygiene 分支临时严格编译执行，无 dist 源码树可运行，只读不执行应用模块）：模块依赖用 TypeScript 官方 API 解析，区分运行时与纯类型依赖，规则覆盖未解析导入、契约运行时导入、R3 提取模块反向依赖、组装入口导入者、`src/architecture/` → `src/agents/` 跨域运行时边界、运行时依赖环登记（当前 2 组）与非字面量动态导入按文件计数登记；测试登记要求发现集合与 TEST_LAYERS 完全对应（混合层文件例外须登记理由）；文档引用校验 README/AGENTS/ARCHITECTURE 的部分仓库内链接（docs/ 专项文档链接仍须另行核对）；明确残留拒绝同名 JS 产物与未迁移自有 JS。全部例外必须写明理由，失效时同样报错。
 - 模型协议测试使用本机模拟接口，不调用真实模型服务；外部检索和业务服务用可控替身。测试通过不表示真实业务模型质量或外部服务集成已验收。
 - CI（`.github/workflows/typescript-check.yml`）：Mac ARM64、Node 22.22.2 / 24.15.0 / 26.3.0 的代码与包检查。发布验证当前只覆盖 Mac ARM64；Linux/Windows 打包与既有原生工作流不在当前收口范围。安装版只运行已编译 JS，不依赖 TypeScript 或源码仓库依赖；打包、解包 smoke 和独立生产依赖安装验证同一编译代次。
@@ -249,6 +260,8 @@
 | 本文 | 当前架构基线（职责、约束、状态归属、验证入口） | 现行 |
 | [docs/development-layer-design.md](docs/development-layer-design.md) | 研发层五阶段详细设计 | 现行（AGENTS 指定同步维护） |
 | [docs/user-guide.md](docs/user-guide.md)、[docs/agent-capabilities-and-services.md](docs/agent-capabilities-and-services.md)、[docs/connections-guide.md](docs/connections-guide.md)、[docs/npm-installation.md](docs/npm-installation.md) | 用户说明、能力与连接、安装 | 现行说明 |
+| [docs/runtime-reliability-improvement-plan-2026-10-26.md](docs/runtime-reliability-improvement-plan-2026-10-26.md) | 断线续看、失败回放、公共执行规则、执行结果核实与自有运行接口的分阶段实施计划 | 已实施；实际取舍与验证见实施记录 |
+| [docs/runtime-reliability-implementation-2026-10-26.md](docs/runtime-reliability-implementation-2026-10-26.md) | 五项运行可靠性改造的文件、协议、恢复与验证证据 | 实施记录 |
 | [docs/history/typescript-migration-completion-2026-10-25.md](docs/history/typescript-migration-completion-2026-10-25.md) 及同目录 `typescript-m*-results-*.md` | TypeScript 迁移 M0–M8 完成说明与各阶段验证证据 | 历史档案；迁移已实施，仅 Mac ARM64 发布验证 |
 | [docs/history/repository-organization-completion-2026-10-25.md](docs/history/repository-organization-completion-2026-10-25.md) 及同目录 R1–R6 实施记录 | 仓库整理 R1、R3–R6 完成状态与实施证据 | 历史档案；已实施，原始方案另行冻结 |
 | [docs/history/architecture-chronicle-2026-10.md](docs/history/architecture-chronicle-2026-10.md) 及 docs/history 其他档案 | 本文前身的编年原文、各次改造交付记录 | 历史档案，无规范效力 |

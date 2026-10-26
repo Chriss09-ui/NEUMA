@@ -1,4 +1,4 @@
-import type { PiSessionPort, SessionMessage } from "../runtime/pi-port.mjs";
+import type { PiSessionPort, SessionMessage } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger, isArray } from "../runtime/type-boundary.mjs";
 import { architectureTurnBudgetSpent, designHash, validateReview } from "./architecture-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
@@ -9,7 +9,7 @@ import { readArchitectureFidelityProgress } from "./architecture-fidelity-progre
 import { readReviewProgressCheckpoint } from "./architecture-review-progress.mjs";
 import { validateArchitecturePriorFindings } from "./architecture-prior-findings.mjs";
 import { diagnoseRequirementFidelitySubmission } from "./requirement-fidelity.mjs";
-import { readPiBoundSession } from "../runtime/pi-session-state.mjs";
+import { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { architectureFidelityContextVersion, architectureRecordFidelityContext } from "./architecture-fidelity-context.mjs";
 import { copyFidelityReviewEvidenceContext } from "./architecture-fidelity-revision.mjs";
 
@@ -82,13 +82,12 @@ export async function readArchitectureRejectedFidelityReference(record: unknown,
       || !isInteger(diagnostic.submissionAttempts) || diagnostic.submissionAttempts < 1
       || ["schemaRejections", "semanticRejections"].some((key) => !isInteger(diagnostic[key]) || diagnostic[key] < 0)
       || !feedbackCore(diagnostic.lastSubmission)) return null;
-    const sdk = await import("@earendil-works/pi-coding-agent");
-    const native = await readPiBoundSession(sdk, { cwd: cwd!, ...(signal ? { signal } : {}), storage: { directory: directory!, file: state.sessionFile,
+    const native = await readExecutionHistory({ cwd: cwd!, ...(signal ? { signal } : {}), storage: { directory: directory!, file: state.sessionFile,
       binding: { version: 1, role: "requirement-fidelity", agentId: binding.source.agentId, candidateHash: binding.source.candidateHash,
         parentBindingHash: checkpoint.bindingHash, reviewHash: checkpoint.reviewHash, contextHash: state.contextHash, schemaHash: state.schemaHash,
         ...(contextVersion ? { contextVersion } : {}) } } });
     if (native.bindingHash !== state.sessionBindingHash) return null;
-    const messages = native.manager.getBranch().filter((entry) => entry.type === "message").map((entry) => entry.message);
+    const messages = native.entries.filter((entry) => entry.type === "message").map((entry) => entry.message);
     const expectedUser = designHash({ ...context, contextHash: contract.contextHash });
     let original = 0;
     for (const message of messages) {
@@ -100,10 +99,10 @@ export async function readArchitectureRejectedFidelityReference(record: unknown,
     }
     if (original !== 1 || messages.some((message) => message.role === "toolResult" && message.toolName === TOOL && message.isError !== true)) return null;
     const usable = messages.filter((message) => !localBudgetStop(message)), assistantIndex = usable.findLastIndex((message) => message.role === "assistant");
-    const assistant = usable[assistantIndex], calls = assistant?.role === "assistant" ? assistant.content.filter((part) => part.type === "toolCall") : undefined;
+    const assistant = usable[assistantIndex], calls = assistant?.role === "assistant" && Array.isArray(assistant.content) ? assistant.content.filter((part) => part.type === "toolCall") : undefined;
     if (assistant?.role !== "assistant" || assistant.stopReason !== "toolUse" || calls?.length !== 1 || calls[0]!.name !== TOOL || typeof calls[0]!.id !== "string") return null;
     const call = calls[0]!, receipts = usable.filter((message) => message.role === "toolResult" && message.toolCallId === call.id);
-    if (usable.flatMap((message) => message.role === "assistant" ? message.content.filter((part) => part.type === "toolCall" && part.id === call.id) : []).length !== 1
+    if (usable.flatMap((message) => message.role === "assistant" && Array.isArray(message.content) ? message.content.filter((part) => part.type === "toolCall" && part.id === call.id) : []).length !== 1
       || receipts.length !== 1 || objectFields(receipts[0]).toolName !== TOOL || usable.indexOf(receipts[0]!) <= assistantIndex) return null;
     const feedback = rejectedReceipt(receipts[0]), submission = jsonCopy(call.arguments, { maxBytes: 256 * 1024 });
     const checked = diagnoseRequirementFidelitySubmission(context, submission, { schemaHash: state.schemaHash });

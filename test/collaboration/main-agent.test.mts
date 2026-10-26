@@ -129,6 +129,43 @@ test("主 Agent 长期对话自动保存、成功历史恢复，创建和发送�
   assert.equal(saved.messages.length, 4); assert.equal(saved.requests.length, 2);
 });
 
+test("持久接受后断开提交连接，重复提交和快照补齐仍只执行一次，旧窗口不能停止新请求", async t => {
+  const started = deferred(), release = deferred();
+  const f = await fixture(t, async record => { started.resolve(); record.release = release.resolve; await release.promise; });
+  const connection = new AbortController();
+  const accepted = await f.main.submit(f.input(), { signal: connection.signal });
+  await started.promise; connection.abort();
+  assert.equal(f.records[0]!.aborted, false);
+  assert.equal((await f.main.submit(f.input())).operation.operationId, accepted.operation.operationId);
+  await assert.rejects(f.main.submit(f.input("different")), /不同内容/);
+  const unchanged = await f.main.operation(f.conversation.id, "turn_once", accepted.cursor);
+  if (!unchanged.changed) assert.equal(unchanged.snapshot, null);
+  const reset = await f.main.operation(f.conversation.id, "turn_once", "other-window:999999");
+  assert.equal(reset.reset, true); assert.equal(reset.snapshot!.conversation.messages.length, 2);
+  release.resolve(); await f.main.active.get(f.conversation.id)?.result;
+  const completed = await f.main.operation(f.conversation.id, "turn_once", accepted.cursor);
+  assert.equal(completed.snapshot!.status, "complete"); assert.equal(f.records.length, 1);
+  const second = await f.main.submit(f.input("second", "second"));
+  await assert.rejects(f.main.cancel(f.conversation.id, { operationId: "second", generation: accepted.operation.generation }), /旧窗口/);
+  await f.main.cancel(f.conversation.id, second.operation);
+});
+
+test("接受保存失败不能启动模型；重建主会话仅恢复查看，不重放中断请求", async t => {
+  const f = await fixture(t);
+  const write = f.main.store.write.bind(f.main.store);
+  f.main.store.write = async () => { throw new Error("synthetic disk failure"); };
+  await assert.rejects(f.main.submit(f.input())); assert.equal(f.records.length, 0);
+  f.main.store.write = write;
+  const before = await f.main.store.get(f.conversation.id);
+  assert.equal(before.requests.length, 0);
+  const accepted = await f.main.submit(f.input());
+  await f.main.active.get(f.conversation.id)?.result;
+  const restored = new MainAgent({ config: f.config, dataDir: f.dataDir, agents: f.agents, collaboration: f.collaboration, sessionFactory: model(f.records) });
+  await restored.ready; t.after(() => restored.close());
+  const observed = await restored.operation(f.conversation.id, accepted.operation.operationId);
+  assert.equal(observed.snapshot!.status, "complete"); assert.equal(f.records.length, 1);
+});
+
 test("删除主对话清除消息与草稿，墓碑重启后仍拒绝读取、写入和创建回执重放", async (t) => {
   const f = await fixture(t);
   await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "open_worker" });

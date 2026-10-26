@@ -3,7 +3,7 @@ import type { ArchitectureContext, ArchitectureIssue, ArchitectureDesign, Requir
 import type { ArchitectureBlueprint, ArchitectureModule, CandidateDraft, StageSchemaOptions, StageAssemblyOptions } from "../contracts/architecture-stages.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { StoredArchitectureRecord } from "./architecture-controller-port.mjs";
-import type { Progress, SessionStorage } from "../runtime/pi-port.mjs";
+import type { Progress, SessionStorage } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
 type DesignStage = "blueprint" | "module" | "integration";
 interface DesignStageState { key: string; modelCalls: number; sessionStartCalls: number; generation: number; sessionRef: { file: string } | null;

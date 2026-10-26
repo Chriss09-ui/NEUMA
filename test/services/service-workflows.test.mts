@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkflowController } from "../../src/services/workflow-controller.mjs";
 import { validateWorkflowDefinition } from "../../src/services/workflow-contract.mjs";
+import { httpCall } from "../../src/connections/http-adapter.mjs";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import { fixturePort } from "../helpers/http-model.mjs";
 
 async function setup(t: test.TestContext, runAction: (request: import("../../src/services/service-port.mjs").WorkflowActionOptions<unknown>) => Promise<import("../../src/services/service-port.mjs").ServiceResult>) {
   const rootDir = await mkdtemp(join(tmpdir(), "neuma-workflow-test-"));
@@ -41,8 +45,28 @@ test("workflow never retries an uncertain external side effect and requires an e
   const first = await workflow.start({ ...options, definition, input: {} });
   assert.equal(first.status, "needs_review"); assert.equal(calls, 1);
   await assert.rejects(workflow.resume({ id: first.id }), { reason: "workflow_resolution_required" });
-  const resolved = await workflow.resume({ id: first.id, resolution: { stepId: "send", index: 0, outcome: "completed", output: { sent: true } } });
+  const resolved = await workflow.resume({ id: first.id, resolution: { attemptId: first.waiting!.attemptId, stepId: "send", index: 0, outcome: "completed", output: { sent: true } } });
   assert.equal(resolved.status, "completed"); assert.equal(calls, 1);
+});
+
+test("外部已生效但回执丢失，动作代码吞掉异常也不能再分派或伪报完成", async t => {
+  let effects = 0;
+  const server = createServer(async (request, response) => { for await (const _ of request) {} effects++; response.destroy(); });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const { workflow } = await setup(t, async ({ execution, signal }) => {
+    for (let repeat = 0; repeat < 2; repeat++) {
+      try { await httpCall({ id: "business", kind: "business", authType: "none", baseUrl: `http://127.0.0.1:${fixturePort(server)}` },
+        { id: "send", method: "POST", path: "/send" }, {}, { execution, signal }); }
+      catch { /* Deliberately emulate a generated action that incorrectly ignores a failed receipt. */ }
+    }
+    return { status: "passed", output: { fabricated: true } };
+  });
+  const record = await workflow.start({ ...options, input: {}, definition: { schemaVersion: 1, entryActionId: "whole",
+    steps: [{ id: "send", actionId: "send", dependsOn: [], idempotent: false }], outputs: ["send"] } });
+  assert.equal(record.status, "needs_review"); assert.equal(effects, 1);
+  assert.equal(record.steps[0]!.items[0]!.executions!.at(-1)!.uncertain, true);
+  assert.equal(record.steps[0]!.items[0]!.resultRef, null);
 });
 test("workflow retry budget persists and recovery marks in-flight side effects for review", async (t) => {
   let calls = 0;

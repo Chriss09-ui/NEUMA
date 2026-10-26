@@ -1,7 +1,7 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { ArchitectureDesign, ArchitectureIssue, ReviewDiagnosticIssue } from "../contracts/architecture.mjs";
-import type { SessionStorage } from "../runtime/pi-port.mjs";
+import type { SessionStorage } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger, isArray, isRecord } from "../runtime/type-boundary.mjs";
 interface RevisionSource { version: number; candidateHash: string; reviewHash: string; issuesHash: string; progressHash: string; pipelineId: string; modelCalls: number }
 export type ReviewRevisionCheckpoint = { schemaVersion: 1; schemaHash: string; bindingHash: string; source: RevisionSource;

@@ -1,3 +1,4 @@
+import { isExecutionAttempt, executionOutcome } from "../runtime/execution-attempt.mjs";
 import type { JsonValue, UnknownRecord } from "../contracts/json.mjs";
 import type { ApplicationTaskInput, ApplicationTask, TaskArtifact, TaskRecord, ApplicationState } from "../contracts/application.mjs";
 import type { AgentStoragePort } from "../runtime/storage-port.mjs";
@@ -30,6 +31,7 @@ function checkedTask(value: unknown, id: string): ApplicationTask {
     || (task.resumeReceipts !== undefined && (!isArray(task.resumeReceipts) || task.resumeReceipts.some((item) => {
       const receipt = objectFields(item); return typeof receipt.mutationId !== "string" || typeof receipt.requestHash !== "string";
     })))) throw new InputError("应用任务记录无效，请保留原文件");
+  if (task.execution !== undefined && !isExecutionAttempt(task.execution)) throw new InputError("应用执行尝试记录无效");
   // Only the storage envelope is trusted. Action inputs/results retain their independent schema gates.
   return task as ApplicationTask;
 }
@@ -93,7 +95,7 @@ export class ApplicationTaskStore {
     const tasks = record.tasks.map((task) => {
       if (taskFinished(task)) return task;
       const interrupted = { ...task, events: [...task.events], status: "interrupted",
-        error: "NEUMA 已重启，任务已中断；请核实外部操作后重新提交。", finishedAt: now() };
+        error: task.execution && executionOutcome(task.execution) === "not_started" ? "NEUMA 已重启，任务尚未分派；可重新提交。" : "NEUMA 已重启，任务已中断；请核实外部操作后重新提交。", finishedAt: now() };
       this.event(interrupted, "interrupted", { error: interrupted.error }); changed = true;
       return interrupted;
     });
@@ -105,7 +107,7 @@ export class ApplicationTaskStore {
       if (interrupted) await this.save(id, interrupted);
     });
   }
-  view(task: ApplicationTask) { const { events, mutationId, requestHash, ...value } = task; return structuredClone({ ...value, taskId: task.id }); }
+  view(task: ApplicationTask) { const { events, mutationId, requestHash, ...value } = task; return structuredClone({ ...value, taskId: task.id, ...(task.execution ? { executionOutcome: executionOutcome(task.execution) } : {}) }); }
   async create(id: string, input: ApplicationTaskInput) {
     await this.ready;
     return this.serial(id, async () => {

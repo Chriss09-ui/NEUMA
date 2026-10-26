@@ -1,9 +1,9 @@
-import type { SessionMessage } from "../runtime/pi-port.mjs";
+import type { SessionMessage } from "../runtime/execution-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { DevelopmentCandidateDesign } from "./development-controller-types.mjs";
 import type { DevelopmentTask, DevelopmentCase } from "../contracts/development.mjs";
-import type { NeumaTool } from "../runtime/pi-port.mjs";
-import type { ContextEvent } from "@earendil-works/pi-coding-agent";
+import type { NeumaTool } from "../runtime/execution-port.mjs";
+import type { ContextEvent } from "../runtime/execution-port.mjs";
 import { objectFields, isRecord, isInteger, isArray } from "../runtime/type-boundary.mjs";
 interface ContextTask { id?: string; dependsOn?: string[]; requirementIds?: string[]; acceptanceIds?: string[]; feedback?: unknown;
   status?: unknown; attempts?: unknown; repairs?: unknown; turns?: unknown; integration?: unknown; title?: unknown; description?: unknown; goal?: unknown; summary?: unknown; nextAction?: unknown }

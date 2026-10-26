@@ -6,6 +6,7 @@ type Resource = Awaited<ReturnType<Client["listResources"]>>["resources"][number
 import { createHash } from "node:crypto";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { connectionHeaders, validateSchema } from "./http-adapter.mjs";
+import type { ExecutionDispatch } from "../runtime/execution-attempt.mjs";
 
 const fail = (reason: string, message: string) => Object.assign(new Error(message), { reason });
 const canonical = (value: unknown): unknown => value && typeof value === "object" ? Array.isArray(value) ? value.map(canonical) : Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(objectFields(value)[key])])) : value;
@@ -49,7 +50,7 @@ export class MCPAdapter {
         resources: resources.map(({ uri, name, description, mimeType }) => ({ uri, name, description, mimeType, contractHash: contractHash({ uri, mimeType }) })) };
     });
   }
-  async call(connection: ConnectionRuntimeConfiguration, operation: ConnectionOperation, input: UnknownRecord, { signal, discovery }: { signal?: AbortSignal | undefined; discovery?: ConnectionDiscovery | undefined } = {}) {
+  async call(connection: ConnectionRuntimeConfiguration, operation: ConnectionOperation, input: UnknownRecord, { signal, discovery, execution }: { signal?: AbortSignal | undefined; discovery?: ConnectionDiscovery | undefined; execution?: ExecutionDispatch | undefined } = {}) {
     validateSchema(operation.inputSchema, input);
     return this.withClient(connection, signal, async (client) => {
       if (operation.tool) {
@@ -57,16 +58,21 @@ export class MCPAdapter {
         const approved = discovery?.tools?.find((entry) => entry.name === operation.tool);
         if (!tool || !approved || approved.contractHash !== contractHash({ name: tool.name, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema })) throw fail("connection_contract_changed", "MCP 工具契约已变化，请重新发现并核验连接");
         validateSchema(tool.inputSchema, input);
-        const result = await client.callTool({ name: operation.tool, arguments: input }, { ...(signal ? { signal } : {}), timeout: operation.timeoutMs ?? 60000 });
-        if (result.isError) throw fail("service_failed", "MCP 工具报告操作未完成");
-        validateSchema(operation.outputSchema, result.structuredContent ?? result, "invalid_response"); return result;
+        await execution?.beforeDispatch(); signal?.throwIfAborted();
+        try {
+          const result = await client.callTool({ name: operation.tool, arguments: input }, { ...(signal ? { signal } : {}), timeout: operation.timeoutMs ?? 60000 });
+          if (result.isError) throw fail("service_failed", "MCP 工具报告操作未完成");
+          validateSchema(operation.outputSchema, result.structuredContent ?? result, "invalid_response"); return result;
+        } catch (error) { await execution?.markUnknown(); throw error; }
       }
       if (operation.resourceUri) {
         const resources = await pages(client, "listResources", "resources", signal), resource = resources.find((entry) => entry.uri === operation.resourceUri);
         const approved = discovery?.resources?.find((entry) => entry.uri === operation.resourceUri);
         if (!resource || !approved || approved.contractHash !== contractHash({ uri: resource.uri, mimeType: resource.mimeType })) throw fail("connection_contract_changed", "MCP 资源范围已变化，请重新核验连接");
         const options = { ...(signal ? { signal } : {}), timeout: 60000, cache: "no-store" };
-        return client.readResource({ uri: operation.resourceUri }, options);
+        await execution?.beforeDispatch(); signal?.throwIfAborted();
+        try { return await client.readResource({ uri: operation.resourceUri }, options); }
+        catch (error) { await execution?.markUnknown(); throw error; }
       }
       throw fail("operation_not_designed", "未指定已评审的 MCP 工具或资源");
     });

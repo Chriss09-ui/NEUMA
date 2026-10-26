@@ -1,4 +1,4 @@
-import type { NeumaTool } from "./pi-port.mjs";
+import type { NeumaTool } from "./execution-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import { objectFields, isArray, isInteger, errorField } from "./type-boundary.mjs";

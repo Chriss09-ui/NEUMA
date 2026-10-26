@@ -1,7 +1,8 @@
+import type { OperationReference } from "./operation-view.js";
 import type { AgentProfile, AgentRequirement, Message, RuntimeOperation, RuntimeResult, RuntimeState } from "./ui-types.js";
 import type { HistoryItem } from "./agent-conversations.js";
 import type { UiRoute } from "./browser-events.js";
-interface AgentOperation extends RuntimeOperation { kind: string; sourceKey: string; cancelPromise?: Promise<RuntimeResult> | undefined; development?: boolean | undefined }
+interface AgentOperation extends RuntimeOperation { reference?: OperationReference; background?: boolean; cancelRequested?: boolean; kind: string; sourceKey: string; cancelPromise?: Promise<RuntimeResult> | undefined; development?: boolean | undefined }
 interface AgentState extends RuntimeState { sourceKey: string; sequence: number; inspectionError: boolean; rebuildRequested: boolean; error: string; buildError: string; label: string; operation: AgentOperation | null }
 type SidebarHistory = ReturnType<typeof createSidebarHistory<HistoryItem>>;
 import { pageElement, type PageElements } from "./page-elements.js";
@@ -678,6 +679,7 @@ function inspectAgent(agent: AgentRequirement, refresh = false) {
       Object.assign(state, agentBuildState(agent, result));
       if (state.status === "ready" || state.architecture?.status === "passed") state.buildError = "";
       syncProfile(agent.id, result.profile || result.agent?.profile, profileVersion);
+      if (result.operationReference?.running) void restoreMaking(agent, state, result.operationReference);
     } catch (caught) { const error = errorInfo(caught);
       if (!valid()) return;
       state.status = "error"; state.inspectionError = true;
@@ -694,6 +696,28 @@ function inspectAgent(agent: AgentRequirement, refresh = false) {
   return inspection.promise;
 }
 
+async function restoreMaking(agent: AgentRequirement, state: AgentState, reference: OperationReference) {
+  if (state.operation) return;
+  const operation: AgentOperation = { kind: reference.domain, reference, controller: new AbortController(), sourceKey: state.sourceKey };
+  state.operation = operation;
+  try {
+    const result = await api.watchOperation(reference, { signal: operation.controller.signal, onProgress(progress) {
+      if (state.operation !== operation || state.sourceKey !== operation.sourceKey) return;
+      operation.phase = progress.phase; operation.label = progress.label; state.label = progress.label || "正在继续查看任务…";
+      if (progress.architecture) state.architecture = progress.architecture;
+      if (progress.development) state.development = progress.development;
+      renderSidebar(); if (visible(agent.id)) renderControls(agent);
+    } });
+    if (state.operation === operation && state.sourceKey === operation.sourceKey) applyDevelopmentResult(agent, state, result);
+  } catch (caught) {
+    if (state.operation === operation && !operation.controller.signal.aborted) state.error = errorInfo(caught).message || "连接中断，可重新加载查看。";
+  } finally {
+    await operation.cancelPromise?.catch(() => {});
+    if (state.operation === operation) state.operation = null;
+    renderSidebar(); if (visible(agent.id)) renderWorkspace();
+  }
+}
+
 async function buildAgent(id: string, queueIfBusy = false, architectureRepair?: unknown) {
   const agent = agents.find((item) => item.id === id);
   if (!agent) return;
@@ -705,7 +729,7 @@ async function buildAgent(id: string, queueIfBusy = false, architectureRepair?: 
     return;
   }
   state.rebuildRequested = false;
-  const operation: AgentOperation = { kind: "build", controller: new AbortController(), sourceKey: agentSourceKey(agent), phase: "designing", label: "正在设计与检查…" };
+  const operation: AgentOperation = { kind: "build", background: true, controller: new AbortController(), sourceKey: agentSourceKey(agent), phase: "designing", label: "正在设计与检查…" };
   const profileVersion = profileVersions.get(id) || 0;
   state.sequence++;
   state.operation = operation;
@@ -721,8 +745,9 @@ async function buildAgent(id: string, queueIfBusy = false, architectureRepair?: 
   renderSidebar();
   if (visible(id)) renderControls(agent);
   try {
-    const result = await api.build(agent, { architectureRepair, signal: operation.controller.signal, onProgress(progress) {
+    const result = await api.startBuild(agent, { architectureRepair, signal: operation.controller.signal, onProgress(progress) {
       if (operation.controller.signal.aborted || state.operation !== operation) return;
+      if (progress.type === "operation") { operation.reference = progress.operation as OperationReference; if (operation.cancelRequested) void stopAgent(id); return; }
       if (progress.type === "architecture_thought") {
         state.architectureThoughts = rememberArchitectureThought(state.architectureThoughts, progress);
         if (visible(id) && makingView?.agentId === id && makingView.syncThoughts) makingView.syncThoughts();
@@ -771,6 +796,7 @@ async function buildAgent(id: string, queueIfBusy = false, architectureRepair?: 
         state.error = "生成状态尚未确认，请刷新后核实已保存的进度。";
     }
   } finally {
+    await operation.cancelPromise?.catch(() => {});
     if (state.operation === operation) state.operation = null;
     renderSidebar();
     if (visible(id)) renderWorkspace();
@@ -800,15 +826,17 @@ async function developAgent(id: string) {
     return;
   }
   if (state.operation || item.turn || (!development.canStart && !development.canResume)) return;
-  const operation: AgentOperation = { kind: "development", controller: new AbortController(), sourceKey: agentSourceKey(agent),
+  const operation: AgentOperation = { kind: "development", background: true, controller: new AbortController(), sourceKey: agentSourceKey(agent),
     phase: development.record?.phase || "intake", label: development.canResume ? "正在核实已保存的研发进度…" : "正在接收已通过的设计…" };
   const profileVersion = profileVersions.get(id) || 0;
   state.sequence++; state.operation = operation; state.status = "developing"; state.error = item.error = ""; state.buildError = "";
   state.label = operation.label!;
   renderSidebar(); if (visible(id)) renderControls(agent);
   try {
-    const result = await api.develop(id, { resume: development.canResume, signal: operation.controller.signal, onProgress(progress) {
-      if (!currentDevelopmentOperation(id, state, operation) || operation.controller.signal.aborted || progress.type !== "status") return;
+    const result = await api.startDevelopment(id, { resume: development.canResume, signal: operation.controller.signal, onProgress(progress) {
+      if (!currentDevelopmentOperation(id, state, operation) || operation.controller.signal.aborted) return;
+      if (progress.type === "operation") { operation.reference = progress.operation as OperationReference; if (operation.cancelRequested) void stopAgent(id); return; }
+      if (progress.type !== "status") return;
       if (developmentPhases.some(([phase]) => phase === progress.phase)) operation.phase = progress.phase;
       if (typeof progress.label === "string") state.label = operation.label = progress.label;
       if (agentDevelopmentState(agent, { architecture: state.architecture, development: progress.development }).record)
@@ -837,6 +865,7 @@ async function developAgent(id: string) {
       state.error = recoveryError.message || "研发状态暂时无法确认，请刷新页面读取已保存的进度。";
     }
   } finally {
+    await operation.cancelPromise?.catch(() => {});
     if (state.operation === operation) state.operation = null;
     renderSidebar(); if (visible(id)) renderWorkspace();
     await rebuildIfRequested(id, state);
@@ -849,8 +878,9 @@ async function stopDevelopment(id: string) {
   const state = runtime(agent), local = state.operation?.kind === "development";
   if (state.operation?.stopping || (!local && (state.operation || !agentDevelopmentState(agent, state).active))) return;
   const operation: AgentOperation = local ? state.operation! : { kind: "development-stop", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
+  if (operation.background && !operation.reference) { operation.cancelRequested = true; state.label = "请求正在保存，接受后将停止。"; if (visible(id)) renderControls(agent); return; }
   operation.stopping = true; state.sequence++; state.operation = operation;
-  operation.cancelPromise = api.cancelDevelopment(id);
+  operation.cancelPromise = operation.reference ? api.cancelOperation(operation.reference) : api.cancelDevelopment(id);
   operation.controller.abort();
   if (visible(id)) renderControls(agent);
   try {
@@ -906,8 +936,9 @@ async function stopMaking(id: string) {
   const operation: AgentOperation = state.operation || { kind: "build-stop", controller: new AbortController(), sourceKey: agentSourceKey(agent) };
   const valid = () => runtimes.get(id) === state && state.operation === operation && state.sourceKey === operation.sourceKey
     && agents.some((entry) => entry.id === id);
+  if (operation.background && !operation.reference) { operation.cancelRequested = true; state.label = "请求正在保存，接受后将停止。"; if (visible(id)) renderControls(agent); return; }
   operation.stopping = true; state.sequence++; state.rebuildRequested = false; state.operation = operation;
-  operation.cancelPromise = api.cancelBuild(id);
+  operation.cancelPromise = operation.reference ? api.cancelOperation(operation.reference) : api.cancelBuild(id);
   operation.controller.abort();
   if (visible(id)) renderControls(agent);
   try {
@@ -925,6 +956,7 @@ async function stopMaking(id: string) {
       if (valid()) applyDevelopmentResult(agent, state, snapshot);
     } catch {}
   } finally {
+    await operation.cancelPromise?.catch(() => {});
     if (state.operation === operation) state.operation = null;
     renderSidebar(); if (visible(id)) renderWorkspace();
   }
@@ -1018,6 +1050,8 @@ document.addEventListener("neuma:agents-changed", (event) => {
     if (state.sourceKey === sourceKey) continue;
     state.sourceKey = sourceKey;
     state.sequence++;
+    if (state.operation?.reference) state.operation.cancelPromise = api.cancelOperation(state.operation.reference);
+    else if (state.operation?.background) state.operation.cancelRequested = true;
     state.operation?.controller.abort();
     state.status = "stale";
     if (!state.activeRuntime) state.application = null;

@@ -1,6 +1,6 @@
 import { Ajv } from "ajv";
 import type { ModelConfig } from "../contracts/model.mjs";
-import type { PiSessionOptions, PiSessionPort, VerificationSessionFactory, VerificationSessionPort, NeumaTool } from "../runtime/pi-port.mjs";
+import type { PiSessionOptions, PiSessionPort, VerificationSessionFactory, VerificationSessionPort, NeumaTool } from "../runtime/execution-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { RequirementItem } from "../contracts/architecture.mjs";
 import { objectFields, isArray } from "../runtime/type-boundary.mjs";
@@ -13,7 +13,7 @@ interface HandoffOptions { issues: unknown; context: HandoffContext; sessionFact
 import { InputError } from "../requirements/core.mjs";
 import { createModelContextReader, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
 import { projectVerificationMessages } from "./architecture-model-context.mjs";
-import { createPiSession } from "../runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash } from "./architecture-contract.mjs";

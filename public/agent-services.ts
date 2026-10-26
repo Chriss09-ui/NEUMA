@@ -126,7 +126,7 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
           if (row!.task!.status === "needs_review") {
             const outcome = row!.choice?.value;
             if (!["completed", "retry"].includes(outcome!)) throw new Error("请先核实上次操作的结果，再选择继续方式。");
-            resolution = { stepId: row!.task!.waiting.stepId, index: row!.task!.waiting.index, outcome,
+            resolution = { ...(row!.task!.waiting.attemptId ? { attemptId: row!.task!.waiting.attemptId } : {}), stepId: row!.task!.waiting.stepId, index: row!.task!.waiting.index, outcome,
               ...(outcome === "completed" ? { output: row!.read?.() } : { explicitlyApproved: true }) };
           }
           return api.resumeTask(item.id, row!.task!.id, resolution ? undefined : row!.read?.() ?? {}, row!.task!.version, `resume_${globalThis.crypto.randomUUID()}`, resolution);

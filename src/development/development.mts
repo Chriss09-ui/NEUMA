@@ -1,12 +1,13 @@
+import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { RegisteredTool as ToolDefinition } from "../runtime/execution-port.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolResult, ToolSchema } from "../contracts/tools.mjs";
 import type { DevelopmentPlan, DevelopmentWork, DevelopmentReview } from "../contracts/development.mjs";
 import type { AcceptanceLedger } from "../contracts/verification.mjs";
 import type { AgentStoragePort } from "../runtime/storage-port.mjs";
-import type { SessionFactory, NeumaTool, RegisteredTool, RawToolInput } from "../runtime/pi-port.mjs";
+import type { SessionFactory, NeumaTool, RegisteredTool, RawToolInput } from "../runtime/execution-port.mjs";
 import type { DevelopmentSnapshot } from "./development-workspace.mjs";
 import type { PlanningDraftSnapshot } from "./development-artifacts.mjs";
 import type { SubmissionIssue } from "./development-diagnostics.mjs";
@@ -31,7 +32,7 @@ interface RunOptions { signal?: AbortSignal | undefined; onProgress?: (value: Un
 type RoleOptions<T> = { kind: DevelopmentRole; tools?: RegisteredTool[]; validate: (value: unknown) => T | Promise<T>; counter: { turns: number }; limit: number; scope: unknown };
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
-import { createPiSession, classifyModelFailure } from "../runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { developmentModelOutputBudget } from "../runtime/model-limits.mjs";
 import { toolInputValidation } from "../runtime/tool-input-diagnostics.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
@@ -498,7 +499,7 @@ export class DevelopmentController {
     bindDevelopmentSessionFile(persistent.reference, handle.session.sessionFile);
     await this.save(ctx);
     ctx.handles.add(handle);
-    if (ctx.signal.aborted) { await handle.session.abort?.(); this.dispose(ctx, handle); this.guard(ctx); }
+    if (ctx.signal.aborted) { await handle.session.abort?.(); await this.dispose(ctx, handle); this.guard(ctx); }
     handle.unsubscribe = handle.session.subscribe?.((event) => {
       if ((event.type === "message_end" || event.type === "turn_end") && event.message?.role === "assistant")
         handle.lastAssistant = event.message;
@@ -529,9 +530,14 @@ export class DevelopmentController {
     return handle;
   }
 
-  dispose(ctx: DevelopmentContext, handle?: DevelopmentHandle) {
+  async dispose(ctx: DevelopmentContext, handle?: DevelopmentHandle) {
     if (!handle || handle.disposed) return;
-    handle.disposed = true; handle.unsubscribe?.(); handle.session.dispose?.(); ctx.handles.delete(handle);
+    handle.disposed = true;
+    const lifecycle = new ExecutionLifecycle();
+    lifecycle.own("handle", () => ctx.handles.delete(handle));
+    lifecycle.own("session", () => handle.session.dispose?.());
+    lifecycle.own("subscription", () => handle.unsubscribe?.());
+    await lifecycle.close();
   }
 
   async ask<T>(ctx: DevelopmentContext, handle: DevelopmentHandle<T>, payload: DevelopmentContextPayload): Promise<T> {
@@ -686,7 +692,7 @@ export class DevelopmentController {
       ctx.record.pendingReview = null;
       delete handle.reference.pendingResult;
       await this.save(ctx); return result;
-    } finally { this.dispose(ctx, handle); }
+    } finally { await this.dispose(ctx, handle); }
   }
 
   async plan(ctx: DevelopmentContext) {
@@ -779,7 +785,7 @@ export class DevelopmentController {
           throw new Stop(review.summary);
         await this.correction(ctx, "plan");
       }
-    } finally { this.dispose(ctx, handle); delete ctx.planningWorkspace; }
+    } finally { await this.dispose(ctx, handle); delete ctx.planningWorkspace; }
   }
 
   async verify(ctx: DevelopmentContext, task: TaskProgress | null, snapshot: DevelopmentSnapshot) {
@@ -874,7 +880,7 @@ export class DevelopmentController {
         }
         await this.correction(ctx, "task", task, () => { task.attempts++; task.nextAction = "implement"; });
       }
-    } finally { this.dispose(ctx, handle); }
+    } finally { await this.dispose(ctx, handle); }
   }
 
   async run(architecture: PassedDevelopmentArchitecture, { signal, onProgress = () => {}, resume = false, activate }: RunOptions = {}) {
@@ -1087,10 +1093,11 @@ export class DevelopmentController {
       await this.save(ctx);
       return clone(ctx.record);
     } finally {
-      signal?.removeEventListener("abort", abort);
-      for (const handle of [...ctx.handles]) this.dispose(ctx, handle);
-      if (this.active.get(agentId) === ctx) this.active.delete(agentId);
-      ctx.finish();
+      const lifecycle = new ExecutionLifecycle();
+      lifecycle.own("run", () => { if (this.active.get(agentId) === ctx) this.active.delete(agentId); ctx.finish(); });
+      for (const handle of [...ctx.handles].reverse()) lifecycle.own("role", () => this.dispose(ctx, handle));
+      lifecycle.own("abort-listener", () => signal?.removeEventListener("abort", abort));
+      await lifecycle.close();
     }
   }
 

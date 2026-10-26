@@ -1,3 +1,4 @@
+import type { ExecutionDispatch } from "../runtime/execution-attempt.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { ConnectionConfiguration, ConnectionRuntimeConfiguration, ConnectionVersion, ConnectionDefinition, ConnectionRoot, ConnectionProfile, ConnectionSnapshot, ConnectionCredentials, ConnectionDiscovery, OAuthConfiguration } from "../contracts/connection.mjs";
@@ -385,7 +386,7 @@ export class AgentConnectionStore {
     }
     return this.oauth.cancel(`${id}:${record.profile}:${connectionId}`);
   }
-  async call(snapshot: ConnectionSnapshot, { connectionId, operationId, input = {} }: { connectionId: string; operationId: string; input?: unknown }, { requirements = [], signal, test = false, resolveFile, scope = "private" }: ConnectionOptions & { test?: boolean; resolveFile?: ConnectionFileResolver | undefined; scope?: string } = {}) {
+  async call(snapshot: ConnectionSnapshot, { connectionId, operationId, input = {} }: { connectionId: string; operationId: string; input?: unknown }, { requirements = [], signal, test = false, resolveFile, scope = "private", execution }: ConnectionOptions & { execution?: ExecutionDispatch | undefined; test?: boolean; resolveFile?: ConnectionFileResolver | undefined; scope?: string } = {}) {
     if (typeof scope !== "string" || scope === "group" || scope.length > 300 || /[\r\n\0]/.test(scope)) throw fail("invalid_connection_scope", "连接调用范围无效");
     const connection = await this.assertActive(snapshot, connectionId);
     if (connection.kind !== "business") throw fail("invalid_connection", "此操作需要业务连接");
@@ -401,8 +402,8 @@ export class AgentConnectionStore {
     try {
       await this.assertActive(snapshot, connectionId); signal?.throwIfAborted();
       const result = connection.protocol === "mcp"
-        ? await this.mcp.call(connection, operation, input, { signal, discovery: connection.discovery })
-        : await httpCall(connection, operation, input, { fetchImpl: (...args) => this.fetchImpl(...args), signal,
+        ? await this.mcp.call(connection, operation, input, { signal, discovery: connection.discovery, execution })
+        : await httpCall(connection, operation, input, { fetchImpl: (...args) => this.fetchImpl(...args), signal, execution,
           resolveFile: resolveFile ?? (this.resolveFile ? (reference, options) => this.resolveFile!(snapshot.agentId, reference, options) : undefined) });
       await this.assertActive(snapshot, connectionId); signal?.throwIfAborted();
       await this.recordResult(snapshot, connectionId, true);

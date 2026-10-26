@@ -1,13 +1,13 @@
 import type { JsonValue } from "../contracts/json.mjs";
 import type { AcceptanceItem, ConversationDecision } from "../contracts/verification.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
-import type { VerificationSessionFactory, VerificationSessionPort, NeumaTool } from "../runtime/pi-port.mjs";
+import type { VerificationSessionFactory, VerificationSessionPort, NeumaTool } from "../runtime/execution-port.mjs";
 interface VerificationOptions { sessionFactory?: VerificationSessionFactory; config?: ModelConfig; cwd?: string; dataDir?: string; acceptance: AcceptanceItem[];
   message: string; reply: string; toolEvidence?: unknown; signal?: AbortSignal | undefined }
 type ConversationObservation = { message: string; reply: string; toolEvidence: JsonValue }
 import { Ajv } from "ajv";
 import { InputError } from "../requirements/core.mjs";
-import { createPiSession } from "../runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { knownModelLimits, reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { acceptanceEvidenceHash, validateAcceptanceVerification } from "./acceptance-contract.mjs";

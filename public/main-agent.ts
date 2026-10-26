@@ -1,5 +1,7 @@
+import { observeOperation, type OperationReference } from "./operation-view.js";
 import type { AgentRequirement } from "./ui-types.js";
 import type { GroupMessageView, MainConversation, MainPanelContext } from "./ui-api-types.js";
+interface MainObservation { id: string; controller: AbortController; reply?: GroupMessageView | undefined; reference?: OperationReference; cancelRequested?: boolean }
 interface MutationRequest { mutationId: string; [key: string]: unknown }
 import { pageElement, type PageElements } from "./page-elements.js";
 import { errorInfo } from "./ui-types.js";
@@ -9,7 +11,7 @@ import { createMainContext } from "./main-context.js";
 import { button, messageRow, node, notice } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = <K extends keyof PageElements>(id: K) => pageElement(document, id);
-let selected: MainConversation | null = null, records: MainConversation[] = [], operation: { id: string; controller: AbortController; reply: GroupMessageView } | null = null, loading = false, loaded = false, sequence = 0;
+let selected: MainConversation | null = null, records: MainConversation[] = [], operation: MainObservation | null = null, loading = false, loaded = false, sequence = 0;
 let retryRequest: { id: string; fingerprint: string; body: MutationRequest } | null = null, page = "chat", listing: Promise<void> | null = null, activationSequence = 0, activationRetry: { key: string; body: MutationRequest } | null = null;
 let needsConversationReload = false, needsHistoryReload = false;
 let removing: string | null = null, historyMenu: { id: string; trigger: HTMLButtonElement; row: HTMLElement } | null = null, historyRevision = 0;
@@ -171,7 +173,7 @@ async function select(id: string) {
     needsConversationReload = false;
     notice(byId("main-error"), ""); render();
   } catch (caught) { const error = errorInfo(caught); showRecovery(error.message); }
-  finally { if (current === sequence) { loading = false; render(); } }
+  finally { if (current === sequence) { loading = false; render(); restoreObservation(); } }
 }
 async function readList() {
   const revision = historyRevision;
@@ -256,6 +258,34 @@ async function create({ preserveInput = true } = {}) {
     if (page === "chat" && (document.activeElement === originalFocus || document.activeElement === document.body)) byId("main-message").focus();
   }
 }
+async function followMain(reference: OperationReference, running: MainObservation) {
+  running.reference = reference;
+  return observeOperation(cursor => api.mainOperation(reference.ownerId, reference.operationId, cursor, { signal: running.controller.signal }), reference, {
+    signal: running.controller.signal,
+    disconnected: () => { if (operation === running) notice(byId("main-progress"), "连接中断，正在重新连接；后台任务继续执行。", false); },
+    update(snapshot) {
+      if (operation !== running || selected?.id !== reference.ownerId) return true;
+      selected = snapshot.conversation; running.reply = undefined;
+      applyContext(snapshot.context, { syncRequirement: true }); render();
+      notice(byId("main-progress"), snapshot.status === "running" ? "正在处理，进度已保存…" : "");
+      return snapshot.status !== "running";
+    },
+  });
+}
+function detachObservation() {
+  const current = operation; operation = null; current?.controller.abort(); controls();
+}
+function restoreObservation() {
+  if (operation || loading || page !== "chat") return;
+  const request = selected?.requests?.findLast(item => item.status === "running");
+  if (!selected || !request) return;
+  const reference: OperationReference = { version: 1, domain: "main", ownerId: selected.id, operationId: request.mutationId, generation: request.assistantId };
+  const running: MainObservation = { id: selected.id, controller: new AbortController(), reference };
+  operation = running; controls();
+  void followMain(reference, running).catch(caught => {
+    if (operation === running && !running.controller.signal.aborted) showRecovery(`${errorInfo(caught).message} 后台任务继续保留，可重新加载查看。`);
+  }).finally(() => { if (operation === running) { operation = null; render(); void list(); } });
+}
 async function send({ message: shortcutMessage }: { message?: string | undefined } = {}) {
   const shortcut = shortcutMessage !== undefined;
   const attachmentIds = materials.refs(), supplied = (shortcut ? shortcutMessage! : byId("main-message").value).trim();
@@ -268,7 +298,7 @@ async function send({ message: shortcutMessage }: { message?: string | undefined
   const request = retryRequest?.id === id && retryRequest.fingerprint === fingerprint
     ? retryRequest.body : { ...input, mutationId: crypto.randomUUID() };
   retryRequest = { id, fingerprint, body: request };
-  const running: { id: string; controller: AbortController; reply: GroupMessageView } = { id, controller: new AbortController(), reply: { role: "assistant", content: "", status: "running" } };
+  const running: MainObservation & { reply: GroupMessageView } = { id, controller: new AbortController(), reply: { role: "assistant", content: "", status: "running" } };
   operation = running;
   selected.messages ||= [];
   const previous = selected.messages.length;
@@ -277,8 +307,9 @@ async function send({ message: shortcutMessage }: { message?: string | undefined
   if (!shortcut) byId("main-message").value = "";
   needsConversationReload = false; notice(byId("main-error"), ""); render();
   try {
-    const result = await api.mainTurn(id, request, { signal: running.controller.signal, onProgress(event) {
+    const result = await api.mainTurnBackground(id, request, { signal: running.controller.signal, onProgress(event) {
       if (operation !== running || running.controller.signal.aborted) return;
+      if (event.type === "operation") { running.reference = event.operation as OperationReference; if (running.cancelRequested) void api.stopMainOperation(running.reference).catch(caught => showRecovery(`停止尚未确认：${errorInfo(caught).message}`)); return; }
       if (event.type === "text-start") running.reply.content = "";
       if (event.type === "text-delta") running.reply.content += event.delta || "";
       if (event.type === "status") notice(byId("main-progress"), event.label || "正在联系智能体、整理工作…");
@@ -296,7 +327,7 @@ async function send({ message: shortcutMessage }: { message?: string | undefined
       document.dispatchEvent(new CustomEvent("neuma:groups-changed"));
     }
     retryRequest = null; materials.consume();
-  } catch (caught) { const error = errorInfo(caught);
+  } catch (caught) { if (operation !== running) return; const error = errorInfo(caught);
     const stopped = running.controller.signal.aborted || error.reason === "cancelled";
     if (stopped || error.reason) retryRequest = null;
     selected.context = previousContext; contextPanel.restore(previousPanel);
@@ -305,7 +336,8 @@ async function send({ message: shortcutMessage }: { message?: string | undefined
     if (!shortcut && !byId("main-message").value.trim()) byId("main-message").value = message;
     showRecovery(stopped ? "本轮已停止，已保存的内容可重新加载查看。" : `${error.message} 当前输入已保留，可重试或重新加载。`, !stopped);
   } finally {
-    if (operation === running) operation = null;
+    if (operation !== running) return;
+    operation = null;
     render(); await list();
     if (page === "chat") byId("main-message").focus();
   }
@@ -375,7 +407,7 @@ byId("main-create-group").addEventListener("click", () => document.dispatchEvent
 byId("main-cancel").addEventListener("click", async () => {
   const current = operation; if (!current) return;
   byId("main-cancel").disabled = true;
-  try { await api.cancelMain(current.id); current.controller.abort(); }
+  try { if (current.reference) await api.stopMainOperation(current.reference); else { current.cancelRequested = true; notice(byId("main-progress"), "请求正在保存，接受后将停止。"); } }
   catch (caught) { const error = errorInfo(caught); showRecovery(`停止尚未确认：${error.message}`); }
   finally { byId("main-cancel").disabled = false; }
 });
@@ -383,9 +415,13 @@ document.addEventListener("neuma:route", (event) => {
   closeHistoryMenu();
   page = event.detail.page;
   contextPanel.route(page);
-  if (page === "chat" && !loaded) void list();
+  if (page !== "chat") detachObservation();
+  else if (!loaded) void list();
+  else if (selected && !loading && !pendingHistoryNavigation) void select(selected.id);
 });
 document.addEventListener("neuma:main-requirements", (event) => void activateRequirements(event.detail?.agentId));
 document.addEventListener("neuma:agent-runtime-change", (event) => contextPanel.runtime(event.detail));
 historyLayout();
 void list();
+
+window.addEventListener?.("pagehide", detachObservation);

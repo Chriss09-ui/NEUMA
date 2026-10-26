@@ -33,7 +33,7 @@ async function agentFixture(t: test.TestContext, sessionFactory:SessionFactory) 
     config: { llmConfigured: true }, ready: Promise.resolve(), closing: null, runtimeEpoch: 0,
     agents: new Map([["alpha", { id: "alpha", name: "助手", revision: 1, instructions: "处理材料",
       draft: { goal: { value: "处理材料" } }, toolIds: [] }]]),
-    sessions: new Map(), collaborationSessions: new Map(), removing: new Set(), builds: new Map(), scheduler: new AgentScheduler(),
+    sessions: new Map(), collaborationSessions: new Map(), removing: new Set(), builds: new Map(), scheduler: new AgentScheduler(), operations: { close: async () => {} },
     activities: { start: async () => ({ id: "test-activity" }), update: async () => {}, persistence: Promise.resolve() },
     configured() {}, prune() {}, approvedDefinition: () => true,
     getActiveArchitecture: async () => ({ delivery: "ready" }), workspace: async () => root,

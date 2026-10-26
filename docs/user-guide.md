@@ -39,6 +39,12 @@ npm start
 
 派发或查看具体群任务时，右侧按需展示该群的实际状态、成员分工和成果入口。点击关闭可恢复宽幅聊天，再点击“需求说明”或“群任务”重新展开；关闭面板不清除需求，也不停止群任务。切换历史会话时，草稿和群任务引用跟随各自会话恢复，不能混入另一条对话。
 
+## 刷新后继续查看任务
+
+主对话、智能体制作和研发请求保存成功后，由本机后台继续执行。刷新、切换页面或关闭浏览器不会停止已接受任务；重新打开原对话或智能体即可继续查看已保存的进度。短暂断线会尝试重新连接，不能据此判断任务失败。点击“停止回复”或“终止生成”才发送停止请求；如果请求还在保存，会在取得任务编号后停止。
+
+关闭 NEUMA 后端或关机后，未完成任务按实际记录显示中断；需要继续时沿用原检查点、预算和授权，不会自动重跑。已完成的外部操作不能通过停止撤销。
+
 ## 群组与全局管理
 
 点击“我的群组”旁的加号，填写名称、用途并选择成员。成员能力卡展示擅长工作、输入、产出及就绪状态；未就绪成员可以保留在群里，但不能实际认领执行。
@@ -196,4 +202,8 @@ Pi 复用 `NEUMA_LLM_CHAT_URL`、`NEUMA_LLM_MODEL`、`NEUMA_LLM_API_KEY`；接�
 npm test
 ```
 
-接口：`GET /api/health` 返回连接配置状态。主入口使用 `POST /api/main/conversations/:id/messages`，在同一会话中路由普通对话、需求和群任务；`POST /api/main/conversations/:id/requirements` 接收 `{mutationId, agentId?}`，激活新建或指定 Agent 的迭代草稿。主回复流中的 `context` 事件告知界面展示需求或群任务，完成响应携带持久化会话及当前上下文。独立的 `POST /api/requirements/turn` 继续保留，接收 `{ "message": "...", "draft": null, "lastQuestion": "", "userMessages": [] }`，返回更新草稿、`needs_input` 或 `ready`、至多一个追问、摘要、Jev 参与状态及诊断摘要。失败响应只返回安全的错误类别、HTTP 状态和重试次数，不返回密钥或接口原始响应。
+接口：`GET /api/health` 返回连接配置状态。主入口使用 `POST /api/main/conversations/:id/operations` 提交 `{mutationId,message,attachmentIds?}`；接受回执包含 `operation` 与快照。`GET /api/main/conversations/:id/operations/:operationId?after=<cursor>` 续看，`POST` 同路径 `/cancel` 携带 `{generation}` 精确停止。相同请求编号不能更换内容；重复查看不执行任务。兼容 `POST /api/main/conversations/:id/messages` 仍在同一会话中路由普通对话、需求和群任务，保留原流式等待与断开取消语义；`POST /api/main/conversations/:id/requirements` 接收 `{mutationId, agentId?}`，激活新建或指定 Agent 的迭代草稿。主回复流中的 `context` 事件告知界面展示需求或群任务，完成响应携带持久化会话及当前上下文。独立的 `POST /api/requirements/turn` 继续保留，接收 `{ "message": "...", "draft": null, "lastQuestion": "", "userMessages": [] }`，返回更新草稿、`needs_input` 或 `ready`、至多一个追问、摘要、Jev 参与状态及诊断摘要。失败响应只返回安全的错误类别、HTTP 状态和重试次数，不返回密钥或接口原始响应。
+
+制作与研发的后台入口：`POST /api/agents/:id/operations`，构建传 `{kind:"build",mutationId,name,draft,architectureRepair?}`，研发传 `{kind:"development",mutationId,resume}`。使用 `GET /api/agents/:id/operations/:operationId?after=<cursor>` 查看，`POST` 同路径 `/cancel` 传 `{generation}` 停止。智能体详情的 `operationReference` 可定位正在执行的任务。游标变化时按返回的完整快照替换显示，不重复拼接正文。旧 `/api/agents/build`、`/api/agents/:id/development/stream` 继续兼容。
+
+已有群和应用任务分别可用 `GET /api/groups/:groupId/tasks/:taskId/view` 与 `GET /api/agents/:id/tasks/:taskId/view` 获得同格式的快照和游标；仍使用各自原存储及调度，群操作保留原作用范围校验。
