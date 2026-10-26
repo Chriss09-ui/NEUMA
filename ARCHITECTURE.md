@@ -32,7 +32,7 @@
 
 - 源码版由 `src/server.mts` 启动，数据、配置及 Agent cwd 绑定源码仓库根（`.neuma/`、`.env`）；安装版 `bin/neuma.cjs` 先核实 Node 版本再加载 CLI，默认数据根为用户主目录 `.neuma/`，安装目录只读取代码与静态资源。
 - `installation-runtime` 先取得数据根的系统互斥锁并绑定端口，之后才创建可能恢复研发状态的 Store；初始化完成前健康检查 503，重复启动复用同一数据目录的实际就绪服务。
-- 退出顺序：停止接收新操作 → 取消请求/模型/目录窗口和受管任务 → 等待持久化与项目关闭 → 释放端口及数据锁。
+- 退出顺序：停止接收新操作 → 取消请求/模型/目录窗口、受管任务、构建与会话 → 关闭应用、网关、连接等独立组件并临时关闭托管服务 → 等待构建及忙碌会话排空后执行第二次、永久的服务关闭 → 释放会话、等待持久化与项目关闭 → 释放端口及数据锁。各独立组件的清理失败分别记录并继续其余清理，最后统一抛出；并发关闭共享同一清理结果；托管服务临时关闭后可恢复，永久关闭不可恢复。
 - `installation-migration` 是不同数据根间的显式复制迁移：持双端锁、分块复制、校验元数据和快照、成功后整体 rename 发布；目标非空拒绝，凭据、模型配置与 SDK 临时数据不复制。
 - 平台辅助程序：macOS 隔离用 `sandbox-exec`（已实际验证）；Linux 辅助程序在 Ubuntu 24.04/26.04、x64/ARM64 云端原生检查通过；Windows LPAC/Job Object 已编译、真实隔离启动仍在验证。项目管理（Job Object/进程组/`/proc` 扫描）与生成程序隔离不复用权限。缺文件、缺系统能力或探测失败均明确阻塞执行，不提供无隔离回退。
 - 本机 Skill 管理（`src/skills/`，`/api/skills`）是独立维护页面：受控目录发现、编辑、导入、回收。它不属于任何 Agent 的运行工具目录；`controlledResources()` 不发现宿主 Skills、Prompts 或 AGENTS 文件，只提供程序指定的系统提示与 NEUMA 内置受控扩展；管理索引不注入工作会话。
@@ -220,7 +220,7 @@
 - 自有后端、前端、测试、安装和维护代码全部严格 TypeScript 编译，`allowJs` / `noCheck` 关闭。Node `.mts`、浏览器 `.ts`、CLI `.cts` 分别发射为 `.mjs`、`.js`、`.cjs`；运行产物位于 `dist/ts-build/package/`，保持安装包层级。源码根不能直接打包，使用 `npm run package:pack`；不手改 dist。`skipLibCheck` 仅用于锁定 Pi 依赖的上游声明错误，不适用于自有共享声明。
 - 构建检查自有 TS 的覆盖、入口、静态资源、执行权限和源码摘要，拒绝遗留自有 JS、编译错误、冲突及陈旧产物；五组配置隔离共享声明、Node、浏览器 ESM、iframe 普通脚本和测试环境。构建失败使上一代产物失去有效标记。
 - 测试命令先构建再运行产物目录中的测试。`scripts/run-tests.mts` 维护 unit / integration / browser 分层清单，递归发现 `test/` 及其领域子目录，条目以相对 `test/` 根的完整路径标识（不同目录的同名文件不冲突）；顶层仅保留 server 组装测试与 native-check 固定引用的 4 个入口。unit、integration 默认移除外部浏览器环境变量并关闭外部浏览器；browser 保留显式启用机制（`NEUMA_REQUIRE_BROWSER_TESTS=1` / `NEUMA_TEST_BROWSER`），macOS 默认只尝试 Dia，无界面参数兼容性待验证；跳过、未运行或启动失败不能记作通过。运行保持串行（`--test-concurrency=1`）。`test/types/` 下的编译期反例只编译不执行；`test/helpers/`、`test/fixtures/` 不进入运行集合。`.github/workflows/native-check.yml` 固定引用 4 个测试的编译产物路径。
-- 仓库规范检查 `npm run check:hygiene`（`scripts/hygiene*.mts`，由 `scripts/build.mjs` 的 hygiene 分支临时严格编译执行，无 dist 源码树可运行，只读不执行应用模块）：模块依赖用 TypeScript 官方 API 解析，区分运行时与纯类型依赖，规则覆盖未解析导入、契约运行时导入、R3 提取模块反向依赖、组装入口导入者、`src/architecture/` → `src/agents/` 跨域运行时边界、运行时依赖环登记（当前 2 组）与非字面量动态导入按文件计数登记；测试登记要求发现集合与 TEST_LAYERS 完全对应（混合层文件例外须登记理由）；文档引用校验 README/AGENTS/ARCHITECTURE 的仓库内链接（本地文档库引用不判错）；明确残留拒绝同名 JS 产物与未迁移自有 JS。全部例外必须写明理由，失效时同样报错。
+- 仓库规范检查 `npm run check:hygiene`（`scripts/hygiene*.mts`，由 `scripts/build.mjs` 的 hygiene 分支临时严格编译执行，无 dist 源码树可运行，只读不执行应用模块）：模块依赖用 TypeScript 官方 API 解析，区分运行时与纯类型依赖，规则覆盖未解析导入、契约运行时导入、R3 提取模块反向依赖、组装入口导入者、`src/architecture/` → `src/agents/` 跨域运行时边界、运行时依赖环登记（当前 2 组）与非字面量动态导入按文件计数登记；测试登记要求发现集合与 TEST_LAYERS 完全对应（混合层文件例外须登记理由）；文档引用校验 README/AGENTS/ARCHITECTURE 的部分仓库内链接（docs/ 专项文档链接仍须另行核对）；明确残留拒绝同名 JS 产物与未迁移自有 JS。全部例外必须写明理由，失效时同样报错。
 - 模型协议测试使用本机模拟接口，不调用真实模型服务；外部检索和业务服务用可控替身。测试通过不表示真实业务模型质量或外部服务集成已验收。
 - CI（`.github/workflows/typescript-check.yml`）：Mac ARM64、Node 22.22.2 / 24.15.0 / 26.3.0 的代码与包检查。发布验证当前只覆盖 Mac ARM64；Linux/Windows 打包与既有原生工作流不在当前收口范围。安装版只运行已编译 JS，不依赖 TypeScript 或源码仓库依赖；打包、解包 smoke 和独立生产依赖安装验证同一编译代次。
 - 每日验证入口：`npm run typecheck`（最快类型检查）、`npm run check:hygiene`（仓库规范检查，已接入 Mac CI）、`npm run test:unit` / `test:integration`（分层）、`npm test`（全量回归，提交或推送前执行）、`npm run package:pack` / `test:package:smoke` / `test:package:install`（涉及包内容时）。页面检查优先使用 Codex 内置浏览器；仅明确需要外部浏览器验收时运行 `npm run test:browser`。
@@ -249,7 +249,7 @@
 | 本文 | 当前架构基线（职责、约束、状态归属、验证入口） | 现行 |
 | [docs/development-layer-design.md](docs/development-layer-design.md) | 研发层五阶段详细设计 | 现行（AGENTS 指定同步维护） |
 | [docs/user-guide.md](docs/user-guide.md)、[docs/agent-capabilities-and-services.md](docs/agent-capabilities-and-services.md)、[docs/connections-guide.md](docs/connections-guide.md)、[docs/npm-installation.md](docs/npm-installation.md) | 用户说明、能力与连接、安装 | 现行说明 |
-| [docs/typescript-migration-plan.md](docs/typescript-migration-plan.md) 及 `typescript-m*-results.md` | 已完成迁移的范围、当前入口与各阶段证据；原始方案另行冻结 | M0–M8 已实施，仅 Mac ARM64 发布验证 |
-| [docs/repository-organization-plan.md](docs/repository-organization-plan.md) | 仓库整理 R1、R3–R6 的完成状态、实现入口与实施证据 | 已实施，原始方案另行冻结 |
+| [docs/history/typescript-migration-completion-2026-10-25.md](docs/history/typescript-migration-completion-2026-10-25.md) 及同目录 `typescript-m*-results-*.md` | TypeScript 迁移 M0–M8 完成说明与各阶段验证证据 | 历史档案；迁移已实施，仅 Mac ARM64 发布验证 |
+| [docs/history/repository-organization-completion-2026-10-25.md](docs/history/repository-organization-completion-2026-10-25.md) 及同目录 R1–R6 实施记录 | 仓库整理 R1、R3–R6 完成状态与实施证据 | 历史档案；已实施，原始方案另行冻结 |
 | [docs/history/architecture-chronicle-2026-10.md](docs/history/architecture-chronicle-2026-10.md) 及 docs/history 其他档案 | 本文前身的编年原文、各次改造交付记录 | 历史档案，无规范效力 |
 | `AGENT_PROTOTYPE.md`、`本地测试记录/` | 原型档案、本机测试冻结证据 | 历史档案，无规范效力 |
