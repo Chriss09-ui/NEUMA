@@ -7,9 +7,12 @@ coverage/
 .neuma/
 dist/
 
-# Keep development Markdown local; publish only the root README.
+# Keep Markdown outside the maintained project documentation local.
 *.[mM][dD]
 !/README.md
-# docs/ has its own local-only repository (no remote); never track its control files here.
+!/AGENTS.md
+!/ARCHITECTURE.md
+!/docs/**/*.[mM][dD]
+# Preserve the local docs repository metadata without tracking it here.
 docs/.gitignore
 docs/.git/
