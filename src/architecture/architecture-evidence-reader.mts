@@ -1,6 +1,6 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
-import type { NeumaTool } from "../runtime/pi-port.mjs";
+import type { NeumaTool } from "../runtime/execution-port.mjs";
 import { objectFields, isRecord, isInteger } from "../runtime/type-boundary.mjs";
 type EvidenceSource = "candidate" | "requirements" | "runtimeCapabilities" | "contextManifest" | "evidence" | "confirmedRequirementContext" | "deferredVerifications" | "acceptanceAdapterGuide";
 interface EvidenceRequest { source: EvidenceSource; pointer: string; offset?: number; limit?: number; pathOffset?: number; acceptanceId?: string }

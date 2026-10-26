@@ -3,6 +3,7 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ConnectionFileResolver } from "./connection-port.mjs";
 import { objectFields, isRecord, isArray } from "../runtime/type-boundary.mjs";
 import { Ajv } from "ajv";
+import type { ExecutionDispatch } from "../runtime/execution-attempt.mjs";
 
 const ajv = new Ajv({ strict: false, allErrors: false, validateFormats: false });
 const fail = (reason: string, message: string) => Object.assign(new Error(message), { reason });
@@ -54,7 +55,7 @@ export async function readResponse(response: Response, { maxBytes = 20 * 1024 * 
   if (!size) return null;
   try { return JSON.parse(Buffer.concat(parts).toString("utf8")); } catch { throw fail("invalid_response", "接口未返回有效 JSON 数据"); }
 }
-export async function httpCall(connection: ConnectionRuntimeConfiguration, operation: ConnectionOperation, input: UnknownRecord, { fetchImpl = fetch, signal, resolveFile }: { fetchImpl?: typeof fetch; signal?: AbortSignal | undefined; resolveFile?: ConnectionFileResolver | undefined } = {}) {
+export async function httpCall(connection: ConnectionRuntimeConfiguration, operation: ConnectionOperation, input: UnknownRecord, { fetchImpl = fetch, signal, resolveFile, execution }: { fetchImpl?: typeof fetch; signal?: AbortSignal | undefined; resolveFile?: ConnectionFileResolver | undefined; execution?: ExecutionDispatch | undefined } = {}) {
   if (typeof operation.method !== "string" || !["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(operation.method)) throw fail("invalid_operation", "接口方法不受支持");
   validateSchema(operation.inputSchema, input);
   let path = operation.path;
@@ -95,10 +96,13 @@ export async function httpCall(connection: ConnectionRuntimeConfiguration, opera
   const timeout = Math.min(600000, Math.max(1000, operation.timeoutMs ?? 60000));
   const active = AbortSignal.any([AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]);
   let response;
-  try { response = await fetchImpl(url.href, { method: operation.method, headers, ...(body === undefined ? {} : { body }), redirect: "manual", signal: active }); }
-  catch { if (active.aborted) throw active.reason; throw fail("network_failed", "连接服务失败，请检查接口地址及网络"); }
-  const result = await readResponse(response, { signal: active }); validateSchema(operation.outputSchema, result, "invalid_response");
-  return result;
+  await execution?.beforeDispatch(); active.throwIfAborted();
+  try {
+    try { response = await fetchImpl(url.href, { method: operation.method, headers, ...(body === undefined ? {} : { body }), redirect: "manual", signal: active }); }
+    catch { if (active.aborted) throw active.reason; throw fail("network_failed", "连接服务失败，请检查接口地址及网络"); }
+    const result = await readResponse(response, { signal: active }); validateSchema(operation.outputSchema, result, "invalid_response");
+    return result;
+  } catch (error) { await execution?.markUnknown(); throw error; }
 }
 
 export function importOpenApi(input: unknown) {

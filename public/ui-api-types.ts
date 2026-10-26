@@ -12,7 +12,7 @@ export interface ConnectionResult { version?: number | undefined; connection?: C
 interface DiscoveryItem { title?: string | undefined; name?: string | undefined; description?: string | undefined; id?: string | undefined; uri?: string | undefined }
 export interface ServiceAction { id: string; title?: string | undefined; name?: string | undefined }
 export interface ServiceValueSchema extends Omit<ValueSchema, "properties" | "items"> { title?: string; properties?: Record<string, ServiceValueSchema>; items?: ServiceValueSchema }
-export interface WorkflowTask { id: string; status: string; version: number; waiting: { stepId?: string | undefined; index?: number | undefined; prompt?: string | undefined; inputSchema?: ServiceValueSchema | undefined; outputSchema?: ServiceValueSchema | undefined } }
+export interface WorkflowTask { id: string; status: string; version: number; waiting: { attemptId?: string | undefined; stepId?: string | undefined; index?: number | undefined; prompt?: string | undefined; inputSchema?: ServiceValueSchema | undefined; outputSchema?: ServiceValueSchema | undefined } }
 export interface ServiceEnvironment { available?: boolean | undefined; version?: string | undefined }
 export interface ServiceGateway { enabled?: boolean | undefined; status?: string | undefined; deliveryVersion?: string | undefined; message?: string | undefined; actionIds?: string[] | undefined; apiUrl?: string | undefined; mcpUrl?: string | undefined }
 export interface ServicesResult { deliveryVersion?: string | undefined; environment?: { docker?: ServiceEnvironment | undefined; managed?: { available?: boolean | undefined; javascript?: ServiceEnvironment | undefined; python?: ServiceEnvironment | undefined } | undefined } | undefined; service?: { language: string; host: string; status?: string | undefined; operations?: ServiceAction[] | undefined; actions?: ServiceAction[] | undefined } | null | undefined; workers?: { status: string }[] | undefined; history?: { deliveryVersion: string; active: boolean }[] | undefined; gateway?: ServiceGateway | undefined; workflowTasks?: WorkflowTask[] | undefined; actions?: ServiceAction[] | undefined }
@@ -81,6 +81,10 @@ export interface AgentRuntime {
  develop(id: string, options?: StreamOptions & { resume?: boolean | undefined }): Promise<ReplyResult>;
  cancelDevelopment(id: string): Promise<RuntimeResult>;
  cancelBuild(id: string): Promise<RuntimeResult>;
+ startBuild(agent: Pick<AgentRequirement, "id" | "name" | "draft">, options?: StreamOptions & { architectureRepair?: unknown }): Promise<RuntimeResult>;
+ startDevelopment(id: string, options?: StreamOptions & { resume?: boolean | undefined }): Promise<RuntimeResult>;
+ watchOperation(reference: import("./operation-view.js").OperationReference, options?: StreamOptions): Promise<RuntimeResult>;
+ cancelOperation(reference: import("./operation-view.js").OperationReference): Promise<RuntimeResult>;
  build(agent: Pick<AgentRequirement, "id" | "name" | "draft">, options?: StreamOptions & { architectureRepair?: unknown }): Promise<ReplyResult>;
  turn(body: { agentId: string; sessionId: string; [key: string]: unknown }, options?: StreamOptions): Promise<ReplyResult>;
  cancel(sessionId: string): Promise<unknown>;
@@ -120,12 +124,17 @@ export interface CollaborationApi {
  mainMaterialUrl(id: string, materialId: string): string;
  uploadMainMaterial(id: string, file: File): Promise<{ attachment: Material }>;
  cancelMain(id: string): Promise<unknown>;
+ submitMain(id: string, body: unknown, options?: RequestOptions): Promise<import("./operation-view.js").OperationView<MainOperationSnapshot>>;
+ mainOperation(id: string, operationId: string, after?: string, options?: RequestOptions): Promise<import("./operation-view.js").OperationView<MainOperationSnapshot>>;
+ stopMainOperation(reference: import("./operation-view.js").OperationReference): Promise<unknown>;
+ mainTurnBackground(id: string, body: unknown, options?: StreamOptions): Promise<MainReplyResult>;
  mainTurn(id: string, body: unknown, options?: StreamOptions): Promise<MainReplyResult>;
 }
 export interface GroupTaskView { id: string; conversationId?: string | undefined; goal?: string | undefined; status: string; phase?: string | undefined; createdAt?: string | undefined; updatedAt?: string | undefined; result?: string | undefined; reason?: string | undefined; participants?: { id: string; name?: string | undefined }[] | undefined; children?: { assigneeId?: string | null | undefined; status: string; title: string }[] | undefined }
 export interface GroupConversationView extends GroupTaskView { taskId: string; tasks: GroupTaskView[]; order: number }
 export interface MainPanelContext { type: string; agentId?: string | undefined; groupId?: string | undefined; taskId?: string | undefined; draft?: import("./ui-types.js").RequirementDraft | undefined; requirement?: AgentRequirement | undefined; confirmed?: boolean | undefined; status?: string | undefined; lastQuestion?: string | undefined; name?: string | undefined; buildStatus?: string | undefined; buildState?: { status: string; handoff?: import("./ui-types.js").RequirementHandoff | undefined; updateStatus?: import("./ui-types.js").BuildPresentation | null | undefined } | undefined }
-export interface MainConversation { id: string; title: string; version: number; messages?: GroupMessageView[] | undefined; context?: MainPanelContext | null | undefined }
+export interface MainConversation { id: string; title: string; version: number; messages?: GroupMessageView[] | undefined; context?: MainPanelContext | null | undefined; requests?: { mutationId: string; assistantId: string; status: string }[] }
+export interface MainOperationSnapshot { reply: string; reason?: string | undefined; error: string | null; sources: MainUiSource[]; actions: MainUiAction[]; conversation: MainConversation; status: string; context: MainPanelContext | null }
 export interface MainUiAction { type: string; agentId?: string | undefined; requirement?: AgentRequirement | undefined }
 export interface MainUiSource { type: string; groupId?: string | undefined; operation?: string | undefined }
 export interface MainReplyResult extends ReplyResult { conversation?: MainConversation | undefined; context?: MainPanelContext | null | undefined; actions?: MainUiAction[] | undefined; sources?: MainUiSource[] | undefined }

@@ -41,11 +41,21 @@ try {
   writeResult({ ok: false, error: String(error.stack || error) });
 }
 </script>`);
+  return runBrowser(browser, pathToFileURL(page).href, root, { windowSize });
+}
+
+export async function browserPageResult(t: TestContext, browser: string, url: string, { windowSize }: { windowSize?: { width: number; height: number } } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "neuma-browser-page-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return runBrowser(browser, url, root, { windowSize });
+}
+
+async function runBrowser(browser: string, url: string, root: string, { windowSize }: { windowSize: { width: number; height: number } | undefined }) {
   const args = ["--headless", ...(windowSize ? [`--window-size=${windowSize.width},${windowSize.height}`] : []),
     "--disable-gpu", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
     "--host-resolver-rules=MAP * ~NOTFOUND", `--user-data-dir=${join(root, "profile")}`,
-    "--timeout=5000", "--dump-dom", pathToFileURL(page).href];
+    "--timeout=5000", "--dump-dom", url];
   const encoded = await new Promise<string>((resolve, reject) => {
     const grouped = process.platform !== "win32";
     const child = spawn(browser, args, { detached: grouped, stdio: ["ignore", "pipe", "pipe"] });

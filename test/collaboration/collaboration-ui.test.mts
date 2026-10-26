@@ -1,3 +1,5 @@
+import { mainOperationFixture } from "../helpers/main-operation-fixture.mjs";
+import { observeOperation } from "../../public/operation-view.js";
 import {pageElement} from "../../public/page-elements.js";
 import {errorInfo,objectFields} from "../../public/ui-types.js";
 import type { Group, GroupTask, GroupMessage, MemberCard, GroupArtifact } from "../../src/contracts/collaboration.mjs";
@@ -178,7 +180,7 @@ function setup(source: string, request: (path: string, options?: RequestInit) =>
     resolveAgentAvatar,
     renderGroupAvatar: (target: Element|null|undefined, group: { memberIds?: string[]|undefined; }|null|undefined, members: DisplayAgent[]|undefined) => renderGroup(target, group, members, { document }),
     createSelectMenu, createSidebarHistory, createGroupMentionComposer,
-    fetch: request, Response, ReadableStream, TextDecoder, TextEncoder, AbortController, structuredClone, URL, Blob,
+    observeOperation, fetch: source.includes(mainSource) ? mainOperationFixture(async (path, options) => { const response = await request(path, options); assert.ok(response instanceof Response); return response; }) : request, Response, ReadableStream, TextDecoder, TextEncoder, AbortController, structuredClone, URL, Blob,
     setTimeout: panelMotion ? (callback: () => unknown) => timeouts.push(callback) : setTimeout,
     clearTimeout: panelMotion ? (id: number) => clearedTimeouts.add(id) : clearTimeout,
     localStorage: { getItem: (key: string) => stored.get(key) || null, setItem: (key: string, value: string) => stored.set(key, value) },
@@ -2287,7 +2289,7 @@ test("主详情和历史的恢复状态独立，另一个读取成功不能隐�
   const requests: ({ "path": (string); "method": (string); })[] = []; let failHistory = false, failConversation = false;
   const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
     requests.push({ path, method: options.method || "GET" });
-    if (path.endsWith("/messages")) throw new Error("回复连接中断");
+    if (path.endsWith("/operations")) throw new Error("回复连接中断");
     if (path === "/api/main/conversations" && failHistory) throw new Error("历史读取中断");
     if (path === "/api/main/conversations/main-one" && failConversation) throw new Error("详情读取中断");
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
@@ -2305,7 +2307,7 @@ test("主详情和历史的恢复状态独立，另一个读取成功不能隐�
   assert.equal(ui.text("main-history-status"), ""); assert.equal(ui.text("main-error"), "");
   assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
   assert.equal(ui.get("main-message").value, "继续分析材料");
-  assert.deepEqual(requests.filter(({ method }) => method !== "GET"), [{ path: "/api/main/conversations/main-one/messages", method: "POST" }]);
+  assert.deepEqual(requests.filter(({ method }) => method !== "GET"), [{ path: "/api/main/conversations/main-one/operations", method: "POST" }]);
 });
 
 test("主历史使用纯气泡，移除身份与时间但保留正文中的称呼", async () => {
@@ -2331,13 +2333,13 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   const conversation = { id: "main-one", title: "持续工作", messages: [] };
   let streamController;
   const ui = setup(mainSource, async (path: string) => {
-    if (path.endsWith("/messages")) return new Response(new ReadableStream({ start(controller) { streamController = controller; } }),
+    if (path.endsWith("/operations")) return new Response(new ReadableStream({ start(controller) { streamController = controller; } }),
       { headers: { "content-type": "application/x-ndjson" } });
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
-  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "整理材料";
+  await ui.route({ page: "chat" }); await new Promise(resolve => setTimeout(resolve, 800)); ui.get("main-message").value = "整理材料";
   assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
-  await ui.submit("main-chat-form"); await settle();
+  await ui.submit("main-chat-form"); await new Promise(resolve => setTimeout(resolve, 800));
   assert.equal(ui.get("main-new-chat").disabled, true); assert.equal(ui.get("main-new-chat").hidden, false);
   assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, true);
   await mainHistoryMore(ui, conversation.id)!.click();
@@ -2349,15 +2351,15 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
     { type: "status", label: "正在整理材料…" }, { type: "text-start" },
     { type: "text-delta", delta: "已整理" }, { type: "text-delta", delta: "第一份材料" },
   ].map(value => JSON.stringify(value)).join("\n") + "\n"));
-  await settle(); reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
+  await new Promise(resolve => setTimeout(resolve, 800)); reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   const body = reply!.children.find(isBubble);
-  assert.equal(ui.text("main-progress"), "正在整理材料…"); assert.equal(ui.get("main-progress").hidden, false);
+  assert.equal(ui.text("main-progress"), "正在处理，进度已保存…"); assert.equal(ui.get("main-progress").hidden, false);
   assert.equal(body!.textContent, "已整理第一份材料"); assert.equal(body!.classes.has("streaming"), true);
   assert.equal(textOf(reply!), "已整理第一份材料");
   streamController!.enqueue!(new TextEncoder().encode(JSON.stringify({ type: "done", result: { reply: "已整理第一份材料",
     conversation: { ...conversation, messages: [{ role: "user", content: "整理材料" },
       { role: "assistant", content: "已整理第一份材料", status: "complete" }] } } }) + "\n"));
-  streamController!.close!(); await settle();
+  streamController!.close!(); await new Promise(resolve => setTimeout(resolve, 800));
   const completed = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   assert.equal(completed!.children.find(isBubble)!.classes.has("streaming"), false);
   assert.equal(ui.get("main-new-chat").disabled, false); assert.equal(ui.get("main-new-chat").hidden, false);
@@ -2809,7 +2811,7 @@ test("主助理失败后保留输入并复用消息操作，群外联系不会�
   const writes: WireBody[] = []; let failed = true;
   const conversation = { id: "main-one", title: "持续工作", messages: [] };
   const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
-    if (path.endsWith("/messages")) { writes.push(JSON.parse(String(options.body))); if (failed) { failed = false; throw new Error("连接断开"); }
+    if (path.endsWith("/operations")) { writes.push(JSON.parse(String(options.body))); if (failed) { failed = false; throw new Error("连接断开"); }
       return Response.json({ reply: "已创建", conversation: { ...conversation, messages: [{ role: "assistant", content: "已联系 #group/one", status: "complete" }] } }); }
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] }
       : path === "/api/activity" ? { groups: [], agents: [], tasks: [] } : { conversation });
@@ -2824,7 +2826,7 @@ test("主聊天成功创建群后侧栏立即读取真实列表，不切页或�
   const navigations: FixtureDetailEvent[] = [], conversation = { id: "main-one", title: "长期工作", messages: [] };
   const ui = setup(`(() => {\n${mainSource}\n})();\n(() => {\n${groupsSource}\n})();`, async (path: string, options:RequestInit = {}) => {
     if (path === "/api/groups") { listReads++; return Response.json({ groups: copy(savedGroups) }); }
-    if (path.endsWith("/messages")) {
+    if (path.endsWith("/operations")) {
       turns++; savedGroups = [group("created-group", "新建研究组")];
       return Response.json({ reply: "研究组已创建", context: null, conversation: { ...conversation, messages: [{ role: "assistant", content: "研究组已创建", status: "complete" }] },
         sources: [{ type: "group", groupId: "created-group", operation: "created" }] });
@@ -2848,7 +2850,7 @@ test("主助理仅在成功的群管理或群任务来源出现时通知群列�
   ] as const) {
     let notifications = 0;
     const conversation = { id: "main-one", title: "工作", messages: [{ role: "assistant", content: "旧回执", status: "complete", sources: [source] }] };
-    const ui = setup(mainSource, async (path: string) => Response.json(path.endsWith("/messages")
+    const ui = setup(mainSource, async (path: string) => Response.json(path.endsWith("/operations")
       ? { reply: "当前操作已确认", context: null, conversation, sources: [source] }
       : path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation }));
     ui.document.addEventListener("neuma:groups-changed", () => notifications++);
@@ -2909,7 +2911,7 @@ test("创建或选择主对话失败保留当前输入，首次自动建对话�
   const writes: WireBody[] = []; let created = false;
   const first = setup(mainSource, async (path: string, options:RequestInit = {}) => {
     if (path === "/api/main/conversations" && options.method === "POST") { created = true; return Response.json({ conversation }); }
-    if (path.endsWith("/messages")) { writes.push(JSON.parse(String(options.body))); return Response.json({ reply: "收到第一条", conversation: { ...conversation, messages: [{ role: "assistant", content: "收到第一条" }] } }); }
+    if (path.endsWith("/operations")) { writes.push(JSON.parse(String(options.body))); return Response.json({ reply: "收到第一条", conversation: { ...conversation, messages: [{ role: "assistant", content: "收到第一条" }] } }); }
     return Response.json(path === "/api/main/conversations" ? { conversations: created ? [conversation] : [] } : { conversation });
   });
   await first.route({ page: "chat" }); await settle(); first.get("main-message").value = "我的第一条工作要求";
@@ -2920,7 +2922,7 @@ test("服务器已取消或明确失败后主动重发使用新请求，取消�
   for (const reason of ["cancelled", "request_failed"]) {
     const conversation = { id: "main-one", title: "停止验收", messages: [] }, writes: WireBody[] = [];
     const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
-      if (path.endsWith("/messages")) {
+      if (path.endsWith("/operations")) {
         writes.push(JSON.parse(String(options.body)));
         if (writes.length === 1) return new Response([
           { type: "status", label: "正在处理…" }, { type: "text-start" }, { type: "text-delta", delta: "已输出的部分内容" },
@@ -2954,7 +2956,7 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
     requests.push(path);
     if (path.endsWith("/requirements")) { writes.push({ path, body: JSON.parse(String(options.body)) }); conversation = { ...conversation, context: ready }; return Response.json({ conversation, context: ready }); }
-    if (path.endsWith("/messages")) {
+    if (path.endsWith("/operations")) {
       writes.push({ path, body: JSON.parse(String(options.body)) });
       const context = { ...ready, status: "needs_build", confirmed: true, requirement, needsBuild: true };
       conversation = { ...conversation, context, messages: [...conversation.messages, { role: "user", content: "确认需求" }, { role: "assistant", content: "需求已保存，开始制作", status: "complete" }] };
@@ -2973,7 +2975,7 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   assert.match(ui.text("main-messages"), /上次的工作已保留/); assert.match(ui.text("main-context-content"), /文字材料|确认这些输入输出吗/);
   assert.match(ui.text("main-context-content"), /导出需求 JSON/); assertDisclosure(ui.get("main-context-panel"), true);
   await ui.get("main-context-content").querySelectorAll("button").find((item) => item.textContent === "确认需求并开始制作")!.click(); await settle();
-  assert.equal(writes[1]!.path, "/api/main/conversations/main-one/messages"); assert.equal(writes[1]!.body.message, "确认需求");
+  assert.equal(writes[1]!.path, "/api/main/conversations/main-one/operations"); assert.equal(writes[1]!.body.message, "确认需求");
   assert.equal(ui.get("main-message").value, "我稍后要补充的主聊天草稿");
   assert.equal(events.filter((event) => event.build).length, 1); assert.deepEqual(events.find!((event) => event.build)!.requirement, requirement);
   assert.equal(navigations.at(-1)?.page, "agent");
@@ -2997,8 +2999,10 @@ test("需求快捷确认成功、失败或停止都保留原输入及发送期�
         draft: { name: { value: "研究助手" } } };
       let conversation:FixtureConversation = { id: "main-one", title: "需求确认", context: ready, messages: [] }, release: ((value?:Response)=>void)|undefined;
       const writes: WireBody[] = [], ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
-        if (path.endsWith("/messages")) {
+        if (path.endsWith("/operations")) {
           writes.push(JSON.parse(String(options.body)));
+          if (outcome === "cancelled") return new Response(new ReadableStream({ start(controller) { release = () => controller.close(); } }),
+            { headers: { "content-type": "application/x-ndjson" } });
           return new Promise((resolve, reject) => {
             release = resolve;
             options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
@@ -3021,7 +3025,7 @@ test("需求快捷确认成功、失败或停止都保留原输入及发送期�
         ] };
         release!(Response.json({ reply: "需求已确认", conversation, context: null }));
       } else if (outcome === "error") release!(Response.json({ error: "确认暂时失败" }, { status: 500 }));
-      else await ui.get("main-cancel").click();
+      else { await ui.get("main-cancel").click(); release!(); }
       await settle();
       assert.equal(ui.get("main-message").value, expected, "结束后不能恢复快捷确认串或覆盖后续编辑");
       assert.equal(ui.get("main-send").disabled, false);
@@ -3125,17 +3129,17 @@ test("流式操作展开上下文后用户关闭，晚到的同一完成上下�
   const conversation = { id: "main-one", title: "工作", messages: [] };
   let streamController;
   const ui = setup(mainSource, async (path: string) => {
-    if (path.endsWith("/messages")) return new Response(new ReadableStream({ start(controller) { streamController = controller;
+    if (path.endsWith("/operations")) return new Response(new ReadableStream({ start(controller) { streamController = controller;
       controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: "context", context }) + "\n"));
     } }), { headers: { "content-type": "application/x-ndjson" } });
     return Response.json(path === "/api/groups/one" ? detail() : path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
-  await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "查看这个群的任务";
-  await ui.submit("main-chat-form"); await settle(); assertDisclosure(ui.get("main-context-panel"), true);
+  await ui.route({ page: "chat" }); await new Promise(resolve => setTimeout(resolve, 800)); ui.get("main-message").value = "查看这个群的任务";
+  await ui.submit("main-chat-form"); await new Promise(resolve => setTimeout(resolve, 800)); assertDisclosure(ui.get("main-context-panel"), true);
   await ui.get("main-context-close").click(); assert.equal(ui.timers.size, 0);
   streamController!.enqueue!(new TextEncoder().encode(JSON.stringify({ type: "done", result: { reply: "群任务已读取", context,
     conversation: { ...conversation, context, messages: [{ role: "assistant", content: "群任务已读取", status: "complete" }] } } }) + "\n")); streamController!.close!();
-  await settle(); assertDisclosure(ui.get("main-context-panel"), false); assert.equal(ui.get("main-context-open").hidden, false); assert.equal(ui.timers.size, 0);
+  await new Promise(resolve => setTimeout(resolve, 800)); assertDisclosure(ui.get("main-context-panel"), false); assert.equal(ui.get("main-context-open").hidden, false); assert.equal(ui.timers.size, 0);
   assert.match(ui.text("main-messages"), /群任务已读取/);
 });
 
@@ -3146,20 +3150,20 @@ test("流式需求预览后失败恢复原上下文与开合状态，不同步�
   const conversation = { id: "main-one", title: "工作", messages: [], context: original }, bridges: FixtureDetailEvent[] = [];
   let streamController;
   const ui = setup(mainSource, async (path: string) => {
-    if (path.endsWith("/messages")) return new Response(new ReadableStream({ start(controller) { streamController = controller;
+    if (path.endsWith("/operations")) return new Response(new ReadableStream({ start(controller) { streamController = controller;
       controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: "context", context: preview }) + "\n"));
     } }), { headers: { "content-type": "application/x-ndjson" } });
     if (path === "/api/agents/new-agent") return Response.json({ agent: null, architecture: null });
     return Response.json(path === "/api/groups/one" ? detail() : path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
   ui.document.addEventListener("neuma:main-requirement-saved", (event) => bridges.push(event.detail!));
-  await ui.route({ page: "chat" }); await settle(); await ui.get("main-context-close").click();
-  ui.get("main-message").value = "做一个新助手"; await ui.submit("main-chat-form"); await settle();
+  await ui.route({ page: "chat" }); await new Promise(resolve => setTimeout(resolve, 800)); await ui.get("main-context-close").click();
+  ui.get("main-message").value = "做一个新助手"; await ui.submit("main-chat-form"); await new Promise(resolve => setTimeout(resolve, 800));
   assertDisclosure(ui.get("main-context-panel"), true); assert.match(ui.text("main-context-title"), /需求/);
   streamController!.enqueue!(new TextEncoder().encode(JSON.stringify({ type: "error", error: "模型回复中断" }) + "\n")); streamController!.close!();
-  await settle(); assert.equal(bridges.length, 0); assertDisclosure(ui.get("main-context-panel"), false); assert.equal(ui.timers.size, 0);
+  await new Promise(resolve => setTimeout(resolve, 800)); assert.equal(bridges.length, 0); assertDisclosure(ui.get("main-context-panel"), false); assert.equal(ui.timers.size, 0);
   assert.equal(ui.get("main-message").value, "做一个新助手");
-  await ui.get("main-context-open").click(); await settle(); assert.equal(ui.text("main-context-title"), "研究小组");
+  await ui.get("main-context-open").click(); await new Promise(resolve => setTimeout(resolve, 800)); assert.equal(ui.text("main-context-title"), "研究小组");
 });
 
 test("主助理先建对话再上传，发送给群的材料在断线重试中保留，成功后显示下载链接", async () => {
@@ -3169,7 +3173,7 @@ test("主助理先建对话再上传，发送给群的材料在断线重试中�
   const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
     if (path === "/api/main/conversations" && options.method === "POST") { created = true; return Response.json({ conversation }); }
     if (path.endsWith("/materials") && options.method === "POST") { uploads.push({ path, headers: options.headers, body: options.body }); return Response.json({ attachment }); }
-    if (path.endsWith("/messages")) {
+    if (path.endsWith("/operations")) {
       writes.push(JSON.parse(String(options.body))); if (failed) { failed = false; throw new Error("响应断开"); }
       return Response.json({ reply: "已把材料交给研究群", conversation: { ...conversation, messages: [
         { role: "user", content: writes.at(-1)!.message, attachments: [attachment] }, { role: "assistant", content: "已交给 #group/one", status: "complete" }] } });

@@ -17,7 +17,7 @@ import { basename, join } from "node:path";
 import { types } from "node:util";
 import { InputError } from "../requirements/core.mjs";
 import { hashValue } from "./development-contract.mjs";
-import { readPiBoundSession } from "../runtime/pi-session-state.mjs";
+import { readExecutionHistory } from "../runtime/execution-history.mjs";
 
 export const PLANNING_TOOL_FAILURE_MAX_BYTES = 64 * 1024;
 const failurePrefix = "草稿用例尚不符合已保存骨架，原文件未修改：";
@@ -209,7 +209,7 @@ export function projectDevelopmentPlanningToolFailures(manager: { getBranch(): u
   return projection.bytes <= PLANNING_TOOL_FAILURE_MAX_BYTES ? projection : unavailableFailures(source, "planning_tool_failures_too_large");
 }
 
-export async function readDevelopmentPlanningToolFailures(storage: Pick<AgentStorage, "directory">, record: HistoricalPlanningRecord, { signal, expectedSessionHash, sdk }: { signal?: AbortSignal | undefined; expectedSessionHash?: string | undefined; sdk?: Parameters<typeof readPiBoundSession>[0] } = {}) {
+export async function readDevelopmentPlanningToolFailures(storage: Pick<AgentStorage, "directory">, record: HistoricalPlanningRecord, { signal, expectedSessionHash }: { signal?: AbortSignal | undefined; expectedSessionHash?: string | undefined } = {}) {
   let source;
   try {
     source = failureSource(record);
@@ -225,10 +225,9 @@ export async function readDevelopmentPlanningToolFailures(storage: Pick<AgentSto
       return unavailableFailures(source, "planner_session_reference_invalid");
     const directory = await storage.directory(record.agentId, `development/sessions/${record.id}/${key}`);
     const cwd = await storage.directory(record.agentId, `development/workspaces/${record.id}/code`);
-    const native = await readPiBoundSession(sdk ?? await import("@earendil-works/pi-coding-agent"),
-      { cwd, storage: { directory, file: reference.file, binding }, ...(signal ? { signal } : {}), ...(expectedSessionHash === undefined ? {} : { expectedSessionHash }) });
+    const native = await readExecutionHistory({ cwd, storage: { directory, file: reference.file, binding }, ...(signal ? { signal } : {}), ...(expectedSessionHash === undefined ? {} : { expectedSessionHash }) });
     source = { ...source, sessionHash: native.sessionHash, leafId: native.leafId };
-    return projectDevelopmentPlanningToolFailures(native.manager, source);
+    return projectDevelopmentPlanningToolFailures({ getBranch: () => native.entries }, source);
   } catch (error) {
     signal?.throwIfAborted();
     return unavailableFailures(source ?? null, typeof errorField(error, "reason") === "string" && /^[a-z][a-z0-9_]{0,99}$/u.test(String(errorField(error, "reason")))

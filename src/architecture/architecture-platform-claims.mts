@@ -1,7 +1,7 @@
 import type { ArchitectureDesign, PlatformClaim } from "../contracts/architecture.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
-import type { NeumaTool } from "../runtime/pi-port.mjs";
+import type { NeumaTool } from "../runtime/execution-port.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 type Query = Pick<PlatformClaim, "source" | "path" | "expected">;
 type FactSource = { reason: string; value?: never; sourceHash?: never } | { value: UnknownRecord; sourceHash: string; reason?: never };

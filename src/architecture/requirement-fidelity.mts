@@ -4,7 +4,7 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema, DiagnosticHint } from "../contracts/tools.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { RequirementItem } from "../contracts/architecture.mjs";
-import type { AssistantSessionMessage, SessionMessage, PiSessionPort, PiSessionOptions, VerificationSessionFactory, VerificationSessionPort, SessionStorage, NeumaTool } from "../runtime/pi-port.mjs";
+import type { AssistantSessionMessage, SessionMessage, PiSessionPort, PiSessionOptions, VerificationSessionFactory, VerificationSessionPort, SessionStorage, NeumaTool } from "../runtime/execution-port.mjs";
 import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
 interface FidelityContext extends UnknownRecord { requirements: RequirementItem[]; candidate?: unknown }
 interface FidelityCheck { requirementId: string; admissionPreserved: boolean; deliveryPreserved: boolean; newUnconfirmedRestriction: boolean }
@@ -30,13 +30,13 @@ function fidelityContext(value: unknown): FidelityContext {
 import { InputError } from "../requirements/core.mjs";
 import { createModelContextReader, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
 import { verificationModelContext, projectVerificationMessages } from "./architecture-model-context.mjs";
-import { createPiSession } from "../runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget, reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
 import { basename } from "node:path";
-import { piSessionManager } from "../runtime/pi-session-state.mjs";
+import { prepareExecutionHistory } from "../runtime/execution-history.mjs";
 import { toolInputValidation } from "../runtime/tool-input-diagnostics.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
 
@@ -339,7 +339,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
     throw Object.assign(new InputError("范围复核历史绑定不一致，不能建立替代会话"), { reason: "scope_evaluation_incomplete" });
   if (!progress && sessionStorage?.file !== undefined)
     throw Object.assign(new InputError("范围复核恢复缺少已用次数，不能重置预算"), { reason: "scope_evaluation_incomplete" });
-  let session: VerificationSessionPort | undefined, persistent: Awaited<ReturnType<typeof piSessionManager>> | undefined, result: FidelityValue | undefined, calls = progress?.calls ?? 0, active = true, incomplete = false, historicalReceipt = false,
+  let session: VerificationSessionPort | undefined, persistent: Awaited<ReturnType<typeof prepareExecutionHistory>> | undefined, result: FidelityValue | undefined, calls = progress?.calls ?? 0, active = true, incomplete = false, historicalReceipt = false,
     lastSubmission = progress?.diagnostic?.lastSubmission as FidelityFeedback | undefined, stopReason = "submission_missing", unsubscribe = () => {};
   let completedSubmissionAvailable = progress?.diagnostic?.resultAvailable === true;
   let truncated = false, modelFailed = false, responseAborted = false, retryPending = false, retryFailed = false, lastAssistantStop: string | undefined, currentPromptAssistant: AssistantSessionMessage | null | undefined;
@@ -364,7 +364,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
       ? { history: { status: "unavailable", reason: "legacy_session_not_persisted" } } : {}) });
   const saveProgress = async () => {
     if (!persistent || !onProgress) return;
-    await onProgress({ contextHash, schemaHash, sessionFile: basename(persistent.manager.getSessionFile()!),
+    await onProgress({ contextHash, schemaHash, sessionFile: basename(persistent.file!),
       sessionBindingHash: persistent.bindingHash!, calls, diagnostic: diagnostic(), ...(contextVersion ? { contextVersion } : {}) });
   };
   const feedbackResult = (feedback: FidelityFeedback) => ({ content: [{ type: "text" as const, text: JSON.stringify({ submitted: false, ...feedback, remainingModelCalls: Math.max(0, 2 - calls) }) }], details: {} });
@@ -402,13 +402,12 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
     signal?.addEventListener("abort", abort, { once: true });
     let nativeStorage: SessionStorage | undefined;
     if (sessionStorage) {
-      const sdk = await import("@earendil-works/pi-coding-agent");
       nativeStorage = { ...sessionStorage, binding: { ...objectFields(sessionStorage.binding), contextHash, schemaHash, ...(contextVersion ? { contextVersion } : {}) },
         ...(progress ? { file: progress.sessionFile } : {}) };
-      persistent = await piSessionManager(sdk, { cwd, storage: nativeStorage });
+      persistent = await prepareExecutionHistory({ cwd, storage: nativeStorage });
       if (progress && progress.sessionBindingHash !== persistent.bindingHash)
         throw new InputError("范围复核原生会话绑定不一致，不能建立替代会话");
-      nativeStorage.file = basename(persistent.manager.getSessionFile()!);
+      nativeStorage.file = basename(persistent.file!);
       await saveProgress();
       signal?.throwIfAborted();
     }

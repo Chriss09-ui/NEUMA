@@ -1,3 +1,6 @@
+import { observeOperation } from "./operation-view.js";
+import type { MainOperationSnapshot } from "./ui-api-types.js";
+import type { OperationView } from "./operation-view.js";
 import type { BrowserRequest } from "./ui-types.js";
 import type { CollaborationApi } from "./ui-api-types.js";
 import type { FrontendError, RequestOptions } from "./ui-types.js";
@@ -60,6 +63,27 @@ export function createCollaborationApi(request: BrowserRequest = fetch): Collabo
       return result;
     },
     cancelMain: (id) => json(`/api/main/conversations/${part(id)}/cancel`, {}),
+    submitMain: (id, body, options) => json(`/api/main/conversations/${part(id)}/operations`, body, options),
+    mainOperation: (id, operationId, after, options) => json(`/api/main/conversations/${part(id)}/operations/${part(operationId)}${after ? `?after=${part(after)}` : ""}`, undefined, options),
+    stopMainOperation: reference => json(`/api/main/conversations/${part(reference.ownerId)}/operations/${part(reference.operationId)}/cancel`, { generation: reference.generation }),
+    async mainTurnBackground(id, body, { signal, onProgress = () => {} } = {}) {
+      const base = `/api/main/conversations/${part(id)}/operations`;
+      const accepted = await json<OperationView<MainOperationSnapshot>>(base, body, { signal });
+      onProgress({ type: "operation", operation: accepted.operation });
+      const result = await observeOperation(cursor => json<OperationView<MainOperationSnapshot>>(`${base}/${part(accepted.operation.operationId)}${cursor ? `?after=${part(cursor)}` : ""}`, undefined, { signal }), accepted.operation, {
+        signal, disconnected: () => onProgress({ type: "status", label: "连接中断，正在重新连接；后台任务继续执行。" }),
+        update(snapshot) {
+          onProgress({ type: "status", label: snapshot.status === "running" ? "正在处理，进度已保存…" : "" });
+          onProgress({ type: "text-start" }); onProgress({ type: "text-delta", delta: snapshot.reply });
+          onProgress({ type: "context", context: snapshot.context });
+          return snapshot.status !== "running";
+        },
+      });
+      if (result.status !== "complete") {
+        const error: FrontendError = new Error(result.error || "回复未完成，已保存的内容保留。"); error.reason = result.reason || result.status; throw error;
+      }
+      return { reply: result.reply, conversation: result.conversation, context: result.context, actions: result.actions, sources: result.sources };
+    },
     async mainTurn(id, body, { signal, onProgress = () => {} } = {}) {
       const response = await request(`/api/main/conversations/${part(id)}/messages`, { method: "POST",
         headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify(body), ...(signal ? { signal } : {}) });

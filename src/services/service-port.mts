@@ -1,5 +1,6 @@
 import type { ServiceManifest, ServiceLanguage, WorkflowDefinition } from "../contracts/service.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
+import type { ExecutionAttempt, ExecutionDispatch } from "../runtime/execution-attempt.mjs";
 export type Progress = (value: UnknownRecord) => void | Promise<void>;
 export interface ProgressOptions { signal?: AbortSignal | undefined; onProgress?: Progress | undefined }
 export interface ReadyEnvironment { available: true; language: string; version: string; executable: string; runtimeRoot: string | null }
@@ -17,11 +18,11 @@ export type CapabilityHandler = (name: string, args: unknown, context: Capabilit
 export interface ServiceRunOptions extends ServiceIdentity { actionId: string; input: unknown; signal?: AbortSignal | undefined; persist?: boolean; capabilityHandler?: CapabilityHandler | undefined; onProgress?: Progress | undefined }
 export interface ServicePrepareOptions extends ProgressOptions { agentId: string; deliveryVersion: string; manifest: unknown; codeDir: string }
 export interface WorkflowReference { sha256: string; path: string }
-export interface WorkflowItem { index: number; status: string; attempts: number; resultRef: WorkflowReference | null; explicitRetry?: boolean; reason?: string }
+export interface WorkflowItem { index: number; status: string; attempts: number; resultRef: WorkflowReference | null; explicitRetry?: boolean; reason?: string; executions?: ExecutionAttempt[] }
 export interface WorkflowStepState { id: string; status: string; items: WorkflowItem[]; responseRef: WorkflowReference | null; resultRef?: WorkflowReference }
-export interface WorkflowRecord { schemaVersion: 1; id: string; agentId: string; deliveryVersion: string; scopeId: string; definition: WorkflowDefinition; definitionHash: string; status: string; createdAt: string; updatedAt?: string; steps: WorkflowStepState[]; waiting: { stepId: string; prompt?: string; inputSchema?: unknown; index?: number; reason?: string } | null; resultRefs: Record<string, WorkflowReference | undefined>; inputRef?: WorkflowReference; reason?: string }
+export interface WorkflowRecord { schemaVersion: 1; id: string; agentId: string; deliveryVersion: string; scopeId: string; definition: WorkflowDefinition; definitionHash: string; status: string; createdAt: string; updatedAt?: string; steps: WorkflowStepState[]; waiting: { stepId: string; prompt?: string; inputSchema?: unknown; index?: number; reason?: string; attemptId?: string } | null; resultRefs: Record<string, WorkflowReference | undefined>; inputRef?: WorkflowReference; reason?: string }
 export interface WorkflowContextOptions<Context> { signal?: AbortSignal | undefined; context?: Context | undefined }
 export interface WorkflowStartOptions<Context> extends WorkflowContextOptions<Context>, ServiceIdentity { id?: string; definition: unknown; input: unknown }
-export interface WorkflowResolution { stepId: string; index: number; outcome: string; output?: unknown; explicitlyApproved?: boolean }
+export interface WorkflowResolution { stepId: string; index: number; outcome: string; output?: unknown; explicitlyApproved?: boolean; attemptId?: string }
 export interface WorkflowResumeOptions<Context> extends WorkflowContextOptions<Context> { id: string; input?: unknown; resolution?: unknown }
-export interface WorkflowActionOptions<Context> extends WorkflowContextOptions<Context>, ServiceRunOptions { workflowId: string; stepId: string; itemIndex: number }
+export interface WorkflowActionOptions<Context> extends WorkflowContextOptions<Context>, ServiceRunOptions { workflowId: string; stepId: string; itemIndex: number; execution?: ExecutionDispatch }

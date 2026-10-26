@@ -1,6 +1,6 @@
 import type { UnknownRecord } from "./contracts/json.mjs";
 import type { ModelConfig } from "./contracts/model.mjs";
-import type { PiSessionPort, SessionFactory, NeumaTool } from "./runtime/pi-port.mjs";
+import type { PiSessionPort, SessionFactory, NeumaTool } from "./runtime/execution-port.mjs";
 import type { FetchPort } from "./runtime/model-idle-timeout.mjs";
 import { objectFields, isArray, errorField } from "./runtime/type-boundary.mjs";
 import { InputError, ProviderError } from "./requirements/core.mjs";
@@ -9,7 +9,7 @@ import { configEnv, settingsUpdates } from "./settings.mjs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPiSession, classifyModelFailure } from "./runtime/pi-runtime.mjs";
+import { createExecutionSession as createPiSession, classifyModelFailure } from "./runtime/execution-runtime.mjs";
 import { withModelIdleTimeout } from "./runtime/model-idle-timeout.mjs";
 interface ProbeOptions { fetchImpl?: FetchPort; signal?: AbortSignal | undefined; timeoutMs?: number }
 interface ProbeRequest { url: string; model: string; apiKey: string; request: unknown; stage: string; validReply(payload: unknown): boolean; missingMessage: string }

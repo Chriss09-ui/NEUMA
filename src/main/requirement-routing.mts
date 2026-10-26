@@ -1,6 +1,6 @@
 import type { ToolResult } from "../contracts/tools.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
-import type { PiSessionPort, SessionFactory, Progress } from "../runtime/pi-port.mjs";
+import type { PiSessionPort, SessionFactory, Progress } from "../runtime/execution-port.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { ProviderError } from "../requirements/core.mjs";
 import { classifyModelFailure } from "../runtime/pi-runtime.mjs";

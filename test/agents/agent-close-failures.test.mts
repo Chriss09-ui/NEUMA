@@ -27,7 +27,7 @@ async function fixture(t: test.TestContext, overrides: Record<string, unknown> =
   const records = { applications: 0, materials: 0, development: 0, services: 0, persistence: 0 };
   const base = {
     closing: null, runtimeEpoch: 0, builds: new Map(), sessions: new Map(), collaborationSessions: new Map(),
-    scheduler: new AgentScheduler(),
+    scheduler: new AgentScheduler(), operations: { close: async () => {} },
     activities: { persistence: Promise.resolve().then(() => { records.persistence++; }) },
     applications: { close: async () => { records.applications++; } },
     materials: { close: async () => { records.materials++; } },

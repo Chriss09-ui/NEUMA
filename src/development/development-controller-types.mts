@@ -1,4 +1,4 @@
-import type { SessionMessage } from "../runtime/pi-port.mjs";
+import type { SessionMessage } from "../runtime/execution-port.mjs";
 import type { ArchitectureRecord, ArchitectureReview } from "../contracts/architecture.mjs";
 import type { DevelopmentArchitecture, DevelopmentPlan, DevelopmentTask, DevelopmentWork, DevelopmentReview, SavedDevelopmentReview } from "../contracts/development.mjs";
 import type { AcceptanceLedger } from "../contracts/verification.mjs";
@@ -9,8 +9,8 @@ import type { SubmissionRecord, SubmissionIssue } from "./development-diagnostic
 import type { DevelopmentSessionReference } from "./development-sessions.mjs";
 import type { PlanningBlockerReport } from "./development-planning-blocker.mjs";
 import type { DevelopmentContextPayload, PreparedDevelopmentContext } from "./development-context.mjs";
-import type { PiSessionPort, NeumaTool } from "../runtime/pi-port.mjs";
-import type { ContextEvent } from "@earendil-works/pi-coding-agent";
+import type { PiSessionPort, NeumaTool } from "../runtime/execution-port.mjs";
+import type { ContextEvent } from "../runtime/execution-port.mjs";
 import type { ApplicationManifest } from "../contracts/application.mjs";
 
 export interface DevelopmentRevision extends UnknownRecord { schemaVersion?: number; trust?: string; status?: string; source?: { agentId: string }; plan?: DevelopmentPlan; planHash?: string; caseFacts?: { planHash: string }; caseFactsReference?: unknown }
@@ -55,7 +55,7 @@ export interface DevelopmentRunRecord extends SubmissionRecord {
   planDraftChecks?: ({ turn?: number; status?: string; hash: string | null } & UnknownRecord)[]; execution?: unknown; runtimeCheck?: unknown;
 }
 export type DevelopmentRole = "planner" | "developer" | "reviewer";
-export interface DevelopmentSession extends PiSessionPort { sessionFile?: string | undefined; modelCallAccounting?: boolean; model?: { contextWindow?: number } }
+export interface DevelopmentSession extends PiSessionPort { sessionFile?: string | undefined; modelCallAccounting?: boolean; model?: { contextWindow?: number } | undefined }
 export interface DevelopmentHandle<Result = unknown> {
   kind: DevelopmentRole; submitName: string; accepting: boolean; submitted: boolean; result: Result | undefined; counter: { turns: number }; limit: number; failed: boolean;
   turnsInPrompt: number; disposed: boolean; submissionCalls: Map<string, { value: unknown; recorded: boolean }>; planningBlocker?: unknown;

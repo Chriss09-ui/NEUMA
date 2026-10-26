@@ -498,11 +498,25 @@ test("资料草稿跨标签保留，切 Agent 后使用各自草稿并忽略后�
 
 test("头像编辑器具有独立预览与有标签的选择组，内部组合值不出现在可见输入", async () => {
   const html = await readFile(new URL("../../public/index.html", import.meta.url), "utf8");
-  assert.match(html, /id="agent-profile-icon" type="hidden"/);
-  assert.match(html, /id="agent-avatar-preview" class="agent-avatar-preview" role="img" aria-label="头像预览"/);
-  assert.match(html, /id="agent-avatar-shapes"[^>]*role="group" aria-labelledby="agent-avatar-shapes-label"/);
-  assert.match(html, /id="agent-avatar-colors"[^>]*role="group" aria-labelledby="agent-avatar-colors-label"/);
-  assert.match(html, /<details class="agent-avatar-custom">.*id="agent-profile-custom-icon" type="text"/);
+  const attributes = (tag: string) => new Map([...tag.matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)].map(match => [match[1]!, match[3]!]));
+  const element = (id: string) => {
+    const matches = [...html.matchAll(/<[a-z][\w-]*\b[^>]*>/gi)].filter(tag => attributes(tag[0]).get("id") === id);
+    assert.equal(matches.length, 1, `${id} 必须唯一`);
+    return attributes(matches[0]![0]);
+  };
+  assert.equal(element("agent-profile-icon").get("type"), "hidden");
+  const preview = element("agent-avatar-preview");
+  assert.equal(preview.get("role"), "img"); assert.equal(preview.get("aria-label"), "头像预览");
+  for (const id of ["agent-avatar-shapes", "agent-avatar-colors"]) {
+    assert.equal(element(id).get("role"), "group");
+    assert.equal(element(id).get("aria-labelledby"), `${id}-label`);
+    element(`${id}-label`);
+  }
+  assert.equal(element("agent-profile-custom-icon").get("type"), "text");
+  const custom = [...html.matchAll(/<details\b([^>]*)>([\s\S]*?)<\/details>/gi)]
+    .find(tag => attributes(tag[1]!).get("class")?.split(/\s+/).includes("agent-avatar-custom"));
+  assert.ok(custom);
+  assert.ok([...custom[2]!.matchAll(/<input\b[^>]*>/gi)].some(tag => attributes(tag[0]).get("id") === "agent-profile-custom-icon"));
   const ui = await setup(); await ui.click("agent-panel-toggle");
   const shapes = ui.get("agent-avatar-shapes").children, colors = ui.get("agent-avatar-colors").children;
   assert.equal(shapes.length, 6); assert.equal(colors.length, 8);

@@ -1,3 +1,4 @@
+import type { ExecutionAttempt } from "./execution.mjs";
 import type { ServiceManifest } from "./service.mjs";
 import type { JsonPrimitive, JsonValue, UnknownRecord } from "./json.mjs";
 export type ValueKind = "object" | "array" | "string" | "number" | "integer" | "boolean" | "null";
@@ -26,6 +27,7 @@ export interface TaskArtifact extends UnknownRecord { path: string; snapshotId?:
 export interface TaskEvent extends UnknownRecord { type: string; seq: number; at: string; taskId: string }
 export interface ApplicationTask extends ApplicationTaskInput {
   id: string; agentId: string; status: string; sequence: number; requestHash: string; createdAt: string; updatedAt: string;
+  execution?: ExecutionAttempt;
   progress: unknown; result: unknown; artifacts: TaskArtifact[]; events: TaskEvent[];
   allowNetwork?: boolean | undefined; waiting?: unknown; workflowId?: string; resumeReceipts?: { mutationId: string; requestHash: string }[];
   error?: string | null; finishedAt?: string | null;

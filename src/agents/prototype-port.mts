@@ -11,7 +11,7 @@ import type { ApplicationService } from "../applications/application-service.mjs
 import type { ApplicationContext } from "../applications/application-context.mjs";
 import type { ManagedServiceManager } from "../services/managed-service-manager.mjs";
 import type { WebCapabilities } from "../runtime/web-capabilities.mjs";
-import type { SessionFactory, PiSessionPort, NeumaTool } from "../runtime/pi-port.mjs";
+import type { SessionFactory, PiSessionPort, NeumaTool } from "../runtime/execution-port.mjs";
 import type { ConnectionSnapshot } from "../contracts/connection.mjs";
 import type { ArchitectureReference } from "../development/development-controller-types.mjs";
 export interface AgentProfile { name: string; description: string; icon: string }

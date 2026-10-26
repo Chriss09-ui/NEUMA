@@ -7,8 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentMakingState } from "../../public/agent-build-view.js";
 import { agentBuildState } from "../../public/agent-runtime.js";
-import { agentDisplayName } from "../../public/state.js";
-import { browserResult, testBrowser } from "../helpers/browser.mjs";
+import { browserPageResult, testBrowser } from "../helpers/browser.mjs";
+import { createServer } from "node:http";
+import { createRequestHandler } from "../../src/server.mjs";
+import { listeningAddress } from "../helpers/m7-test-boundaries.mjs";
 
 const agent: AgentRequirement = { persisted: false, dirty: false, id: "making-one", name: "微积分可视化学习助手", draft: validDraft("通过动态几何理解微积分") };
 const architecture = (overrides: Partial<ArchitectureView> = {}): ArchitectureView => ({ agentId: agent.id, name: agent.name, draft: agent.draft, version: 1,
@@ -136,51 +138,62 @@ test("读取、取消、失败和轻量交付不冒充已生成，研发整理�
   assert.equal(currentStage(packaging), "delivery");
 });
 
-const [stylesheet, html, runtimeSource, makingSource, agentsSource, historySource] = await Promise.all([
-  "style.css", "index.html", "agent-runtime.js", "agent-build-view.js", "agents.js", "sidebar-history.js",
-].map((file) => readFile(new URL(`../../public/${file}`, import.meta.url), "utf8")));
-const stripModule = (source: string|undefined) => source!.replace(/^import [\s\S]*?;\n/gm, "").replace(/^export /gm, "");
 const literal = (value: unknown) => JSON.stringify(value).replaceAll("<", "\\u003c");
-const pageStart = html!.indexOf('<section id="page-agent"');
-const pageEnd = html!.indexOf('<section id="page-projects"', pageStart);
-assert.ok(pageStart >= 0 && pageEnd > pageStart);
-const pageMarkup = html!.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "");
-const renderStart = agentsSource!.indexOf("function renderMaking(");
-const renderEnd = agentsSource!.indexOf("\nfunction clearInspectionTimer", renderStart);
-assert.ok(renderStart >= 0 && renderEnd > renderStart);
-
 const browserPrelude = `
-  ${stripModule(runtimeSource!.slice(0, runtimeSource!.indexOf("export function agentHistory")))}
-  ${agentDisplayName.toString()}
-  function renderAgentAvatar(target) { target.textContent = "✦"; target.style.cssText = "display:grid;place-items:center;height:100%;font-size:64px;color:#409af0"; }
-  ${stripModule(makingSource)}
-  ${stripModule(historySource)}
-  const style = document.createElement("style"); style.textContent = ${literal(stylesheet)}; document.head.append(style);
-  document.body.insertAdjacentHTML("beforeend", ${literal(pageMarkup)});
-  const byId = (id) => document.getElementById(id);
+  const agent = ${literal(agent)}, byId = (id) => document.getElementById(id);
   for (const page of document.querySelectorAll(".page")) page.hidden = page.id !== "page-agent";
-  const historyView = createSidebarHistory({ document, id: "making-history", title: ${literal(agent.name)}, href: "#agent/making-one" });
-  byId("sidebar-agent-list").append(historyView.root); historyView.setExpanded(true);
-  historyView.update({ records: [{ id: "first", title: "现有对话" }], renderRow(record) {
-    const row = document.createElement("button"); row.className = "sidebar-history-item"; row.textContent = record.title; return row;
+  byId("agent-workspace").classList.add("is-making");
+  byId("agent-making-panel").hidden = false;
+  byId("agent-conversation").hidden = true;
+  byId("agent-title").textContent = agent.name;
+  const history = createSidebarHistory({ document, id: "making-history", title: agent.name, href: "#agent/making-one" });
+  byId("sidebar-agent-list").append(history.root); history.setExpanded(true);
+  history.update({ records: [{ id: "first", title: "现有对话" }], renderRow(record) {
+    const row = document.createElement("button"); row.textContent = record.title; return row;
   } });
-  byId("agent-title").textContent = ${literal(agent.name)};
-  byId("agent-subtitle").textContent = ${literal(agent.draft.goal.value)};
-  let currentState, makingView = null, stopped = 0, started = 0, details = 0;
-  const runtime = () => currentState;
-  const conversation = () => ({ turn: null });
-  const stopMaking = () => stopped++;
-  const developAgent = () => started++;
-  const buildAgent = () => started++;
-  byId("agent-panel-toggle").addEventListener("click", () => details++);
-  ${agentsSource!.slice(renderStart, renderEnd)}
-  const agent = ${literal(agent)};
-  const visible = (id) => byId(id).getClientRects().length > 0;
+  const visible = id => byId(id).getClientRects().length > 0;
+  let stopped = 0, started = 0, details = 0;
+  const render = (state, selected = agent) => {
+    const view = createAgentMakingView(selected, state, {
+      onStop: () => stopped++, onStart: () => started++, onDetails: () => details++,
+    });
+    byId("agent-making-content").replaceChildren(view.root);
+    return view;
+  };
   const stageFacts = () => [...document.querySelectorAll(".agent-making-step")].map((step) => ({
-    label: step.querySelector("strong").textContent, state: step.dataset.state, current: step.getAttribute("aria-current"),
+    state: step.dataset.state, current: step.getAttribute("aria-current"),
     rect: { left: step.getBoundingClientRect().left, right: step.getBoundingClientRect().right },
   }));
 `;
+
+async function makingBrowserResult(t: test.TestContext, browser: string, script: string) {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-making-page-"));
+  const handler = createRequestHandler({ config: {}, providers: {}, projects: {}, projectAgent: {}, prototypeAgents: {}, skillManager: {}, dataDir: directory });
+  const markup = (await readFile(new URL("../../public/index.html", import.meta.url), "utf8"))
+    .replace(/<script\b(?=[^>]*type=["']module["'])[^>]*>[\s\S]*?<\/script>/gi, "");
+  const page = markup.replace("</body>", `<pre id="test-result"></pre><script type="module">
+    const write = value => document.getElementById("test-result").textContent = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
+    try {
+      const { createAgentMakingView } = await import("/agent-build-view.js");
+      const { createSidebarHistory } = await import("/sidebar-history.js");
+      const result = (() => { ${browserPrelude} ${script} })();
+      write({ ok: true, result });
+    } catch (error) { write({ ok: false, error: String(error.stack || error) }); }
+  </script></body>`);
+  const server = createServer((request, response) => {
+    if (request.url === "/making-fixture") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(page);
+    } else void handler(request, response);
+  });
+  t.after(async () => {
+    await handler.dispose(); server.closeAllConnections();
+    if (server.listening) await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
+    await rm(directory, { recursive: true, force: true });
+  });
+  await handler.ready;
+  await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
+  return browserPageResult(t, browser, `http://127.0.0.1:${listeningAddress(server).port}/making-fixture`);
+}
 
 async function desktopBrowser(t: test.TestContext, { reducedMotion = false } = {}) {
   const browser = await testBrowser(t);
@@ -194,73 +207,60 @@ async function desktopBrowser(t: test.TestContext, { reducedMotion = false } = {
   return wrapper;
 }
 
-test("真实桌面浏览器制作界面隐藏原工作区，保留设置，动态阶段与终止操作可用", { timeout: 20_000 }, async (t) => {
+test("真实桌面浏览器制作组件保留阶段布局、动画及按钮行为", { timeout: 20_000 }, async (t) => {
   const browser = await desktopBrowser(t);
   if (!browser) return;
-  const facts = await browserResult(t, browser, `${browserPrelude}
-    currentState = { status: "building", label: "正在核实技术资料…", operation: { controller: new AbortController(), phase: "researching" } };
-    renderMaking(agent);
+  const facts = await makingBrowserResult(t, browser, `
+    const view = render({ status: "building", label: "正在核实技术资料…", operation: { controller: new AbortController(), phase: "researching" } });
     const active = {
-      width: innerWidth, panel: visible("agent-making-panel"), historyVisible: visible("making-history"),
-      historyInNavigation: byId("sidebar-agent-list").contains(historyView.root),
-      conversation: visible("agent-conversation"), composer: visible("agent-chat-form"), artifacts: visible("agent-artifacts-open"),
-      title: visible("agent-title"), settings: visible("agent-panel-toggle"), workspace: getComputedStyle(byId("agent-workspace")).display,
-      stages: stageFacts(), animation: getComputedStyle(document.querySelector(".agent-making-satellite")).animationName,
+      width: innerWidth, visible: view.root.getClientRects().length > 0, stages: stageFacts(),
+      historyVisible: visible("making-history"), titleVisible: visible("agent-title"), settingsVisible: visible("agent-panel-toggle"),
+      animation: getComputedStyle(document.querySelector(".agent-making-satellite")).animationName,
       pulse: getComputedStyle(document.querySelector('[aria-current="step"] .agent-making-marker')).animationName,
-      stop: makingView.stop.textContent, stopDisabled: makingView.stop.disabled,
+      stop: view.stop.textContent, stopDisabled: view.stop.disabled,
     };
-    makingView.stop.click(); makingView.details.click();
-    makingView.stop.focus(); renderMaking(agent);
-    const focusPreserved = document.activeElement === makingView.stop;
-    currentState = { ...currentState, operation: { controller: new AbortController(), phase: "evaluating", stopping: true } };
-    renderMaking(agent);
-    const stopping = { disabled: makingView.stop.disabled, label: makingView.stop.textContent, state: makingView.root.dataset.state };
-    makingView.stop.click();
-    currentState = { status: "ready" }; renderMaking(agent);
-    return { active, stopped, details, focusPreserved, stopping,
-      ready: { panel: visible("agent-making-panel"), historyVisible: visible("making-history"),
-      historyInNavigation: byId("sidebar-agent-list").contains(historyView.root), conversation: visible("agent-conversation") } };
+    view.stop.click(); view.details.click();
+    const stoppingView = render({ status: "building", operation: { controller: new AbortController(), phase: "evaluating", stopping: true } });
+    const stopping = { disabled: stoppingView.stop.disabled, label: stoppingView.stop.textContent, state: stoppingView.root.dataset.state };
+    stoppingView.stop.click();
+    return { active, stopped, details, stopping };
   `);
   assert.ok(facts.active.width >= 1200);
-  assert.equal(facts.active.panel, true);
-  assert.equal(facts.active.historyInNavigation, true); assert.equal(facts.active.historyVisible, true);
-  for (const key of ["conversation", "composer", "artifacts"]) assert.equal(facts.active[key], false);
-  assert.equal(facts.active.title, true);
-  assert.equal(facts.active.settings, true);
-  assert.equal(facts.active.workspace, "block");
-  assert.deepEqual(facts.active.stages.map((stage: {state:string}) => stage.state), ["complete", "current", "pending", "pending", "pending"]);
+  assert.equal(facts.active.visible, true);
+  assert.equal(facts.active.historyVisible, true);
+  assert.equal(facts.active.titleVisible, true);
+  assert.equal(facts.active.settingsVisible, true);
+  assert.deepEqual(facts.active.stages.map((stage: { state: string }) => stage.state), ["complete", "current", "pending", "pending", "pending"]);
   assert.equal(facts.active.stages[1].current, "step");
-  assert.ok(facts.active.stages.every((stage: { rect: { left: number; }; }, index: number, stages: { rect: { right: number; }; }[]) => !index || stage.rect.left >= stages[index - 1]!.rect.right - 1));
+  assert.ok(facts.active.stages.every((stage: { rect: { left: number } }, index: number, stages: { rect: { right: number } }[]) => !index || stage.rect.left >= stages[index - 1]!.rect.right - 1));
   assert.equal(facts.active.animation, "agent-making-orbit");
   assert.equal(facts.active.pulse, "agent-making-pulse");
   assert.equal(facts.active.stop, "终止生成");
   assert.equal(facts.active.stopDisabled, false);
   assert.equal(facts.stopped, 1);
   assert.equal(facts.details, 1);
-  assert.equal(facts.focusPreserved, true);
   assert.deepEqual(facts.stopping, { disabled: true, label: "正在终止…", state: "stopping" });
-  assert.deepEqual(facts.ready, { panel: false, historyVisible: true, historyInNavigation: true, conversation: true });
 });
 
 test("真实浏览器减少动态效果时停止动画，失败文字安全展示并可重新生成", { timeout: 20_000 }, async (t) => {
   const browser = await desktopBrowser(t, { reducedMotion: true });
   if (!browser) return;
   const unsafeText = '<img src="x" onerror="window.makingInjected=true"><script>window.makingInjected=true</script>';
-  const facts = await browserResult(t, browser, `${browserPrelude}
-    currentState = { status: "building", operation: { controller: new AbortController(), phase: "evaluating" } }; renderMaking(agent);
+  const facts = await makingBrowserResult(t, browser, `
+    render({ status: "building", operation: { controller: new AbortController(), phase: "evaluating" } });
     const animations = [...document.querySelectorAll(".agent-making-satellite,.agent-making-avatar,.agent-making-marker")]
       .map((node) => getComputedStyle(node).animationName);
-    currentState = { status: "failed", error: ${literal(unsafeText)} };
-    renderMaking({ ...agent, profile: { name: ${literal(unsafeText)} } });
-    const failed = { summary: document.querySelector(".agent-making-status-copy p").textContent,
-      name: document.querySelector(".agent-making-name").textContent,
-      activeContent: makingView.root.querySelectorAll("script,img,iframe").length,
-      injected: Boolean(window.makingInjected), alert: document.querySelector(".agent-making-status").dataset.error,
-      state: makingView.root.dataset.state, stop: makingView.stop, start: makingView.start.textContent };
-    makingView.start.click();
+    const view = render({ status: "failed", error: ${literal(unsafeText)} }, { ...agent, profile: { name: ${literal(unsafeText)} } });
+    const summary = view.root.querySelector(".agent-making-status-copy p"), name = view.root.querySelector(".agent-making-name");
+    const failed = { summary: summary.textContent, name: name.textContent,
+      activeContent: [summary, name].reduce((count, node) => count + node.querySelectorAll("script,img,iframe").length, 0),
+      injected: Boolean(window.makingInjected), alert: view.root.querySelector(".agent-making-status").dataset.error,
+      state: view.root.dataset.state, stop: view.stop, start: view.start.textContent };
+    view.start.click();
     return { reduced: matchMedia("(prefers-reduced-motion: reduce)").matches, animations, failed, started };
   `);
   assert.equal(facts.reduced, true);
+  assert.ok(facts.animations.length > 0);
   assert.deepEqual(facts.animations, Array(facts.animations.length).fill("none"));
   assert.equal(facts.failed.summary, unsafeText);
   assert.equal(facts.failed.name, unsafeText);

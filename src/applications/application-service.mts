@@ -1,3 +1,5 @@
+import { createExecutionAttempt, type ExecutionDispatch } from "../runtime/execution-attempt.mjs";
+import { serviceHash } from "../services/service-contract.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import type { AgentDefinition, MaterialTool } from "../agents/prototype-port.mjs";
 import type { DevelopmentDeliveryRecord } from "../development/development-controller-types.mjs";
@@ -5,7 +7,7 @@ import { readDevelopmentDeliveryRecord } from "../development/development-record
 import type { PrototypeAgents } from "../agents/agent-prototype.mjs";
 import type { ApplicationManifest, ApplicationAction, TaskSource } from "../contracts/application.mjs";
 import type { ApplicationContextDescriptor, ApplicationContext } from "./application-context.mjs";
-import type { RegisteredTool, NeumaTool } from "../runtime/pi-port.mjs";
+import type { RegisteredTool, NeumaTool } from "../runtime/execution-port.mjs";
 import type { DevelopmentSnapshot } from "../development/development-workspace.mjs";
 import type { ActionRunOptions } from "../development/development-executor.mjs";
 import type { ServiceResult, WorkflowRecord, WorkflowResolution } from "../services/service-port.mjs";
@@ -35,6 +37,7 @@ interface RunningTask {
   workspaceRoot: string | undefined; materialTools: MaterialTool[] | undefined; heldLease: boolean;
   done?: Promise<void> | undefined; signal?: AbortSignal | undefined; terminalStatus?: string;
   onCapability?: NonNullable<ActionRunOptions["onCapability"]>; onProgress?: (progress: unknown) => Promise<void>;
+  execution?: ExecutionDispatch;
   resume?: { input: unknown; resolution: unknown };
 }
 import { randomUUID } from "node:crypto";
@@ -210,7 +213,7 @@ export class ApplicationService {
       }
       await this.check(item);
       await this.store.update(task.agentId, task.id, { status: "running", startedAt: new Date().toISOString() });
-      const capability = await this.agents.applicationCapabilities({ ...item, signal, check: () => this.check(item) });
+      const capability = await this.agents.applicationCapabilities({ ...item, signal, check: () => this.check(item), execution: () => item.execution });
       item.signal = signal;
       item.onCapability = async (call) => {
           await this.check(item);
@@ -228,6 +231,18 @@ export class ApplicationService {
           try { await this.store.update(task.agentId, task.id, { progress }, "progress"); }
           catch (error) { item.terminalStatus = "failed"; controller.abort(); throw error; }
         };
+      const workflowAction = descriptor.manifest.runtime === "managed-service" && descriptor.manifest.service.workflow?.entryActionId === task.actionId;
+      const attempt = workflowAction ? undefined : createExecutionAttempt(serviceHash([task.id, task.deliveryVersion, task.actionId, task.input]), 1);
+      if (attempt) {
+        await this.store.update(task.agentId, task.id, { execution: attempt }, "execution_prepared");
+        item.execution = { id: attempt.id, beforeDispatch: async () => {
+          await this.check(item);
+          if (attempt.uncertain) throw new InputError("上次外部操作结果尚未核实，已阻止继续执行");
+          if (attempt.phase === "prepared") { attempt.phase = "dispatched"; await this.store.update(task.agentId, task.id, { execution: attempt }, "execution_dispatched"); }
+          await this.check(item);
+        }, markUnknown: async () => { attempt.uncertain = true;
+          await this.store.update(task.agentId, task.id, { execution: attempt }, "execution_unknown"); } };
+      }
       let run;
       if (descriptor.manifest.runtime === "managed-service") {
         const definition = descriptor.manifest.service.workflow;
@@ -248,13 +263,14 @@ export class ApplicationService {
           const outputs = await Promise.all(Object.entries(workflow.resultRefs).map(async ([id, ref]) => [id, await this.workflows.readResult(workflow, ref)]));
           run = { status: "passed", output: outputs.length === 1 ? outputs[0]![1] : Object.fromEntries(outputs) };
         } else run = await this.runManaged(item, { actionId: task.actionId, input: task.input, signal });
-      } else run = await this.agents.development.executor.runAction!({ codeDir: descriptor.snapshot.path,
+      } else { await item.execution?.beforeDispatch(); run = await this.agents.development.executor.runAction!({ codeDir: descriptor.snapshot.path,
         entrypoint: descriptor.manifest.entrypoint, actionId: task.actionId, input: task.input, signal,
-        onCapability: item.onCapability, onProgress: item.onProgress });
+        onCapability: item.onCapability, onProgress: item.onProgress }); }
       await this.check(item);
+      if (attempt?.uncertain) throw new InputError("外部操作结果需要确认，请先核实上次操作是否已经生效；不会自动重新发送");
       if (run.status !== "passed") throw new InputError(run.reason === "timeout" ? "操作超过已配置的时限；已有结果保留，请拆分步骤继续" : "应用程序未成功完成，实际执行结果已保留");
       validateActionOutput(action, run.output);
-      await this.store.update(task.agentId, task.id, { status: "completed", result: run.output });
+      await this.store.update(task.agentId, task.id, { status: "completed", result: run.output, ...(attempt ? { execution: { ...attempt, phase: "completed", resultRef: { sha256: serviceHash(run.output), path: `task:${task.id}` } } } : {}) });
     } catch (error) {
       try { await this.store.update(task.agentId, task.id, { status: item.terminalStatus ?? (controller.signal.aborted || objectFields(error).name === "AbortError" ? "cancelled" : "failed"), error: cleanError(error) }); }
       finally { controller.abort(); }
@@ -266,11 +282,13 @@ export class ApplicationService {
     const operation = manifest.service!.operations.find((operation) => operation.id === step?.actionId);
     return { ...workflow.waiting, ...(operation ? { outputSchema: operation.outputSchema } : {}) };
   }
-  async runManaged(item: RunningTask, { actionId, input, signal }: { actionId: string; input: unknown; signal?: AbortSignal | undefined }) {
+  async runManaged(item: RunningTask, { actionId, input, signal, execution }: { actionId: string; input: unknown; signal?: AbortSignal | undefined; execution?: ExecutionDispatch }) {
     const { task, descriptor } = item;
     const operation = descriptor.manifest.service!.operations.find((operation) => operation.id === actionId);
     if (!operation) throw new InputError("流程动作未经过交付验收");
     validateActionInput(operation, input);
+    if (execution) item.execution = execution;
+    await item.execution?.beforeDispatch();
     const result = await this.agents.services.run({ agentId: task.agentId, deliveryVersion: descriptor.deliveryVersion,
       scopeId: task.source.scope, actionId, input, signal,
       capabilityHandler: async (name: string, args: unknown, context: { signal: AbortSignal }) => {
@@ -301,7 +319,7 @@ export class ApplicationService {
     if (workflow.status === "waiting_input") validateActionValue(body.input, workflow.waiting!.inputSchema);
     if (workflow.status === "needs_review") {
       const resolution = objectFields(body.resolution);
-      if (!resolution || resolution.stepId !== workflow.waiting!.stepId || resolution.index !== workflow.waiting!.index) throw new InputError("请先核实这个步骤是否已经完成");
+      if (!resolution || resolution.stepId !== workflow.waiting!.stepId || resolution.index !== workflow.waiting!.index || workflow.waiting!.attemptId !== undefined && resolution.attemptId !== workflow.waiting!.attemptId) throw new InputError("请先核实这个步骤是否已经完成");
       if (resolution.outcome === "completed") validateActionValue(resolution.output, this.workflowWaiting(workflow, descriptor.manifest)!.outputSchema);
       else if (resolution.outcome !== "retry" || resolution.explicitlyApproved !== true) throw new InputError("重试外部操作需要明确确认");
     }

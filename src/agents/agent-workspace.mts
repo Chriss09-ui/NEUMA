@@ -1,6 +1,6 @@
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
-import type { NeumaTool } from "../runtime/pi-port.mjs";
+import type { NeumaTool } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger, errorField } from "../runtime/type-boundary.mjs";
 import { MAX_RUNTIME_FILE_BYTES } from "../runtime/file-limits.mjs";
 import { WORKSPACE_TEXT_WRITE_CODE_UNITS, WORKSPACE_TEXT_READ_CODE_UNITS, WORKSPACE_LIST_PAGE_ITEMS } from "../runtime/runtime-capability-contract.mjs";

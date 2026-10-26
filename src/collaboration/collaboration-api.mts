@@ -1,3 +1,4 @@
+import { operationView } from "../runtime/operation-view.mjs";
 import type { ServerMainPort, ServerCollaborationPort } from "../server-port.mjs";
 import type { HttpRouteContext, SendMaterial, PublicFailure } from "../runtime/http-port.mjs";
 import type { CollaborationService } from "./groups.mjs";
@@ -59,12 +60,14 @@ export async function routeCollaboration({ request, response, address, getCollab
   }
   const artifact = path.match(/^\/api\/groups\/([\w-]+)\/artifacts\/([\w-]+)$/);
   if (method === "GET" && artifact) return send(await groups.artifact!(artifact[1]!, artifact[2]!));
-  const task = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/([\w-]+)(?:\/(cancel))?$/);
+  const task = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/([\w-]+)(?:\/(cancel|view))?$/);
   if (task) {
     if (method === "POST" && task[3] === "cancel") { await readBody(); return send(await groups.cancelTask!(task[1]!, task[2]!)); }
-    if (method === "GET" && !task[3]) {
+    if (method === "GET" && (!task[3] || task[3] === "view")) {
       const view = await groups.getGroup!(task[1]!), value = view.tasks.find((value) => value.id === task[2]!);
-      if (!value) throw new InputError("任务不存在"); return send({ task: value });
+      if (!value) throw new InputError("任务不存在");
+      if (task[3] === "view") return send(operationView({ version: 1, domain: "group", ownerId: task[1]!, operationId: task[2]!, generation: String(value.generation) }, view.lastSequence, { task: value }, address.searchParams.get("after")));
+      return send({ task: value });
     }
   }
   if (path.startsWith("/api/main/")) {
@@ -89,6 +92,17 @@ export async function routeCollaboration({ request, response, address, getCollab
     if (path === "/api/main/conversations") {
       if (method === "GET") return send(await main.listConversations!());
       if (method === "POST") return send(await main.createConversation!(await readBody()));
+    }
+    const operation = path.match(/^\/api\/main\/conversations\/([\w-]+)\/operations(?:\/([\w-]+)(?:\/(cancel))?)?$/);
+    if (operation) {
+      const [, conversationId, operationId, action] = operation;
+      if (method === "POST" && !operationId) return send(await main.submit!({ ...await readBody(), conversationId }, { signal }));
+      if (method === "GET" && operationId && !action) return send(await main.operation!(conversationId!, operationId, address.searchParams.get("after")));
+      if (method === "POST" && operationId && action === "cancel") {
+        const body = await readBody();
+        if (typeof body.generation !== "string") throw new InputError("停止任务需要当前执行编号");
+        return send(await main.cancel!(conversationId!, { operationId, generation: body.generation }));
+      }
     }
     const conversation = path.match(/^\/api\/main\/conversations\/([\w-]+)(?:\/(messages|cancel|requirements|remove))?$/);
     if (conversation) {

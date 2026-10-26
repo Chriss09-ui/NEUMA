@@ -9,6 +9,8 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 // test/ 顶层只保留 server 组装测试和 native-check.yml 固定引用的四个入口；其余测试按领域子目录存放，条目使用相对 test 根的路径。
 export const TEST_LAYERS = Object.freeze({
   unit: Object.freeze([
+    "runtime/session-replay.test.mjs",
+    "runtime/execution-lifecycle.test.mjs",
     "installation/source-launcher.test.mjs", "build/typescript-boundaries.test.mjs", "build/m4-architecture-boundaries.test.mjs", "build/m4-development-boundaries.test.mjs",
     "runtime/model-context.test.mjs", "architecture/architecture-model-context.test.mjs",
     "applications/application-ui.test.mjs", "applications/application-context-ui.test.mjs", "applications/application-assistant-ui.test.mjs", "applications/application-context.test.mjs", "runtime/web-capabilities.test.mjs", "agents/agent-connections.test.mjs",
@@ -32,6 +34,10 @@ export const TEST_LAYERS = Object.freeze({
   // R5 起显式登记全部集成测试（原 integration 兜底发现改为登记基线，运行器兜底仍保留防漏测）；
   // 新增集成测试必须在此登记，hygiene 的测试登记检查会拒绝新遗漏。
   integration: Object.freeze([
+    "services/workflow-crash-recovery.test.mjs",
+    "agents/agent-operations.test.mjs",
+    "runtime/execution-runtime.test.mjs",
+    "development/development-crash-recovery.test.mjs",
     "agents/agent-active-runtime.test.mjs", "agents/agent-attachments-api.test.mjs", "agents/agent-build-view.test.mjs", "agents/agent-capabilities.test.mjs",
     "agents/agent-material-runtime.test.mjs", "agents/agent-prototype.test.mjs", "agents/agent-storage.test.mjs", "agents/agent-web-runtime.test.mjs",
     "agents/materials.test.mjs", "agents/workspace-utf8-nul.test.mjs", "applications/application-artifact-download.test.mjs",

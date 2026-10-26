@@ -86,9 +86,9 @@ test("外部副作用结果不明时暂停，核实结果后继续且不重复�
   assert.deepEqual(objectFields(task.waiting).outputSchema, number);
   await assert.rejects(f.service.resume("one", taskId, { mutationId: "wrong-resume", expectedVersion: task.sequence }), /先核实/);
   await assert.rejects(f.service.resume("one", taskId, { mutationId: "wrong-result", expectedVersion: task.sequence,
-    resolution: { stepId: "batch", index: 0, outcome: "completed", output: "eight" } }));
+    resolution: { attemptId: objectFields(task.waiting).attemptId, stepId: "batch", index: 0, outcome: "completed", output: "eight" } }));
   await f.service.resume("one", taskId, { mutationId: "resolve-effect", expectedVersion: task.sequence,
-    resolution: { stepId: "batch", index: 0, outcome: "completed", output: 8 } });
+    resolution: { attemptId: objectFields(task.waiting).attemptId, stepId: "batch", index: 0, outcome: "completed", output: 8 } });
   task = await f.service.wait("one", taskId); assert.equal(task.status, "waiting_input"); assert.deepEqual(f.calls, [4]);
   await f.service.resume("one", taskId, { mutationId: "resolve-final", expectedVersion: task.sequence, input: "checked" });
   task = await f.service.wait("one", taskId); assert.equal(task.status, "completed"); assert.deepEqual(objectFields(task.result).values, [8]); assert.deepEqual(f.calls, [4]);

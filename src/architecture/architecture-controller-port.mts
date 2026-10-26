@@ -5,7 +5,7 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import type { AgentStoragePort } from "../runtime/storage-port.mjs";
-import type { SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress } from "../runtime/pi-port.mjs";
+import type { SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress } from "../runtime/execution-port.mjs";
 import type { createTechnicalResearch } from "./architecture-research.mjs";
 import type { WebCapabilities } from "../runtime/web-capabilities.mjs";
 import type { developmentRevisionReference } from "./architecture-development-revision.mjs";

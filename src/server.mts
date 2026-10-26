@@ -6,7 +6,7 @@ import { ServerResponse as NodeServerResponse } from "node:http";
 import { objectFields } from "./runtime/type-boundary.mjs";
 import type { RawMaterial } from "./contracts/material.mjs";
 import type { ProviderConfig, Providers } from "./requirements/requirement-provider-port.mjs";
-import type { Progress } from "./runtime/pi-port.mjs";
+import type { Progress } from "./runtime/execution-port.mjs";
 type RequirementTurnResult = Awaited<ReturnType<RequirementSessions["turn"]>>;
 type ProcessRequirement = (body: unknown, options?: Parameters<RequirementSessions["turn"]>[2]) => Promise<RequirementTurnResult>;
 type PromptPort = ServerPromptPort;
@@ -72,6 +72,7 @@ const PUBLIC = new Map<string, [string, string]>([
   ["/agents.js", ["agents.js", "text/javascript; charset=utf-8"]],
   ["/agent-conversations.js", ["agent-conversations.js", "text/javascript; charset=utf-8"]],
   ["/agent-runtime.js", ["agent-runtime.js", "text/javascript; charset=utf-8"]],
+  ["/operation-view.js", ["operation-view.js", "text/javascript; charset=utf-8"]],
   ["/agent-attachments.js", ["agent-attachments.js", "text/javascript; charset=utf-8"]],
   ["/agent-build-view.js", ["agent-build-view.js", "text/javascript; charset=utf-8"]],
   ["/agent-details.js", ["agent-details.js", "text/javascript; charset=utf-8"]],
@@ -467,6 +468,20 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
             : await prototypeAgents.saveConversationRecord!(id, cid, body));
         }
       }
+      const acceptedOperation = path.match(/^\/api\/agents\/([\w-]+)\/operations(?:\/([\w-]+)(?:\/(cancel))?)?$/);
+      if (acceptedOperation) {
+        const [, id, operationId, action] = acceptedOperation;
+        if (request.method === "POST" && !operationId) {
+          const body = await readJson(request, REQUIREMENT_REQUEST_MAX_BYTES), { kind, ...input } = body;
+          if (kind !== "build" && kind !== "development") throw new InputError("制作任务类型无效");
+          return sendJson(response, 200, await prototypeAgents.submitOperation!(kind, { ...input, id }, { signal: requestController.signal }));
+        }
+        if (request.method === "GET" && operationId && !action) return sendJson(response, 200, await prototypeAgents.operation!(id!, operationId, address.searchParams.get("after")));
+        if (request.method === "POST" && operationId && action === "cancel") {
+          const body = await readJson(request); if (typeof body.generation !== "string") throw new InputError("停止任务需要当前执行编号");
+          return sendJson(response, 200, await prototypeAgents.cancelOperation!(id!, operationId, body.generation));
+        }
+      }
       if (request.method === "POST" && path === "/api/agents/build") {
         return await buildAgentReply(request, response, prototypeAgents, await readJson(request, REQUIREMENT_REQUEST_MAX_BYTES), config, false, requestController.signal);
       }
@@ -501,6 +516,7 @@ export function createRequestHandler({ config = getProviderConfig(), providers: 
       }
       const agentQuery = path.match(/^\/api\/agents\/([\w-]+)$/);
       if (request.method === "GET" && agentQuery) return sendJson(response, 200, { agent: await prototypeAgents.get!(agentQuery[1]!),
+        ...(prototypeAgents.currentOperation ? { operationReference: await prototypeAgents.currentOperation(agentQuery[1]!) } : {}),
         architecture: await prototypeAgents.getArchitecture?.(agentQuery[1]!) ?? null,
         ...(prototypeAgents.getActiveRuntime ? { activeRuntime: await prototypeAgents.getActiveRuntime!(agentQuery[1]!) } : {}),
         ...(prototypeAgents.getDevelopment ? { development: await prototypeAgents.getDevelopment!(agentQuery[1]!) } : {}),

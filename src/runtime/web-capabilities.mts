@@ -1,6 +1,6 @@
 import type { AgentConnectionStore } from "../agents/agent-connections.mjs";
 import type { ConnectionSnapshot } from "../contracts/connection.mjs";
-import type { NeumaTool } from "./pi-port.mjs";
+import type { NeumaTool } from "./execution-port.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { LookupAddress } from "node:dns";
 import { objectFields, isArray, isRecord, isInteger, errorField } from "./type-boundary.mjs";

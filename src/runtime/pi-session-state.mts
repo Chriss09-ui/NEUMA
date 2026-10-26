@@ -1,8 +1,8 @@
 import type { Stats } from "node:fs";
-import type { ExtensionFactory, MessageEndEventResult, SessionManager, SessionEntry, FileEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionFactory, ContextEvent, MessageEndEventResult, SessionManager, SessionEntry, FileEntry } from "@earendil-works/pi-coding-agent";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
-import type { PiSessionOptions, SessionStorage, RawDecision, RawToolInput } from "./pi-port.mjs";
+import type { PiSessionOptions, SessionStorage, RawDecision, RawToolInput } from "./execution-port.mjs";
 import { objectFields, isArray, isInteger } from "./type-boundary.mjs";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -10,6 +10,7 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { InputError } from "../requirements/core.mjs";
 import { toolInputValidation } from "./tool-input-diagnostics.mjs";
+import type { SessionMessage } from "./execution-port.mjs";
 type ManagerPort = Pick<SessionManager, "getBranch" | "getEntries" | "getLeafId" | "getSessionFile" | "getCwd" | "appendCustomEntry">;
 interface SessionSdkPort<M extends ManagerPort> {
   CURRENT_SESSION_VERSION: number;
@@ -17,6 +18,18 @@ interface SessionSdkPort<M extends ManagerPort> {
   SessionManager: { inMemory(cwd: string, options?: undefined, entries?: FileEntry[]): M; open(file: string, directory?: string, cwd?: string): M; create(cwd: string, directory: string): M };
 }
 interface RawCall { index: number; bytes: number; text: string; complete: boolean; id?: string }
+
+export async function readExecutionHistory(options: Parameters<typeof readPiBoundSession>[1]) {
+  const native = await readPiBoundSession(await import("@earendil-works/pi-coding-agent"), options);
+  const entries = native.manager.getBranch().filter(entry => entry.type === "message")
+    .map(entry => ({ type: "message" as const, id: entry.id, message: structuredClone(entry.message) as SessionMessage }));
+  return { entries, bindingHash: native.bindingHash, sessionHash: native.sessionHash, leafId: native.leafId };
+}
+
+export async function prepareExecutionHistory(options: Parameters<typeof piSessionManager>[1]) {
+  const native = await piSessionManager(await import("@earendil-works/pi-coding-agent"), options);
+  return { file: native.manager.getSessionFile(), bindingHash: native.bindingHash };
+}
 
 const BINDING_ENTRY = "neuma.session-binding.v1";
 const MAX_RAW_ARGUMENT_BYTES = 1024 * 1024;
@@ -192,7 +205,19 @@ export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult
     if (transformContext) pi.on("context", async (event) => {
       const messages = await safeCall(transformContext, event.messages);
       if (messages !== undefined && !Array.isArray(messages)) { halt(new InputError("模型上下文投影必须返回消息数组")); return; }
-      return messages === undefined ? undefined : { messages };
+      if (messages === undefined) return;
+      // Host projections only replace/add user input; every other native entry stays opaque.
+      for (const message of messages) {
+        if (message.role !== "user") {
+          if (!event.messages.includes(message as ContextEvent["messages"][number])) {
+            halt(new InputError("上下文投影不能伪造运行历史")); return;
+          }
+        } else if (typeof message.content !== "string" && (!Array.isArray(message.content)
+          || message.content.some(part => part.type !== "text" && part.type !== "image"))) {
+          halt(new InputError("上下文投影的用户消息无效")); return;
+        }
+      }
+      return { messages: messages as ContextEvent["messages"] };
     });
     if (rawValidators.size) pi.on("tool_call", async (event, context) => {
       if (!rawValidators.has(event.toolName)) return;
