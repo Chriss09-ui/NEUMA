@@ -94,8 +94,10 @@ export const REVIEW_SCHEMA = object({
   issues: list(object({
     id: identifier, blocking: { type: "boolean" }, kind: choice("code", "plan", "architecture", "environment"),
     description: text(), remedy: text(),
+    taskIds: references(), files: paths(), candidatePaths: list(text(1000)),
   })),
 });
+REVIEW_SCHEMA.properties.issues.items.required = ["id", "blocking", "kind", "description", "remedy"];
 
 export const WORK_SCHEMA = object({
   summary: text(), changedFiles: paths(), knownIssues: list(text()), nextAction: text(4000, 0),
@@ -490,11 +492,23 @@ export function validatePlan(input: unknown, { architecture, previousPlan, fresh
   return structuredClone(value);
 }
 
-export function validateReview(input: unknown, { subjectHash }: { subjectHash?: string | undefined } = {}): DevelopmentReview {
+export function validateReview(input: unknown, { subjectHash, plan }: { subjectHash?: string | undefined; plan?: DevelopmentPlan } = {}): DevelopmentReview {
   validateSchema(input, REVIEW_SCHEMA, "review");
   const value = input as DevelopmentReview;
   if (value.subjectHash !== subjectHash) fail("评审结果与当前审查版本不匹配");
   uniqueIds(value.issues, "review.issues");
+  if (plan) for (const issue of value.issues) {
+    if (issue.taskIds?.some(id => !plan.tasks.some(task => task.id === id))
+      || issue.files?.some(file => !plan.tasks.some(task => task.files.includes(file)))) fail("评审问题必须引用原计划中的真实任务和文件");
+    if (issue.kind === "plan") for (const pointer of issue.candidatePaths ?? []) {
+      if (!pointer.startsWith("/") || /~(?![01])/u.test(pointer)) fail("评审计划字段路径无效");
+      let current: unknown = plan;
+      for (const key of pointer.slice(1).split("/").map(key => key.replaceAll("~1", "/").replaceAll("~0", "~"))) {
+        if (["__proto__", "constructor", "prototype"].includes(key) || !current || typeof current !== "object" || !Object.hasOwn(current, key)) fail("评审计划字段不存在");
+        current = objectFields(current)[key];
+      }
+    }
+  }
   const blocking = value.issues.some((issue) => issue.blocking);
   if (value.verdict === "pass" && blocking) fail("仍有阻断问题，不能判定 pass");
   if (value.verdict !== "pass" && !blocking) fail("未通过评审必须说明阻断问题");

@@ -53,6 +53,24 @@ function fixture({ progressVersion = 1, designCalls = 15 } = {}) {
   return { source, record, saved, calls, run };
 }
 
+test("十条架构评审问题分派多个独立修复会话，原需求与验收保留后再进入评审", async () => {
+  const f = fixture();
+  f.source.issues.splice(0, 1, ...Array.from({ length: 10 }, (_, index) => ({ id: `finding_${index}`, blocking: true,
+    candidateFields: ["instructions"], description: `补充处理边界${index}` })));
+  const assignments: number[] = [];
+  const candidate = await f.run({ runRole: () => assert.fail("多问题不能交回单一旧修订节点"), runWorker: async worker => {
+    assignments.push(worker.issues.length);
+    await worker.onSession(`${worker.group.id}.jsonl`); await worker.onCall();
+    await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "保留原义务并补充本组边界",
+      updates: [{ path: "/instructions", value: (worker.base as ArchitectureDesign).instructions + " " + worker.group.issueIds.join(" ") }] });
+  } });
+  assert.deepEqual(assignments, [3, 3, 3, 1]);
+  for (let index = 1; index <= 10; index++) assert.ok(candidate.instructions.includes(`issue_${index}`));
+  assert.deepEqual(candidate.acceptance, f.source.design.acceptance);
+  assert.equal(f.record.reviewRevisionCheckpoint!.modelCalls, 4); assert.equal(f.record.review, null);
+  await f.run({ runWorker: () => assert.fail("已保存修复不得重跑") });
+});
+
 test("已耗尽原设计的完整候选可显式按评审修订，原15轮及模块检查点保持", async () => {
   const f = fixture(), original = structuredClone(f.source), ledger = structuredClone(f.record.designProgressCheckpoint);
   const recovery = architectureReviewRevisionRecovery(f.source);

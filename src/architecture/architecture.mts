@@ -1,4 +1,5 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { runRepairAgent } from "../runtime/repair-agent.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import { feedbackLedger } from "./architecture-feedback-port.mjs";
 import type { ArchitectureOptions, ArchitectureRoleOptions, ArchitectureDesignOptions, StoredArchitectureRecord, Definition, ModuleConsultation, ArchitectureDiagnostic, ArchitectureRoleDiagnostic, HandoffResult } from "./architecture-controller-port.mjs";
@@ -1490,6 +1491,13 @@ export class ArchitectureDesigner {
               issues: record.design ? record.issues : revisionSeed?.issues ?? record.issues } } : {}) }) : null;
         const revisedCandidate = !resumeReview && reviewRevision ? await runArchitectureReviewRevision({ record, source: reviewRevisionSource,
           candidateSchema, validate: value => validateDesign(value, context()), signal,
+          runWorker: async worker => runRepairAgent({ worker, context: { requirements, candidateSchema, platformRules,
+            runtimeCapabilities: runtimeCapabilities ?? null, acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE },
+            binding: { agentId: record.agentId, source: record.reviewRevisionSource }, config: this.config,
+            cwd: this.cwd, dataDir: this.dataDir, sessionFactory: this.sessionFactory,
+            sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),
+            maxOutputTokens: architectureModelOutputBudget(this.config, "specialist"), signal,
+            tools: [createPlatformContractTool(context())] }),
           sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),
           onSave: async checkpoint => {
             const before = record.reviewRevisionCheckpoint;

@@ -3,9 +3,11 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { ArchitectureDesign, ArchitectureIssue, ReviewDiagnosticIssue } from "../contracts/architecture.mjs";
 import type { SessionStorage } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger, isArray, isRecord } from "../runtime/type-boundary.mjs";
+import { createRepairCheckpoint, readRepairCheckpoint, runRepairSchedule, repairHash } from "../runtime/repair-scheduler.mjs";
+import type { RepairCheckpoint, RepairWorker, RepairIssue } from "../runtime/repair-scheduler.mjs";
 interface RevisionSource { version: number; candidateHash: string; reviewHash: string; issuesHash: string; progressHash: string; pipelineId: string; modelCalls: number }
-export type ReviewRevisionCheckpoint = { schemaVersion: 1; schemaHash: string; bindingHash: string; source: RevisionSource;
-  modelCalls: number; sessionRef: { file: string } | null; result: unknown; resultHash: string | null; hash: string }
+export type ReviewRevisionCheckpoint = { schemaVersion: 1 | 2; schemaHash: string; bindingHash: string; source: RevisionSource;
+  dispatch?: RepairCheckpoint; modelCalls: number; sessionRef: { file: string } | null; result: unknown; resultHash: string | null; hash: string }
 interface RetrySource { version: number; candidateHash: string; progressHash: string; modelCalls: number }
 type RevisionIssue = UnknownRecord & { blocking: unknown; candidatePaths?: string[]; candidateFields?: string[] };
 interface TestAuthorization { kind: "user_requested_test"; reason: string; authorizedAt: string }
@@ -18,6 +20,7 @@ export interface ReviewRevisionRole { parameters: ToolSchema; validate(value: un
   resumeSubmissionIssue?: { path: string; reason: string } | undefined; sessionStorage: SessionStorage;
   onSessionRef(reference: unknown): Promise<void>; onModelCall(event?: unknown): Promise<void>; onResult(value: unknown): Promise<void> }
 interface RevisionOptions { record: UnknownRecord; source: unknown; candidateSchema: ToolSchema; validate(value: unknown): ArchitectureDesign;
+  runWorker?: ((worker: RepairWorker) => Promise<unknown>) | undefined;
   runRole(node: ReviewRevisionRole): Promise<unknown>; onSave(checkpoint: ReviewRevisionCheckpoint): Promise<void>; sessionDirectory: string;
   signal?: AbortSignal | undefined; formatSubmissionIssue?: ReviewDiagnosticIssue | undefined }
 import { InputError, ProviderError } from "../requirements/core.mjs";
@@ -71,7 +74,7 @@ export function hasReviewedArchitectureCandidate(input: unknown) {
 
 function revisionShape(input: unknown): ReviewRevisionCheckpoint {
   const checkpoint = objectFields(input), source = objectFields(checkpoint.source), session = objectFields(checkpoint.sessionRef);
-  if (!isRecord(input) || !isRecord(checkpoint.source) || checkpoint.schemaVersion !== 1 || !isInteger(checkpoint.modelCalls)
+  if (!isRecord(input) || !isRecord(checkpoint.source) || ![1, 2].includes(Number(checkpoint.schemaVersion)) || !isInteger(checkpoint.modelCalls)
     || [checkpoint.schemaHash, checkpoint.bindingHash, checkpoint.hash, source.candidateHash, source.reviewHash, source.issuesHash, source.progressHash, source.pipelineId].some(value => typeof value !== "string")
     || !isInteger(source.version) || !isInteger(source.modelCalls)
     || checkpoint.sessionRef !== null && (!isRecord(checkpoint.sessionRef) || typeof session.file !== "string")
@@ -97,19 +100,24 @@ export function readArchitectureReviewRevision(input: unknown): ReviewRevisionCh
   if (!Object.hasOwn(record, "reviewRevisionCheckpoint")) return null;
   try {
     const checkpoint = revisionShape(copy(record.reviewRevisionCheckpoint));
-    if (Object.keys(checkpoint).sort().join() !== "bindingHash,hash,modelCalls,result,resultHash,schemaHash,schemaVersion,sessionRef,source"
-      || checkpoint.schemaVersion !== 1 || checkpoint.hash !== seal(checkpoint).hash || checkpoint.bindingHash !== materialHash(record)
+    const distributed = checkpoint.schemaVersion === 2;
+    const dispatch = distributed ? readRepairCheckpoint(checkpoint.dispatch) : null;
+    if (Object.keys(checkpoint).sort().join() !== (distributed ? "bindingHash,dispatch,hash,modelCalls,result,resultHash,schemaHash,schemaVersion,sessionRef,source" : "bindingHash,hash,modelCalls,result,resultHash,schemaHash,schemaVersion,sessionRef,source")
+      || checkpoint.hash !== seal(checkpoint).hash || checkpoint.bindingHash !== materialHash(record)
+      || dispatch && (dispatch.calls !== checkpoint.modelCalls || dispatch.baseHash !== checkpoint.source.candidateHash
+        || dispatch.bindingHash !== repairHash(checkpoint.source))
       || !/^[a-f0-9]{64}$/u.test(checkpoint.schemaHash) || !validProgress(record)
-      || !Number.isSafeInteger(checkpoint!.modelCalls) || checkpoint!.modelCalls < 0 || checkpoint!.modelCalls > ARCHITECTURE_FORMAT_SUBMISSION_LIMIT
+      || !Number.isSafeInteger(checkpoint!.modelCalls) || checkpoint!.modelCalls < 0 || checkpoint!.modelCalls > (dispatch?.callLimit ?? ARCHITECTURE_FORMAT_SUBMISSION_LIMIT)
       || !Number.isSafeInteger(checkpoint.source?.version) || checkpoint.source.version < 1 || (!isInteger(record.version) || checkpoint.source.version >= record.version)
       || checkpoint.source.pipelineId !== objectFields(record.designProgressCheckpoint).pipelineId
       || checkpoint.source.progressHash !== objectFields(record.designProgressCheckpoint).hash || checkpoint.source.modelCalls !== objectFields(record.designProgressCheckpoint).modelCalls
       || record.reviewRevisionSource !== designHash(checkpoint.source)
       || checkpoint!.sessionRef !== null && (Object.keys(checkpoint!.sessionRef).join() !== "file"
         || !/^[A-Za-z0-9_.-]+\.jsonl$/u.test(checkpoint!.sessionRef.file))
-      || checkpoint!.modelCalls > 0 && !checkpoint!.sessionRef
+      || !distributed && checkpoint!.modelCalls > 0 && !checkpoint!.sessionRef
       || (checkpoint!.result === null ? checkpoint!.resultHash !== null : checkpoint!.resultHash !== designHash(checkpoint!.result)
-        || checkpoint!.modelCalls < 1 || !checkpoint!.sessionRef)) throw invalid();
+        || checkpoint!.modelCalls < 1 || (!distributed && !checkpoint!.sessionRef)
+        || dispatch && dispatch.groups.some(group => !group.result))) throw invalid();
     return checkpoint;
   } catch { throw invalid(); }
 }
@@ -266,8 +274,9 @@ export function architectureReviewRevisionRecovery(input: unknown) {
         && (formatIssue && checkpoint!.modelCalls >= ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT
           || checkpoint!.modelCalls > ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT
           || acceptanceRetry || referenceRetry);
-      const revisionLimit = formatContinuation ? ARCHITECTURE_FORMAT_SUBMISSION_LIMIT : ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT;
-      const blocked = Boolean(reviewed || reviewExhausted) || !checkpoint!.result && checkpoint!.modelCalls >= revisionLimit;
+      const revisionLimit = checkpoint!.dispatch?.callLimit ?? (formatContinuation ? ARCHITECTURE_FORMAT_SUBMISSION_LIMIT : ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT);
+      const blocked = Boolean(reviewed || reviewExhausted) || !checkpoint!.result && (checkpoint!.modelCalls >= revisionLimit
+        || checkpoint!.dispatch?.groups.some(group => !group.result && group.calls >= checkpoint!.dispatch!.groupCallLimit));
       return { kind: "review_revision", status: blocked ? "blocked" : "continuing", stage: "review_revision", stageKey: "review_revision",
         stageLabel: "评审修订", modelCalls: checkpoint!.modelCalls, modelCallLimit: revisionLimit,
         actionLabel: blocked ? "查看评审阻断" : checkpoint!.result ? "继续独立评审" : "继续按评审修订",
@@ -283,25 +292,41 @@ export function architectureReviewRevisionRecovery(input: unknown) {
                   ? `上次修订没有补上验收，可沿原会话再改（已用${checkpoint!.modelCalls}/${ARCHITECTURE_FORMAT_SUBMISSION_LIMIT}次）。`
                 : formatContinuation
                   ? `模型接口连接中断，这次修订还没完成（已用${checkpoint!.modelCalls}/${ARCHITECTURE_FORMAT_SUBMISSION_LIMIT}次）。可沿原会话继续。`
+              : checkpoint!.dispatch ? `正在按问题分组修订：${checkpoint!.dispatch.groups.filter(group => group.result).length}/${checkpoint!.dispatch.groups.length}组已提交，累计${checkpoint!.modelCalls}/${revisionLimit}轮。`
               : `正在续接同一次评审修订（已用${checkpoint!.modelCalls}/${revisionLimit}轮）；蓝图、模块和原设计用量保留。` };
     } catch (error) { return { kind: "review_revision", status: "blocked", actionLabel: "检查修订材料", message: error instanceof Error ? error.message : String(error) }; }
   }
   if (!hasReviewedArchitectureCandidate(record)) return null;
   const source = sourceReference(record);
+  const planned = createRepairCheckpoint(source, record.design, repairIssues(record), ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT);
+  const grouped = planned.groups.length > 1;
   return { kind: "review_revision", status: "available", stage: "review_revision", stageKey: "review_revision", stageLabel: "评审修订",
-    actionLabel: "按评审修订（最多3轮）", modelCalls: 0, modelCallLimit: ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT,
-    message: "完整方案及独立评审意见已保存。可开启一次按评审意见的局部修订（最多3轮），不重跑蓝图和模块；原设计用量保留，修订后仍须独立评审。",
+    actionLabel: grouped ? "按问题分组修订" : "按评审修订（最多3轮）", modelCalls: 0, modelCallLimit: grouped ? planned.callLimit : ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT,
+    message: grouped ? `完整方案及意见已保存，将分成${planned.groups.length}组独立修复，每组最多3轮，总计最多${planned.callLimit}轮；修订后仍须完整检查和独立评审。`
+      : "完整方案及独立评审意见已保存。可开启一次按评审意见的局部修订（最多3轮），不重跑蓝图和模块；原设计用量保留，修订后仍须独立评审。",
     request: { kind: "review_revision", version: record.version, checkpointHash: objectFields(record.designProgressCheckpoint).hash,
       candidateHash: source.candidateHash, reviewHash: source.reviewHash, issuesHash: source.issuesHash } };
 }
 
+function repairIssues(source: unknown): RepairIssue[] {
+  const value = objectFields(source);
+  return (isArray(value.issues) ? value.issues : []).map(objectFields).filter(issue => issue.blocking).map((issue, index) => {
+    const paths = (isArray(issue.candidatePaths) && issue.candidatePaths.length ? issue.candidatePaths
+      : isArray(issue.candidateFields) ? issue.candidateFields.map(field => `/${String(field)}`) : ["/instructions"]).map(String);
+    return { id: `issue_${index + 1}`, description: String(issue.description ?? issue.id ?? "评审问题"), remedy: String(issue.remedy ?? "按原需求核对并修复"),
+      paths, owner: [...new Set(paths.map(path => path.split("/")[1]))].sort().join("+") };
+  });
+}
+
 export function createArchitectureReviewRevision(record: unknown, source: unknown, candidateSchema: ToolSchema): ReviewRevisionCheckpoint {
   if (!hasReviewedArchitectureCandidate(source) || materialHash(source) !== materialHash(record)) throw invalid();
-  return seal({ schemaVersion: 1 as const, schemaHash: designHash(candidateSchema), bindingHash: materialHash(record), source: sourceReference(source),
+  const dispatch = createRepairCheckpoint(sourceReference(source), objectFields(source).design, repairIssues(source), ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT);
+  return seal({ schemaVersion: dispatch.groups.length > 1 ? 2 as const : 1 as const,
+    ...(dispatch.groups.length > 1 ? { dispatch } : {}), schemaHash: designHash(candidateSchema), bindingHash: materialHash(record), source: sourceReference(source),
     modelCalls: 0, sessionRef: null, result: null, resultHash: null });
 }
 
-export async function runArchitectureReviewRevision({ record, source: sourceInput, candidateSchema, validate, runRole, onSave, sessionDirectory, signal, formatSubmissionIssue }: RevisionOptions): Promise<ArchitectureDesign> {
+export async function runArchitectureReviewRevision({ record, source: sourceInput, candidateSchema, validate, runRole, runWorker, onSave, sessionDirectory, signal, formatSubmissionIssue }: RevisionOptions): Promise<ArchitectureDesign> {
   const source = objectFields(sourceInput);
   if (!hasReviewedArchitectureCandidate(source) || materialHash(source) !== materialHash(record)) throw invalid();
   let checkpoint = readArchitectureReviewRevision(record);
@@ -344,6 +369,19 @@ export async function runArchitectureReviewRevision({ record, source: sourceInpu
     return candidate;
   };
   if (checkpoint!.result) return validateCandidate(checkpoint!.result);
+  if (checkpoint!.schemaVersion === 2) {
+    if (!runWorker) throw invalid();
+    if (repairHash(checkpoint!.dispatch!.issues) !== repairHash(repairIssues(source))) throw invalid();
+    const result = validateCandidate(await runRepairSchedule({ checkpoint: checkpoint!.dispatch!, base, binding: expected, signal,
+      run: runWorker, save: dispatch => save(next => { next.dispatch = dispatch; next.modelCalls = dispatch.calls; }) }));
+    const paths = repairIssues(source).flatMap(issue => issue.paths);
+    for (const [index, row] of base.acceptance.entries()) {
+      if (!paths.some(path => path === "/acceptance" || path === `/acceptance/${index}` || path.startsWith(`/acceptance/${index}/`))
+        && designHash(row) !== designHash(result.acceptance.find(item => item.id === row.id))) throw contentError("未涉及反馈的验收必须完整保留。");
+    }
+    await save(next => { next.result = result; next.resultHash = designHash(result); });
+    return result;
+  }
   const referenceRetry = formatSubmissionIssue?.reason === "invalid_reference"
     && checkpoint!.modelCalls >= ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT
     && checkpoint!.modelCalls < ARCHITECTURE_FORMAT_SUBMISSION_LIMIT;

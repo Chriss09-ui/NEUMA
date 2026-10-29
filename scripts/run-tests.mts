@@ -9,6 +9,7 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 // test/ 顶层只保留 server 组装测试和 native-check.yml 固定引用的四个入口；其余测试按领域子目录存放，条目使用相对 test 根的路径。
 export const TEST_LAYERS = Object.freeze({
   unit: Object.freeze([
+    "runtime/repair-scheduler.test.mjs",
     "runtime/session-replay.test.mjs",
     "runtime/execution-lifecycle.test.mjs",
     "installation/source-launcher.test.mjs", "build/typescript-boundaries.test.mjs", "build/m4-architecture-boundaries.test.mjs", "build/m4-development-boundaries.test.mjs",

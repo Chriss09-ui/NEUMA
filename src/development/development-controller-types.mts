@@ -39,6 +39,7 @@ export interface DevelopmentDiagnostic extends UnknownRecord { stage: string; ph
 export interface HistoricalReview { sourceRunId: string; reviewedPlanHash: string; review: DevelopmentReview & { subjectVersion?: number }; instruction: string }
 export interface PlanningDraft { bindingHash: string; snapshot: PlanningDraftSnapshot; historicalReview?: HistoricalReview }
 export interface DevelopmentRunRecord extends SubmissionRecord {
+  repairDispatchVersion?: 1; dispatchedRepairs?: string[]; repairBatches?: Record<string, import("./development-repair.mjs").DevelopmentRepairBatch>; pendingPlanRepair?: boolean;
   id: string; agentId: string; name: string; version: number; revision: number; createdAt: string; updatedAt: string;
   architectureRef: ArchitectureReference; architecture: PassedDevelopmentArchitecture; status: string; phase: string; delivery: string; summary: string;
   budgets: { corrections: number; planRevisions: number; integrationRepairs: number }; planning: { turns: number }; tasks: TaskProgress[];

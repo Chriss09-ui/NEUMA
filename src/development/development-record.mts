@@ -1,4 +1,5 @@
 import { Ajv } from "ajv";
+import { readRepairCheckpoint } from "../runtime/repair-scheduler.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, REVIEW_SCHEMA as ARCHITECTURE_REVIEW_SCHEMA } from "../architecture/architecture-contract.mjs";
 import { LEGACY_PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA } from "./development-contract.mjs";
@@ -100,6 +101,19 @@ const valid = new Ajv({ strict: false, allErrors: false }).compile<DevelopmentRu
 /** Checks persisted controller fields without filling historical gaps or changing stored bytes. Semantic bindings remain controller gates. */
 export function readDevelopmentRunRecord(value: unknown): DevelopmentRunRecord {
   if (!valid(value)) throw new InputError("研发检查点字段已损坏，不能恢复阶段状态或模型预算");
+  if (value.repairDispatchVersion !== undefined && value.repairDispatchVersion !== 1
+    || value.pendingPlanRepair !== undefined && typeof value.pendingPlanRepair !== "boolean"
+    || value.repairBatches !== undefined && (!value.repairBatches || typeof value.repairBatches !== "object" || Array.isArray(value.repairBatches)))
+    throw new InputError("研发修复调度版本或进度无效。");
+  for (const batch of Object.values(value.repairBatches ?? {})) {
+    if (!batch || typeof batch.applied !== "boolean") throw new InputError("研发修复批次损坏。");
+    readRepairCheckpoint(batch.checkpoint);
+  }
+  if (value.repairDispatchVersion === 1 && (!Array.isArray(value.dispatchedRepairs) || !value.repairBatches
+    || new Set(value.dispatchedRepairs).size !== value.dispatchedRepairs.length
+    || value.dispatchedRepairs.some(key => typeof key !== "string" || !value.repairBatches?.[key])
+    || Object.keys(value.repairBatches).some(key => !value.dispatchedRepairs!.includes(key))))
+    throw new InputError("已分派的修复进度缺失，不能重新分派刷新额度。");
   if (value.architecture.draft !== undefined) checkedStoredDraft(value.architecture.draft);
   for (const delivery of [value.package, ...value.deliveries.map(item => item.package)]) {
     if (delivery?.application !== undefined) validateApplicationManifest(delivery.application);

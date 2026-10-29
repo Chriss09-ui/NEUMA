@@ -35,7 +35,7 @@ export type DevelopmentPlan = PlanFields & ({ schemaVersion?: never; runtime: "n
   | { schemaVersion: 3; runtime: "node-action" | "managed-service"; application: DevelopmentApplication });
 export interface DevelopmentIssue { path: string; reason: string; referenceId?: string; [key: string]: unknown }
 export interface DevelopmentReview { subjectVersion?: number; subjectHash: string; verdict: "pass" | "revise" | "blocked"; summary: string;
-  issues: { id: string; blocking: boolean; kind: "code" | "plan" | "architecture" | "environment"; description: string; remedy: string }[] }
+  issues: { id: string; blocking: boolean; kind: "code" | "plan" | "architecture" | "environment"; description: string; remedy: string; taskIds?: string[]; files?: string[]; candidatePaths?: string[] }[] }
 export interface DevelopmentWork { summary: string; changedFiles: string[]; knownIssues: string[]; nextAction: string; continue: boolean }
 export interface DevelopmentArchitecture {
   draft?: {taskSpec?:RequirementDraft["taskSpec"];interaction?:Pick<NonNullable<RequirementDraft["interaction"]>,"operations">}; deferredVerifications?: { issues?: { requirementId: string; stage?: string }[] } | null | undefined;
