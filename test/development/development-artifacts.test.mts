@@ -58,6 +58,17 @@ test("原生规划工具保存分批用例，封存后组装与完整旧校验�
   assert.throws(() => validatePlan(revised.plan, { architecture, previousPlan: plan }), /不能删除或替换/);
 });
 
+test("调度器合并的规划按原材料协议封存，原冻结用例和历史快照完整保留", async t => {
+  const { artifacts, tools } = await fixture(t), architecture = developmentArchitecture(), plan = developmentPlan(architecture);
+  await savePlan(tools, plan);
+  const original = await artifacts.submit("agent_one", "run_one", "index.json");
+  const candidate = structuredClone(plan); candidate.tasks[0]!.description += "，补充边界处理";
+  const repaired = await artifacts.saveRepairCandidate("agent_one", "run_one", candidate);
+  assert.deepEqual(validatePlan(repaired.plan, { architecture, previousPlan: plan }), candidate);
+  assert.deepEqual((await artifacts.validateSnapshot(repaired.snapshot)).plan, candidate);
+  assert.deepEqual((await artifacts.validateSnapshot(original.snapshot)).plan, plan);
+});
+
 test("规划预览只捕获当前材料，不封存、不改变权限或接受正式计划", async (t) => {
   const { artifacts, tools, directory } = await fixture(t), architecture = developmentArchitecture(), plan = developmentPlan(architecture);
   await savePlan(tools, plan);

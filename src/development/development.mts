@@ -1,4 +1,5 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { needsDevelopmentRepairDispatch, repairDevelopmentPlan, repairDevelopmentCode } from "./development-repair.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { RegisteredTool as ToolDefinition } from "../runtime/execution-port.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
@@ -684,7 +685,7 @@ export class DevelopmentController {
     const counter = { turns: 0 };
     const handle = await this.role(ctx, { kind: "reviewer", counter, limit: this.limits.reviewerTurns,
       scope: { subjectHash },
-      tools: snapshot ? await this.workspace.snapshotTools(snapshot, ctx.record.agentId) : [], validate: (value) => validateReview(value, { subjectHash }) });
+      tools: snapshot ? await this.workspace.snapshotTools(snapshot, ctx.record.agentId) : [], validate: (value) => validateReview(value, { subjectHash, plan: payload.plan }) });
     try {
       let result = await this.ask(ctx, handle, { ...this.base(ctx), mode, subjectHash, ...payload });
       if (subjectVersion === 2) result = { ...result, subjectVersion };
@@ -748,6 +749,11 @@ export class DevelopmentController {
           } }] : [])],
       validate: (value) => validatePlan(value, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined, freshWorkspace }) });
       for (;;) {
+        if (ctx.record.pendingPlanRepair) {
+          const feedback = ctx.record.feedback;
+          if (!feedback?.review || !feedback.rejectedPlan) throw new InputError("待修订计划的原候选或评语缺失。");
+          await repairDevelopmentPlan(this, ctx, feedback.rejectedPlan, { review: feedback.review });
+        }
         const caseFacts = ctx.record.pendingPlan?.plan == null ? planningCaseFacts(ctx.record, ctx.signal) : undefined;
         const plan = ctx.record.pendingPlan?.plan ?? await this.ask(ctx, handle, { ...this.base(ctx, caseFacts), previousPlan: ctx.record.plan,
           ...(caseFacts ? { caseFacts } : {}),
@@ -783,7 +789,9 @@ export class DevelopmentController {
         await this.save(ctx);
         if (review.verdict === "blocked" || review.issues.some((item) => item.blocking && ["architecture", "environment"].includes(item.kind)))
           throw new Stop(review.summary);
-        await this.correction(ctx, "plan");
+        await this.correction(ctx, "plan", null, () => {
+          if (needsDevelopmentRepairDispatch(ctx, { review })) ctx.record.pendingPlanRepair = true;
+        });
       }
     } finally { await this.dispose(ctx, handle); delete ctx.planningWorkspace; }
   }
@@ -846,6 +854,11 @@ export class DevelopmentController {
       if (!task.attempts) { task.attempts = 1; task.nextAction = "implement"; }
       await this.save(ctx);
       for (;;) {
+        if (task.nextAction !== "verify" && task.feedback && (task.integration || task.repairs > 0)
+          && needsDevelopmentRepairDispatch(ctx, task.feedback)) {
+          await this.phase(ctx, "implementing", `正在按问题分组修复「${task.title}」…`);
+          await repairDevelopmentCode(this, ctx, task, task.feedback);
+        }
         if (task.nextAction !== "verify") {
           await this.phase(ctx, "implementing", `正在${task.repairs ? "修复" : "开发"}「${task.title}」…`);
           if (!handle) handle = await create();
@@ -917,7 +930,7 @@ export class DevelopmentController {
           version: (previous?.version ?? 0) + 1, architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash },
           architecture: clone(architecture), status: "running", phase: "intake", delivery: "blocked", summary: LABELS.intake,
           budgets: { corrections: this.limits.corrections, planRevisions: this.limits.planRevisions, integrationRepairs: this.limits.integrationRepairs },
-          planning: { turns: 0 }, tasks: [], plan: null, planHash: null, planAttempts: [], reviews: [], reports: [], handoffs: [],
+          repairDispatchVersion: 1, dispatchedRepairs: [], repairBatches: {}, planning: { turns: 0 }, tasks: [], plan: null, planHash: null, planAttempts: [], reviews: [], reports: [], handoffs: [],
           currentTaskId: null, snapshot: null, verifiedSnapshot: null, package: null, deliveries: [], feedback: null }));
         if (previous?.status === "failed" && unacceptedPlanning(previous) && Number(architecture.design.schemaVersion) >= 2
           && planningDraftBinding(previous) === planningDraftBinding(ctx.record)) {

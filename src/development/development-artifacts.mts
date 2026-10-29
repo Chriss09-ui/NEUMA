@@ -904,6 +904,27 @@ export class DevelopmentArtifacts {
     });
   }
 
+  /** Persist an assembled repair through the same material/snapshot reader as ordinary planning. */
+  async saveRepairCandidate(agentId: string, id: string, candidate: unknown, { signal }: PlanningOptions = {}) {
+    runId(id); const plan = objectFields(candidate);
+    if (!Array.isArray(plan.cases) || plan.activationCases !== undefined && !Array.isArray(plan.activationCases)) throw artifactFailure("shape");
+    const root = await this.storage.directory(agentId, `development/repair-planning/${id}/${digest(JSON.stringify(candidate))}`, { create: true });
+    const { cases, activationCases, ...index } = plan;
+    const saveCases = async (rows: unknown[], prefix: string) => {
+      const paths = [];
+      for (const [number, row] of rows.entries()) {
+        const path = `${prefix}-${number}.json`; await this.write(root, path, JSON.stringify([row]), { signal }); paths.push(path);
+      }
+      return paths;
+    };
+    const caseFiles = await saveCases(cases as unknown[], "cases");
+    const activationCaseFiles = activationCases === undefined ? undefined : await saveCases(activationCases as unknown[], "activation");
+    await this.write(root, "index.json", JSON.stringify({ ...index, caseFiles, ...(activationCaseFiles ? { activationCaseFiles } : {}) }), { signal });
+    const source = await inspect(root), parent = await this.storage.directory(agentId, "development/planning-snapshots", { create: true });
+    const { path, frozen } = await freezeBundle(source, parent, signal);
+    return { plan: assemble(frozen.contents, "index.json"), snapshot: { agentId, runId: id, path, hash: frozen.hash, files: frozen.files, indexPath: "index.json" } };
+  }
+
   async captureDraft(agentId: string, id: string, indexPath: string, { expectedHash, signal }: PlanningOptions = {}) {
     planPath(indexPath); abort(signal);
     try {

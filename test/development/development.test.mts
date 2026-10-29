@@ -153,6 +153,53 @@ const failReport = (report: VerifyReport, marker = "raw-failure") => ({ ...repor
   results: report.results.map((item, index) => index ? item : { ...item, status: "failed", actual: { error: marker },
     stdout: JSON.stringify({ error: marker }), stderr: `${marker}-stderr`, reason: "assertion_mismatch" }) });
 
+for (const repairNode of ["plan", "task", "integration"] as const) test(`${repairNode}的十条反馈分组进入独立子会话，合并成果后完整复评`, async t => {
+  let rejected = false, rechecked = false;
+  const f = await fixture(t, { onPrompt: async ({ record, payload, submit, respond }) => {
+    const target = record.role === "reviewer" && payload.mode === repairNode && (repairNode !== "task" || payload.task?.id === "core");
+    if (target && !rejected) {
+      rejected = true;
+      const issues = Array.from({ length: 10 }, (_, index) => {
+        const task = repairNode === "task" || index < 5 ? "core" : "guard";
+        return { ...developmentIssue(repairNode === "plan" ? "plan" : "code", `issue_${index}`),
+          description: `补齐独立场景 ${index}`, remedy: `保留修复标记 FIX_${index};`, taskIds: [task],
+          files: [task === "core" ? "main.mjs" : "guard.mjs"],
+          ...(repairNode === "plan" ? { candidatePaths: [`/tasks/${task === "core" ? 0 : 1}/description`] } : {}) };
+      });
+      return submit(developmentReview(payload.subjectHash!, { verdict: "revise", issues }));
+    }
+    if (target && rejected) rechecked = true;
+    await respond();
+  } });
+  const originalFactory = f.controller.sessionFactory, assignments: { count: number; binding: unknown }[] = [];
+  f.controller.sessionFactory = async options => {
+    const tools = fixtureTools(options.customTools);
+    if (!tools.submit_repair_patch) return originalFactory(options);
+    return { sessionFile: join(options.sessionStorage!.directory, `child-${assignments.length}-${Math.random().toString(16).slice(2)}.jsonl`),
+      async prompt(text) {
+        const input = JSON.parse(text), assignment = input.repairAssignment;
+        assignments.push({ count: assignment.issues.length, binding: options.sessionStorage!.binding });
+        const page = JSON.parse(toolText(await tools.read_repair_context!.execute("read", { section: "base", limit: 24000 })));
+        assert.equal(page.nextOffset, null); const base = JSON.parse(page.text);
+        const marker = assignment.issues.map((issue: { remedy: string }) => issue.remedy).join(" ");
+        const updates = assignment.allowedPaths.map((path: string) => {
+          const keys = path.slice(1).split("/").map(key => key.replaceAll("~1", "/").replaceAll("~0", "~"));
+          const value = keys.reduce((value: Record<string, unknown>, key: string) => value[key] as Record<string, unknown>, base);
+          return { path, value: String(value) + "\n// " + marker };
+        });
+        await tools.submit_repair_patch!.execute("submit", { baseHash: assignment.baseHash, issueIds: assignment.issues.map((issue: { id: string }) => issue.id), summary: "逐项补充本组场景，等待独立复评", updates });
+      }, abort() {}, dispose() {} };
+  };
+  const result = await f.controller.run(f.architecture);
+  assert.equal(result.status, "completed", result.summary);
+  assert.ok(rechecked); assert.ok(assignments.length >= 4); assert.ok(assignments.every(group => group.count <= 3));
+  assert.equal(new Set(assignments.map(group => JSON.stringify(group.binding))).size, assignments.length);
+  const text = repairNode === "plan" ? JSON.stringify(result.plan)
+    : (await Promise.all(result.snapshot!.files.map(file => readFile(join(result.snapshot!.path, file.path), "utf8")))).join("\n");
+  for (let index = 0; index < 10; index++) assert.ok(text.includes(`FIX_${index};`), `问题${index}的修改必须保留`);
+  assert.equal(result.budgets.corrections, 5, "一个修复批次扣一次纠错额度，子组不重复扣减");
+});
+
 function bindPlatform<A extends PassedDevelopmentArchitecture>(architecture: A, snapshot: ReturnType<typeof createPlatformSnapshot>) {
   const platformHash = hashValue(snapshot);
   return Object.assign(architecture, { platformSnapshot: structuredClone(snapshot), platformContractVersion: snapshot.version,

@@ -235,4 +235,22 @@ export class DevelopmentWorkspace {
     const checked = await this.validateSnapshot(snapshot, agentId);
     return this.makeTools(checked.path, { readOnly: true, check: () => this.validateSnapshot(snapshot, agentId) });
   }
+
+  async applyRepair(agentId: string, runId: string, snapshot: DevelopmentSnapshot, files: Record<string, string>, allowedFiles: string[], signal?: AbortSignal) {
+    const original = await inspectDevelopmentCode((await this.validateSnapshot(snapshot, agentId)).path);
+    await this.serial(agentId, runId, async () => {
+      checkAbort(signal);
+      const root = await this.workspacePath(agentId, runId), current = await inspectDevelopmentCode(root);
+      const allowed = new Set(allowedFiles.map(validateCodePath));
+      for (const file of new Set([...current.contents.keys(), ...original.contents.keys(), ...Object.keys(files)])) {
+        const before = original.contents.get(file)?.toString("utf8"), actual = current.contents.get(file)?.toString("utf8"), desired = files[file];
+        if (typeof desired !== "string" || (!allowed.has(file) && desired !== before)
+          || actual !== before && actual !== desired) throw new InputError("代码在修复期间发生冲突；保留子任务成果，请检查当前版本。");
+      }
+      const writer = this.makeTools(root, { allowed, readOnly: false, signal }).find(tool => tool.name === "write_code_file")!;
+      for (const file of allowed) if (files[file] !== undefined && files[file] !== current.contents.get(file)?.toString("utf8"))
+        await writer.execute("repair", { path: file, content: files[file] }, signal);
+    });
+    return this.snapshot(agentId, runId);
+  }
 }

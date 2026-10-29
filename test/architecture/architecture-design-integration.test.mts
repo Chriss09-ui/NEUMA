@@ -25,6 +25,7 @@ import type { NeumaPiSession, PiSessionOptions } from "../../src/runtime/pi-port
 import type { ArchitectureBase } from "../../src/contracts/architecture.mjs";
 
 interface NativePayload extends Record<string, unknown> {
+  repairAssignment?: { baseHash: string; issues: { id: string }[]; allowedPaths: string[] };
   pipelineStage?: string; requirements?: { id: string; text: string }[]; assignment?: unknown; baseCandidate?: unknown;
   rejectedSubmission?: { submissionHash: string }; baseHash?: string; candidateHash?: string;
   design?: Parameters<typeof passingReview>[1] & { components: { purpose: string }[] }; priorFindings?: Parameters<typeof passingReview>[2];
@@ -46,7 +47,7 @@ function fixtureNumber(value: unknown): number { assert.ok(typeof value === "num
 const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit_architecture_module", integration: "submit_architecture_integration" };
 
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
-  failRevisionCalls = 0, failRevisedReview = 0, programBlocker = false, useFindingSelectors = false } = {}) {
+  failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, reviewRejected: false, cancelStage: null as "blueprint" | "module" | "integration" | "research" | null, controller: null as AbortController | null }, dataDir = join(root, "data");
@@ -60,11 +61,12 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
       const body = fixtureChatRequest(Buffer.concat(chunks).toString()), names = body.tools!.map((tool) => tool.function.name), payloads = users(body);
       const stage = (Object.keys(stageNames) as (keyof typeof stageNames)[]).find(key => names.includes(stageNames[key]));
-      const kind = stage ?? (names.includes("submit_architecture_review_revision") ? "review_revision"
+      const kind = stage ?? (names.includes("submit_repair_patch") ? "repair" : names.includes("submit_architecture_review_revision") ? "review_revision"
         : names.includes("submit_requirement_fidelity") ? "fidelity" : "reviewer");
       requests.push({ kind, body });
       let name, args;
       if (kind === "review_revision" && state.failRevisionCalls-- > 0
+        || kind === "repair" && failRepairCalls-- > 0
         || kind === "reviewer" && state.reviewRejected && state.failRevisedReview-- > 0) {
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(`data: ${JSON.stringify({ id: "revision-length", choices: [{ index: 0, delta: { role: "assistant", content: "固定修订阶段截断" }, finish_reason: "length" }] })}\n\ndata: [DONE]\n\n`);
@@ -104,6 +106,12 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
               updates: [{ path: "/steps/0/componentId", value: recordArray(objectFields(args).steps)[0]!.componentId }] };
           }
         }
+      } else if (kind === "repair") {
+        const assignment = payloads.findLast(row => row.repairAssignment)!.repairAssignment!;
+        name = "submit_repair_patch";
+        args = { baseHash: assignment.baseHash, issueIds: assignment.issues.map(issue => issue.id),
+          summary: "固定模型只补职责，其他程序阻断保留以检验评审恢复", updates: assignment.allowedPaths.some(path => path.startsWith("/components"))
+            ? [{ path: "/components/0/purpose", value: "完整逐条归纳已确认工作记录并标记缺失项" }] : [] };
       } else if (kind === "review_revision") {
         const payload = payloads.findLast((row) => row.pipelineStage === "review_revision" && row.baseCandidate);
         assert.ok(payload); name = "submit_architecture_review_revision";
@@ -579,7 +587,7 @@ test("修订候选仍有程序阻断时评审中断，重启保留该候选的�
   const payload = users(f.requests[before]!.body).find((row) => row.design);
   assert.equal(payload!.modelBudget!.used, stopped!.reviewProgressCheckpoint!.modelCalls, "原生请求发送前的提示保留已用次数");
   assert.equal(result.reviewProgressCheckpoint!.modelCalls, stopped!.reviewProgressCheckpoint!.modelCalls + 2, "续接的一次评审和一次范围复核追加到原计数");
-  assert.equal(result.reviewRevisionCheckpoint!.modelCalls, 1);
+  assert.equal(result.reviewRevisionCheckpoint!.modelCalls, stopped!.reviewRevisionCheckpoint!.modelCalls, "恢复独立评审不得重跑已保存的修复子组");
   assert.equal(result.status, "needs_changes", "程序阻断不能被独立评审pass绕过");
   assert.equal((await f.designer.get(f.definition.id))!.designRecovery!.status, "blocked");
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["reviewer", "fidelity"]);
@@ -599,6 +607,23 @@ test("首次评审修订授权保存失败不产生无入口的失败版本，�
   assert.equal(f.requests.length, before);
   const passed = await f.run({ architectureRepair: source!.designRecovery!.request });
   assert.equal(passed.status, "passed"); assert.equal(passed.reviewRevisionCheckpoint!.modelCalls, 1);
+});
+
+test("真实修复子会话截断后只续接未完成组，已提交组及原调用账本保留", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { rejectReview: true, programBlocker: true, failRepairCalls: 1 });
+  await f.run(); const source = await f.designer.get(f.definition.id);
+  await assert.rejects(f.run({ architectureRepair: source!.designRecovery!.request }));
+  const stopped = await f.designer.get(f.definition.id), checkpoint = stopped!.reviewRevisionCheckpoint!;
+  assert.equal(checkpoint.schemaVersion, 2);
+  const dispatch = objectFields(checkpoint.dispatch), groups = recordArray(dispatch.groups);
+  assert.equal(groups.filter(group => group.result).length, 1);
+  assert.equal(checkpoint.modelCalls, 2);
+  const before = f.requests.filter(request => request.kind === "repair").length;
+  await f.reload(); const resumed = await f.run();
+  assert.equal(f.requests.filter(request => request.kind === "repair").length, before + 1);
+  assert.equal(resumed.reviewRevisionCheckpoint!.modelCalls, 3);
+  assert.equal(resumed.status, "needs_changes", "原程序阻断仍须真实处理，不能因子组已提交而通过");
+  assert.deepEqual(f.errors, []);
 });
 
 for (const legacy of [false, true]) test(`评审后追加检索资料仍能完整修订和复评，${legacy ? "旧记录按精确历史目录恢复" : "新记录使用冻结目录"}`, { timeout: 30000 }, async t => {

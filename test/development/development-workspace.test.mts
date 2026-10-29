@@ -37,6 +37,21 @@ test("研发文件工具只写任务精确授权文件，读取与元数据分�
   await assert.rejects(call(await workspace.tools("agent_one", "run-1"), "write_code_file", { path: "main.mjs", content: "bad" }), /授权/);
 });
 
+test("分组代码合并拒绝外部冲突，部分写入中断后可沿同一基底继续", async t => {
+  const { workspace } = await fixture(t), tools = await workspace.tools("agent_one", "run-1", { allowedFiles: ["a.mjs", "b.mjs"] });
+  await call(tools, "write_code_file", { path: "a.mjs", content: "old-a" });
+  await call(tools, "write_code_file", { path: "b.mjs", content: "old-b" });
+  const base = await workspace.snapshot("agent_one", "run-1");
+  await call(tools, "write_code_file", { path: "a.mjs", content: "external-change" });
+  await assert.rejects(workspace.applyRepair("agent_one", "run-1", base, { "a.mjs": "new-a", "b.mjs": "new-b" }, ["a.mjs", "b.mjs"]), /冲突/);
+  assert.equal((await call(tools, "read_code_file", { path: "b.mjs" })).content, "old-b");
+  await call(tools, "write_code_file", { path: "a.mjs", content: "new-a" });
+  const result = await workspace.applyRepair("agent_one", "run-1", base, { "a.mjs": "new-a", "b.mjs": "new-b" }, ["a.mjs", "b.mjs"]);
+  assert.notEqual(result.hash, base.hash);
+  assert.equal((await call(tools, "read_code_file", { path: "a.mjs" })).content, "new-a");
+  assert.equal((await call(tools, "read_code_file", { path: "b.mjs" })).content, "new-b");
+});
+
 test("路径穿越、隐藏凭据、元数据、符号链接及硬链接均拒绝", async (t) => {
   const { workspace, root } = await fixture(t);
   const code = await workspace.create("agent_one", "safe");
