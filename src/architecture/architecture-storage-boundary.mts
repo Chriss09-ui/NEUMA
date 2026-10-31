@@ -68,11 +68,11 @@ export function checkedStoredArchitectureRecord(input: unknown): StoredArchitect
     if (!architectureToolValidation(value.design, version === 3 ? storedDesignSchemas[3] : version === 2 ? storedDesignSchemas[2] : storedDesignSchemas.legacy).valid) invalid();
   }
   if (value.review !== null && !architectureToolValidation(value.review, REVIEW_SCHEMA).valid) invalid();
-  for (const key of ["updatedAt", "platformHash", "designProgressEvidenceHash", "reviewRevisionSource"]) if (value[key] !== undefined && typeof value[key] !== "string") invalid();
+  for (const key of ["updatedAt", "platformHash", "designProgressEvidenceHash", "reviewRevisionSource", "reviewDispatchSource"]) if (value[key] !== undefined && typeof value[key] !== "string") invalid();
   for (const key of ["platformContractVersion", "capabilityCatalogVersion", "designResearchCalls"]) if (value[key] !== undefined && !isInteger(value[key])) invalid();
   if (value.reviewContext !== undefined && value.reviewContext !== null && !isRecord(value.reviewContext)) invalid();
   for (const key of ["reviewEvidence", "revisionSource", "requirementFidelity", "designRecovery"]) if (value[key] !== undefined && !isRecord(value[key])) invalid();
-  for (const key of ["designProgressCheckpoint", "reviewProgressCheckpoint", "mainReviewCheckpoint", "requirementFidelityProgress", "reviewRevisionCheckpoint", "reviewRetryCheckpoint"])
+  for (const key of ["designProgressCheckpoint", "reviewProgressCheckpoint", "mainReviewCheckpoint", "requirementFidelityProgress", "reviewRevisionCheckpoint", "reviewRetryCheckpoint", "reviewDispatchCheckpoint"])
     if (value[key] !== undefined && value[key] !== null && !isRecord(value[key])) invalid();
   if (value.diagnostic !== undefined) diagnostic(value.diagnostic, true);
   if (value.reviewDiagnostics !== undefined) { if (!isArray(value.reviewDiagnostics)) invalid(); value.reviewDiagnostics.forEach(entry => diagnostic(entry, false)); }

@@ -885,13 +885,18 @@ test("设计中的阻断未知项即使被独立评估忽略也不能交付", as
 
 test("模型与 provider 错误不泄露原始敏感载荷", async (t) => {
   for (const error of [new Error("Bearer private-key-fixture"),
-    new ProviderError("upstream raw Bearer private-key-fixture", { stage: "provider", reason: "raw", raw: "private-key-fixture" })]) {
+    new ProviderError("upstream raw Bearer private-key-fixture", { stage: "provider", reason: "raw", raw: "private-key-fixture" }),
+    new ProviderError("Bearer private-key-fixture", { stage: "llm", reason: "api_idle_timeout", raw: "private-key-fixture",
+      phase: "private-key-fixture", idleTimeoutMs: "private-key-fixture", elapsedMs: -1, firstResponseMs: null,
+      lastDataMs: "private-key-fixture", receivedBytes: Infinity, chunkCount: 2 })]) {
     const progress: UnknownRecord[] = [];
     const { designer } = await fixture(t, { sessionFactory: async () => { throw error; } });
     await assert.rejects(designer.design(definition(), { onProgress: (event) => progress.push(event) }),
       (caught) => caught instanceof ProviderError && !/private-key|Bearer/.test(caught.message + JSON.stringify(caught.diagnostic)));
     assert.doesNotMatch(JSON.stringify(await designer.get("weekly")), /private-key|Bearer/);
     assert.doesNotMatch(JSON.stringify(progress), /private-key|Bearer/);
+    if (error instanceof ProviderError && error.diagnostic.reason === "api_idle_timeout")
+      assert.deepEqual((await designer.get("weekly"))!.diagnostic!.modelTransport, { firstResponseMs: null, chunkCount: 2 });
   }
 });
 
@@ -1189,8 +1194,13 @@ test("真实Pi阶段工具保留完整v3连接与动态schema，不以多轮修�
         assert.ok(globalSchema.required!.includes("execution"));
         assert.ok(globalSchema.required!.includes("selectionBasis"));
         assert.deepEqual(globalSchema.properties!.schemaVersion!.enum, [3]);
-        for (const field of ["interaction", "execution", "selectionBasis", "connections"])
-          assert.deepEqual(globalSchema.properties![field], submittedSchema.properties![field], "蓝图全局字段沿用完整候选契约");
+        for (const field of ["interaction", "execution", "selectionBasis", "connections"]) {
+          const wireField = structuredClone(globalSchema.properties![field]);
+          // Stage-specific ownership guidance is an annotation; validation constraints stay identical.
+          if (field === "selectionBasis") delete wireField!.properties!.requirementIds!.description;
+          if (field === "interaction") delete wireField!.properties!.assistant!.description;
+          assert.deepEqual(wireField, submittedSchema.properties![field], "蓝图全局字段沿用完整候选校验约束");
+        }
         candidate = validDesign(payload.requirements!, { schemaVersion: 3, profile: "custom" as const,
         interaction: { defaultEntry: "conversation" as const, page: false, operations: true, inputs: "用户记录", results: "检索结果", persistentData: "无" },
         execution: { language: "javascript" as const, hosting: "managed" as const, reason: "已确认的专属检索逻辑" },

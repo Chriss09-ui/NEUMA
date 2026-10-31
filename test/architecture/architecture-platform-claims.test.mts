@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { Ajv } from "ajv";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { validateDesign, designHash, requirementItems, designSubmissionSchema } from "../../src/architecture/architecture-contract.mjs";
-import { createPlatformContractTool, validateArchitecturePlatformClaims } from "../../src/architecture/architecture-platform-claims.mjs";
+import { createPlatformContractTool, validateArchitecturePlatformClaims, prepareArchitectureRepairFacts } from "../../src/architecture/architecture-platform-claims.mjs";
 import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { runtimeCapabilityContract } from "../../src/runtime/runtime-capability-contract.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../../src/verification/acceptance-contract.mjs";
@@ -30,6 +30,21 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 const facts = () => ({ runtimeCapabilities: runtimeCapabilityContract(), acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE });
 const claim = (overrides: Partial<PlatformClaim> = {}): PlatformClaim => ({ id: "dependency", source: "acceptanceAdapterGuide", path: "/adapters/action/executionFacts/dynamicPlaceholders",
   expected: false, decisionIds: ["runtime"], acceptanceIds: [], ...overrides });
+
+test("修复准备从当前来源计算反证，不把旧稿的错误平台声明变成事实", () => {
+  const context = facts(), previous = { platformClaims: [claim({ expected: true })] }, before = structuredClone(previous);
+  const prepared = prepareArchitectureRepairFacts(previous, context);
+  assert.equal(prepared.ready, true); assert.equal(prepared.minimumCalls, 1);
+  const checked = prepared.checks[0]!; assert.ok("actual" in checked);
+  assert.equal(checked.matches, false); assert.equal(checked.actual, false);
+  assert.equal(prepared.checks[0]!.reason, "platform_fact_mismatch");
+  assert.equal(prepared.checks[0]!.sourceHash, digest(context.acceptanceAdapterGuide));
+  assert.deepEqual(prepared.material, context); assert.deepEqual(previous, before);
+  const stale = { ...context, contextManifest: { acceptanceAdapterGuide: { sha256: "0".repeat(64) } } };
+  assert.throws(() => prepareArchitectureRepairFacts(previous, stale), error =>
+    objectFields(objectFields(error).diagnostic).reason === "repair_materials_incomplete");
+});
+
 function fixture() {
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "full", dimension: "processing", content: "完整核对全部记录", applicability: "applies", critical: true,

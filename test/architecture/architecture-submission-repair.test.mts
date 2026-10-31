@@ -18,11 +18,18 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createArchitectureSubmissionRepair } from "../../src/architecture/architecture-submission-repair.mjs";
+import { runRepairAgent } from "../../src/runtime/repair-agent.mjs";
+import { createRepairCheckpoint, runRepairSchedule } from "../../src/runtime/repair-scheduler.mjs";
 import { architectureToolValidation } from "../../src/architecture/architecture-tool-diagnostics.mjs";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { designSubmissionSchema, requirementItems, validateDesign, reviewSubmissionSchema, validateReview, designHash } from "../../src/architecture/architecture-contract.mjs";
 import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
+import { createArchitectureStageSchemas, validateArchitectureModule } from "../../src/architecture/architecture-design-stages.mjs";
+import type { ArchitectureBlueprint, ArchitectureModule } from "../../src/contracts/architecture-stages.mjs";
+import { createPlatformContractTool } from "../../src/architecture/architecture-platform-claims.mjs";
+import { runtimeCapabilityContract } from "../../src/runtime/runtime-capability-contract.mjs";
+import { ACCEPTANCE_ADAPTER_GUIDE } from "../../src/verification/acceptance-contract.mjs";
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
 import type { RequirementItem } from "../../src/contracts/architecture.mjs";
 import type { ArchitectureBase } from "../../src/contracts/architecture.mjs";
@@ -194,6 +201,81 @@ function designerRole(designer:ArchitectureDesigner,draft:RequirementDraft,requi
     submitName: "submit_architecture", parameters: designSubmissionSchema(draft, { requirements }),
     validate: (candidate: unknown) => validateDesign(candidate, { draft, requirements }), ...options });
 }
+
+function stageRepairFixture() {
+  const draft = validDraft(), requirements = requirementItems(draft), candidate = validDesign(requirements);
+  const { components, steps, capabilities, failureHandling, decisions, coverage, acceptance, unknowns, ...global } = candidate;
+  const blueprint: ArchitectureBlueprint = { global, modules: [{ id: "input_contract", purpose: "核对本模块输入", requirementIds: requirements.map(item => item.id), dependsOn: [], inputs: "已确认输入", outputs: "已确认结果" }] };
+  const previous: ArchitectureModule = { moduleId: "input_contract", blueprintHash: designHash(blueprint), instructions: candidate.instructions,
+    components, steps, capabilities, failureHandling, decisions, coverage, acceptance, unknowns };
+  previous.capabilities[0]!.id = "invented_conversation";
+  blueprint.global.instructions += " 复核后的当前蓝图。";
+  const candidateSchema = designSubmissionSchema(draft, { requirements }), context = { candidateSchema, requirements, blueprint,
+    assignment: blueprint.modules[0]!, runtimeCapabilities: runtimeCapabilityContract(), acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE };
+  const parameters = createArchitectureStageSchemas(context).module;
+  return { previous, context, parameters };
+}
+
+test("动态修复实际请求内联本组原文，批读使用同源游标且末轮只声明提交", { timeout: 15000 }, async t => {
+  const base = { instructions: "保留原始记录" }, binding = { task: "prepared-repair" };
+  let checkpoint = createRepairCheckpoint(binding, base, [{ id: "boundary", owner: "instructions", paths: ["/instructions"],
+    description: "补充缺失边界", remedy: "保留原文并明确缺失项" }], 3);
+  const f = await actualPi(t, (body, turn) => {
+    const payload = requestPayload(body), assignment = objectFields(payload.repairAssignment);
+    assert.equal(objectFields(objectFields(payload.preparedContext).baseFields)["/instructions"], base.instructions);
+    if (turn < 3) return { name: "read_repair_context", args: { requests: [{ section: "base", pointer: "/instructions" }] } };
+    assert.deepEqual(body.tools!.map(tool => tool.function.name), ["submit_repair_patch"]);
+    assert.match(feedbackText(body), /nextRequest/u);
+    return { name: "submit_repair_patch", args: { baseHash: assignment.baseHash, issueIds: ["boundary"], summary: "保留事实与缺失提示",
+      updates: [{ path: "/instructions", value: base.instructions + "，缺失项明确标注。" }] } };
+  });
+  const result = await runRepairSchedule({ checkpoint, binding, base, save: async value => { checkpoint = value; }, run: worker => runRepairAgent({
+    worker, binding, context: { requirements: [{ id: "req", text: "原始记录不丢失" }] }, config: f.designer.config,
+    cwd: f.designer.cwd, dataDir: f.designer.dataDir, sessionDirectory: join(f.designer.cwd, "repair-sessions"),
+    sessionFactory: f.designer.sessionFactory, maxOutputTokens: 4096,
+  }) });
+  assert.deepEqual(result, { instructions: "保留原始记录，缺失项明确标注。" });
+  assert.equal(checkpoint.calls, 3); assert.equal(f.requests.length, 3);
+});
+
+for (const remaining of [1, 2]) test(`真实修复剩${remaining}轮时预置事实与可编辑基底，末轮请求不再声明读取工具`, { timeout: 15000 }, async t => {
+  const { previous, context, parameters } = stageRepairFixture(), before = structuredClone(previous);
+  let charges = 0;
+  const f = await actualPi(t, (body, turn) => {
+    const payload = requestPayload(body), preparation = objectFields(payload.repairPreparation);
+    assert.equal(preparation.ready, true);
+    assert.deepEqual(objectFields(preparation.material).runtimeCapabilities, context.runtimeCapabilities);
+    assert.deepEqual(objectFields(preparation.material).acceptanceAdapterGuide, context.acceptanceAdapterGuide);
+    assert.deepEqual(objectFields(payload.validationRepair).previousResult, before);
+    assert.equal(payload.editableSubmission.source, "historical-stage-repair");
+    const names = body.tools!.map(tool => tool.function.name);
+    if (remaining === 2 && turn === 1) {
+      assert.ok(names.includes("read_model_context"));
+      return { name: "read_model_context", args: { requests: [{ section: "runtimeCapabilities", pointer: "/valueSchemas" }] } };
+    }
+    assert.deepEqual(names.sort(), ["revise_architecture_submission", "submit_architecture_module"]);
+    return { name: "revise_architecture_submission", args: { submissionHash: payload.editableSubmission.submissionHash,
+      updates: [{ path: "/capabilities/0/id", value: "conversation" }] } };
+  });
+  const result = await f.designer.role({ role: "specialist", systemPrompt: "固定修复规程", submitName: "submit_architecture_module", parameters,
+    initialModelCalls: 5 - remaining, modelCallLimit: 5, onStageModelCall: async () => { charges++; },
+    payload: { ...context, pipelineStage: "module", blueprintHash: designHash(context.blueprint),
+      validationRepair: { previousResult: previous, issues: [{ path: "module.capabilities[0].id", reason: "invalid_reference" }] } },
+    tools: [createPlatformContractTool(context)], validate: value => validateArchitectureModule(value, context) });
+  assert.deepEqual(result, { ...before, blueprintHash: designHash(context.blueprint), capabilities: [{ ...before.capabilities[0]!, id: "conversation" }, ...before.capabilities.slice(1)] });
+  assert.deepEqual(previous, before); assert.equal(f.requests.length, remaining); assert.equal(charges, remaining);
+});
+
+test("最后一轮所需事实过大时在请求前阻断，不隐瞒分页缺口或消耗额度", async t => {
+  const { previous, context, parameters } = stageRepairFixture();
+  const f = await actualPi(t, () => { assert.fail("资料缺口不得消耗最后一次模型调用"); });
+  let charges = 0;
+  await assert.rejects(f.designer.role({ role: "specialist", systemPrompt: "固定修复规程", submitName: "submit_architecture_module", parameters,
+    initialModelCalls: 4, modelCallLimit: 5, onStageModelCall: async () => { charges++; },
+    payload: { ...context, acceptanceAdapterGuide: { ...ACCEPTANCE_ADAPTER_GUIDE, large: "x".repeat(70_000) }, pipelineStage: "module", validationRepair: { previousResult: previous } },
+    validate: value => validateArchitectureModule(value, context) }), (error: unknown) => objectFields(objectFields(error).diagnostic).reason === "repair_materials_incomplete");
+  assert.equal(charges, 0); assert.equal(f.requests.length, 0);
+});
 
 test("真实Pi宿主合法基底首轮只发局部正式提交，原文逐字保留且不冒充旧稿已通过", { timeout: 15000 }, async (t) => {
   const draft = validDraft(), requirements = requirementItems(draft), original = validDesign(requirements);

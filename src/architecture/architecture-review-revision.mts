@@ -276,7 +276,8 @@ export function architectureReviewRevisionRecovery(input: unknown) {
           || acceptanceRetry || referenceRetry);
       const revisionLimit = checkpoint!.dispatch?.callLimit ?? (formatContinuation ? ARCHITECTURE_FORMAT_SUBMISSION_LIMIT : ARCHITECTURE_REVIEW_REVISION_CALL_LIMIT);
       const blocked = Boolean(reviewed || reviewExhausted) || !checkpoint!.result && (checkpoint!.modelCalls >= revisionLimit
-        || checkpoint!.dispatch?.groups.some(group => !group.result && group.calls >= checkpoint!.dispatch!.groupCallLimit));
+        || checkpoint!.dispatch?.groups.some(group => !group.result && group.calls >= checkpoint!.dispatch!.groupCallLimit)
+        || checkpoint!.dispatch && checkpoint!.dispatch.callLimit - checkpoint!.dispatch.calls < checkpoint!.dispatch.groups.filter(group => !group.result).length);
       return { kind: "review_revision", status: blocked ? "blocked" : "continuing", stage: "review_revision", stageKey: "review_revision",
         stageLabel: "评审修订", modelCalls: checkpoint!.modelCalls, modelCallLimit: revisionLimit,
         actionLabel: blocked ? "查看评审阻断" : checkpoint!.result ? "继续独立评审" : "继续按评审修订",
@@ -354,9 +355,9 @@ export async function runArchitectureReviewRevision({ record, source: sourceInpu
     await save(() => {});
   }
   const base = validate(copy(source.design));
-  const validateCandidate = (value: unknown) => {
+  const validateCandidate = (value: unknown, requireChange = true) => {
     const candidate = validate(copy(value));
-    if (designHash(candidate) === expected.candidateHash) throw contentError("修订必须实际解决评审问题；原候选不能换取新的评审额度。");
+    if (requireChange && designHash(candidate) === expected.candidateHash) throw contentError("修订必须实际解决评审问题；原候选不能换取新的评审额度。");
     for (const field of ["components", "steps", "decisions", "acceptance", "platformClaims"] as const) {
       const ids = new Set((candidate[field] ?? []).map(item => item.id));
       if ((base[field] ?? []).some(item => !ids.has(item.id))) throw contentError(`评审修订必须保留${field}的原编号及验收义务，不能删除后重建。`);
@@ -372,13 +373,18 @@ export async function runArchitectureReviewRevision({ record, source: sourceInpu
   if (checkpoint!.schemaVersion === 2) {
     if (!runWorker) throw invalid();
     if (repairHash(checkpoint!.dispatch!.issues) !== repairHash(repairIssues(source))) throw invalid();
-    const result = validateCandidate(await runRepairSchedule({ checkpoint: checkpoint!.dispatch!, base, binding: expected, signal,
-      run: runWorker, save: dispatch => save(next => { next.dispatch = dispatch; next.modelCalls = dispatch.calls; }) }));
     const paths = repairIssues(source).flatMap(issue => issue.paths);
-    for (const [index, row] of base.acceptance.entries()) {
-      if (!paths.some(path => path === "/acceptance" || path === `/acceptance/${index}` || path.startsWith(`/acceptance/${index}/`))
-        && designHash(row) !== designHash(result.acceptance.find(item => item.id === row.id))) throw contentError("未涉及反馈的验收必须完整保留。");
-    }
+    const validateMerged = (value: unknown, final: boolean) => {
+      const result = validateCandidate(value, final);
+      for (const [index, row] of base.acceptance.entries()) {
+        if (!paths.some(path => path === "/acceptance" || path === `/acceptance/${index}` || path.startsWith(`/acceptance/${index}/`))
+          && designHash(row) !== designHash(result.acceptance.find(item => item.id === row.id))) throw contentError("未涉及反馈的验收必须完整保留。");
+      }
+      return result;
+    };
+    const result = validateMerged(await runRepairSchedule({ checkpoint: checkpoint!.dispatch!, base, binding: expected, signal,
+      validateCandidate: validateMerged, run: runWorker,
+      save: dispatch => save(next => { next.dispatch = dispatch; next.modelCalls = dispatch.calls; }) }), true);
     await save(next => { next.result = result; next.resultHash = designHash(result); });
     return result;
   }

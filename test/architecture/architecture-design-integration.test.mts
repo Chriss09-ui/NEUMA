@@ -13,6 +13,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
+import { readRepairCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { designHash } from "../../src/architecture/architecture-contract.mjs";
 import { createReviewProgressCheckpoint } from "../../src/architecture/architecture-review-progress.mjs";
@@ -47,10 +48,15 @@ function fixtureNumber(value: unknown): number { assert.ok(typeof value === "num
 const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit_architecture_module", integration: "submit_architecture_integration" };
 
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
-  failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false } = {}) {
+  failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
+  consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
+  acceptanceCount = 0, failReviewSlice = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
-    programBlocker, researchIssued: false, reviewRejected: false, cancelStage: null as "blueprint" | "module" | "integration" | "research" | null, controller: null as AbortController | null }, dataDir = join(root, "data");
+    programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false,
+    blueprintDraft: null as Record<string, unknown> | null, blueprintAllocation: null as Record<string, unknown> | null, blueprintPatched: false,
+    blueprintRawRejected: false, blueprintRawFeedback: "",
+    cancelStage: null as "blueprint" | "module" | "integration" | "research" | null, controller: null as AbortController | null }, dataDir = join(root, "data");
   let designer: ArchitectureDesigner, candidate: CandidateDraft;
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "all_records", dimension: "processing", content: "完整核对全部工作记录", applicability: "applies", critical: true,
@@ -61,13 +67,22 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
       const body = fixtureChatRequest(Buffer.concat(chunks).toString()), names = body.tools!.map((tool) => tool.function.name), payloads = users(body);
       const stage = (Object.keys(stageNames) as (keyof typeof stageNames)[]).find(key => names.includes(stageNames[key]));
-      const kind = stage ?? (names.includes("submit_repair_patch") ? "repair" : names.includes("submit_architecture_review_revision") ? "review_revision"
+      const kind = stage ?? (names.includes("submit_architecture_review_slice") ? "review_slice" : names.includes("submit_blueprint_analysis") ? "consultation" : names.includes("submit_repair_patch") ? "repair" : names.includes("submit_architecture_review_revision") ? "review_revision"
         : names.includes("submit_requirement_fidelity") ? "fidelity" : "reviewer");
       requests.push({ kind, body });
+      if (stage === "module" && stallModule) {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write(`data: ${JSON.stringify({ id: "native-stalled-stream", choices: [{ index: 0,
+          delta: { role: "assistant", content: "固定的未完成模块" }, finish_reason: null }] })}\n\n`);
+        return;
+      }
       let name, args;
-      if (kind === "review_revision" && state.failRevisionCalls-- > 0
+      if (kind === "review_slice" && failReviewSlice || kind === "consultation" && failConsultation
+        || kind === "review_revision" && state.failRevisionCalls-- > 0
         || kind === "repair" && failRepairCalls-- > 0
         || kind === "reviewer" && state.reviewRejected && state.failRevisedReview-- > 0) {
+        if (kind === "consultation") failConsultation = false;
+        if (kind === "review_slice") failReviewSlice = false;
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(`data: ${JSON.stringify({ id: "revision-length", choices: [{ index: 0, delta: { role: "assistant", content: "固定修订阶段截断" }, finish_reason: "length" }] })}\n\ndata: [DONE]\n\n`);
         return;
@@ -82,7 +97,10 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       if (stage) {
         const payload = payloads.find((row) => row.pipelineStage === stage && (stage === "blueprint" ? row.requirements : stage === "module" ? row.assignment : row.baseCandidate));
         assert.ok(payload, "恢复的原生历史应保留首次完整节点材料");
-        if (stage === "blueprint" && state.researchBeforeBlueprint && !state.researchIssued) {
+        if (stage === "blueprint" && consultBeforeBlueprint && !state.consultationIssued) {
+          assert.ok(names.includes("consult_architecture")); state.consultationIssued = true;
+          name = "consult_architecture"; args = { assignments: [{ topic: "platform", question: "核对本需求的实现路径", requirementIds: [payload.requirements![0]!.id] }] };
+        } else if (stage === "blueprint" && state.researchBeforeBlueprint && !state.researchIssued) {
           state.researchIssued = true;
           name = "search_technical_sources"; args = { query: "固定技术依据，无真实检索", topics: ["sdk"] };
         } else {
@@ -90,10 +108,38 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
             interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "已确认记录", results: "完整摘要", persistentData: "无跨任务状态" },
             execution: { language: "none", hosting: "builtin", reason: "复用已有对话能力" },
             selectionBasis: { capacity: "已确认记录集合", process: "逐项核对", quality: "保留原文事实", requirementIds: payload.requirements!.map((item) => item.id), assumptions: [] } });
-          if (stage === "blueprint" && state.programBlocker) candidate.execution = { language: "javascript", hosting: "builtin", reason: "固定矛盾候选，仅用于检验评审预算续接" };
+          if (stage === "blueprint" && state.programBlocker) candidate.unknowns = [{ question: "固定尚未核实的业务效果",
+            blocking: true, resolution: "保留独立程序阻断，用于检验评审恢复不能绕过未完成核实" }];
+          if (stage === "blueprint" && acceptanceCount) candidate.acceptance = Array.from({ length: acceptanceCount }, (_, i) => ({
+            ...candidate.acceptance[i % candidate.acceptance.length]!, id: `case_${i}` }));
           if (stage === "module" && state.reviewRejected) candidate.components[0]!.purpose = "完整逐条归纳已确认工作记录并标记缺失项";
           const submission = architectureStageSubmission({ tools: Object.fromEntries(names.map((toolName) => [toolName, { name: toolName }])), payload, candidate });
           name = submission!.name!; args = submission!.args!;
+          if (stage === "blueprint" && omitBlueprintRequirement) {
+            if (!state.blueprintRawRejected) {
+              Reflect.set(recordArray(objectFields(args).modules)[0]!, "requirementIds", [
+                ...payload.requirements!.slice(0, -1).map(row => row.id), payload.requirements![0]!.id, "unknown_requirement",
+              ]);
+              state.blueprintRawRejected = true;
+            } else if (!state.blueprintDraft) {
+              state.blueprintRawFeedback = body.messages.filter(row => row.role === "tool").map(row => text(row.content))
+                .findLast(value => value.includes('"blueprintAllocation"')) ?? "";
+              assert.ok(state.blueprintRawFeedback, "SDK前置拒绝也必须返回具体分配诊断");
+              Reflect.set(recordArray(objectFields(args).modules)[0]!, "requirementIds", payload.requirements!.slice(0, -1).map(row => row.id));
+              state.blueprintDraft = objectFields(structuredClone(args));
+            } else if (!state.blueprintPatched) {
+              const feedback = body.messages.filter(row => row.role === "tool").map(row => text(row.content))
+                .findLast(value => value.includes("蓝图需求分工诊断："));
+              assert.ok(feedback, "原生工具回填必须携带具体分配诊断");
+              const report = /蓝图需求分工诊断：(\{.*\})；只修正/.exec(feedback);
+              const reference = /"rejectedSubmission":\{"submissionHash":"([a-f0-9]{64})"\}/.exec(feedback);
+              assert.ok(report); assert.ok(reference);
+              state.blueprintAllocation = objectFields(JSON.parse(report[1]!));
+              name = "revise_architecture_submission";
+              args = { submissionHash: reference[1], updates: [{ path: "/modules/0/requirementIds", value: payload.requirements!.map(row => row.id) }] };
+              state.blueprintPatched = true;
+            }
+          }
           if (stage === "integration" && state.rejectIntegrationCalls > 0) {
             state.rejectIntegrationCalls--;
             Reflect.set(args!, "updates", [{ path: "/components", value: [{ ...candidate.components[0]!, id: "forbidden_rewrite" }] }]);
@@ -106,6 +152,19 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
               updates: [{ path: "/steps/0/componentId", value: recordArray(objectFields(args).steps)[0]!.componentId }] };
           }
         }
+      } else if (kind === "consultation") {
+        const payload = payloads.find(row => row.pipelineStage === "consultation");
+        assert.ok(payload); assert.equal(payload.requirements!.length, 1);
+        assert.equal(names.includes("consult_architecture"), false);
+        name = "submit_blueprint_analysis"; args = { conclusion: "固定协议测试的专项建议，不代表真实能力验收", recommendations: ["保留需求并使用已有能力"], unknowns: [], references: [{ section: "requirements", pointer: "/0" }] };
+      } else if (kind === "review_slice") {
+        const payload = payloads.findLast(row => row.pipelineStage === "review_slice")!;
+        const assignment = objectFields(payload.assignment), ids = assignment.ids as string[];
+        const reviewed = passingReview(payload.candidateHash!, payload.design, payload.priorFindings);
+        name = "submit_architecture_review_slice"; args = { summary: "原生模拟模型独立核对本组原文", issues: [],
+          checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
+          acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
+          priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };
       } else if (kind === "repair") {
         const assignment = payloads.findLast(row => row.repairAssignment)!.repairAssignment!;
         name = "submit_repair_patch";
@@ -151,7 +210,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
     }
   });
   await new Promise<void>(resolve => model.listen(0, "127.0.0.1", resolve));
-  const config = { llmConfigured: true, model: "native-stage-model", apiKey: "fixed-local-fixture", chatUrl: `http://127.0.0.1:${listeningAddress(model).port}/v1/chat/completions` };
+  const config = { llmConfigured: true, model: "native-stage-model", apiKey: "fixed-local-fixture", chatUrl: `http://127.0.0.1:${listeningAddress(model).port}/v1/chat/completions`,
+    ...(stallModule ? { llmIdleTimeoutMs: 150 } : {}) };
   const sessionFactory = async (options: PiSessionOptions) => {
     const session = await createPiSession(options); sessions.push({ session, options });
     session.setAutoRetryEnabled(false); session.setAutoCompactionEnabled(false);
@@ -182,6 +242,114 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
     sessionDirectory: () => sessions.find(row => row.options.sessionStorage)!.options.sessionStorage!.directory,
     sessionPath: (file: unknown) => join(sessions.find(row => row.options.sessionStorage)?.options.sessionStorage!.directory!, fixtureString(file)) };
 }
+
+test("复杂架构分组评审中断后沿原子会话继续，主评审和范围复核仍独立完成", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, failReviewSlice: true });
+  await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "review_slice_incomplete");
+  const before = (await f.designer.get(f.definition.id))!;
+  const saved = readRepairCheckpoint(objectFields(before.reviewDispatchCheckpoint).dispatch);
+  assert.equal(saved.groups.length, 7); assert.equal(saved.calls, 3);
+  assert.equal(saved.groups.filter(group => group.result).length, 2);
+  assert.equal(before.reviewProgressCheckpoint!.modelCalls, 0);
+  assert.equal(before.designRecovery!.kind, "review_specialists");
+  const start = f.requests.length;
+  await f.reload(); const result = await f.run();
+  assert.equal(result.status, "passed");
+  assert.equal(f.requests.slice(start).some(request => ["blueprint", "module", "integration"].includes(request.kind)), false);
+  const completed = readRepairCheckpoint(objectFields(result.reviewDispatchCheckpoint).dispatch);
+  assert.equal(completed.calls, 8);
+  for (const group of saved.groups.filter(group => group.result))
+    assert.deepEqual(completed.groups.find(item => item.id === group.id), group);
+  assert.equal(result.reviewProgressCheckpoint!.modelCalls, 2);
+  assert.ok(f.requests.slice(start).some(request => request.kind === "fidelity"));
+  assert.deepEqual(f.errors, []);
+});
+
+test("原生模块响应停滞保留超时收包诊断与蓝图检查点，重读仍为失败且不续调", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { stallModule: true });
+  let diagnostic: Record<string, unknown> = {};
+  await assert.rejects(f.run(), error => {
+    diagnostic = objectFields(objectFields(error).diagnostic);
+    assert.equal(diagnostic.reason, "api_idle_timeout");
+    const transport = objectFields(diagnostic.modelTransport);
+    assert.equal(transport.phase, "body");
+    assert.equal(transport.idleTimeoutMs, 150);
+    assert.ok(fixtureNumber(transport.receivedBytes) > 0);
+    assert.ok(fixtureNumber(transport.chunkCount) >= 1);
+    assert.ok(fixtureNumber(transport.firstResponseMs) <= fixtureNumber(transport.lastDataMs));
+    assert.ok(fixtureNumber(transport.elapsedMs) >= fixtureNumber(transport.lastDataMs));
+    return true;
+  });
+  assert.deepEqual(f.requests.map(row => row.kind), ["blueprint", "module"]);
+  await f.reload();
+  const saved = (await f.designer.get(f.definition.id))!;
+  assert.equal(saved.status, "failed");
+  assert.deepEqual(saved.diagnostic, diagnostic);
+  const checkpoint = nativeCheckpoint(saved.designProgressCheckpoint);
+  assert.ok(checkpoint.blueprint.result);
+  assert.equal(checkpoint.modules[0]!.modelCalls, 1);
+  assert.equal(checkpoint.modules[0]!.result, null);
+  assert.equal(checkpoint.modelCalls, 2);
+  assert.deepEqual(f.errors, []);
+});
+
+test("必读提示与工具区分全局引用和模块主责，原生反馈能指导只补编号清单", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { omitBlueprintRequirement: true });
+  const result = await f.run();
+  assert.equal(result.status, "passed");
+  assert.equal(f.state.blueprintPatched, true);
+  const allocation = f.state.blueprintAllocation!;
+  assert.deepEqual(allocation.totals, { missing: 1, duplicates: 0, unknown: 0 });
+  assert.equal(recordArray(allocation.missing)[0]!.referencedGlobally, true);
+  const saved = objectFields(nativeCheckpoint(result.designProgressCheckpoint).blueprint.result);
+  assert.deepEqual(saved.global, f.state.blueprintDraft!.global);
+  const beforeModule = recordArray(f.state.blueprintDraft!.modules)[0]!, afterModule = recordArray(saved.modules)[0]!;
+  const { requirementIds: beforeIds, ...beforeBody } = beforeModule;
+  const { requirementIds: afterIds, ...afterBody } = afterModule;
+  assert.deepEqual(afterBody, beforeBody);
+  assert.equal((afterIds as string[]).length, (beforeIds as string[]).length + 1);
+  assert.equal(nativeCheckpoint(result.designProgressCheckpoint).blueprint.modelCalls, 3);
+  assert.match(f.state.blueprintRawFeedback, /"totals":\{"missing":1,"duplicates":1,"unknown":1\}/);
+  assert.match(f.state.blueprintRawFeedback, /"id":"unknown_requirement"/);
+  const request = f.requests.find(row => row.kind === "blueprint")!.body;
+  const system = request.messages.filter(row => row.role === "system").map(row => text(row.content)).join("\n");
+  assert.match(system, /每个id.*恰好出现一次/);
+  assert.match(system, /selectionBasis\.requirementIds.*不能替代/);
+  const parameters = objectFields(objectFields(request.tools!.find(tool => tool.function.name === "submit_architecture_blueprint")!.function).parameters);
+  const properties = objectFields(parameters.properties);
+  const moduleFields = objectFields(objectFields(objectFields(properties.modules).items).properties);
+  assert.match(String(objectFields(moduleFields.requirementIds).description), /恰好出现一次/);
+  const globalFields = objectFields(objectFields(properties.global).properties);
+  const basisFields = objectFields(objectFields(globalFields.selectionBasis).properties);
+  assert.match(String(objectFields(basisFields.requirementIds).description), /不算模块覆盖/);
+  assert.deepEqual(f.errors, []);
+});
+
+test("蓝图专项分析使用独立原生会话，截断恢复保留子会话及已用总额", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { consultBeforeBlueprint: true, failConsultation: true });
+  await assert.rejects(f.run(), /模型输出额度已用完/);
+  const first = await f.designer.get(f.definition.id);
+  assert.equal(first!.status, "failed");
+  const before = objectFields(first!.designProgressCheckpoint), advice = recordArray(before.consultations)[0]!;
+  assert.equal(advice.modelCalls, 1); assert.equal(advice.result, null);
+  assert.equal(before.modelCalls, 2);
+  const savedSession = objectFields(advice.sessionRef).file;
+  await f.reload();
+  const result = await f.run();
+  assert.equal(result.status, "passed");
+  const after = objectFields(result.designProgressCheckpoint);
+  assert.equal(recordArray(after.consultations)[0]!.modelCalls, 2);
+  assert.equal(after.modelCalls, 6);
+  const children = f.sessions.filter(row => objectFields(row.options.sessionStorage?.binding).stage === "consultation");
+  assert.equal(children.length, 2);
+  assert.equal(children[1]!.options.sessionStorage!.file, savedSession);
+  assert.deepEqual(children[0]!.options.sessionStorage!.binding, children[1]!.options.sessionStorage!.binding);
+  assert.equal(f.requests.filter(row => row.kind === "consultation").length, 2);
+  const resumedBlueprint = users(f.requests.filter(row => row.kind === "blueprint").at(-1)!.body).at(-1)!;
+  assert.equal(recordArray(resumedBlueprint.consultations).length, 1);
+  assert.equal(recordArray(resumedBlueprint.consultations)[0]!.trust, "advisory-not-verified");
+  assert.deepEqual(f.errors, []);
+});
 
 test("显式重开只准备待启动记录，手动运行从新蓝图开始且中断恢复不会取回旧方案", { timeout: 30000 }, async t => {
   const f = await fixture(t, { rejectReview: true });
