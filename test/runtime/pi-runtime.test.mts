@@ -88,8 +88,8 @@ test("共享输出预算使用调用方任务预算并受模型能力上限约�
     assert.equal(modelOutputBudget(config), 4096);
     assert.equal(modelOutputBudget(config, 8192), 8192);
     assert.equal(modelOutputBudget(config, 999_999), 131_072);
-    assert.equal(architectureModelOutputBudget(config, "designer"), 65536);
-    assert.equal(architectureModelOutputBudget(config, "reviewer"), 16384);
+    assert.equal(architectureModelOutputBudget(config, "designer"), 131072);
+    assert.equal(architectureModelOutputBudget(config, "reviewer"), 131072);
     assert.equal(knownModelLimits!(config)!.contextWindow, 1_048_576);
     assert.equal(knownModelLimits!(config)!.reasoning, true);
   }
@@ -223,17 +223,17 @@ test("auto采用锁定Pi默认档位，官方与显式网关的原生payload不�
   assert.equal(networkCalls, 0);
 });
 
-test("架构加大输出额度仍用默认medium，真实SDK参数不伪造独立思考额度", async (t) => {
+test("架构最高输出额度传入真实SDK请求，保留原思考开关且不伪造独立思考额度", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-pi-architecture-output-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   let networkCalls = 0;
-  for (const role of ["designer", "specialist", "reviewer"]) {
+  for (const role of ["designer", "module", "reviewer"]) {
     const session = await createPiSession({ config: mimoConfig, cwd: root, dataDir: root, customTools: [], systemPrompt: "fixture",
       reasoningMode: role === "reviewer" ? "off" : "auto", maxOutputTokens: architectureModelOutputBudget(mimoConfig, role),
       beforeModelRequest: () => { networkCalls++; throw new Error("NETWORK_FORBIDDEN"); } });
     try {
       const payload = await capturePiPayload(session);
-      assert.equal(payload!.maxTokens, { designer: 65536, specialist: 32768, reviewer: 16384 }[role]);
+      assert.equal(payload!.maxTokens, 131072);
       assert.deepEqual(payload!.thinking, { type: role === "reviewer" ? "disabled" : "enabled" });
       assert.equal(payload!.reasoningEffort, role === "reviewer" ? undefined : DEFAULT_THINKING_LEVEL);
       assert.equal(payload!.thinkingBudget, undefined);
@@ -242,7 +242,7 @@ test("架构加大输出额度仍用默认medium，真实SDK参数不伪造独�
   assert.equal(networkCalls, 0);
 });
 
-test("旧持久会话high和off按新auto策略追加原生档位，消息绑定与已有预算metadata不重置", async (t) => {
+test("旧持久会话提高输出至模型上限仍按auto或off设置思考，历史和已用预算不重置", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-pi-old-effort-")), directory = join(root, "sessions"), binding = { task: "same-task", version: 1 };
   t.after(() => rm(root, { recursive: true, force: true }));
   let networkCalls = 0;
@@ -256,7 +256,8 @@ test("旧持久会话high和off按新auto策略追加原生档位，消息绑定
   original.dispose();
   for (const reasoningMode of ["auto", "off", "auto"] as const) {
     const before = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(String(line)));
-    const restored = await createPiSession({ ...options, reasoningMode, sessionStorage: { directory, binding, file } });
+    const restored = await createPiSession({ ...options, maxOutputTokens: architectureModelOutputBudget(mimoConfig, "module"),
+      reasoningMode, sessionStorage: { directory, binding, file } });
     try {
       const expected = reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : "off";
       assert.equal(restored.sessionFile, file); assert.equal(restored.sessionBindingHash, bindingHash);
@@ -268,7 +269,7 @@ test("旧持久会话high和off按新auto策略追加原生档位，消息绑定
       assert.ok(restored.messages.some((message) => message.role === "user" && message.content === "已有任务材料"));
       const payload = await capturePiPayload(restored);
       assert.equal(payload!.reasoningEffort, reasoningMode === "auto" ? DEFAULT_THINKING_LEVEL : undefined);
-      assert.equal(payload!.maxTokens, 16384); assert.equal((await stat(file)).mode & 0o777, 0o600);
+      assert.equal(payload!.maxTokens, 131072); assert.equal((await stat(file)).mode & 0o777, 0o600);
     } finally { restored.dispose(); }
   }
   assert.equal(networkCalls, 0);

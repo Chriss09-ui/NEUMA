@@ -66,6 +66,6 @@ test("真实委派链的请求正文：新设计及顾问auto，技术修订及�
   assert.deepEqual(requests.filter(item => item.role === "designer").map(({ body }) => objectFields(objectFields(body).thinking).type), ["enabled", "enabled", "disabled", "disabled"]);
   assert.ok(requests.filter(item => item.role === "specialist").every(({ body }) => objectFields(body).max_completion_tokens === 32768));
   assert.ok(requests.filter(item => item.role === "designer").every(({ body }) => objectFields(body).max_completion_tokens === 32768));
-  assert.ok(requests.filter(item => item.role === "reviewer").every(({ body }) => objectFields(body).max_completion_tokens === 16384));
+  assert.ok(requests.filter(item => item.role === "reviewer").every(({ body }) => objectFields(body).max_completion_tokens === 32768));
   assert.notEqual(result.attempts![0]!.candidateHash, result.attempts![1]!.candidateHash);
 });
