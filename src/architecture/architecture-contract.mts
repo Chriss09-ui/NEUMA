@@ -15,7 +15,7 @@ import { hostDeliveryCapabilityCatalog, runtimeCapabilityContract } from "../run
 import { PLATFORM_CLAIMS_SCHEMA, validateArchitecturePlatformClaims } from "./architecture-platform-claims.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
 import { textLength } from "../runtime/text-length.mjs";
-import { architectureGlobalIssues, architectureCapabilityIssues } from "./architecture-stage-semantics.mjs";
+import { architectureGlobalIssues, architectureCapabilityIssues, requiredArchitectureAcceptanceKinds } from "./architecture-stage-semantics.mjs";
 import type { StageSemanticIssue } from "./architecture-stage-semantics.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
@@ -416,8 +416,9 @@ export function validateDesign(input: unknown, { requirements, capabilities = CA
   uniqueIds(evidence, "evidence");
   validateArchitectureDecisionReferences(value, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const kinds = new Set<string>(value.acceptance.map((item) => item.kind));
-  for (const kind of ["success", "missing_input", "boundary"]) if (!kinds.has(kind)) fail(`缺少 ${kind} 验收场景`);
-  if (value.capabilities.some((item) => item.id !== "conversation") && !kinds.has("tool_failure")) fail("使用工具时必须提供 tool_failure 验收场景");
+  const missingKinds = requiredArchitectureAcceptanceKinds(value.capabilities).filter(kind => !kinds.has(kind));
+  if (missingKinds.length) fail(missingKinds[0] === "tool_failure" ? "使用工具时必须提供 tool_failure 验收场景" : `缺少 ${missingKinds[0]} 验收场景`,
+    { path: "design.acceptance", reason: "missing_acceptance_kind", missingKinds });
   const tested = new Set();
   for (const [index, acceptance] of value.acceptance.entries()) {
     validateAcceptanceVerification(acceptance, { required: requireAcceptanceVerification });

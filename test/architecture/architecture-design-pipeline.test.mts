@@ -100,6 +100,53 @@ async function oldSemanticFailure(integrationCalls = 3) {
   return f;
 }
 
+test("整合前完整预检失败时保留模块成果且零整合调用", async () => {
+  const f = fixture();
+  let checks = 0;
+  await assert.rejects(f.run({ validateAssembledCandidate: candidate => {
+    checks++; assert.equal(candidate.components.length, 2);
+    throw new InputError("冻结义务尚未完整交接");
+  } }), error => objectFields(objectFields(error).diagnostic).reason === "integration_preflight_failed");
+  assert.equal(checks, 1);
+  assert.deepEqual(f.calls.map(call => call.stage), ["blueprint", "module", "module"]);
+  const cp = f.record.designProgressCheckpoint!;
+  assert.ok(cp.modules.every(entry => entry.result));
+  assert.equal(cp.modelCalls, 3); assert.equal(cp.integration.modelCalls, 0); assert.equal(cp.integration.sessionRef, null);
+});
+
+test("历史工具失败验收漏项只复核责任模块与下游，保留兄弟成果和原总账", async () => {
+  const f = fixture();
+  f.blueprint.global.profile = "custom";
+  f.blueprint.global.execution = { language: "javascript", hosting: "builtin", reason: "执行专属代码并保存结果" };
+  f.modules[0]!.capabilities.push({ id: "write_workspace_file", status: "available", reason: "保存工作记录" });
+  f.modules[1]!.acceptance.push({ id: "save_failure", kind: "tool_failure", requirementIds: ["req_1"],
+    input: "文件工具返回明确保存失败", expected: "报告保存失败，不声称已交付文件",
+    verification: { stage: "runtime", owner: "conversation", adapterId: "conversation" } });
+  await f.run();
+  const cp = f.record.designProgressCheckpoint!;
+  cp.modules[1]!.result!.acceptance = cp.modules[1]!.result!.acceptance.filter(row => row.kind !== "tool_failure");
+  cp.modules[1]!.resultHash = designHash(cp.modules[1]!.result);
+  cp.integration.result = null; cp.integration.resultHash = null;
+  const { hash: _hash, ...body } = cp; cp.hash = designHash(body);
+  const draft = validDraft(); draft.taskSpec = { version: 1, items: [] };
+  Object.assign(f.record, { status: "failed", draft, requirements: f.context.requirements });
+  const original = structuredClone(cp), start = f.calls.length;
+  const recovery = objectFields(architectureDesignRecovery(f.record));
+  assert.equal(recovery.kind, "stage_validation"); assert.equal(recovery.status, "continuing");
+  assert.deepEqual(recovery.targets, ["module_1", "integration"]);
+  assert.deepEqual((objectFields(recovery.issues).module_1 as { missingKinds: string[] }[])[0]!.missingKinds, ["tool_failure"]);
+  f.record.version = 2;
+  await f.run({ validateHistory: async () => {} });
+  const saved = f.record.designProgressCheckpoint!;
+  assert.deepEqual(f.calls.slice(start).map(call => call.key), ["module_1", "integration"]);
+  assert.deepEqual(saved.modules[0], original.modules[0]);
+  assert.deepEqual(saved.validationRepair!.source, original);
+  assert.equal(saved.modelCalls, original.modelCalls + 2);
+  assert.equal(saved.modules[1]!.modelCalls, original.modules[1]!.modelCalls + 1);
+  assert.equal(saved.integration.modelCalls, original.integration.modelCalls + 1);
+  assert.equal(saved.repair, undefined, "原剩余额度足够时不得新增局部修复额度");
+});
+
 test("旧蓝图与模块语义问题按归属复核，五个原剩余调用完成且不重写历史", async () => {
   const f = await oldSemanticFailure();
   const original = structuredClone(f.record.designProgressCheckpoint!);
@@ -251,6 +298,9 @@ test("跨模块后续义务标明主责，模块工具与最终校验只允许�
       assert.ok(rejected.issues.some(issue => issue.path === "module.acceptance[0].requirementIds[1]"));
       assert.throws(() => options.validate(invalid), InputError);
       const packet = architectureModelContext(options.payload, { role: "specialist" });
+      const duties = objectFields(packet.moduleObligations);
+      assert.equal(duties.moduleId, options.key);
+      assert.deepEqual(duties.stageRequirements, options.key === "module_1" ? [{ requirementId: "req_1", stage: "development" }] : []);
       const scope = objectFields(packet.requirementScope);
       assert.deepEqual(scope.ownedRequirementIds, [ownedId]);
       assert.deepEqual(scope.referenceOnly, [{ moduleId: options.key === "module_0" ? "module_1" : "module_0", requirementIds: [foreignId] }]);

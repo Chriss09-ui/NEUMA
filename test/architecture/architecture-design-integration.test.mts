@@ -216,7 +216,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
     const session = await createPiSession({ ...options,
       ...(legacyModuleContext && objectFields(options.sessionStorage?.binding).stage === "module" ? { preparePrompt: async (raw: string) => {
         const payload = JSON.parse(await options.preparePrompt?.(raw) ?? raw);
-        if (payload.type !== "resume_architecture_stage") delete payload.requirementScope;
+        if (payload.type !== "resume_architecture_stage") { delete payload.requirementScope; delete payload.moduleObligations; }
         return JSON.stringify(payload);
       } } : {}) });
     sessions.push({ session, options });
@@ -506,6 +506,10 @@ test("真实原生节点length后重建控制器，仅恢复模块与整合并�
     "恢复必须用新消息提供当前冻结分工，不能因旧首包缺少范围标记而继续含糊交接");
   assert.equal(objectFields(resumed!.requirementScope).moduleId, assignment.id);
   assert.deepEqual(objectFields(resumed!.requirementScope).referenceOnly, []);
+  assert.equal(users(f.requests[1]!.body).at(-1)!.moduleObligations, undefined);
+  assert.equal(objectFields(resumed!.moduleObligations).moduleId, assignment.id);
+  assert.deepEqual(objectFields(resumed!.moduleObligations).acceptanceKinds, ["success", "missing_input", "boundary"]);
+  assert.deepEqual(objectFields(resumed!.moduleObligations).conditionalAcceptanceKinds, ["tool_failure"]);
   assert.equal(Object.hasOwn(resumed!, "requirements"), false); assert.equal(Object.hasOwn(resumed!, "draft"), false);
   assert.ok(text(recordArray(objectFields(f.requests[start]!.body).messages).find((message) => message.role === "user")!.content).includes('"assignment"'));
 });

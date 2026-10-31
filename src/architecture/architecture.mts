@@ -376,6 +376,7 @@ export class ArchitectureDesigner {
     try {
       return await runArchitectureDesignPipeline({ record, context, binding, revision, repair, forceIntegration, signal, onProgress, sessionDirectory,
         validateHistory: storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }),
+        validateAssembledCandidate: candidate => validateDesign(candidate, context),
         validateProgramCandidate: async (candidate, { sessionStorage }) => {
           await readExecutionHistory({ cwd: this.cwd, storage: sessionStorage, ...(signal ? { signal } : {}) });
           return validateDesign(candidate, context);
@@ -537,7 +538,7 @@ export class ArchitectureDesigner {
     let submissionAttempts = 0, lastSubmissionError: string | undefined, lastSubmissionIssue: (ReviewDiagnosticIssue & { allowedReferences?: string[] }) | undefined, lastSubmissionFingerprint: string | undefined, lastSubmissionDiagnostics: { total: unknown; truncated: unknown; issues: ReviewDiagnosticIssue[] } | undefined;
     const resumedIssue = objectFields(resumeSubmissionIssue);
     if (isArchitectureFormatSubmissionIssue(resumeSubmissionIssue)
-      || ["invalid_reference", "missing_coverage"].includes(String(resumedIssue.reason)))
+      || ["invalid_reference", "missing_coverage", "missing_acceptance_kind"].includes(String(resumedIssue.reason)))
       lastSubmissionIssue = { path: String(resumedIssue.path), reason: String(resumedIssue.reason) };
     let extendedSubmissionBudget = formatSubmissionLimit === ARCHITECTURE_FORMAT_SUBMISSION_LIMIT
       && (isArchitectureFormatSubmissionIssue(lastSubmissionIssue)
@@ -1125,6 +1126,7 @@ export class ArchitectureDesigner {
         submitName, modelBudget: modelBudget(),
         ...(payload.stageContract ? { stageContract: payload.stageContract, stageSchema: payload.stageSchema } : {}),
         ...(payload.requirementScope ? { requirementScope: payload.requirementScope } : {}),
+        ...(payload.moduleObligations ? { moduleObligations: payload.moduleObligations } : {}),
         ...(payload.consultations ? { consultations: payload.consultations } : {}),
         ...(payload.stageRepair ? { stageRepair: payload.stageRepair } : {}),
         ...(rejectedReference() ? { rejectedSubmission: rejectedReference(), lastSubmissionIssue,

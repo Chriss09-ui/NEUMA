@@ -1,9 +1,13 @@
 import type { ArchitectureGlobal } from "../contracts/architecture-stages.mjs";
-import type { Capability, RequirementItem } from "../contracts/architecture.mjs";
+import type { ArchitectureAcceptance, Capability, RequirementItem } from "../contracts/architecture.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { validateConnectionDefinition } from "../connections/connection-contract.mjs";
 
-export interface StageSemanticIssue { path: string; reason: string; message: string; allowedReferences?: string[] }
+export interface StageSemanticIssue { path: string; reason: string; message: string; allowedReferences?: string[]; missingReferences?: string[]; missingKinds?: string[]; ownerModuleId?: string }
+
+export function requiredArchitectureAcceptanceKinds(capabilities: readonly { id: string }[]): ArchitectureAcceptance["kind"][] {
+  return ["success", "missing_input", "boundary", ...(capabilities.some(item => item.id !== "conversation") ? ["tool_failure" as const] : [])];
+}
 
 /** These checks need only global choices, so they can run before any module is designed. */
 export function architectureGlobalIssues(value: Pick<ArchitectureGlobal, "profile" | "schemaVersion" | "interaction" | "execution" | "selectionBasis"> & { connections?: readonly unknown[] }, context: { draft?: unknown; requirements?: RequirementItem[] } = {}, root = "design", confirmed = false): StageSemanticIssue[] {

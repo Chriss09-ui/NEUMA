@@ -8,6 +8,7 @@ import { ARCHITECTURE_MODULE_LIMIT, CAPABILITIES, designHash, normalizeArchitect
 import { architectureGlobalIssues, architectureCapabilityIssues, type StageSemanticIssue } from "./architecture-stage-semantics.mjs";
 import { copyArchitectureReviewJson } from "./architecture-review-binding.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
+import { architectureModuleObligationIssues } from "./architecture-module-obligations.mjs";
 
 const PART_FIELDS = ["components", "steps", "capabilities", "failureHandling", "decisions", "coverage", "acceptance", "unknowns", "platformClaims"] as const;
 const LOCAL_ID_FIELDS = ["decisions", "acceptance", "platformClaims"] as const;
@@ -273,7 +274,8 @@ function moduleOptions(blueprint: ArchitectureBlueprint, assignment: BlueprintAs
 
 type ModuleContext = StageSchemaOptions & { blueprint: ArchitectureBlueprint; assignment: BlueprintAssignment; dependencyModules?: ArchitectureModule[] };
 export function readArchitectureModuleStructure(value: unknown, context: ModuleContext): ArchitectureModule { return readModule(value, context, false); }
-function readModule(value: unknown, { blueprint, assignment, candidateSchema, requirements = [], legacyBlueprint = false, dependencyModules = [], capabilities, moduleLimit }: ModuleContext, semantic: boolean): ArchitectureModule {
+function readModule(value: unknown, context: ModuleContext, semantic: boolean): ArchitectureModule {
+  const { blueprint, assignment, candidateSchema, requirements = [], legacyBlueprint = false, dependencyModules = [], capabilities, moduleLimit } = context;
   const frozenBlueprint = readArchitectureBlueprintStructure(blueprint, { candidateSchema, requirements, legacyBlueprint, moduleLimit });
   const { frozen, componentIds, stepIds, dependencies } = moduleOptions(frozenBlueprint, assignment, dependencyModules, legacyBlueprint);
   const module = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements, legacyBlueprint }).module, "module") as ArchitectureModule;
@@ -330,7 +332,10 @@ function readModule(value: unknown, { blueprint, assignment, candidateSchema, re
   for (const [index, claim] of (module.platformClaims ?? []).entries()) if (claim.decisionIds.some((id) => !decisions.has(id))
     || claim.acceptanceIds.some((id) => !acceptance.has(id)))
     add({ path: `module.platformClaims[${index}]`, reason: "invalid_reference", message: "平台依赖声明只能关联本模块的实际决策或验收编号。" });
-  if (semantic) architectureCapabilityIssues(module.capabilities, capabilities ?? CAPABILITIES, "module").forEach(add);
+  if (semantic) {
+    architectureCapabilityIssues(module.capabilities, capabilities ?? CAPABILITIES, "module").forEach(add);
+    if (module.moduleId === frozen.id) architectureModuleObligationIssues(module, blueprint, context, [...dependencyModules, module]).forEach(add);
+  }
   if (issues.length) {
     const { message: _message, ...firstIssue } = issues[0]!;
     throw Object.assign(new InputError("模块存在待修正问题：" + [...new Set(issues.map(issue => issue.message))].join("；").slice(0, 8000)), {
@@ -362,6 +367,8 @@ function assembleCandidate({ blueprint, modules, candidateSchema, requirements =
       blueprint: frozen, assignment, candidateSchema, requirements, legacyBlueprint, dependencyModules: verified, draft, capabilities, moduleLimit,
     }));
   const ordered = scopeLocalIds(frozen.modules.map(assignment => verified.find(module => module.moduleId === assignment.id)!), legacyBlueprint);
+  if (semantic) assertStageSemantics(verified.flatMap(module => architectureModuleObligationIssues(module, frozen,
+    { candidateSchema, requirements, legacyBlueprint, draft, capabilities, moduleLimit, deferredVerifications }, verified)));
   if (mergeCapabilityReasons) for (const module of ordered)
     module.decisions = normalizeArchitectureDecisionReferences(module.decisions, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const candidate: Partial<CandidateDraft> = copy(frozen.global), conflicts: ArchitectureConflict[] = [];
@@ -399,7 +406,13 @@ function assembleCandidate({ blueprint, modules, candidateSchema, requirements =
   const feedback = architectureToolValidation(candidate, candidateSchema, { root: "candidate" });
   for (const issue of feedback.issues) {
     const field = issue.path.match(/^candidate\.([A-Za-z]+)/u)?.[1];
-    if (!field || !DERIVED_FIELDS.has(field)) fail(issue.path, issue.reason, "模块合并后超过最终候选的结构限制，请修正负责模块。");
+    if (!field || !DERIVED_FIELDS.has(field)) {
+      const rows = field ? objectFields(candidate)[field] : undefined;
+      const minimum = field ? candidateSchema.properties?.[field]?.minItems : undefined;
+      const missing = Array.isArray(rows) && minimum !== undefined && rows.length < minimum;
+      fail(issue.path, missing ? "missing_coverage" : issue.reason,
+        missing ? `模块合并后缺少${field}内容，至少需要${minimum}项；请由负责模块补齐。` : "模块合并后的字段不满足完整候选结构，请由负责模块按具体诊断修正。");
+    }
     if (!conflicts.some((entry) => entry.path === `/${field}` && entry.reason === issue.reason))
       conflicts.push({ path: `/${field}`, reason: issue.reason, relatedPaths: [`/${field}`], moduleIds: frozen.modules.map((entry) => entry.id) });
   }

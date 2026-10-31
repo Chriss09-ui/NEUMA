@@ -4,6 +4,7 @@ import { CAPABILITIES } from "./architecture-contract.mjs";
 import { architectureGlobalIssues, architectureCapabilityIssues } from "./architecture-stage-semantics.mjs";
 import type { StageSemanticIssue } from "./architecture-stage-semantics.mjs";
 import { readArchitectureBlueprintStructure, readArchitectureModuleStructure, architectureModuleLayers, architectureModuleCapacities } from "./architecture-design-stages.mjs";
+import { architectureModuleObligationIssues } from "./architecture-module-obligations.mjs";
 
 /** Audit readable old results before deciding who must repair them. Never edits their contents. */
 export function architectureStageRepairPlan(checkpoint: DesignCheckpoint, context: DesignPipelineContext) {
@@ -20,6 +21,10 @@ export function architectureStageRepairPlan(checkpoint: DesignCheckpoint, contex
     verified.push(module);
     const local = architectureCapabilityIssues(module.capabilities, context.capabilities ?? CAPABILITIES, "module");
     if (local.length) issues[assignment.id] = local;
+  }
+  for (const module of verified) {
+    const local = architectureModuleObligationIssues(module, blueprint, context, verified);
+    if (local.length) (issues[module.moduleId] ??= []).push(...local);
   }
   const capacity = architectureModuleCapacities(blueprint, context.candidateSchema);
   for (const field of ["components", "steps", "decisions", "acceptance", "platformClaims", "failureHandling", "unknowns"] as const) {
