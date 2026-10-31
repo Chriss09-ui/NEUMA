@@ -126,7 +126,7 @@ function focusComposer() {
 
 function apply(focusInput = false) {
   for (const page of PAGES) byId(`page-${page}`).hidden = page !== route.page;
-  for (const link of document.querySelectorAll<HTMLElement>(".nav-item, .sidebar-manage")) {
+  for (const link of document.querySelectorAll<HTMLElement>(".nav-item, .sidebar-section-link")) {
     if (link.dataset.page === route.page || (route.page === "group" && link.dataset.page === "groups")) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }

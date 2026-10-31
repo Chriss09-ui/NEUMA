@@ -13,7 +13,6 @@ export interface PageElements {
   "agent-artifacts-count": HTMLElementTagNameMap["span"];
   "agent-artifacts-open": HTMLElementTagNameMap["button"];
   "agent-artifacts-title": HTMLElementTagNameMap["h2"];
-  "agent-assistant-actions": HTMLElementTagNameMap["div"];
   "agent-assistant-avatar": HTMLElementTagNameMap["span"];
   "agent-assistant-collapse": HTMLElementTagNameMap["button"];
   "agent-assistant-header": HTMLElementTagNameMap["header"];
@@ -47,14 +46,12 @@ export interface PageElements {
   "agent-build": HTMLElementTagNameMap["button"];
   "agent-build-shortcut": HTMLElementTagNameMap["button"];
   "agent-cancel-reply": HTMLElementTagNameMap["button"];
-  "agent-chat-actions": HTMLElementTagNameMap["div"];
   "agent-chat-fork": HTMLElementTagNameMap["button"];
   "agent-chat-form": HTMLElementTagNameMap["form"];
   "agent-chat-retry": HTMLElementTagNameMap["button"];
   "agent-chat-save-status": HTMLElementTagNameMap["span"];
   "agent-connections-content": HTMLElementTagNameMap["div"];
   "agent-conversation": HTMLElementTagNameMap["section"];
-  "agent-conversation-actions": HTMLElementTagNameMap["div"];
   "agent-conversation-title": HTMLElementTagNameMap["span"];
   "agent-count": HTMLElementTagNameMap["span"];
   "agent-details-avatar": HTMLElementTagNameMap["div"];
@@ -107,7 +104,6 @@ export interface PageElements {
   "agent-message-label": HTMLElementTagNameMap["label"];
   "agent-messages": HTMLElementTagNameMap["div"];
   "agent-missing": HTMLElementTagNameMap["div"];
-  "agent-new-chat": HTMLElementTagNameMap["button"];
   "agent-page-shell": HTMLElementTagNameMap["div"];
   "agent-panel": HTMLElementTagNameMap["aside"];
   "agent-panel-toggle": HTMLElementTagNameMap["button"];
@@ -205,7 +201,6 @@ export interface PageElements {
   "group-message": HTMLElementTagNameMap["textarea"];
   "group-messages": HTMLElementTagNameMap["div"];
   "group-name": HTMLElementTagNameMap["input"];
-  "group-new-task": HTMLElementTagNameMap["button"];
   "group-page-shell": HTMLElementTagNameMap["div"];
   "group-panel": HTMLElementTagNameMap["aside"];
   "group-panel-toggle": HTMLElementTagNameMap["button"];
@@ -246,6 +241,8 @@ export interface PageElements {
   "iteration-context": HTMLElementTagNameMap["div"];
   "jev-status": HTMLElementTagNameMap["div"];
   "main-agent-title": HTMLElementTagNameMap["h1"];
+  "main-attachment-menu": HTMLElementTagNameMap["div"];
+  "main-attachment-menu-toggle": HTMLElementTagNameMap["button"];
   "main-cancel": HTMLElementTagNameMap["button"];
   "main-chat-form": HTMLElementTagNameMap["form"];
   "main-content": HTMLElementTagNameMap["main"];
@@ -256,9 +253,6 @@ export interface PageElements {
   "main-context-panel": HTMLElementTagNameMap["aside"];
   "main-context-requirement-status": HTMLElementTagNameMap["span"];
   "main-context-title": HTMLElementTagNameMap["h2"];
-  "main-conversation-title": HTMLElementTagNameMap["span"];
-  "main-create-agent": HTMLElementTagNameMap["button"];
-  "main-create-group": HTMLElementTagNameMap["button"];
   "main-error": HTMLElementTagNameMap["div"];
   "main-file-input": HTMLElementTagNameMap["input"];
   "main-history": HTMLElementTagNameMap["section"];
@@ -268,7 +262,7 @@ export interface PageElements {
   "main-history-menu": HTMLElementTagNameMap["div"];
   "main-history-more-toggle": HTMLElementTagNameMap["button"];
   "main-history-status": HTMLElementTagNameMap["p"];
-  "main-history-toggle": HTMLElementTagNameMap["button"];
+  "sidebar-main-new-chat": HTMLElementTagNameMap["button"];
   "main-material-close": HTMLElementTagNameMap["button"];
   "main-material-dialog": HTMLElementTagNameMap["dialog"];
   "main-material-feedback": HTMLElementTagNameMap["p"];
@@ -278,7 +272,6 @@ export interface PageElements {
   "main-materials-open": HTMLElementTagNameMap["button"];
   "main-message": HTMLElementTagNameMap["textarea"];
   "main-messages": HTMLElementTagNameMap["div"];
-  "main-new-chat": HTMLElementTagNameMap["button"];
   "main-pending-materials": HTMLElementTagNameMap["div"];
   "main-progress": HTMLElementTagNameMap["p"];
   "main-recovery": HTMLElementTagNameMap["div"];
@@ -393,17 +386,16 @@ export interface PageElements {
   "sidebar-agent-list": HTMLElementTagNameMap["nav"];
   "sidebar-agent-rail": HTMLElementTagNameMap["div"];
   "sidebar-agents-empty": HTMLElementTagNameMap["p"];
+  "sidebar-agents-link": HTMLElementTagNameMap["a"];
   "sidebar-agents-title": HTMLElementTagNameMap["h2"];
-  "sidebar-create-agent": HTMLElementTagNameMap["button"];
-  "sidebar-create-group": HTMLElementTagNameMap["button"];
   "sidebar-details": HTMLElementTagNameMap["div"];
   "sidebar-group-list": HTMLElementTagNameMap["nav"];
   "sidebar-group-rail": HTMLElementTagNameMap["div"];
   "sidebar-groups-feedback": HTMLElementTagNameMap["p"];
+  "sidebar-groups-link": HTMLElementTagNameMap["a"];
   "sidebar-groups-title": HTMLElementTagNameMap["h2"];
   "sidebar-main-heading": HTMLElementTagNameMap["div"];
   "sidebar-main-link": HTMLElementTagNameMap["a"];
-  "sidebar-manage-groups": HTMLElementTagNameMap["a"];
   "sidebar-resize": HTMLElementTagNameMap["div"];
   "sidebar-scroll": HTMLElementTagNameMap["div"];
   "sidebar-toggle": HTMLElementTagNameMap["button"];

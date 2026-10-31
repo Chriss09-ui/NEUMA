@@ -2,7 +2,7 @@ import type { initWorkspaceResize } from "../../public/panel-resize.js";
 import type { createSidebarHistory } from "../../public/sidebar-history.js";
 import type { renderAgentAvatar } from "../../public/agent-avatar.js";
 import type { renderGroupAvatar } from "../../public/group-avatar.js";
-interface LayoutElements { "app-shell": HTMLElement; "main-history": HTMLElement; "main-history-body": HTMLElement; "main-history-list": HTMLElement; "main-history-toggle": HTMLButtonElement; "sidebar-agent-list": HTMLElement; "sidebar-agent-rail": HTMLElement; "sidebar-agents-empty": HTMLElement; "sidebar-agents-title": HTMLElement; "sidebar-details": HTMLElement; "sidebar-group-list": HTMLElement; "sidebar-group-rail": HTMLElement; "sidebar-groups-title": HTMLElement; "sidebar-scroll": HTMLElement }
+interface LayoutElements { "app-shell": HTMLElement; "main-history": HTMLElement; "main-history-body": HTMLElement; "main-history-list": HTMLElement; "sidebar-main-link": HTMLAnchorElement; "sidebar-agent-list": HTMLElement; "sidebar-agent-rail": HTMLElement; "sidebar-agents-empty": HTMLElement; "sidebar-agents-title": HTMLElement; "sidebar-details": HTMLElement; "sidebar-group-list": HTMLElement; "sidebar-group-rail": HTMLElement; "sidebar-groups-title": HTMLElement; "sidebar-scroll": HTMLElement }
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
@@ -28,9 +28,9 @@ function inspectSidebarLayout({ markup, stylesheet, avatarAssets }: { markup: st
       avatar.querySelector<HTMLElement>(".star-avatar-shell")!.style.setProperty("--avatar-mask", `url("${avatarAssets[avatar.dataset.shape!]}")`);
     return element;
   };
-  const agents = Array.from({ length: 6 }, (_, index) => ({ id: `layout-agent-${index}`, name: `测试智能体 ${index + 1}`,
-    profile: { icon: `star:${index}:1` } }));
-  const groups = Array.from({ length: 6 }, (_, index) => ({ id: `layout-group-${index}`, name: `测试群组 ${index + 1}`,
+  const agents = Array.from({ length: 10 }, (_, index) => ({ id: `layout-agent-${index}`, name: `测试智能体 ${index + 1}`,
+    profile: { icon: `star:${index % 6}:1` } }));
+  const groups = Array.from({ length: 10 }, (_, index) => ({ id: `layout-group-${index}`, name: `测试群组 ${index + 1}`,
     memberIds: agents.slice(index % 3, index % 3 + 3).map((agent) => agent.id) }));
   const histories: Record<"agents" | "groups", ReturnType<typeof createSidebarHistory<{ id: string; title: string }>>[]> = { agents: [], groups: [] };
   const populate = (items: { id: string; name: string; profile: { icon: string; }; }[]|{ id: string; name: string; memberIds: string[]; }[], list: HTMLElement|null, rail: HTMLElement|null, kind: "agents" | "groups") => {
@@ -64,6 +64,22 @@ function inspectSidebarLayout({ markup, stylesheet, avatarAssets }: { markup: st
       rows: [...element!.children].map((child) => ({ ...rect(child.querySelector<HTMLElement>(".sidebar-history-heading")! ?? child),
         avatar: rect(child.querySelector<HTMLElement>(".agent-avatar, .sidebar-group-avatar, .collapsed-group-avatar")!) })) };
   };
+  const mainLink = document.getElementById("sidebar-main-link")!;
+  const entryLayout = () => ({ heading: rect(mainLink.parentElement!), link: rect(mainLink), action: rect(mainLink.nextElementSibling!) });
+  const restingEntry = entryLayout();
+  const focusFacts = () => {
+    const css = getComputedStyle(mainLink), bounds = rect(mainLink);
+    const width = Number.parseFloat(css.outlineWidth), spread = width + Number.parseFloat(css.outlineOffset);
+    const clips = [];
+    for (let parent = mainLink.parentElement; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent), box = rect(parent);
+      clips.push({ x: /^(auto|scroll|hidden|clip)$/.test(style.overflowX), y: /^(auto|scroll|hidden|clip)$/.test(style.overflowY),
+        left: box.left + parent.clientLeft, top: box.top + parent.clientTop,
+        right: box.left + parent.clientLeft + parent.clientWidth, bottom: box.top + parent.clientTop + parent.clientHeight });
+    }
+    return { visible: mainLink.matches(":focus-visible"), width, style: css.outlineStyle,
+      left: bounds.left - spread, right: bounds.right + spread, top: bounds.top - spread, bottom: bounds.bottom + spread, clips };
+  };
   const snapshot = (compact = false) => ({
     viewport: { width: innerWidth, height: innerHeight },
     documentHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
@@ -73,9 +89,13 @@ function inspectSidebarLayout({ markup, stylesheet, avatarAssets }: { markup: st
     settings: rect(document.querySelector<HTMLElement>(".sidebar-settings")!),
     agents: listFacts(compact ? agentRail : agentList), groups: listFacts(compact ? groupRail : groupList),
     focused: (document.activeElement as HTMLElement | null)?.dataset.fixtureId ?? null,
+    mainFocus: focusFacts(),
+    mainEntry: { resting: restingEntry, current: entryLayout() },
   });
   const reset = (...lists: (HTMLElement|null)[]) => { for (const list of lists) list!.scrollTop = 0; };
+  mainLink.focus();
   const initial = snapshot();
+  mainLink.blur();
   agentList!.scrollTop = agentList!.scrollHeight; const agentScrolled = snapshot();
   groupList!.scrollTop = groupList!.scrollHeight; const groupScrolled = snapshot();
   reset(agentList, groupList);
@@ -103,7 +123,7 @@ function inspectSidebarLayout({ markup, stylesheet, avatarAssets }: { markup: st
   byId("sidebar-details")!.inert = false; agentRail!.inert = true; groupRail!.inert = true;
   byId("main-history")!.classList.remove("history-collapsed");
   byId("main-history-body")!.inert = false; byId("main-history-body")!.setAttribute("aria-hidden", "false");
-  byId("main-history-toggle")!.setAttribute("aria-expanded", "true");
+  byId("sidebar-main-link")!.setAttribute("aria-expanded", "true");
   byId("main-history-list")!.replaceChildren(...Array.from({ length: 25 }, (_, index) => {
     const row = make("button", "sidebar-history-item", `主助理历史对话 ${index + 1}`); row.type = "button"; return row;
   }));
@@ -129,7 +149,17 @@ export async function sidebarLayoutScript() {
 }
 
 export function assertSidebarLayout(facts: ReturnType<typeof inspectSidebarLayout>) {
+  const focus = facts.initial.mainFocus;
+  assert.ok(focus.visible && focus.width > 0 && !["none", "hidden"].includes(focus.style), "NEUMA 入口应保留可见的键盘焦点提示");
+  for (const clip of focus.clips) {
+    if (clip.x) assert.ok(focus.left >= clip.left - .5 && focus.right <= clip.right + .5, "NEUMA 焦点框左右边不应被父容器裁切");
+    if (clip.y) assert.ok(focus.top >= clip.top - .5 && focus.bottom <= clip.bottom + .5, "NEUMA 焦点框上下边不应被父容器裁切");
+  }
   const close = (actual: number, expected: number, label: string) => assert.ok(Math.abs(actual - expected) <= 1, `${label}: ${actual} vs ${expected}`);
+  const { resting, current } = facts.initial.mainEntry;
+  close(current.link.width, resting.link.width, "新对话按钮出现时不应挤压入口标题");
+  close((current.action.top + current.action.bottom) / 2, (current.heading.top + current.heading.bottom) / 2, "新对话按钮应与入口行垂直居中");
+  assert.ok(current.heading.right - current.action.right >= 3.5, "新对话按钮与入口右边缘应保留间距");
   const fullyVisible = (row: { top: number; bottom: number; }, list: { top: number; bottom: number; }) => row.top >= list.top - 1 && row.bottom <= list.bottom + 1;
   const stable = (before: ReturnType<typeof inspectSidebarLayout>["initial"], after: ReturnType<typeof inspectSidebarLayout>["initial"], label: string, headings = true) => {
     close(after.settings.top, before.settings.top, `${label} 设置入口应固定`);
@@ -143,11 +173,12 @@ export function assertSidebarLayout(facts: ReturnType<typeof inspectSidebarLayou
     assert.ok(sample.settings.top >= 0 && sample.settings.bottom <= sample.viewport.height + 1, `${name} 设置入口应在视口内`);
     for (const key of ["agents", "groups"] as const) {
       const list = sample[key];
-      assert.equal(list.rows.length, 6, `${name} ${key} 应保留全部六个入口`);
+      assert.equal(list.rows.length, 10, `${name} ${key} 应保留全部入口`);
       assert.equal(list.overflowY, "auto", `${name} ${key} 应单独滚动`);
       assert.equal(list.overscrollBehaviorY, "contain", `${name} ${key} 应阻止滚动传递`);
-      close(Number.parseFloat(list.maxHeight), 188, `${name} ${key} 最多容纳四项`);
-      assert.ok(list.clientHeight > 0 && list.clientHeight <= 188, `${name} ${key} 应有受限的可用高度`);
+      const maximum = key === "agents" ? 332 : 188;
+      close(Number.parseFloat(list.maxHeight), maximum, `${name} ${key} 列表高度上限`);
+      assert.ok(list.clientHeight > 0 && list.clientHeight <= maximum, `${name} ${key} 应有受限的可用高度`);
       assert.ok(list.scrollHeight > list.clientHeight, `${name} ${key} 更多条目应产生滚动内容`);
       const avatarSize = name.startsWith("collapsed") ? 28 : 36;
       for (const row of list.rows) {
@@ -159,10 +190,9 @@ export function assertSidebarLayout(facts: ReturnType<typeof inspectSidebarLayou
   }
   for (const name of ["initial", "collapsed"] as const) for (const key of ["agents", "groups"] as const) {
     const sample = facts[name], list = sample[key], count = list.rows.filter((row: { top: number; bottom: number; }) => fullyVisible(row, list)).length;
-    assert.ok(count > 0 && count <= 4, `${name} ${key} 首屏最多显示四项`);
-    if (sample.viewport.height >= 900) assert.equal(count, 4, `${name} ${key} 高桌面应完整显示四项`);
-    assert.ok(list.rows[4]!.top >= list.bottom - 1, `${name} ${key} 第五项应被裁切`);
-    close(list.rows[1]!.top - list.rows[0]!.bottom, 4, `${name} ${key} 条目间距`);
+    assert.ok(count > 0, `${name} ${key} 首屏应显示入口`);
+    if (sample.viewport.height >= 900 && key === "agents") assert.ok(count >= 5, `${name} 高桌面应显示更多智能体`);
+    close(list.rows[1]!.top - list.rows[0]!.bottom, name === "collapsed" ? 4 : 2, `${name} ${key} 条目间距`);
   }
   for (const [start, agentName, groupName, headings] of [["initial", "agentScrolled", "groupScrolled", true],
     ["collapsed", "collapsedAgentScrolled", "collapsedGroupScrolled", false]] as const) {
@@ -173,8 +203,8 @@ export function assertSidebarLayout(facts: ReturnType<typeof inspectSidebarLayou
     close(group.agents.scrollTop, agent.agents.scrollTop, `${groupName} 不应移动 Agent 列表`);
     stable(initial, agent, agentName, headings); stable(initial, group, groupName, headings);
   }
-  for (const [name, key, id] of [["agentFocused", "agents", "layout-agent-5"], ["groupFocused", "groups", "layout-group-5"],
-    ["collapsedAgentFocused", "agents", "layout-agent-5"], ["collapsedGroupFocused", "groups", "layout-group-5"]] as const) {
+  for (const [name, key, id] of [["agentFocused", "agents", "layout-agent-9"], ["groupFocused", "groups", "layout-group-9"],
+    ["collapsedAgentFocused", "agents", "layout-agent-9"], ["collapsedGroupFocused", "groups", "layout-group-9"]] as const) {
     const sample = facts[name];
     assert.equal(sample.focused, id, `${name} 最后入口应可获得键盘焦点`);
     assert.ok(fullyVisible(sample[key].rows.at(-1)!, sample[key]), `${name} 焦点应自动滚入列表可见范围`);

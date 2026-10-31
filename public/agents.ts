@@ -151,6 +151,7 @@ function renderHistory(agent: AgentRequirement) {
   const view = sidebarHistories.get(agent.id);
   if (!view) return;
   const state = history.state(agent.id), selected = conversation(agent.id), records = history.records(agent.id);
+  view.newChat.disabled = Boolean(selected.deleting);
   if (historyMenu?.agentId === agent.id) closeHistoryMenu(true);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   view.update({ records, active: visible(agent.id), status: state.loading ? "正在读取历史对话…" : state.error
@@ -313,7 +314,6 @@ function renderSidebar() {
     view.root.remove(); sidebarHistories.delete(id); sidebarAvatars.delete(id);
   }
   byId("sidebar-agents-empty").hidden = agents.length > 0;
-  byId("sidebar-create-agent").disabled = mainBusy;
   for (const agent of agents) {
     let view = sidebarHistories.get(agent.id);
     const name = agentDisplayName(agent);
@@ -322,6 +322,7 @@ function renderSidebar() {
       view = createSidebarHistory<HistoryItem>({ document, storage, id: `sidebar-agent-history-${agent.id}`, title: name,
         href: `#agent/${encodeURIComponent(agent.id)}`, icon: mark, className: "sidebar-agent",
         onExpand(open) { if (!open && historyMenu?.agentId === agent.id) closeHistoryMenu(); if (open) return loadConversation(agent); },
+        onNew: () => newConversation(agent.id),
       });
       sidebarHistories.set(agent.id, view); list.append(view.root);
       const status = element("small", "sidebar-agent-status", "");
@@ -430,7 +431,6 @@ function renderControls(agent: AgentRequirement) {
   byId("agent-chat-fork").hidden = !item.conflict;
   byId("agent-chat-fork").disabled = Boolean(item.turn || item.deleting);
   byId("agent-save-actions").hidden = !item.storageError && !library.error && !item.conflict;
-  byId("agent-new-chat").disabled = Boolean(item.deleting);
   showError(item.error || item.storageError || state.error);
   renderDevelopment(agent, development);
   renderMaking(agent);
@@ -450,7 +450,6 @@ function renderMaking(agent: AgentRequirement) {
   const making = showingUpdate || !active && state.status !== "ready" && !state.application?.pageReady && !conversation(agent.id).turn;
   byId("agent-making-panel").hidden = !making;
   byId("agent-conversation").hidden = making;
-  byId("agent-conversation-actions").hidden = making;
   byId("agent-workspace").classList.toggle("is-making", making && !showingUpdate);
   byId("agent-workspace").classList.toggle("showing-update", showingUpdate);
   if (!making) { byId("agent-making-content").replaceChildren(); makingView = null; return; }
@@ -594,7 +593,6 @@ function renderWorkspace({ renderConversation = true } = {}) {
   const agent = current();
   byId("agent-missing").hidden = Boolean(agent);
   byId("agent-workspace").hidden = !agent;
-  byId("agent-conversation-actions").hidden = !agent;
   byId("agent-iterate").hidden = !agent;
   byId("agent-title").textContent = agent ? agentDisplayName(agent) : "找不到智能体";
   const identity = byId("agent-panel-toggle");
@@ -1134,7 +1132,6 @@ document.addEventListener("neuma:agent-saved", (event) => {
   if (event.detail.id === route.agentId) showError(event.detail.ok ? "" : event.detail.message || "Agent 需求尚未保存到文件夹，请重试保存。");
 });
 
-byId("sidebar-create-agent").addEventListener("click", () => action("create"));
 byId("agent-iterate").addEventListener("click", () => action("edit"));
 byId("agent-save-entry").addEventListener("click", () => action("save"));
 byId("agent-build").addEventListener("click", () => {
@@ -1184,7 +1181,7 @@ document.addEventListener("keydown", (event) => {
 async function newConversation(id = route.agentId) {
   if (!visible(id)) document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "agent", agentId: id } }));
   const agent = current();
-  if (!agent || !visible(id)) return;
+  if (!agent || !visible(id) || conversation(agent.id).deleting) return;
   const sequence = (switchRequests.get(agent.id) || 0) + 1;
   switchRequests.set(agent.id, sequence);
   const previous = conversation(agent.id);
@@ -1194,9 +1191,14 @@ async function newConversation(id = route.agentId) {
   history.blank(agent.id);
   input.value = "";
   renderWorkspace();
-  input.dispatchEvent(new Event("input")); input.focus();
+  input.dispatchEvent(new Event("input"));
+  if (byId("agent-conversation").inert) {
+    const assistant = byId("agent-assistant-toggle");
+    if (!assistant.hidden && !assistant.disabled) assistant.click();
+    else byId("agent-view-chat").click();
+  }
+  input.focus();
 }
-byId("agent-new-chat").addEventListener("click", () => newConversation());
 input.addEventListener("input", () => { if (route.page === "agent" && current()) rememberInput(route.agentId!, conversation(route.agentId!), input.value); });
 byId("agent-chat-form").addEventListener("submit", (event) => { event.preventDefault(); return sendMessage(); });
 window.addEventListener?.("pagehide", () => {

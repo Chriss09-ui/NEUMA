@@ -6,6 +6,7 @@ export interface FormElement<E> {
   parentElement?: {remove():unknown} | null | undefined;
   append(...children:E[]):unknown; replaceChildren(...children:E[]):unknown; remove():unknown;
   setAttribute(name:string,value:string):unknown;
+  focus?():unknown;
   addEventListener(type:string,callback: {invoke(event:{type:string;preventDefault():void}):unknown}["invoke"]):unknown;
 }
 export interface FormDocument<E> { createElement(tag:string):E; hidden?:boolean }

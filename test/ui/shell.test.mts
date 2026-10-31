@@ -54,10 +54,10 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     closest() { return this.hidden ? this : null; }
     contains(element: unknown) {
       return (this.id === "project-library-body" && element === get("project-search"))
-        || (this.id === "sidebar-details" && element === get("sidebar-create-agent"))
+        || (this.id === "sidebar-details" && element === get("sidebar-groups-link"))
         || (this.id === "sidebar-agent-rail" && element === get("collapsed-agent-one"))
         || (this.id === "sidebar-group-rail" && element === get("collapsed-group-one"))
-        || (this.id === "main-history" && ["sidebar-main-link", "main-history-more-toggle", "main-history-toggle"].some((id) => element === get(id)));
+        || (this.id === "main-history" && ["sidebar-main-link", "main-history-more-toggle", "sidebar-main-new-chat"].some((id) => element === get(id)));
     }
     focus() { document.activeElement = this; }
     click() { this.dispatchEvent({ type: "click" }); }
@@ -70,13 +70,14 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
     return nodes.get(id)!;
   };
   const inputs = ["message", "project-message", "agent-message", "main-message", "group-message"].map(get);
-  const links = ["chat", "projects", "agents", "skills", "settings"].map((page) => {
+  const links = ["chat", "projects", "skills", "settings"].map((page) => {
     const link = get(`nav-${page}`); link.dataset.page = page; return link;
   });
-  const groupsManage = get("sidebar-manage-groups"); groupsManage.className = "sidebar-manage"; groupsManage.dataset.page = "groups";
-  links.push(groupsManage);
+  for (const page of ["agents", "groups"]) {
+    const link = get(`sidebar-${page}-link`); link.className = "sidebar-section-link"; link.dataset.page = page; links.push(link);
+  }
   document.getElementById = (id: string) => ["llm-dot", "llm-state", "jev-dot", "jev-state"].includes(id) ? null : get(id);
-  document.querySelectorAll = (selector: string) => selector === ".nav-item, .sidebar-manage" ? links : inputs;
+  document.querySelectorAll = (selector: string) => selector === ".nav-item, .sidebar-section-link" ? links : inputs;
   get("setup-banner").firstElementChild = get("banner-text");
   get("project-setup-banner").firstElementChild = get("project-banner-text");
   get("chat-panel-toggle").setAttribute("aria-controls", "requirements-panel");
@@ -166,7 +167,7 @@ test("旧创建入口统一到主聊天，群详情保持群导航选中且主�
   navigate({ page: "group", groupId: "group-one" });
   assert.equal(location.hash, "#group/group-one");
   assert.equal(get("page-group").hidden, false);
-  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), "page");
+  assert.equal(get("sidebar-groups-link").getAttribute("aria-current"), "page");
   assert.equal(document.activeElement.id, "group-message");
   navigate({ page: "chat" });
   assert.equal(get("main-message").value, "主助理下一条草稿");
@@ -174,20 +175,20 @@ test("旧创建入口统一到主聊天，群详情保持群导航选中且主�
   assert.equal(document.activeElement.id, "main-message");
 });
 
-test("群组管理从我的群组标题进入，群详情与管理页都选中同一入口", async () => {
+test("分区标题直接进入对应管理页，群详情仍选中我的群组", async () => {
   const html = await readFile(new URL("../../public/index.html", import.meta.url), "utf8");
-  const navigation = html.match(/<nav class="nav"[\s\S]*?<\/nav>/)![0];
-  assert.doesNotMatch(navigation, /data-page="groups"/);
-  const manage = html.match(/<a\b[^>]*id="sidebar-manage-groups"[^>]*>/)![0];
-  assert.match(manage, /class="sidebar-manage"/); assert.match(manage, /href="#groups"/);
-  assert.match(manage, /data-page="groups"/);
   const { get, navigate } = setup();
-  navigate({ page: "groups" });
-  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), "page");
+  for (const [page, title] of [["agents", "我的智能体"], ["groups", "我的群组"]] as const) {
+    const heading = html.match(new RegExp(`<h2 id="sidebar-${page}-title">([\\s\\S]*?)</h2>`))?.[1];
+    assert.ok(heading);
+    assert.match(heading, new RegExp(`<a[^>]+href="#${page}"[^>]*>${title}</a>`));
+    navigate({ page });
+    assert.equal(get(`sidebar-${page}-link`).getAttribute("aria-current"), "page");
+    navigate({ page: "chat" });
+    assert.equal(get(`sidebar-${page}-link`).getAttribute("aria-current"), null);
+  }
   navigate({ page: "group", groupId: "one" });
-  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), "page");
-  navigate({ page: "chat" });
-  assert.equal(get("sidebar-manage-groups").getAttribute("aria-current"), null);
+  assert.equal(get("sidebar-groups-link").getAttribute("aria-current"), "page");
 });
 
 test("主导航折叠保留页面与草稿，头像列只在收起时允许聚焦，展开归还焦点", () => {
@@ -195,7 +196,7 @@ test("主导航折叠保留页面与草稿，头像列只在收起时允许聚�
   assert.equal(get("sidebar-agent-rail").inert, true);
   assert.equal(get("sidebar-group-rail").inert, true);
   get("project-message").value = "保留这条草稿";
-  get("sidebar-create-agent").focus();
+  get("sidebar-groups-link").focus();
   get("sidebar-toggle").click();
   assert.equal(document.activeElement.id, "sidebar-toggle");
   assert.equal(get("sidebar-details").inert, true);
@@ -343,7 +344,7 @@ test("浏览器返回和前进恢复面板，重复路由事件只通知一次",
   window.dispatchEvent({ type: "hashchange" });
   assert.equal(updates, 1);
   assert.equal(get("page-agents").hidden, false);
-  assert.equal(get("nav-agents").getAttribute("aria-current"), "page");
+  assert.equal(get("sidebar-agents-link").getAttribute("aria-current"), "page");
   assert.equal(get("nav-projects").getAttribute("aria-current"), null);
   assert.equal(get("page-chat").hidden, true);
   location.hash = "#chat/requirements";

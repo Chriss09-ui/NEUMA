@@ -2,7 +2,7 @@ import type { initWorkspaceResize } from "../../public/panel-resize.js";
 import type { createSidebarHistory } from "../../public/sidebar-history.js";
 import type { renderAgentAvatar } from "../../public/agent-avatar.js";
 import type { renderGroupAvatar } from "../../public/group-avatar.js";
-interface LayoutElements { "agent-attachment-add": HTMLButtonElement; "agent-attachment-menu-toggle": HTMLButtonElement; "agent-attachment-pick": HTMLButtonElement; "agent-chat-form": HTMLFormElement; "agent-chat-retry": HTMLButtonElement; "agent-conversation": HTMLElement; "agent-conversation-actions": HTMLElement; "agent-details-profile": HTMLElement; "agent-error": HTMLElement; "agent-making-panel": HTMLElement; "agent-message": HTMLTextAreaElement; "agent-messages": HTMLElement; "agent-new-chat": HTMLButtonElement; "agent-page-shell": HTMLElement; "agent-panel": HTMLElement; "agent-panel-toggle": HTMLButtonElement; "agent-primary": HTMLElement; "agent-save-actions": HTMLElement; "agent-send": HTMLButtonElement; "agent-title": HTMLElement; "agent-workspace": HTMLElement; "app-shell": HTMLElement; "page-agent": HTMLElement; "sidebar-agent-list": HTMLElement; "sidebar-resize": HTMLElement; "sidebar-toggle": HTMLButtonElement }
+interface LayoutElements { "agent-attachment-add": HTMLButtonElement; "agent-attachment-menu-toggle": HTMLButtonElement; "agent-attachment-pick": HTMLButtonElement; "agent-chat-form": HTMLFormElement; "agent-chat-retry": HTMLButtonElement; "agent-conversation": HTMLElement; "agent-details-profile": HTMLElement; "agent-error": HTMLElement; "agent-making-panel": HTMLElement; "agent-message": HTMLTextAreaElement; "agent-messages": HTMLElement; "agent-page-shell": HTMLElement; "agent-panel": HTMLElement; "agent-panel-toggle": HTMLButtonElement; "agent-primary": HTMLElement; "agent-save-actions": HTMLElement; "agent-send": HTMLButtonElement; "agent-title": HTMLElement; "agent-workspace": HTMLElement; "app-shell": HTMLElement; "page-agent": HTMLElement; "sidebar-agent-list": HTMLElement; "sidebar-resize": HTMLElement; "sidebar-toggle": HTMLButtonElement }
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
@@ -15,7 +15,6 @@ function inspectAgentLayout({ markup, stylesheet }: { markup: string; stylesheet
   for (const page of document.querySelectorAll<HTMLElement>(".page")) page.hidden = page.id !== "page-agent";
   byId("agent-title")!.textContent = "材料阅读测试";
   byId("agent-send")!.disabled = false;
-  byId("agent-conversation-actions")!.hidden = false;
   byId("agent-messages")!.style.setProperty("--user-bubble-background", "#ff7a00");
   byId("agent-messages")!.style.setProperty("--user-bubble-color", "#fff");
   const workspace = byId("agent-workspace"), messages = byId("agent-messages");
@@ -110,7 +109,7 @@ function inspectAgentLayout({ markup, stylesheet }: { markup: string; stylesheet
       textOverflow: getComputedStyle(title).textOverflow, whiteSpace: getComputedStyle(title).whiteSpace },
     navigation: rect(document.querySelector<HTMLElement>(".sidebar")!), historyInNavigation: history.closest(".sidebar") !== null,
     conversationColumns: getComputedStyle(workspace).gridTemplateColumns.split(" ").length,
-    navigationToggleVisible: visible(byId("sidebar-toggle")), newChatVisible: visible(byId("agent-new-chat")),
+    navigationToggleVisible: visible(byId("sidebar-toggle")),
     settings: { ...rect(panel), hidden: panel!.hidden,
       content: { ...rect(profile), clientHeight: profile!.clientHeight, scrollHeight: profile!.scrollHeight, scrollTop: profile!.scrollTop } },
     messages: { ...rect(messages), clientHeight: messages!.clientHeight, scrollHeight: messages!.scrollHeight, scrollTop: messages!.scrollTop },
@@ -153,7 +152,6 @@ function inspectAgentLayout({ markup, stylesheet }: { markup: string; stylesheet
   byId("agent-error")!.hidden = true; byId("agent-save-actions")!.hidden = true;
 
   workspace!.classList.add("is-making"); making!.hidden = false;
-  byId("agent-conversation-actions")!.hidden = true;
   byId("agent-conversation")!.hidden = true;
   refresh();
   for (let index = 0; index < 80; index++) {
@@ -166,7 +164,6 @@ function inspectAgentLayout({ markup, stylesheet }: { markup: string; stylesheet
     page: rect(byId("page-agent")), header: rect(document.querySelector<HTMLElement>(".agent-chat-header")!),
     workspace: { ...rect(workspace), clientHeight: workspace!.clientHeight, scrollHeight: workspace!.scrollHeight, scrollTop: workspace!.scrollTop } };
   making!.hidden = true; byId("agent-conversation")!.hidden = false;
-  byId("agent-conversation-actions")!.hidden = false;
   workspace!.classList.remove("is-making"); workspace!.scrollTop = 0;
   fillMessages(true); messages!.scrollTop = messages!.scrollHeight;
   for (const control of Object.values(controls)) control?.dispose();
@@ -244,7 +241,6 @@ export function assertAgentLayout(facts: ReturnType<typeof inspectAgentLayout>) 
     assert.ok(sample!.historyInNavigation, `${name} 历史应归入主导航`);
     assert.equal(sample!.conversationColumns, 1, `${name} 私聊工作区应只有对话列`);
     assert.ok(sample!.navigationToggleVisible, `${name} 主导航开合按钮应可见`);
-    assert.ok(sample!.newChatVisible, `${name} 新对话加号应可见`);
     close(sample!.header.top, facts.long.header.top, `${name} 标题位置`);
     close(sample!.composer.bottom, facts.long.composer.bottom, `${name} 输入框底部位置`);
   }

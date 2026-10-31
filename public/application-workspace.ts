@@ -46,13 +46,9 @@ export function createApplicationWorkspace<E extends ApplicationElement<E> = HTM
     const conversation = byId("agent-conversation");
     conversation.inert = appMode && !assistantVisible;
     conversation.setAttribute("aria-hidden", String(conversation.inert));
-    const actions = byId("agent-conversation-actions");
-    const actionsHost = byId(assistantVisible ? "agent-assistant-actions" : "agent-chat-actions");
-    if (actions.parentElement !== actionsHost) actionsHost.append(actions);
     byId("agent-view-switch").hidden = !available;
     byId("agent-assistant-toggle").hidden = !appMode || settingsOpen || !assistantAllowed;
     byId("agent-assistant-toggle").disabled = settingsOpen || !assistantAllowed;
-    byId("agent-new-chat").hidden = appMode && !assistantVisible;
     byId("agent-assistant-toggle").setAttribute("aria-expanded", String(assistantVisible && floatingAssistant.isExpanded()));
     byId("agent-view-application").setAttribute("aria-pressed", String(mode === "application"));
     byId("agent-view-chat").setAttribute("aria-pressed", String(mode === "chat"));

@@ -75,8 +75,6 @@ declare dataset:Record<string,string>;
   }
   const get = (id: string) => { if (!nodes.has(id)) nodes.set(id, new Element("div")); return nodes.get(id)!; };
   document.getElementById = get; document.createElement = (tag: string) => new Element(tag);
-  get("agent-chat-actions").append(get("agent-conversation-actions"));
-  get("agent-conversation-actions").append(get("agent-new-chat"));
   const window = new Events(); window.location = { origin: "http://127.0.0.1:3000" };
   return { document, window, get, downloads };
 }
@@ -246,20 +244,15 @@ test("应用与助手复用聊天区域，切换保留页面草稿，不取消�
   }) });
   try {
     view.route("one"); view.update("one", application); await settle();
-    assert.equal(ui.get("agent-new-chat").hidden, true);
     assert.equal(ui.get("agent-conversation").inert, true);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "true");
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-chat-actions"));
     const frame = ui.get("agent-application-frame-host").children[0]; frame!.savedDraft = "还未发送的链接";
     assert.equal(frame!.attributes.get("sandbox"), "allow-scripts allow-same-origin");
     ui.get("agent-message").value = "对话草稿";
     await ui.get("agent-view-chat").click();
-    assert.equal(ui.get("agent-new-chat").hidden, false);
     assert.equal(ui.get("agent-conversation").inert, false);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "false");
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-chat-actions"));
     await ui.get("agent-view-application").click();
-    assert.equal(ui.get("agent-new-chat").hidden, true);
     assert.equal(ui.get("agent-conversation").inert, true);
     assert.equal(ui.get("agent-application-frame-host").children[0], frame);
     assert.equal(frame!.savedDraft, "还未发送的链接"); assert.equal(ui.get("agent-message").value, "对话草稿");
@@ -267,14 +260,10 @@ test("应用与助手复用聊天区域，切换保留页面草稿，不取消�
     assert.equal(ui.get("agent-workspace").classes.has("application-assistant-open"), true);
     assert.equal(ui.get("agent-conversation").inert, false);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "false");
-    assert.equal(ui.get("agent-new-chat").hidden, false);
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-assistant-actions"));
     assert.equal(ui.document.activeElement, ui.get("agent-message"));
     await ui.get("agent-assistant-toggle").click();
-    assert.equal(ui.get("agent-new-chat").hidden, true);
     assert.equal(ui.get("agent-conversation").inert, true);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "true");
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-chat-actions"));
     await ui.get("agent-view-chat").click();
     assert.equal(ui.get("agent-conversation").inert, false);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "false");
@@ -283,8 +272,6 @@ test("应用与助手复用聊天区域，切换保留页面草稿，不取消�
     view.route("two"); await settle(); assert.equal(calls[1]![0], "close"); assert.equal(calls[1]![1], "one");
     assert.equal(ui.get("agent-conversation").inert, false);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "false");
-    assert.equal(ui.get("agent-new-chat").hidden, false);
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-chat-actions"));
   } finally { view.close(); }
 });
 
@@ -303,7 +290,6 @@ for (const initiallyOpen of [false, true]) test(`应用设置临时替换${initi
     ui.get("agent-message").value = "聊天草稿";
     assert.equal(assistantVisible(), initiallyOpen);
     assert.equal(ui.get("agent-conversation").inert, !initiallyOpen);
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get(initiallyOpen ? "agent-assistant-actions" : "agent-chat-actions"));
     await settings("two", true);
     assert.equal(assistantVisible(), initiallyOpen);
     assert.equal(ui.get("agent-assistant-toggle").hidden, false);
@@ -314,8 +300,6 @@ for (const initiallyOpen of [false, true]) test(`应用设置临时替换${initi
     assert.equal(ui.get("agent-assistant-toggle").hidden, true);
     assert.equal(ui.get("agent-assistant-toggle").disabled, true);
     assert.equal(ui.get("agent-assistant-toggle").attributes.get("aria-expanded"), "false");
-    assert.equal(ui.get("agent-new-chat").hidden, true);
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-chat-actions"));
     ui.get("agent-panel-toggle").focus();
     await ui.get("agent-assistant-toggle").click();
     await settings("two", false);
@@ -328,8 +312,6 @@ for (const initiallyOpen of [false, true]) test(`应用设置临时替换${initi
     assert.equal(ui.get("agent-assistant-toggle").hidden, false);
     assert.equal(ui.get("agent-assistant-toggle").disabled, false);
     assert.equal(ui.get("agent-assistant-toggle").attributes.get("aria-expanded"), String(initiallyOpen));
-    assert.equal(ui.get("agent-new-chat").hidden, !initiallyOpen);
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get(initiallyOpen ? "agent-assistant-actions" : "agent-chat-actions"));
     assert.equal(ui.document.activeElement, ui.get("agent-panel-toggle"));
     assert.equal(ui.get("agent-application-frame-host").children[0], frame);
     assert.equal(frame!.savedDraft, "页面草稿");
@@ -351,7 +333,6 @@ for (const initiallyOpen of [false, true]) test(`应用设置临时替换${initi
     assert.equal(ui.get("agent-assistant-toggle").disabled, false);
     assert.equal(assistantVisible(), false);
     assert.equal(ui.get("agent-conversation").inert, true);
-    assert.equal(ui.get("agent-conversation-actions").parentElement, ui.get("agent-chat-actions"));
     view.route(null);
     assert.equal(ui.get("agent-conversation").inert, false);
     assert.equal(ui.get("agent-conversation").attributes.get("aria-hidden"), "false");

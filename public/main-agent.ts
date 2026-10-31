@@ -31,13 +31,11 @@ try { historyCollapsed = localStorage.getItem(HISTORY_KEY) === "true"; } catch {
 function historyLayout() {
   byId("main-history").classList.toggle("history-collapsed", historyCollapsed);
   byId("main-history-body").inert = historyCollapsed; byId("main-history-body").setAttribute("aria-hidden", String(historyCollapsed));
-  const toggle = byId("main-history-toggle"), label = historyCollapsed ? "展开历史对话" : "收起历史对话";
-  toggle.setAttribute("aria-expanded", String(!historyCollapsed)); toggle.setAttribute("aria-label", label); toggle.title = label;
   byId("sidebar-main-link").setAttribute("aria-expanded", String(!historyCollapsed));
 }
 function setHistoryCollapsed(value: boolean) {
   closeHistoryMenu(); historyCollapsed = value;
-  if (historyCollapsed && byId("main-history-body").contains?.(document.activeElement)) byId("main-history-toggle").focus();
+  if (historyCollapsed && byId("main-history-body").contains?.(document.activeElement)) byId("sidebar-main-link").focus();
   historyLayout(); try { localStorage.setItem(HISTORY_KEY, String(historyCollapsed)); } catch { /* Only persistence is unavailable. */ }
 }
 async function openHistoryConversation(id: string) {
@@ -95,24 +93,20 @@ function openHistoryMenu(record: MainConversation, trigger: HTMLButtonElement, r
 function controls() {
   if (busy()) closeHistoryMenu();
   byId("main-send").disabled = busy();
-  byId("main-new-chat").disabled = busy();
+  byId("sidebar-main-new-chat").disabled = busy();
   byId("main-refresh").disabled = busy();
   byId("main-refresh").hidden = !(needsConversationReload || needsHistoryReload);
   byId("main-recovery").hidden = byId("main-refresh").hidden;
-  byId("main-upload").disabled = busy();
-  byId("main-materials-open").disabled = busy();
-  byId("main-create-agent").disabled = busy();
   byId("main-history-delete").disabled = busy();
   for (const item of byId("main-history-list").querySelectorAll("button")) item.disabled = busy();
   byId("main-cancel").hidden = !operation;
   byId("main-message").disabled = Boolean(loading || removing);
+  materials.setDisabled(busy());
   if (!operation) notice(byId("main-progress"), "");
 }
 function render() {
   const target = byId("main-messages"), wasBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
   target.replaceChildren();
-  byId("main-conversation-title").textContent = selected?.title || "一起推进你的工作";
-  byId("main-conversation-title").hidden = !selected?.messages?.length;
   if (!selected?.messages?.length) {
     const welcome = node("div", "collaboration-empty main-welcome");
     const mark = node("span", "brand-mark main-welcome-mark"); mark.setAttribute("aria-hidden", "true");
@@ -232,7 +226,7 @@ async function removeConversation(id: string) {
     if (page === "chat" && restoreFocus()) byId("main-message").focus();
   } else if (restoreFocus() && !byId("sidebar-scroll").inert) {
     const row = ([...byId("main-history-list").children] as HTMLElement[]).find((item) => item.dataset.conversationId === id);
-    const target = byId("main-history-body").inert ? byId("main-history-toggle")
+    const target = byId("main-history-body").inert ? byId("sidebar-main-link")
       : row && !row.hidden ? row.querySelector<HTMLElement>(".main-history-more") : byId("main-history-more-toggle");
     target?.focus({ preventScroll: true });
   }
@@ -361,7 +355,12 @@ async function activateRequirements(agentId?: string) {
   finally { if (token === activationSequence) { loading = false; controls(); byId("main-message").focus(); } }
 }
 byId("main-chat-form").addEventListener("submit", (event) => { event.preventDefault(); void send(); });
-byId("main-new-chat").addEventListener("click", () => void create({ preserveInput: false }));
+byId("sidebar-main-new-chat").addEventListener("click", () => {
+  if (busy()) return;
+  const pending = create({ preserveInput: false });
+  if (page !== "chat") document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "chat" } }));
+  return pending;
+});
 byId("sidebar-main-link").addEventListener("click", (event) => {
   if (!historyCollapsed) event.preventDefault();
   setHistoryCollapsed(!historyCollapsed);
@@ -375,10 +374,6 @@ byId("sidebar-main-heading").addEventListener("click", (event) => {
   if (event.target === byId("sidebar-main-heading")) byId("sidebar-main-link").click();
 });
 byId("main-refresh").addEventListener("click", async () => { if (selected) await select(selected.id); await list(); });
-byId("main-create-agent").addEventListener("click", () => void activateRequirements());
-byId("main-history-toggle").addEventListener("click", () => {
-  setHistoryCollapsed(!historyCollapsed);
-});
 byId("main-history-more-toggle").addEventListener("click", () => {
   closeHistoryMenu(); historyShowAll = !historyShowAll;
   if (!historyShowAll && byId("main-history-list").contains(document.activeElement)) byId("main-history-more-toggle").focus({ preventScroll: true });
@@ -403,7 +398,6 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault(); byId("main-history-delete").focus({ preventScroll: true });
   }
 });
-byId("main-create-group").addEventListener("click", () => document.dispatchEvent(new CustomEvent("neuma:create-group")));
 byId("main-cancel").addEventListener("click", async () => {
   const current = operation; if (!current) return;
   byId("main-cancel").disabled = true;

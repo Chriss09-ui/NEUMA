@@ -34,7 +34,7 @@ const collapsedGroups = new Map<string, { link: HTMLAnchorElement; mark: HTMLEle
 const historyActionErrors = new Map<string, string>(), removingHistories = new Map<string, string>(), removalRetries = new Map<string, { mutationId: string }>();
 const removedConversations = new Map<string, Set<string>>(), removedTasks = new Map<string, Set<string>>();
 let historyMenu: { groupId: string; conversationId: string; trigger: HTMLButtonElement; row: HTMLElement } | null = null;
-let pendingSidebarTask: { groupId: string; taskId?: string | undefined } | null = null;
+let pendingSidebarTask: { groupId: string; taskId?: string | undefined; newConversation?: boolean } | null = null;
 const materials = createGroupMaterials({ api, current: () => data, refresh: load, changed: controls });
 const memberCapabilities = createGroupCapabilities(byId("group-members"));
 const navigate = (detail: Partial<UiRoute>) => document.dispatchEvent(new CustomEvent("neuma:navigate", { detail }));
@@ -66,7 +66,8 @@ function syncAvatars(members: DisplayAgent[]) {
 function controls() {
   const unavailable = loading || !data?.group || data!.group.archived || removingHistories.has(route.groupId!);
   byId("group-send").disabled = Boolean(unavailable || sending || materials.busy());
-  byId("group-new-task").disabled = Boolean(unavailable || sending);
+  for (const [id, entry] of sidebarGroups) entry.newChat.disabled = Boolean(sending || removingHistories.has(id)
+    || (route.page === "group" && route.groupId === id && loading));
   byId("group-message").disabled = Boolean(unavailable || sending);
   byId("group-panel-toggle").disabled = route.page !== "group" || data?.group?.id !== route.groupId;
   materials.syncControls();
@@ -261,7 +262,7 @@ async function removeConversation(groupId: string, conversationId: string) {
     else if (restoreFocus) sidebarGroups.get(groupId)?.link.focus({ preventScroll: true });
   } else if (restoreFocus) {
     const entry = sidebarGroups.get(groupId), row = ([...(entry?.list.children || [])] as HTMLElement[]).find((item) => item.dataset.conversationId === conversationId);
-    (entry?.expanded ? row?.querySelector<HTMLElement>(".main-history-more") : entry?.toggle)?.focus({ preventScroll: true });
+    (entry?.expanded ? row?.querySelector<HTMLElement>(".main-history-more") : entry?.link)?.focus({ preventScroll: true });
   }
 }
 async function loadTaskHistory(id: string) {
@@ -280,11 +281,15 @@ async function loadTaskHistory(id: string) {
     taskHistories.set(id, { loading: false, error: `${error.message} 收起后展开可重试。` }); renderSidebarGroups();
   }
 }
-function openSidebarGroup(id: string, taskId?: string) {
+function openSidebarGroup(id: string, taskId?: string, newConversation = false) {
+  if (newConversation && (sending || removingHistories.has(id))) return;
   if (route.page === "group" && route.groupId === id && data?.group?.id === id) {
-    pendingSidebarTask = null; if (taskId !== undefined) chooseTask(taskId, { focus: false }); return;
+    pendingSidebarTask = null;
+    if (newConversation) startNewConversation();
+    else if (taskId !== undefined) chooseTask(taskId, { focus: false });
+    return;
   }
-  pendingSidebarTask = { groupId: id, taskId };
+  pendingSidebarTask = { groupId: id, taskId, newConversation };
   navigate({ page: "group", groupId: id });
 }
 function renderCollapsedGroups(visible: Group[]) {
@@ -333,7 +338,7 @@ function renderSidebarGroups() {
           if (!expanded && historyMenu?.groupId === group.id) closeHistoryMenu();
           if (expanded) void loadTaskHistory(group.id);
         },
-        onOpen: () => openSidebarGroup(group.id), storage: localStorage });
+        onOpen: () => openSidebarGroup(group.id), onNew: () => openSidebarGroup(group.id, undefined, true), storage: localStorage });
       entry.root.dataset.groupId = group.id; sidebarGroups.set(group.id, entry);
     }
     renderGroupAvatar(entry.icon as HTMLElement, group, [...avatarMembers.values()]);
@@ -362,6 +367,7 @@ function renderSidebarGroups() {
         });
         row.append(select, more); return row;
       } });
+    entry.newChat.disabled = Boolean(sending || removingHistories.has(group.id) || (current && loading));
     if (entry.root.parentNode !== rail) rail.append(entry.root);
   }
   if (visible.some((group, index) => rail.children[index] !== sidebarGroups.get(group.id)!.root)) {
@@ -434,6 +440,7 @@ function render() {
 }
 async function load(id: string | null = route.groupId, { quiet = false } = {}) {
   if (!id) return;
+  let openNewConversation = false;
   const sequence = ++requestSequence;
   const historySequence = taskHistorySequence(id);
   const history = taskHistories.get(id);
@@ -449,7 +456,8 @@ async function load(id: string | null = route.groupId, { quiet = false } = {}) {
     if (requestSequence !== sequence || route.page !== "group" || route.groupId !== id) return;
     data = result;
     if (pendingSidebarTask?.groupId === id) {
-      if (pendingSidebarTask.taskId !== undefined) {
+      if (pendingSidebarTask.newConversation) openNewConversation = true;
+      else if (pendingSidebarTask.taskId !== undefined) {
         selectedTask = resolveConversation(pendingSidebarTask.taskId); newTask = false;
       }
       pendingSidebarTask = null;
@@ -462,7 +470,7 @@ async function load(id: string | null = route.groupId, { quiet = false } = {}) {
     }
     if (requestSequence === sequence && route.groupId === id) notice(byId("group-error"), `${error.message} 点击右侧刷新重试。`, true);
   }
-  finally { if (sequence === requestSequence) { loading = false; controls(); } }
+  finally { if (sequence === requestSequence) { loading = false; controls(); if (openNewConversation) startNewConversation(); } }
 }
 function chooseTask(id: string, { focus = true } = {}) {
   mentionComposer.close();
@@ -599,11 +607,12 @@ document.addEventListener("keydown", (event) => {
   }
 });
 byId("group-chat-form").addEventListener("submit", (event) => { event.preventDefault(); void send(); });
-byId("group-new-task").addEventListener("click", () => {
+function startNewConversation() {
+  if (loading || sending || !data?.group || data.group.id !== route.groupId || data.group.archived || removingHistories.has(route.groupId!)) return;
   mentionComposer.close();
   if (retry?.id === route.groupId) retry = null;
   newTask = true; selectedTask = ""; render(); byId("group-message").focus();
-});
+}
 byId("group-edit").addEventListener("click", () => void editor(data?.group, byId("group-edit")));
 byId("group-refresh").addEventListener("click", () => void load());
 byId("group-archive").addEventListener("click", () => void archive());
@@ -616,8 +625,7 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault(); closeSettings();
 });
 byId("groups-show-archived").addEventListener("change", renderLibrary);
-for (const id of ["groups-create", "sidebar-create-group"] as const) byId(id).addEventListener("click", () => void editor(null, byId(id)));
-document.addEventListener("neuma:create-group", () => void editor(null, byId("main-create-group")));
+byId("groups-create").addEventListener("click", () => void editor(null, byId("groups-create")));
 document.addEventListener("neuma:groups-changed", () => void list());
 document.addEventListener("neuma:agents-changed", (event) => syncAvatars(event.detail?.items || []));
 document.addEventListener("neuma:agent-profile-changed", (event) => {
