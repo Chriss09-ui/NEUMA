@@ -900,12 +900,12 @@ test("模型与 provider 错误不泄露原始敏感载荷", async (t) => {
   }
 });
 
-test("当前MiMo架构按角色分配思考输出预算，不自动用满模型上限", async (t) => {
+test("当前MiMo架构设计与评审均请求模型最高输出额度", async (t) => {
   const { designer, sessions } = await fixture(t);
   designer.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     model: "mimo-v2.6-pro", apiKey: "fixture-only" };
   assert.equal((await designer.design(definition())).status, "passed");
-  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [65536, 16384]);
+  assert.deepEqual(sessions.map((item) => item.options.maxOutputTokens), [131072, 131072]);
 });
 
 test("架构失败保留安全的模型原因、失败阶段和重试数", async (t) => {

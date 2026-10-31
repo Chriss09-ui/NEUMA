@@ -23,7 +23,7 @@ cp .env.example .env
 
 排查 Agent 构建时，可显式调用 `POST /api/settings/test-agent-model`，请求 `{}` 沿用已保存模型。这个独立探针通过真实 Pi 会话验证流式工具调用和工具返回后的后续回复，仅使用一个无副作用工具，不读写 Agent 文件；最多等待 30 秒、使用 512 tokens 测试预算，不修改正式输出设置。返回能力检查和安全错误类别，不返回模型原始正文或凭据。
 
-当前内置配置为小米官方接口上的 `mimo-v2.6-pro` / `mimo-v2.6-flash` 记录了 1,048,576 tokens 上下文与 131,072 tokens 最大输出能力。每次调用仍按具体角色设置较小的输出预算，并受模型上限和实际上下文余量约束；需求整理、架构设计、研发和评审的额度并不相同。预算规则见 [架构说明](../ARCHITECTURE.md)，实现统一在 [model-limits.mts](../src/runtime/model-limits.mts)；未知模型使用保守配置。模型规格参考 [小米官方说明](https://mimo.mi.com/models/zh-CN/mimo-v2.6-pro)。
+当前内置配置为小米官方接口上的 `mimo-v2.6-pro` / `mimo-v2.6-flash` 记录了 1,048,576 tokens 上下文与 131,072 tokens 最大输出能力。架构设计、模块顾问和架构评审按已核实的模型能力请求最高单次输出额度，模型可以提前结束，思考开关继续按节点职责选择；需求整理与研发等其他领域按各自角色设置预算。所有请求仍受模型上限和实际上下文余量约束。预算规则见 [架构说明](../ARCHITECTURE.md)，实现统一在 [model-limits.mts](../src/runtime/model-limits.mts)；未知模型使用保守配置。模型规格参考 [小米官方说明](https://mimo.mi.com/models/zh-CN/mimo-v2.6-pro)。
 
 需求澄清、正式 Agent 与项目助手默认在连续 90 秒没有收到模型响应数据时停止等待，可通过兼容配置项 `NEUMA_LLM_TIMEOUT_MS` 调整（10,000～300,000 毫秒）。每次收到数据都会重新计时，持续返回数据的请求可以累计运行超过 90 秒。无响应停止会保留实际进度，不自动当作成功或盲目重发。
 
