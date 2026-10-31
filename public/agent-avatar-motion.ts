@@ -14,36 +14,51 @@ interface MotionEvents {
 export interface MotionDocument<Root> extends MotionEvents,MotionScope {hidden:boolean;documentElement:Root;querySelector(selector:string):MotionScope|null}
 export interface MotionMutation {attributeName:string|null;target:unknown}
 export interface MotionWindow<Root> {matchMedia(query:string):{matches:boolean;addEventListener(type:string,listener:()=>void):unknown;removeEventListener(type:string,listener:()=>void):unknown};requestAnimationFrame(callback:(time:number)=>void):number;cancelAnimationFrame(id:number):unknown;addEventListener(type:string,listener:()=>void):unknown;removeEventListener(type:string,listener:()=>void):unknown;MutationObserver?:new(callback:(records:MotionMutation[])=>void)=>{observe(target:Root,options:MutationObserverInit):unknown;disconnect():unknown}}
-type AvatarPose = { x: number; y: number; rx: number; ry: number; rz: number; scale: number; cx: number; cy: number };
-interface AvatarMotionState { element:MotionAvatar;world:MotionStyled;core:MotionStyled; pose: AvatarPose; target: AvatarPose }
+type AvatarPose = { x: number; y: number; rx: number; ry: number; rz: number; scale: number; cx: number; cy: number; cr: number; sx: number; sy: number; sxy: number };
+interface AvatarMotionState { element:MotionAvatar;world:MotionStyled;core:MotionStyled;shell:MotionStyled; pose: AvatarPose; target: AvatarPose; velocity: AvatarPose }
 const installed = new WeakMap<object,()=>void>();
-const fields = ["x", "y", "rx", "ry", "rz", "scale", "cx", "cy"] as const;
+const fields = ["x", "y", "rx", "ry", "rz", "scale", "cx", "cy", "cr", "sx", "sy", "sxy"] as const;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const isBusy = (element:Pick<MotionAvatar,"dataset">) => ["thinking", "working", "queued"].includes(element.dataset.activity ?? "");
-export const restingAvatarPose = () => ({ x: 0, y: 0, rx: 0, ry: 0, rz: 0, scale: 1, cx: 0, cy: 0 });
+export const restingAvatarPose = (): AvatarPose => ({ x: 0, y: 0, rx: 0, ry: 0, rz: 0, scale: 1, cx: 0, cy: 0, cr: 0, sx: 1, sy: 1, sxy: 0 });
+const restingAvatarVelocity = (): AvatarPose => ({ ...restingAvatarPose(), scale: 0, sx: 0, sy: 0 });
 
 export function avatarPointerPose({ dx, dy, size, shape }: { dx: number; dy: number; size: number; shape?: string | undefined }) {
   if (![dx, dy, size].every(Number.isFinite) || size <= 0) return restingAvatarPose();
   const large = size >= 80, radius = large ? 170 : 72;
   const proximity = Math.pow(clamp(1 - Math.max(0, Math.hypot(dx, dy) - size * .42) / radius, 0, 1), 1.4);
   if (!proximity) return restingAvatarPose();
-  const nx = clamp(dx / (size * .75), -1, 1) * proximity;
-  const ny = clamp(dy / (size * .75), -1, 1) * proximity;
-  const tilt = large ? 9 : 4.5;
-  const coreTravel = ["shield", "diamond"].includes(shape ?? "") ? .018 : .02;
-  return { x: nx * size * .015, y: ny * size * .015, rx: -ny * tilt, ry: nx * tilt,
-    rz: nx * tilt * .3, scale: 1 + (large ? .035 : .025) * proximity,
-    cx: nx * size * coreTravel, cy: ny * size * coreTravel };
+  const distance = Math.hypot(dx, dy), pull = Math.min(distance / (size * .7), 1) * proximity;
+  const ux = distance ? dx / distance : 0, uy = distance ? dy / distance : 0;
+  const nx = ux * pull, ny = uy * pull, tilt = large ? 14 : 10;
+  const coreTravel = ["shield", "diamond"].includes(shape ?? "") ? .045 : .055;
+  const stretch = (large ? .16 : .12) * pull, squeeze = .065 * pull;
+  return { x: nx * size * .025, y: ny * size * .025, rx: -ny * tilt, ry: nx * tilt,
+    rz: nx * 7, scale: 1 + .018 * proximity,
+    cx: nx * size * coreTravel, cy: ny * size * coreTravel, cr: nx * 62 + ny * 28,
+    // Stretch along the pointer direction and compress across it, including diagonals.
+    sx: 1 + stretch * ux * ux - squeeze * uy * uy,
+    sy: 1 + stretch * uy * uy - squeeze * ux * ux, sxy: (stretch + squeeze) * ux * uy };
 }
 
-export function advanceAvatarPose(current: AvatarPose, target: AvatarPose, elapsed: number) {
-  const amount = 1 - Math.exp(-clamp(Number.isFinite(elapsed) ? elapsed : 16, 0, 40) / 105);
-  const pose = {} as AvatarPose, moving = fields.some((key) => Math.abs(target[key] - current[key]) > (key === "scale" ? .0001 : .005));
+export function advanceAvatarPose(current: AvatarPose, target: AvatarPose, elapsed: number, velocity = restingAvatarVelocity()) {
+  const seconds = clamp(Number.isFinite(elapsed) ? elapsed : 16, 0, 40) / 1000;
+  const frequency = 20, damping = .72, decay = Math.exp(-damping * frequency * seconds);
+  const oscillation = frequency * Math.sqrt(1 - damping * damping);
+  const cosine = Math.cos(oscillation * seconds), sine = Math.sin(oscillation * seconds);
+  const pose = {} as AvatarPose, nextVelocity = {} as AvatarPose;
+  let moving = false;
   for (const key of fields) {
-    const delta = target[key] - current[key];
-    pose[key] = Math.abs(delta) > (key === "scale" ? .0001 : .005) ? current[key] + delta * amount : target[key];
+    const offset = current[key] - target[key], speed = velocity[key];
+    const nextOffset = decay * (offset * cosine + (speed + damping * frequency * offset) / oscillation * sine);
+    const nextSpeed = decay * (speed * cosine - (damping * frequency * speed + frequency * frequency * offset) / oscillation * sine);
+    const epsilon = ["scale", "sx", "sy", "sxy"].includes(key) ? .0001 : .005;
+    const settled = Math.abs(nextOffset) <= epsilon && Math.abs(nextSpeed) <= epsilon * frequency;
+    pose[key] = settled ? target[key] : target[key] + nextOffset;
+    nextVelocity[key] = settled ? 0 : nextSpeed;
+    moving ||= !settled;
   }
-  return { pose, moving };
+  return { pose, velocity: nextVelocity, moving };
 }
 
 export function installAvatarMotion<Root>(documentRef:MotionDocument<Root>,windowRef:MotionWindow<Root>) {
@@ -56,7 +71,8 @@ export function installAvatarMotion<Root>(documentRef:MotionDocument<Root>,windo
   function paint(state: AvatarMotionState) {
     const p = state.pose;
     state.world.style.transform = `translate3d(${p.x.toFixed(3)}px, ${p.y.toFixed(3)}px, 0) rotateX(${p.rx.toFixed(3)}deg) rotateY(${p.ry.toFixed(3)}deg) rotateZ(${p.rz.toFixed(3)}deg) scale(${p.scale.toFixed(5)})`;
-    state.core.style.transform = `translate3d(${p.cx.toFixed(3)}px, ${p.cy.toFixed(3)}px, 4px)`;
+    state.core.style.transform = `translate3d(${p.cx.toFixed(3)}px, ${p.cy.toFixed(3)}px, 4px) rotate(${p.cr.toFixed(3)}deg)`;
+    state.shell.style.transform = `matrix(${p.sx.toFixed(5)}, ${p.sxy.toFixed(5)}, ${p.sxy.toFixed(5)}, ${p.sy.toFixed(5)}, 0, 0)`;
   }
 
   function updateTargets() {
@@ -73,7 +89,7 @@ export function installAvatarMotion<Root>(documentRef:MotionDocument<Root>,windo
       let state = states.get(element);
       if (!state) {
         state = { element, world: element.querySelector(".star-avatar-world") as MotionStyled, core: element.querySelector(".star-avatar-core") as MotionStyled,
-          pose: restingAvatarPose(), target };
+          shell: element.querySelector(".star-avatar-shell") as MotionStyled, pose: restingAvatarPose(), target, velocity: restingAvatarVelocity() };
         states.set(element, state);
       }
       state.target = target;
@@ -90,8 +106,9 @@ export function installAvatarMotion<Root>(documentRef:MotionDocument<Root>,windo
       if (isBusy(element) || !element.isConnected || !element.getBoundingClientRect().width) {
         state.pose = restingAvatarPose(); paint(state); states.delete(element); continue;
       }
-      const next = reduce.matches ? { pose: restingAvatarPose(), moving: false } : advanceAvatarPose(state.pose, state.target, elapsed);
-      state.pose = next.pose; moving ||= next.moving;
+      const next = reduce.matches ? { pose: restingAvatarPose(), velocity: restingAvatarVelocity(), moving: false }
+        : advanceAvatarPose(state.pose, state.target, elapsed, state.velocity);
+      state.pose = next.pose; state.velocity = next.velocity; moving ||= next.moving;
       paint(state);
       if (!next.moving && state.target.scale === 1) states.delete(element);
     }

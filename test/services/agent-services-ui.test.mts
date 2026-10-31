@@ -4,6 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServiceView } from "../../public/agent-services.js";
 import { createApplicationApi } from "../../public/application-api.js";
+import { validateActionValue } from "../../src/applications/application-contract.mjs";
+import type { ValueSchema } from "../../public/ui-types.js";
 
 function dom() {
   const document: {hidden:boolean;activeElement?:Element;createElement?:(tag:string)=>Element} = { hidden: false };
@@ -56,6 +58,19 @@ test("运行页面展示真实环境，普通功能不会要求先安装Docker",
   await control(ui.container, "启动").click(); assert.deepEqual(ui.calls[1], ["start", "agent", "v1"]); ui.view.hide();
 });
 
+test("无交付版本时给出明确提示，出现版本后可选择并恢复", async () => {
+  const ui = setup(), empty = data(); empty.service = undefined; empty.history = []; empty.deliveryVersion = undefined;
+  ui.snapshot(empty); await ui.view.show("agent");
+  const select = all(ui.container).find((item) => item.tag === "select")!;
+  assert.equal(select.disabled, true); assert.match(text(select), /暂无交付版本/); assert.equal(select.children[0]!.value, "");
+  assert.equal(control(ui.container, "恢复所选版本").disabled, true);
+  assert.equal(control(ui.container, "启动").disabled, true);
+  ui.snapshot(data()); await ui.view.reload();
+  assert.equal(select.disabled, false); assert.match(text(select), /当前 · v1/);
+  assert.equal(control(ui.container, "恢复所选版本").disabled, false);
+  assert.equal(control(ui.container, "启动").disabled, false); ui.view.hide();
+});
+
 test("后台状态更新保留未保存的动作选择和焦点", async () => {
   const ui = setup(); await ui.view.show("agent");
   const checkbox = all(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.focus(); checkbox!.dispatch("change");
@@ -93,6 +108,44 @@ test("等待输入的流程按字段填写并使用当前版本继续，刷新�
   assert.equal(field!.value, "最近一周"); assert.equal(ui.document.activeElement, field);
   await all(ui.container).find((item) => item.tag === "form")!.dispatch("submit");
   assert.equal(calls[0]![0], "agent"); assert.equal(calls[0]![1], "task"); assert.deepEqual(calls[0]![2], { range: "最近一周" }); assert.equal(calls[0]![3], 4); ui.view.hide();
+});
+
+test("数组表单增删后保留数字类型与顺序，刷新保留草稿并通过真实输入校验", async t => {
+  const schema: ValueSchema = { type: "array", items: { type: "number" }, minItems: 1, maxItems: 3 };
+  const inputs: unknown[] = [], ui = setup({ resumeTask: async (_id, _taskId, value) => { validateActionValue(value, schema); inputs.push(value); } });
+  t.after(() => ui.view.hide());
+  const snapshot = data(); snapshot.workflowTasks = [{ id: "task", version: 4, status: "waiting_input", waiting: { inputSchema: schema } }];
+  ui.snapshot(snapshot); await ui.view.show("agent");
+  const form = all(ui.container).find(item => item.tag === "form")!, add = control(form, "添加一项");
+  assert.ok(add, "数组需要能够逐项填写");
+  for (const value of [1.25, 9.5, 2.75]) {
+    await add.click(); all(form).filter(item => item.type === "number").at(-1)!.value = String(value);
+  }
+  assert.equal(add.disabled, true, "不能超过数组的条数上限");
+  const remove = all(form).filter(item => item.tag === "button" && item.textContent === "移除此项")[1]!;
+  await remove.click(); assert.equal(add.disabled, false);
+  const field = all(form).find(item => item.type === "number")!; field.focus(); await ui.view.reload();
+  assert.equal(ui.document.activeElement, field); assert.equal(field.value, "1.25");
+  assert.equal(field.step, "any", "小数输入不能被浏览器默认的整数步长拒绝");
+  await form.dispatch("submit"); assert.deepEqual(inputs, [[1.25, 2.75]]);
+});
+
+test("对象数组逐项填写嵌套字段，布尔、枚举和空值保持原类型", async t => {
+  const schema: ValueSchema = { type: "array", items: { type: "object", properties: {
+    count: { type: "integer" }, enabled: { type: "boolean" }, category: { type: "string", enum: ["a", "b"] }, empty: { type: "null" },
+    tags: { type: "array", items: { type: "string" } },
+  }, required: ["count", "enabled", "category", "empty", "tags"], additionalProperties: false } };
+  const inputs: unknown[] = [], ui = setup({ resumeTask: async (_id, _taskId, value) => { validateActionValue(value, schema); inputs.push(value); } });
+  t.after(() => ui.view.hide());
+  const snapshot = data(); snapshot.workflowTasks = [{ id: "task", version: 4, status: "waiting_input", waiting: { inputSchema: schema } }];
+  ui.snapshot(snapshot); await ui.view.show("agent");
+  const form = all(ui.container).find(item => item.tag === "form")!, add = control(form, "添加一项");
+  assert.ok(add, "对象数组需要能够逐项填写"); await add.click();
+  const field = (title: string) => all(form).find(item => item.tag === "label" && item.textContent === title)!.children[0]!;
+  field("count").value = "2"; field("enabled").checked = true; field("category").value = '"b"';
+  const tags = all(form).find(item => item.tag === "fieldset" && item.children[0]?.textContent === "tags")!;
+  await control(tags, "添加一项").click(); all(tags).find(item => item.tag === "textarea")!.value = "保留文字";
+  await form.dispatch("submit"); assert.deepEqual(inputs, [[{ count: 2, enabled: true, category: "b", empty: null, tags: ["保留文字"] }]]);
 });
 
 test("不确定外部结果的流程必须显式核实，重试发送独立resolution", async () => {

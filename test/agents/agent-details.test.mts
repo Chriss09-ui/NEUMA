@@ -885,14 +885,9 @@ test("胶囊、顶部加号和侧栏产物入口唯一且保留 ARIA 关联与�
   assert.doesNotMatch(html, /id="agent-identity-edit"/);
   const start = element!("agent-conversation")!.index;
   const conversation = html.slice(start, html.indexOf("</section>", start));
-  const newChat = element("agent-new-chat"), error = element("agent-error"), recovery = element("agent-save-actions");
-  assert.equal(newChat![1]!, "button"); assert.equal(attribute(newChat, "type"), "button");
-  assert.ok(attribute(newChat, "aria-label"));
-  const actions = element("agent-chat-actions");
-  assert.ok(header.includes(actions![0]!)); assert.ok(header.includes(newChat![0]!));
+  const error = element("agent-error"), recovery = element("agent-save-actions");
   assert.doesNotMatch(html, /id="agent-history-(?:sidebar|heading|resize)"/);
   for (const control of [error, recovery, element("agent-chat-form")]) assert.ok(conversation.includes(control![0]!));
-  assert.ok(newChat!.index! < element!("agent-messages")!.index);
   assert.equal(conversation.includes(element!("agent-artifacts-open")![0]), false);
   assert.match(element!("agent-conversation-title")![0], /\bhidden\b/);
   assert.equal(attribute(error, "role"), "alert"); assert.equal(attribute(recovery, "role"), "group");

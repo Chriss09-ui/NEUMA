@@ -180,11 +180,18 @@ export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntim
   }
 
   const pendingOperations = new Map<string, { input: string; mutationId: string }>();
+  function releaseSettledOperation(reference: OperationReference, snapshot: BuildObservation | null) {
+    if (snapshot?.running !== false) return;
+    const key = `${reference.domain}:${reference.ownerId}`;
+    // A confirmed terminal receipt permits a new request; a lost response does not.
+    if (pendingOperations.get(key)?.mutationId === reference.operationId) pendingOperations.delete(key);
+  }
   const operationPath = (reference: OperationReference) => `/api/agents/${encodeURIComponent(reference.ownerId)}/operations/${encodeURIComponent(reference.operationId)}`;
   async function watchOperation(reference: OperationReference, { signal, onProgress = () => {} }: StreamOptions = {}) {
     const completed = await observeOperation(cursor => json<OperationView<BuildObservation>>(`${operationPath(reference)}${cursor ? `?after=${encodeURIComponent(cursor)}` : ""}`, undefined, { signal }), reference, {
       signal, disconnected: () => onProgress({ type: "status", label: "连接中断，正在重新连接；后台任务继续执行。" }),
       update(snapshot) {
+        releaseSettledOperation(reference, snapshot);
         onProgress({ type: "status", ...(snapshot.result.architecture ? { architecture: snapshot.result.architecture } : {}), ...(snapshot.result.development ? { development: snapshot.result.development } : {}), phase: snapshot.phase, label: snapshot.label || "正在处理，进度已保存…" });
         return !snapshot.running;
       },
@@ -197,8 +204,9 @@ export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntim
     const key = `${kind}:${id}`, input = JSON.stringify(body), prior = pendingOperations.get(key);
     const receipt = prior?.input === input ? prior : { input, mutationId: crypto.randomUUID() }; pendingOperations.set(key, receipt);
     const accepted = await json<OperationView<BuildObservation>>(`/api/agents/${encodeURIComponent(id)}/operations`, { ...body as object, kind, mutationId: receipt.mutationId }, { signal: options.signal });
+    releaseSettledOperation(accepted.operation, accepted.snapshot);
     options.onProgress?.({ type: "operation", operation: accepted.operation });
-    const result = await watchOperation(accepted.operation, options); pendingOperations.delete(key); return result;
+    return watchOperation(accepted.operation, options);
   }
   async function stream(path: string, body: unknown, { signal, onProgress = () => {} }: StreamOptions = {}, options: ReplyOptions) {
     const response = await request(path, {
@@ -279,6 +287,7 @@ export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntim
     watchOperation,
     cancelOperation: async reference => {
       const result = await json<OperationView<BuildObservation>>(`${operationPath(reference)}/cancel`, { generation: reference.generation });
+      releaseSettledOperation(reference, result.snapshot);
       return result.snapshot!.result;
     },
     startBuild: (agent, { architectureRepair, ...options } = {}) => background("build", agent.id, { name: agent.name, draft: agent.draft,

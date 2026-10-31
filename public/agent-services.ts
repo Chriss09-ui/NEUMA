@@ -26,44 +26,67 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
       for (const [key, definition] of Object.entries(schema.properties || {})) fields.set(key, input(group, (definition as ValueSchema & { title?: string }).title || definition.description || key, definition));
       return () => Object.fromEntries([...fields].map(([key, read]) => [key, read()]));
     }
+    if (schema.type === "array") {
+      const group = node("fieldset", "service-input-group"), list = node("div");
+      const entries: { root: E; heading: E; remove: E; read: () => unknown }[] = [], limit = schema.maxItems ?? 10000;
+      const sync = () => {
+        entries.forEach((entry, index) => { entry.heading.textContent = `第 ${index + 1} 项`; entry.remove.setAttribute("aria-label", `移除${title}的第 ${index + 1} 项`); });
+        add.disabled = entries.length >= limit;
+      };
+      const add = button("添加一项", () => {
+        if (entries.length >= limit) return;
+        const root = node("fieldset", "service-input-group"), heading = node("legend"); root.append(heading); root.setAttribute("tabindex", "-1");
+        const read = input(root, "内容", schema.items || {});
+        const remove = button("移除此项", () => {
+          const index = entries.indexOf(entry); if (index < 0) return;
+          entries.splice(index, 1); root.remove(); sync();
+          (entries[index]?.root || entries.at(-1)?.root || add).focus?.();
+        }, "ghost-button");
+        const entry = { root, heading, remove, read }; entries.push(entry); root.append(remove); list.append(root); sync(); root.focus?.();
+      });
+      add.setAttribute("aria-label", `为${title}添加一项`);
+      group.append(node("legend", "", title), list, add); parent.append(group); sync();
+      return () => entries.map(entry => entry.read());
+    }
+    if (schema.type === "null") { parent.append(node("p", "muted-note small", `${title}：空值`)); return () => null; }
     const label = node("label", "connection-field", title);
     const field = node(schema.enum ? "select" : schema.type === "string" ? "textarea" : "input");
     if (schema.enum) for (const option of schema.enum) { const item = node("option", "", String(option)); item.value = JSON.stringify(option); field.append(item); }
     else (field as E).type = schema.type === "boolean" ? "checkbox" : ["integer", "number"].includes(schema.type!) ? "number" : "text";
-    if (field.type === "number" && schema.type === "integer") (field as E).step = "1";
-    if (schema.type === "array") (field as E).placeholder = "每行一项";
+    if (field.type === "number") (field as E).step = schema.type === "integer" ? "1" : "any";
     label.append(field); parent.append(label);
     return () => schema.enum ? JSON.parse(field.value!) : schema.type === "boolean" ? (field as E).checked
-      : ["integer", "number"].includes(schema.type!) ? Number(field.value)
-        : schema.type === "array" ? field.value!.split(/\r?\n/).filter(Boolean) : field.value;
+      : ["integer", "number"].includes(schema.type!) ? Number(field.value) : field.value;
   }
   function state(id: string): ServiceItem<E> {
     if (states.has(id)) return states.get(id)!;
     const item: ServiceItem<E> = { id, root: node("div", "service-settings"), operations: new Map(), tasks: new Map(), busy: false, loading: false, generation: 0, selectionDirty: false };
-    item.feedback! = node("p", "muted-note", "正在读取运行状态…"); item.feedback!.setAttribute("role", "status"); item.feedback!.setAttribute("aria-live", "polite");
-    item.root.append(node("p", "muted-note small", "功能在这台电脑运行，随 NEUMA 启停。关闭网页后仍可继续，退出 NEUMA 或关机后停止。"), item.feedback!,
+    item.feedback! = node("p", "service-feedback muted-note", "正在读取运行状态…"); item.feedback!.setAttribute("role", "status"); item.feedback!.setAttribute("aria-live", "polite");
+    const intro = node("div", "service-intro");
+    intro.append(node("p", "muted-note small", "功能在这台电脑运行，随 NEUMA 启停。关闭网页后仍可继续，退出 NEUMA 或关机后停止。"),
       button("刷新状态", () => load(item), "ghost-button"));
+    item.root.append(intro, item.feedback!);
     const environments = section(item.root, "运行环境"); item.environments! = new Map();
     for (const [key, title] of [["javascript", "JavaScript"], ["python", "Python"], ["docker", "Docker（可选）"]] as const) {
-      const row = node("div", "service-environment"), status = node("span", "muted-note small");
+      const row = node("div", "service-environment"), status = node("span", "service-environment-status");
       const prepare = button(key === "docker" ? "检查 Docker" : "准备环境", () => operate(item, () => api.prepareService(id, key === "docker" ? item.data?.service?.language || "javascript" : key, key === "docker" ? "docker" : "managed")));
       row.append(node("strong", "", title), status, prepare); environments.append(row); item.environments!.set(key, { status, prepare });
     }
-    environments.append(node("p", "muted-note small", "只准备当前功能需要的环境。Docker 需在本机安装并启动后使用。"));
-    const service = section(item.root, "当前功能"); item.serviceStatus! = node("p", "muted-note"); service.append(item.serviceStatus!);
+    environments.append(node("p", "service-hint muted-note small", "只准备当前功能需要的环境。Docker 需在本机安装并启动后使用。"));
+    const service = section(item.root, "当前功能"); item.serviceStatus! = node("p", "service-status muted-note"); service.append(item.serviceStatus!);
     item.runButtons! = [
       button("启动", () => operate(item, () => api.startService(id, item.data!.deliveryVersion))),
       button("停止", () => operate(item, () => api.stopService(id, item.data!.deliveryVersion))),
       button("重新启动", () => operate(item, () => api.restartService(id, item.data!.deliveryVersion))),
     ];
     const controls = node("div", "connection-actions"); controls.append(...item.runButtons!); service.append(controls);
-    const history = node("label", "connection-field", "交付版本"); item.history! = node("select"); history.append(item.history!); service.append(history);
-    item.rollback! = button("恢复所选版本", () => operate(item, () => api.rollbackService(id, item.history!.value!))); service.append(item.rollback!);
+    const versionRow = node("div", "service-version-row"), history = node("label", "connection-field", "交付版本"); item.history! = node("select"); history.append(item.history!);
+    item.rollback! = button("恢复所选版本", () => operate(item, () => api.rollbackService(id, item.history!.value!))); versionRow.append(history, item.rollback!); service.append(versionRow);
     const logs = node("details", "panel-disclosure"); logs.append(node("summary", "", "运行记录")); item.log! = node("pre", "service-log");
     logs.append(button("读取记录", () => operate(item, async () => { const result = await api.serviceLogs(id, item.data!.deliveryVersion); item.log!.textContent = result.text || "暂无运行记录。"; }, false), "ghost-button"), item.log!); service.append(logs);
     const gateway = section(item.root, "给本机其他工具使用");
     gateway.append(node("p", "muted-note small", "选择允许调用的功能后再开启接口。调用方需要下方地址和访问令牌。"));
-    item.gatewayStatus! = node("p", "muted-note"); item.actionList! = node("fieldset", "service-action-list"); item.actionList!.append(node("legend", "sr-only", "允许调用的功能"));
+    item.gatewayStatus! = node("p", "service-status muted-note"); item.actionList! = node("fieldset", "service-action-list"); item.actionList!.append(node("legend", "sr-only", "允许调用的功能"));
     item.gatewaySave! = button("开启或更新接口", () => operate(item, async () => {
       const actionIds = [...item.operations].filter(([, field]) => (field as E).checked).map(([actionId]) => actionId);
       if (!actionIds.length) throw new Error("请先选择至少一项允许调用的功能。");
@@ -87,6 +110,7 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
       const available = key === "docker" ? environment.docker : environment.managed?.[key as "javascript" | "python"];
       controls.status.textContent = key !== "docker" && environment.managed?.available === false ? "当前平台尚未支持"
         : available?.available ? `可用${available.version ? ` · ${available.version}` : ""}` : "尚未准备";
+      controls.status.setAttribute("data-ready", available?.available ? "true" : "false");
       controls.prepare.disabled = item.busy || key !== "docker" && Boolean(available?.available) || key !== "docker" && environment.managed?.available === false;
     }
     item.serviceStatus!.textContent = service ? `${service.language === "python" ? "Python" : "JavaScript"} · ${service.host === "docker" ? "Docker" : "NEUMA 托管"} · ${statuses[(workers[0]?.status || service.status)!] || "已交付，尚未启动"}` : "这个智能体尚无需要独立运行的功能。";
@@ -94,10 +118,11 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
     const historyKey = JSON.stringify(history.map((entry) => [entry.deliveryVersion, entry.active]));
     if (historyKey !== item.historyKey) {
       const selected = item.history!.value; item.history!.replaceChildren();
+      if (!history.length) { const option = node("option", "", "暂无交付版本"); option.value = ""; item.history!.append(option); }
       for (const entry of history) { const option = node("option", "", `${entry.active ? "当前 · " : ""}${entry.deliveryVersion}`); option.value = entry.deliveryVersion; item.history!.append(option); }
       item.history!.value = history.some((entry) => entry.deliveryVersion === selected) ? selected : item.data!.deliveryVersion || ""; item.historyKey = historyKey;
     }
-    item.rollback!.disabled = item.busy || !history.length;
+    item.history!.disabled = item.busy || !history.length; item.rollback!.disabled = item.busy || !history.length;
     const outdatedGateway = gateway.enabled && gateway.deliveryVersion && gateway.deliveryVersion !== item.data!.deliveryVersion;
     item.gatewayStatus!.textContent = outdatedGateway ? "接口仍绑定旧版本，请选择当前功能后更新接口。"
       : gateway.status === "failed" ? gateway.message || "接口启动失败，请检查运行环境后重试。"
@@ -129,7 +154,7 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
             resolution = { ...(row!.task!.waiting.attemptId ? { attemptId: row!.task!.waiting.attemptId } : {}), stepId: row!.task!.waiting.stepId, index: row!.task!.waiting.index, outcome,
               ...(outcome === "completed" ? { output: row!.read?.() } : { explicitlyApproved: true }) };
           }
-          return api.resumeTask(item.id, row!.task!.id, resolution ? undefined : row!.read?.() ?? {}, row!.task!.version, `resume_${globalThis.crypto.randomUUID()}`, resolution);
+          return api.resumeTask(item.id, row!.task!.id, resolution ? undefined : row!.read ? row!.read() : {}, row!.task!.version, `resume_${globalThis.crypto.randomUUID()}`, resolution);
         }); });
       }
       row.task = task; row.form.hidden = false; row.note.textContent = task.waiting?.prompt || statuses[task.status]!; row.submit.disabled = item.busy;

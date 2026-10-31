@@ -148,7 +148,7 @@ test("已有历史与未发送新会话各自恢复草稿，Agent快速切换隔
   const stored = new Map(), records = new Map(), ui = await setup({ stored, records });
   await ui.submit("已有历史"); const previous = ui.item().id;
   ui.get("agent-message").value = "历史里的下一条"; await ui.get("agent-message").dispatchEvent({ type: "input" });
-  await ui.get("agent-new-chat").click(); const blank = ui.item().id;
+  await ui.sidebar().newChat.click(); const blank = ui.item().id;
   ui.get("agent-message").value = "新会话还没发送"; await ui.get("agent-message").dispatchEvent({ type: "input" });
   await ui.route("two"); ui.get("agent-message").value = "另一个Agent的草稿"; await ui.get("agent-message").dispatchEvent({ type: "input" });
   await Promise.all([ui.route("one"), ui.route("two")]);
@@ -198,7 +198,7 @@ test("上传忙碌阻止发送，新对话和切换Agent不接收旧上传的迟
   ui.get("agent-attachment-input").files = [new File(["fixture"], "原对话.pdf")];
   const uploading = ui.get("agent-attachment-input").dispatchEvent({ type: "change" });
   await settle(); assert.equal(ui.get("agent-send").disabled, true);
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   assert.equal(ui.get("agent-attachment-list").hidden, true);
   await ui.route("two");
   release!(Response.json({ attachment: { id: "material-late", name: "原对话.pdf", size: 7, mimeType: "application/pdf", kind: "pdf", status: "uploaded" } }));
@@ -477,7 +477,7 @@ declare type: string; constructor(type: string, fields = {}) { this.type = type;
   await emit("neuma:agents-changed", { items: initialItems, busy: false });
   const route = (id: string | null) => emit("neuma:route", id ? { page: "agent", agentId: id } : { page: "chat", agentId: null });
   await route(initialAgentId);
-  type SidebarFixture = {root:Element; link:Element; icon:Element;toggle:Element;body:Element;list:Element;status:Element;more:Element;expanded:boolean};
+  type SidebarFixture = {root:Element; link:Element; icon:Element;newChat:Element;body:Element;list:Element;status:Element;more:Element;expanded:boolean};
   return { get, requests, savedConversations, records, stored, emit, route, document, runtimeEvents, profileEvents, confirmations,
     timers, poll: async () => { const pending = [...timers.values()]; timers.clear(); await Promise.all(pending.map((callback) => callback())); await settle(); },
     item: (id = "one") => vm.runInContext(`conversations.get(${JSON.stringify(id)})`, context) as HistoryItem,
@@ -1263,7 +1263,7 @@ test("新对话生成独立会话并停止旧任务，旧任务迟到的失败�
   const oldConversation = ui.item(), oldSession = oldConversation.sessionId;
   partial.send({ type: "text-delta", delta: "已完成的部分" }); await settle();
   ui.get("agent-message").value = "旧对话下一项草稿";
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   assert.notEqual(ui.item().id, oldConversation.id);
   assert.notEqual(ui.item().sessionId, oldSession);
   assert.equal(ui.item().messages.length, 0);
@@ -1354,7 +1354,7 @@ test("切换历史和刷新按当前会话createdAt显示日期，重复渲染�
   assertDate(ui, "2026-10-10T08:00:00.000Z", "第一场会议");
   const restored = await setup({ stored: ui.stored, records });
   assertDate(restored, "2026-10-10T08:00:00.000Z", "第一场会议");
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   assert.equal(container.querySelector(".conversation-date"), null);
 });
 
@@ -1387,7 +1387,7 @@ test("自动保存到独立记录，清除浏览器后可恢复，新建空白�
   assert.equal(restored.item().messages[1]!.status, "complete");
   assert.equal(restored.item().saved, true);
   assert.equal(restored.get("agent-chat-save-status").hidden, true);
-  await restored.get("agent-new-chat").click();
+  await restored.sidebar().newChat.click();
   assert.equal(restored.item().messages.length, 0);
   assert.equal(restored.get("agent-chat-save-status").hidden, true);
   assert.equal(restored.records.size, 1);
@@ -1397,7 +1397,7 @@ test("自动保存到独立记录，清除浏览器后可恢复，新建空白�
 test("左栏逐条显示当前智能体历史，切换继续聊天并刷新恢复选中项", async () => {
   const ui = await setup();
   await ui.submit("第一条对话"); const first = ui.item().id;
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   assert.equal(String(ui.sidebar().list.children.length), "1");
   await ui.submit("第二条对话"); const second = ui.item().id;
   assert.notEqual(first, second);
@@ -1453,10 +1453,8 @@ test("主导航按Agent懒加载历史，跨Agent选择保留各自输入草稿"
     ["two/two-second", record("two", "two-second")]]) });
   assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/two/conversations").length, 0);
   const other = ui.sidebar("two");
-  assert.equal(treeNodes(ui.sidebar("one").root).some((node) => node.matches(".sidebar-history-new")), false);
-  assert.equal(treeNodes(other.root).some((node) => node.matches(".sidebar-history-new")), false);
-  assert.equal(ui.get("agent-new-chat").hidden, false);
-  await other.toggle.click();
+  assert.equal(ui.sidebar().newChat.hidden, false);
+  await other.link.click(); await settle();
   assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/two/conversations").length, 1);
   assert.equal(other.list.children.length, 2);
   assert.equal(ui.get("agent-title").textContent, "会议助手");
@@ -1469,13 +1467,12 @@ test("主导航按Agent懒加载历史，跨Agent选择保留各自输入草稿"
   await ui.route("two"); assert.equal(ui.get("agent-message").value, "日报草稿");
 });
 
-test("整个Agent标题区域反复点击开合，头像与空白有效，箭头不会冒泡切换两次", async () => {
+test("整个Agent标题区域反复点击开合，头像与空白有效且空格不因长按重复", async () => {
   const ui = await setup(); await ui.submit("已经保存的对话");
   const view = ui.sidebar("one"), header = view.root.children[0], active = ui.item();
   ui.get("agent-message").value = "未发送草稿";
   const reads = ui.requests.filter((entry) => entry.path === "/api/agents/one/conversations").length;
-  for (const [target, open] of [[view.link.children[1], false], [view.icon, true], [header, false], [view.link, true],
-    [view.toggle, false], [view.toggle.children[0]!.children[0], true]] as const) {
+  for (const [target, open] of [[view.link.children[1], false], [view.icon, true], [header, false], [view.link, true]] as const) {
     await target!.click(); await settle();
     assert.equal(view.expanded, open);
     assert.equal(view.link.getAttribute("aria-expanded"), String(open));
@@ -1494,6 +1491,23 @@ test("整个Agent标题区域反复点击开合，头像与空白有效，箭头
   assert.equal(ui.requests.filter((entry) => entry.path === "/api/agents/one/conversations").length, reads);
 });
 
+test("侧栏新对话图标进入对应Agent的空白会话，保留其他Agent草稿且不折叠历史", async () => {
+  const ui = await setup(); await ui.submit("会议助手的已保存工作");
+  const first = ui.item(); ui.get("agent-message").value = "会议助手的草稿";
+  const other = ui.sidebar("two");
+  await other.newChat.children[0]!.children[0]!.click(); await settle();
+  const blank = ui.item("two");
+  assert.equal(ui.get("agent-title").textContent, "日报助手");
+  assert.equal(blank.messages.length, 0); assert.equal(ui.get("agent-message").value, "");
+  assert.equal(ui.document.activeElement, ui.get("agent-message"));
+  assert.equal(other.expanded, true);
+  await other.newChat.click(); await settle();
+  assert.notEqual(ui.item("two").id, blank.id); assert.equal(other.expanded, true);
+  assert.equal(other.newChat.getAttribute("aria-expanded"), null);
+  await ui.route("one");
+  assert.equal(ui.item(), first); assert.equal(ui.get("agent-message").value, "会议助手的草稿");
+});
+
 test("刷新恢复未选中Agent的展开历史，删除到4条时更多按钮归还焦点", async () => {
   const stored = new Map([["neuma.sidebar.history-open.v1.sidebar-agent-history-two", "true"]]);
   const records = new Map(Array.from({ length: 5 }, (_, index) => {
@@ -1507,7 +1521,7 @@ test("刷新恢复未选中Agent的展开历史，删除到4条时更多按钮�
   assert.equal(other.more.hidden, false); other.more.focus();
   await ui.remove("saved-0", "two");
   assert.equal(other.more.hidden, true);
-  assert.equal(ui.document.activeElement, other.toggle);
+  assert.equal(ui.document.activeElement, other.link);
   assert.equal(ui.get("agent-title").textContent, "会议助手");
 });
 
@@ -1528,7 +1542,7 @@ test("首次历史读取迟到时，跨Agent切换仍保留临时空对话的输
 
 test("历史操作菜单按记录切换且互斥，Esc返回触发按钮，外部点击关闭", async () => {
   const ui = await setup(); await ui.submit("第一条对话"); const first = ui.item().id;
-  await ui.get("agent-new-chat").click(); await ui.submit("第二条对话"); const second = ui.item().id;
+  await ui.sidebar().newChat.click(); await ui.submit("第二条对话"); const second = ui.item().id;
   const firstMore = historyMore(ui, first), secondMore = historyMore(ui, second);
   assert.equal(firstMore!.className, "agent-history-more");
   assert.equal(firstMore!.attributes.get("aria-label"), "对话操作：第一条对话");
@@ -1590,7 +1604,7 @@ test("菜单删除保留明确确认，取消不发请求，确认只删除菜�
   let approve = false;
   const ui = await setup({ confirm: () => approve });
   await ui.submit("保留的对话"); const kept = ui.item().id;
-  await ui.get("agent-new-chat").click(); await ui.submit("删除的对话"); const removed = ui.item().id;
+  await ui.sidebar().newChat.click(); await ui.submit("删除的对话"); const removed = ui.item().id;
   await historyMore(ui, kept)!.click(); await ui.get("agent-history-delete").click();
   assert.match(ui.confirmations[0]!, /保留的对话/);
   assert.equal(ui.requests.some((request) => request.path.endsWith("/remove")), false);
@@ -1610,12 +1624,12 @@ test("删除非当前历史时焦点避开禁用按钮，成功或失败都保�
     const ui = await setup({ historyRequest: (path: string) => path.endsWith("/remove")
       ? new Promise((done) => { release = done; }) : undefined });
     await ui.submit("非当前的历史记录"); const removed = ui.item().id;
-    await ui.get("agent-new-chat").click(); await ui.submit("当前对话"); const current = ui.item().id;
+    await ui.sidebar().newChat.click(); await ui.submit("当前对话"); const current = ui.item().id;
     await historyMore(ui, removed)!.click();
     const deleting = ui.get("agent-history-delete").click(); await settle();
     assert.equal(ui.item().id, current);
     assert.equal(historyMore(ui, removed)!.disabled, true);
-    assert.equal(ui.document.activeElement, ui.sidebar().toggle);
+    assert.equal(ui.document.activeElement, ui.sidebar().link);
     assert.equal(ui.document.activeElement.disabled, false);
     if (success) {
       ui.records.set(`one/${removed}`, { id: removed, agentId: "one", deletedAt: new Date().toISOString() });
@@ -1624,7 +1638,7 @@ test("删除非当前历史时焦点避开禁用按钮，成功或失败都保�
     await deleting;
     assert.equal(ui.item().id, current);
     assert.equal(ui.get("agent-conversation-title").textContent, "当前对话");
-    assert.equal(ui.document.activeElement, ui.sidebar().toggle);
+    assert.equal(ui.document.activeElement, ui.sidebar().link);
     if (success) assert.equal(ui.history().some((item) => item.id === removed), false);
     else {
       assert.equal(ui.history().some((item) => item.id === removed), true);
@@ -1635,7 +1649,7 @@ test("删除非当前历史时焦点避开禁用按钮，成功或失败都保�
 
 test("切换历史或Agent关闭旧菜单，隐藏菜单的迟到删除不会操作原记录", async () => {
   const ui = await setup(); await ui.submit("第一条对话"); const first = ui.item().id;
-  await ui.get("agent-new-chat").click(); await ui.submit("第二条对话"); const second = ui.item().id;
+  await ui.sidebar().newChat.click(); await ui.submit("第二条对话"); const second = ui.item().id;
   await historyMore(ui, first)!.click(); await ui.select(first);
   assert.equal(ui.get("agent-history-menu").hidden, true);
   await ui.get("agent-history-delete").click();
@@ -1649,7 +1663,7 @@ test("切换历史或Agent关闭旧菜单，隐藏菜单的迟到删除不会操
 
 test("删除当前历史打开剩余记录，删除最后一条回到空白，刷新不能恢复已删聊天", async () => {
   const ui = await setup(); await ui.submit("保留的对话"); const first = ui.item().id;
-  await ui.get("agent-new-chat").click(); await ui.submit("删除的对话"); const second = ui.item().id;
+  await ui.sidebar().newChat.click(); await ui.submit("删除的对话"); const second = ui.item().id;
   await ui.remove(second);
   assert.equal(ui.item().id, first);
   assert.equal(String(ui.sidebar().list.children.length), "1");
@@ -1666,7 +1680,7 @@ test("切换历史对话即停止原任务，保存部分回复且忽略迟到�
   const partial = stream(); let turns = 0;
   const ui = await setup({ turn: (body) => ++turns === 1 ? Response.json(completed(body)) : partial.response });
   await ui.submit("已有对话"); const first = ui.item().id;
-  await ui.get("agent-new-chat").click(); const pending = ui.submit("运行中的对话"); await settle();
+  await ui.sidebar().newChat.click(); const pending = ui.submit("运行中的对话"); await settle();
   const second = ui.item().id;
   partial.send({ type: "text-delta", delta: "部分内容" }); await settle();
   await ui.select(first);
@@ -1684,12 +1698,13 @@ test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存",
   assert.equal(ui.sidebar().body.hidden, false);
   assert.equal(ui.sidebar().body.inert, false);
   assert.equal(ui.sidebar().body.attributes.get("aria-hidden"), "false");
-  await ui.sidebar().toggle.click();
+  ui.sidebar().link.focus();
+  await ui.sidebar().link.click();
   assert.equal(ui.sidebar().root.classes.has("history-collapsed"), true);
-  assert.equal(ui.document.activeElement, ui.sidebar().toggle);
+  assert.equal(ui.document.activeElement, ui.sidebar().link);
   const previous = ui.item().id;
   ui.get("agent-message").value = "旧对话草稿";
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   assert.notEqual(ui.item().id, previous);
   assert.equal(ui.get("agent-message").value, "");
   assert.equal(ui.document.activeElement, ui.get("agent-message"));
@@ -1701,7 +1716,7 @@ test("历史栏折叠独立于旧产物偏好，并返还焦点和刷新保存",
   assert.equal(restored.sidebar().body.hidden, false);
   assert.equal(restored.sidebar().body.inert, true);
   assert.equal(restored.sidebar().body.attributes.get("aria-hidden"), "true");
-  assert.equal(restored.sidebar().toggle.attributes.get("aria-expanded"), "false");
+  assert.equal(restored.sidebar().link.attributes.get("aria-expanded"), "false");
 });
 
 test("历史栏从列表内收起返还焦点，反复开合不改变对话和输入草稿", async () => {
@@ -1713,7 +1728,7 @@ test("历史栏从列表内收起返还焦点，反复开合不改变对话和�
   ui.get("agent-message").value = "尚未发送的任务草稿";
   historyRows(ui)[0]!.children[0]!.focus();
   for (let index = 0; index < 4; index++) {
-    await ui.sidebar().toggle.click();
+    await ui.sidebar().link.click();
     assert.equal(ui.sidebar().body.inert, index % 2 === 0);
     assert.equal(ui.sidebar().body.attributes.get("aria-hidden"), String(index % 2 === 0));
     assert.equal(ui.sidebar().body.hidden, false);
@@ -1721,7 +1736,7 @@ test("历史栏从列表内收起返还焦点，反复开合不改变对话和�
     assert.equal(ui.item(), item); assert.equal(item.title, title);
     assert.equal(JSON.stringify(item.messages), messages); assert.equal(JSON.stringify([...ui.records]), records);
     assert.equal(ui.requests.length, requests);
-    if (index % 2 === 0) assert.equal(ui.document.activeElement, ui.sidebar().toggle);
+    if (index % 2 === 0) assert.equal(ui.document.activeElement, ui.sidebar().link);
   }
   assert.equal(ui.stored.get("neuma.sidebar.history-open.v1.sidebar-agent-history-one"), "true");
 });
@@ -1782,7 +1797,7 @@ test("迟到的保存对话读取不能覆盖用户开启的新对话", async ()
   previous.loaded = false;
   const pending = ui.readCurrent(); await settle();
   assert.equal(typeof release, "function");
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   release!(Response.json({ conversation: record })); await pending;
   assert.notEqual(ui.item(), previous);
   assert.equal(ui.item().messages.length, 0);
@@ -1795,7 +1810,7 @@ test("服务器已有旧对话时，失败保存的新对话刷新后仍可恢�
   const savedConversations = new Map([["one", old]]);
   const failSave = (_path: string, body: HarnessBody) => body ? Response.json({ error: "保存连接中断" }, { status: 503 }) : undefined;
   const ui = await setup({ savedConversations, historyRequest: failSave });
-  await ui.get("agent-new-chat").click();
+  await ui.sidebar().newChat.click();
   await ui.submit("新对话 B");
   assert.equal(savedConversations.get("one")!.messages[0]!.content, "旧对话 A");
   assert.equal(ui.item().pendingSync, true);
@@ -1865,7 +1880,6 @@ test("构建只切换指定工作区，按真实阶段展示制作并在就绪�
   assert.equal(ui.get("agent-making-panel").hidden, false);
   assert.ok(ui.sidebar("one").root);
   assert.equal(ui.get("agent-conversation").hidden, true);
-  assert.equal(ui.get("agent-conversation-actions").hidden, true);
   assert.equal(ui.get("agent-title").textContent, requirements[0]!.name);
   assert.match(treeText(ui.get("agent-making-content")), /需求确认.*架构设计.*独立评估.*按需研发.*运行交付/s);
   partial.send({ type: "status", phase: "researching", label: "正在核实技术资料…" }); await new Promise(resolve => setTimeout(resolve, 800));
@@ -1881,7 +1895,6 @@ test("构建只切换指定工作区，按真实阶段展示制作并在就绪�
   assert.equal(ui.get("agent-making-panel").hidden, true);
   assert.ok(ui.sidebar("one").root);
   assert.equal(ui.get("agent-conversation").hidden, false);
-  assert.equal(ui.get("agent-conversation-actions").hidden, false);
   assert.equal(ui.get("agent-message").value, "保留下一项任务草稿");
   assert.equal(ui.get("agent-send").disabled, false);
 });
@@ -2103,7 +2116,6 @@ test("已验收但缺连接的应用保留工作区与设置产物入口，不�
   }) });
   assert.equal(ui.runtime().status, "needs_connection");
   assert.equal(ui.get("agent-making-panel").hidden, true);
-  assert.equal(ui.get("agent-conversation-actions").hidden, false);
   assert.equal(ui.runtimeEvents.at(-1)!.application!.pageReady, true);
   const updated = requirements.map((item) => item.id === "one" ? { ...item, draft: { goal: { value: "新应用需求", source: "user" } } } : item);
   await ui.emit("neuma:agents-changed", { items: updated, busy: false });
