@@ -32,6 +32,7 @@ interface PipelineOptions { record: Pick<StoredArchitectureRecord, "version"> & 
   runRole(node: DesignStageRole): Promise<unknown>; onSave(checkpoint: DesignCheckpoint): Promise<unknown>; signal?: AbortSignal | undefined; onProgress?: Progress | undefined;
   sessionDirectory: string; revision?: unknown; repair?: unknown; forceIntegration?: boolean | undefined;
   validateProgramCandidate?: (candidate: CandidateDraft, options: { sessionStorage: SessionStorage }) => unknown | Promise<unknown>;
+  validateAssembledCandidate?: (candidate: CandidateDraft) => unknown | Promise<unknown>;
   validateHistory?: (storage: SessionStorage) => unknown | Promise<unknown> }
 const rows = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
@@ -42,6 +43,7 @@ import { CAPABILITIES, designHash, designSubmissionSchema } from "./architecture
 import { platformCapabilityCatalog } from "./platform-contract.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { architectureStageRepairPlan } from "./architecture-stage-recovery.mjs";
+import { architectureModuleObligations } from "./architecture-module-obligations.mjs";
 import { copyArchitectureReviewJson, reviewCheckpointObject } from "./architecture-review-binding.mjs";
 import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule, architectureModuleLayers,
   assembleArchitectureCandidate, applyArchitectureIntegration, readArchitectureBlueprintStructure, readArchitectureModuleStructure,
@@ -254,6 +256,7 @@ function validationRecovery(record: Partial<StoredArchitectureRecord>, checkpoin
   if (!record.draft || !record.requirements) return null;
   const plan = architectureStageRepairPlan(checkpoint, { draft: record.draft, requirements: record.requirements,
     candidateSchema: designSubmissionSchema(record.draft, { requirements: record.requirements }), legacyBlueprint: checkpoint.schemaVersion < 3,
+    deferredVerifications: record.deferredVerifications,
     moduleLimit: checkpoint.moduleLimit,
     capabilities: record.platformSnapshot ? platformCapabilityCatalog(record.platformSnapshot, { runtimeCapabilities: record.runtimeCapabilities }) : CAPABILITIES });
   if (!plan) return null;
@@ -461,7 +464,7 @@ function revisionOwners(revision: DesignRevision, blueprint: ArchitectureBluepri
 
 /** Runs only the new design path. Its caller retains the final full validation and independent review. */
 export async function runArchitectureDesignPipeline({ record, context, binding, runRole, onSave, signal, onProgress, sessionDirectory, revision, repair,
-  forceIntegration = false, validateProgramCandidate = value => value, validateHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
+  forceIntegration = false, validateProgramCandidate = value => value, validateAssembledCandidate, validateHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
   if (typeof runRole !== "function" || typeof onSave !== "function" || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) throw invalid();
   const savedVersion = objectFields(record.designProgressCheckpoint).schemaVersion;
   const moduleLimit = savedVersion === 5 ? Number(objectFields(record.designProgressCheckpoint).moduleLimit)
@@ -739,7 +742,9 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   const dependencyLayers = context.legacyBlueprint ? [blueprint.modules] : architectureModuleLayers(blueprint);
   const layers = dependencyLayers.flatMap(layer => Array.from({ length: Math.ceil(layer.length / 3) }, (_, index) => layer.slice(index * 3, index * 3 + 3)));
   for (const layer of layers) {
-    const capacities = architectureModuleCapacities(blueprint, context.candidateSchema, checkedModules(checkpoint, blueprint, context));
+    const completed = checkedModules(checkpoint, blueprint, context);
+    const capacities = architectureModuleCapacities(blueprint, context.candidateSchema, completed);
+    const obligations = architectureModuleObligations(blueprint, context, completed);
     allocate("module", layer.map(assignment => checkpoint.modules.find(entry => entry.key === assignment.id)!), integrationReserve(checkpoint)
       + checkpoint.modules.filter(entry => !complete(entry) && !layer.some(assignment => assignment.id === entry.key)).length);
     const settled = await Promise.allSettled(layer.map(assignment => {
@@ -749,6 +754,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       const parameters = architectureModuleSubmissionSchema(schemas.module, assignment, capacities[assignment.id]!);
       return runStage("module", assignment.id,
         { ...facts, assignment, blueprint, blueprintHash: designHash(blueprint), moduleCapacity: capacities[assignment.id],
+          moduleObligations: obligations[assignment.id],
           requirementScope: { moduleId: assignment.id, ownedRequirementIds: [...assignment.requirementIds],
             referenceOnly: blueprint.modules.filter(owner => owner.id !== assignment.id).map(owner => ({ moduleId: owner.id, requirementIds: [...owner.requirementIds] })),
             instruction: "coverage与acceptance[*].requirementIds只能登记ownedRequirementIds；referenceOnly列出其他模块主责，供理解接口、配合实现或测试，不能在本模块登记覆盖或验收。后续义务的主责按其单独的requirementId查本表；requirementIds只是关联的原始需求，不转移主责。跨模块验证由主责模块保留完整检查，本模块仍须提交自己负责要求的具体测试。" },
@@ -768,6 +774,14 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   const modules = checkedModules(checkpoint, blueprint, context);
   const mergeCapabilityReasons = checkpoint.assemblyVersion === 2;
   const assembled = assembleArchitectureCandidate({ ...context, blueprint, modules, mergeCapabilityReasons });
+  if (!assembled.conflicts.length && validateAssembledCandidate) {
+    try { await validateAssembledCandidate(assembled.candidate); active(); }
+    catch (error) {
+      if (!(error instanceof InputError)) throw error;
+      throw new ProviderError("整合前完整校验未通过：" + error.message, { stage: "architecture", reason: "integration_preflight_failed",
+        modelCalls: checkpoint.modelCalls, lastSubmissionIssue: objectFields(error).validationIssue });
+    }
+  }
   const integrationContext = { ...context, ...assembled, blueprint, modules, mergeCapabilityReasons };
   const integration = await runStage("integration", "integration", { ...facts, requirements: context.requirements,
     blueprintBoundary: { globalFields: Object.keys(blueprint.global).filter(key => key !== "instructions"), modules: blueprint.modules },

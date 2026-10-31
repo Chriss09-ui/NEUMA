@@ -202,6 +202,24 @@ export function acceptanceCaseMatches(acceptance: AcceptanceItem | undefined, te
     : verification.adapterId === "input-contract" ? test.kind === "input-rejection" : test.kind === "node-check";
 }
 
+export function requiredActionAcceptanceRequirementIds({ requirements = [], draft }: Pick<DevelopmentArchitecture, "requirements" | "draft">) {
+  const required = new Set(["task", "deliverable"]);
+  for (const [index] of (draft?.interaction?.operations ?? []).entries()) required.add(`operation_${index + 1}`);
+  for (const item of taskSpecRequirementItems(draft).filter((item) => ["processing", "delivery"].includes(item.dimension)))
+    required.add(`spec_${acceptanceEvidenceHash(item.id).slice(0, 24)}`);
+  return requirements.filter(item => required.has(item.id)).map(item => item.id);
+}
+
+export function requiredAcceptanceStages({ requirements = [], deferredVerifications }: Pick<DevelopmentArchitecture, "requirements" | "deferredVerifications">) {
+  const allowedReferences = requirements.map(item => item.id).filter(identifier);
+  return (deferredVerifications?.issues ?? []).map(issue => {
+    if (!identifier(issue.requirementId) || !allowedReferences.includes(issue.requirementId)
+      || !["development", "activation", "runtime"].includes(issue.stage ?? ""))
+      fail("后续验证义务必须保留有效正式要求及原阶段", { path: "design.acceptance", reason: "invalid_reference", allowedReferences });
+    return { requirementId: issue.requirementId, stage: issue.stage! };
+  });
+}
+
 export function validateAcceptanceCoverage(architecture: DevelopmentArchitecture, { application }: { application?: DevelopmentApplication | undefined } = {}) {
   const acceptance = architecture?.design?.acceptance ?? [], requirements = architecture?.requirements ?? [];
   acceptance.forEach((item) => validateAcceptanceVerification(item));
@@ -209,10 +227,7 @@ export function validateAcceptanceCoverage(architecture: DevelopmentArchitecture
   if (!hasExplicitVerification) return;
   const allowedReferences = requirements.map((item) => item.id).filter(identifier);
   const deferredMissing = [];
-  for (const issue of architecture.deferredVerifications?.issues ?? []) {
-    if (!identifier(issue.requirementId) || !allowedReferences.includes(issue.requirementId)
-      || !["development", "activation", "runtime"].includes(issue.stage ?? ""))
-      fail("后续验证义务必须保留有效正式要求及原阶段", { path: "design.acceptance", reason: "invalid_reference", allowedReferences });
+  for (const issue of requiredAcceptanceStages(architecture)) {
     if (!acceptance.some((item) => item.requirementIds?.includes(issue.requirementId) && validateAcceptanceVerification(item).stage === issue.stage))
       deferredMissing.push(issue.requirementId);
   }
@@ -221,12 +236,8 @@ export function validateAcceptanceCoverage(architecture: DevelopmentArchitecture
     return verification.stage === "development" && verification.adapterId === "action";
   });
   const hasOperations = application ? application.actions?.length > 0 : architecture.design?.interaction?.operations === true;
-  const required = new Set(["task", "deliverable"]);
-  for (const [index] of (architecture.draft?.interaction?.operations ?? []).entries()) required.add(`operation_${index + 1}`);
-  for (const item of taskSpecRequirementItems(architecture.draft).filter((item) => ["processing", "delivery"].includes(item.dimension)))
-    required.add(`spec_${acceptanceEvidenceHash(item.id).slice(0, 24)}`);
-  const missing = requirements.filter((item) => hasOperations && required.has(item.id)
-    && !actionAcceptance.some((entry) => entry.requirementIds?.includes(item.id))).map((item) => item.id);
+  const missing = requiredActionAcceptanceRequirementIds(architecture).filter(id => hasOperations
+    && !actionAcceptance.some(entry => entry.requirementIds?.includes(id)));
   if (deferredMissing.length || hasOperations && (!actionAcceptance.length || missing.length)) fail(
     deferredMissing.length ? "后续验证义务缺少原阶段验收，不能只改签至其他阶段或适配器"
       : "实际操作及其任务、交付要求必须有研发动作验收，不能全部转成宿主或运行期待验",

@@ -54,6 +54,86 @@ function boundaryFixture() {
   return { ...options, options, moduleOptions: (index: number) => ({ ...options, assignment: f.blueprint.modules[index]!, dependencyModules: f.modules.slice(0, index!) }) };
 }
 
+function obligationFixture() {
+  const f = boundaryFixture();
+  const requirements = ["inputSource", "task", "deliverable", "verification_execution"].map(id => ({ id, text: `已确认要求 ${id}` }));
+  f.blueprint.global.profile = "custom";
+  f.blueprint.global.execution = { language: "javascript", hosting: "builtin", reason: "执行专属统计动作" };
+  f.blueprint.global.interaction!.operations = true;
+  f.blueprint.global.selectionBasis!.requirementIds = requirements.map(row => row.id);
+  f.blueprint.modules[0]!.requirementIds = ["inputSource"];
+  f.blueprint.modules[1]!.requirementIds = ["task", "deliverable", "verification_execution"];
+  const draft = { interaction: { defaultEntry: "conversation", page: false, operations: ["统计"] } };
+  const context = { ...f, requirements, draft, candidateSchema: designSubmissionSchema({ taskSpec: { version: 1 } }, { requirements }),
+    deferredVerifications: { issues: [{ requirementId: "verification_execution", stage: "development" }] } };
+  for (const [index, module] of f.modules.entries()) {
+    const ids = f.blueprint.modules[index]!.requirementIds;
+    module.blueprintHash = designHash(f.blueprint);
+    module.coverage = ids.map(requirementId => ({ requirementId, componentIds: [module.components[0]!.id], verification: "核对本模块已确认的要求" }));
+    module.acceptance = (index ? ["success", "tool_failure"] as const : ["missing_input", "boundary"] as const).map((kind, row) => ({
+      id: `${module.moduleId}_acceptance_${row}`, kind, requirementIds: ids.filter(id => id !== "verification_execution"),
+      input: kind === "tool_failure" ? "统计执行器明确返回执行失败" : "冻结的业务输入",
+      expected: kind === "tool_failure" ? "如实返回执行失败，不声称已得到统计结果" : "返回符合该要求的具体结果或拒绝说明",
+      verification: { stage: "development", owner: "generated-code", adapterId: "action" },
+    }));
+    if (index) {
+      module.capabilities = [{ id: "statistics_code", status: "needs_development", reason: "实现统计代码" }];
+      module.acceptance.push({ id: "verify_execution", kind: "success", requirementIds: ["verification_execution"],
+        input: "开发阶段执行冻结验证用例", expected: "按原义务核对真实执行结果，失败阻止交付",
+        verification: { stage: "development", owner: "generated-code", adapterId: "action" } });
+    }
+  }
+  return { ...context, moduleOptions: (index: number) => ({ ...context, blueprint: f.blueprint,
+    assignment: f.blueprint.modules[index]!, dependencyModules: f.modules.slice(0, index) }) };
+}
+
+test("模块提交前拒绝自己负责的验收类型、真实动作、原阶段及必填清单缺项", async t => {
+  const cases: { name: string; index: number; path: string; change(module: ArchitectureModule): void }[] = [
+    ...["missing_input", "boundary"].map(kind => ({ name: `缺少${kind}`, index: 0, path: "module.acceptance",
+      change(module: ArchitectureModule) { module.acceptance = module.acceptance.filter(row => row.kind !== kind); } })),
+    ...["success", "tool_failure"].map(kind => ({ name: `缺少${kind}`, index: 1, path: "module.acceptance",
+      change(module: ArchitectureModule) { for (const row of module.acceptance) if (row.kind === kind) row.kind = "boundary"; } })),
+    { name: "业务计算不能只留运行期观察", index: 1, path: "module.acceptance", change(module) {
+      for (const row of module.acceptance) if (row.requirementIds.includes("task"))
+        row.verification = { stage: "runtime", owner: "conversation", adapterId: "conversation" };
+    } },
+    { name: "后续义务不能改变原验证阶段", index: 1, path: "module.acceptance", change(module) {
+      module.acceptance.find(row => row.id === "verify_execution")!.verification = { stage: "activation", owner: "platform", adapterId: "host-business" };
+    } },
+    { name: "能力清单必须有负责模块", index: 0, path: "module.capabilities", change(module) { module.capabilities = []; } },
+    { name: "设计决策必须有负责模块", index: 1, path: "module.decisions", change(module) { module.decisions = []; } },
+    { name: "失败处理必须有负责模块", index: 1, path: "module.failureHandling", change(module) { module.failureHandling = []; } },
+  ];
+  const baseline = obligationFixture();
+  for (const [index, module] of baseline.modules.entries()) assert.doesNotThrow(() => validateArchitectureModule(module, baseline.moduleOptions(index)));
+  for (const scenario of cases) await t.test(scenario.name, () => {
+    const f = obligationFixture(), module = structuredClone(f.modules[scenario.index]!);
+    scenario.change(module);
+    assert.throws(() => validateArchitectureModule(module, f.moduleOptions(scenario.index)), error => {
+      const issue = (objectFields(error).validationIssues as { path: string; ownerModuleId?: string }[]).find(issue => issue.path === scenario.path);
+      assert.ok(issue); assert.equal(issue.ownerModuleId, module.moduleId);
+      return true;
+    });
+  });
+});
+
+test("纯工具方案由选用能力的模块提交失败验收，不追补已完成兄弟模块", () => {
+  const f = boundaryFixture();
+  const input = f.modules[0]!;
+  input.capabilities.push({ id: "write_workspace_file", status: "available", reason: "保存输入记录" });
+  assert.throws(() => validateArchitectureModule(input, f.moduleOptions(0)), error => {
+    assert.deepEqual(objectFields(error).validationIssue, { path: "module.acceptance", reason: "missing_acceptance_kind",
+      missingKinds: ["tool_failure"], ownerModuleId: "source" });
+    return true;
+  });
+  input.acceptance.push({ id: "input_save_failure", kind: "tool_failure", requirementIds: ["notes"],
+    input: "文件工具明确返回写入失败", expected: "如实报告写入失败，不声称已经保存",
+    verification: { stage: "runtime", owner: "conversation", adapterId: "conversation" } });
+  assert.doesNotThrow(() => validateArchitectureModule(input, f.moduleOptions(0)));
+  assert.doesNotThrow(() => validateArchitectureModule(f.modules[1], f.moduleOptions(1)));
+  assert.doesNotThrow(() => validateDesign(assembleArchitectureCandidate(f).candidate, { requirements: f.requirements }));
+});
+
 test("连接协议缺项在蓝图提交时报告，不能留给无连接修改权限的整合节点", () => {
   const f = boundaryFixture();
   f.blueprint.global.connections = [{ id: "business_api", purpose: "business", required: true, description: "业务接口",
@@ -98,9 +178,10 @@ test("蓝图在派模块前同时拒绝交互与运行组合矛盾，模块在�
       { id: "custom_validation_code", status: "needs_development", reason: "专属代码需研发" }];
   });
   assert.throws(() => validateArchitectureModule(module, f.moduleOptions(0)), (error: TestFailure) => {
-    const issues = objectFields(error).validationIssues as { path: string; allowedReferences: string[] }[];
-    assert.deepEqual(issues.map(item => item.path), ["module.capabilities[0].id", "module.capabilities[1].id"]);
-    assert.ok(issues.every(item => item.allowedReferences.includes("conversation")));
+    const issues = objectFields(error).validationIssues as { path: string; allowedReferences?: string[]; missingKinds?: string[] }[];
+    assert.deepEqual(issues.map(item => item.path), ["module.capabilities[0].id", "module.capabilities[1].id", "module.acceptance"]);
+    assert.ok(issues.slice(0, 2).every(item => item.allowedReferences!.includes("conversation")));
+    assert.deepEqual(issues[2]!.missingKinds, ["tool_failure"], "选用新能力还应在本模块核对对应失败验收");
     return true;
   });
   assert.equal(designHash(createArchitectureStageSchemas(f)), schemaHash, "语义校验不改变历史阶段schema摘要");
@@ -346,15 +427,17 @@ test("整合绑定实际模块与冲突，禁止改写蓝图、模块内容、�
   rejected(() => applyArchitectureIntegration(input([{ path: "/instructions", value: "第一项" }, { path: "/instructions", value: "第二项" }]), options), "updates.path");
 });
 
-test("全局验收不足留给整合补跨模块场景，缺失模块不能提前成为完整候选", () => {
+test("模块漏验收在组装前指明原责任，缺失模块不能提前成为完整候选", () => {
   const f = fixture();
+  const original = structuredClone(f.modules[0]!.acceptance);
   f.modules![0]!.acceptance = f.modules![0]!.acceptance.slice(0, 1);
-  const assembled = assembleArchitectureCandidate(f.options);
-  assert.ok(assembled.conflicts.some(row => row.path === "/acceptance"));
-  const acceptance = [...assembled.candidate.acceptance, { ...f.modules![0]!.acceptance[0]!, id: "missing_record", kind: "missing_input",
-    requirementIds: ["notes"], input: "未提供记录", expected: "请用户提供记录" }];
-  const candidate = applyArchitectureIntegration({ baseHash: designHash(assembled.candidate), updates: [{ path: "/acceptance", value: acceptance }] }, { ...f.options, ...assembled });
-  assert.doesNotThrow(() => validateDesign(candidate, { requirements: f.requirements }));
+  assert.throws(() => assembleArchitectureCandidate(f.options), error => {
+    assert.deepEqual(objectFields(error).validationIssue, { path: "module.acceptance", reason: "missing_acceptance_kind",
+      missingKinds: ["missing_input"], ownerModuleId: "source" });
+    return true;
+  });
+  f.modules[0]!.acceptance = original;
+  assert.doesNotThrow(() => validateDesign(assembleArchitectureCandidate(f.options).candidate, { requirements: f.requirements }));
   rejected(() => assembleArchitectureCandidate({ ...f.options, modules: [] }), "modules");
 });
 

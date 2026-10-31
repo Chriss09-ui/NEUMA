@@ -4,10 +4,11 @@ import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 function array(value: unknown): unknown[] { if (!isArray(value)) throw new TypeError("Model context list is invalid"); return value; }
 import { modelContextPacket, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
 import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE } from "./architecture-prompts.mjs";
+import { MODULE_OBLIGATION_RULE } from "./architecture-module-obligations.mjs";
 
 const pick = (value: unknown, fields: string[]) => { const record = objectFields(value); return Object.fromEntries(fields.filter(key => record[key] !== undefined).map(key => [key, record[key]])); };
 const metadata = ["type", "pipelineStage", "blueprintProtocol", "submitName", "candidateHash", "baseHash", "blueprintHash", "allowedRoots", "integrationPolicy", "revisionSource",
-  "stageContract", "consultations", "moduleCapacity", "moduleLimit", "requirementScope",
+  "stageContract", "consultations", "moduleCapacity", "moduleLimit", "requirementScope", "moduleObligations",
   "modelBudget", "designModelBudget", "remaining", "stageRepair", "editableSubmission", "rejectedSubmission", "lastSubmissionIssue",
   "unsubmittedDraft", "unsubmittedDraftDiagnostic", "structuredSubmissionFeedback", "repairInstruction", "instruction"];
 
@@ -156,10 +157,12 @@ ${pipelineStage ? "已有本节点主要资料时直接设计；只读取影响�
 ${pipelineStage ? "本阶段提交契约已完整提供在提交工具参数中；stageSchema为同源只读参照，有具体字段疑问时按pointer定位，不先通读最终candidateSchema。" : ""}
 ${pipelineStage === "blueprint" ? "蓝图提交的global是对象、modules是数组，不能编码成字符串；selectionBasis直接放在global内。仅负责全局选择、职责划分与冲突裁决；模块细节留给模块设计者。存在多个独立技术难点且提供consult_architecture时，按问题及责任需求分组委派专项分析；简单任务直接提交。子分析是建议，不能替代原始需求、平台事实或正式验收。" : ""}
 ${pipelineStage === "blueprint" ? BLUEPRINT_ASSIGNMENT_RULE : ""}
+${pipelineStage === "blueprint" ? "需求分工还决定系统验收责任：task主责承担成功及业务动作验收，inputSource主责承担缺少输入与边界验收，deliverable主责承担代码或业务连接的失败验收及整体失败处理。纯工具方案中选用新能力的模块承担其失败验收。没有对应标准需求时按模块顺序分配，宿主会生成明确moduleObligations；不为这些义务新增业务模块。" : ""}
 ${pipelineStage === "blueprint" ? "interaction.assistant仅指托管页面的浮窗助手，不是普通对话入口；未确认启用则不得添加，启用必须page=true且保留用途。profile=workflow表示需要持久检查点的流程，不能配builtin；单次专属代码动作按实际需求选择custom。Python不能配builtin；无代码必须none/builtin。保持已确认的默认入口、页面和操作交付。" : ""}
 ${pipelineStage === "module" ? "capabilities中status=available的id必须逐字来自本轮能力目录，不能为已有能力另起别名；平台交付机制不等于新工具编号。专属待开发代码单独标needs_development，不把目录已可用的运行器改标为待开发。" : ""}
 ${pipelineStage === "module" ? "moduleId和blueprintHash由宿主在正式提交时绑定本次assignment，无需复制历史摘要。遵守moduleCapacity的本模块条数额度，保留完整业务义务，合并重复表达而不截断内容。" : ""}
 ${pipelineStage === "module" ? "requirementScope明确本模块主责与其他模块的参考要求。coverage和acceptance[*].requirementIds仅使用ownedRequirementIds；参考内容可用于接口配合和本模块测试，但不能认领其中其他模块负责的正式编号。后续义务的单独requirementId决定主责，其requirementIds仅表示关联原始要求。" : ""}
+${pipelineStage === "module" ? MODULE_OBLIGATION_RULE : ""}
 ${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内联，可直接核对；最后一次请求仅用于正式提交，不能再次读取或只保存草稿。" : ""}
 已确认需求、用户选择、原验证阶段和全部验收义务不能缩水。技术问题由系统核实；只有需求本身仍不清楚且改变业务承诺才允许返需。历史评语和拒稿均可有误，须用当前原文核对，不能当作新需求或通过证据。需求操作清单为空不等于禁止必要专属代码。平台可用、环境准备、业务实现及实际验收分别判断，不伪造测量或通过。
 正式重查可修正技术验收与证据分工；完整保留已确认业务范围、边界、结果、验证义务及明确选择，重新程序检查和独立评审，不以纠错缩水。

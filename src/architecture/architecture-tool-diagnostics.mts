@@ -7,6 +7,7 @@ import { toolInputValidation } from "../runtime/tool-input-diagnostics.mjs";
 import { ACCEPTANCE_ADAPTERS } from "../verification/acceptance-contract.mjs";
 import { CAPABILITIES } from "./architecture-contract.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
+import { requiredArchitectureAcceptanceKinds } from "./architecture-stage-semantics.mjs";
 
 const reasons = Object.freeze({ required: "required_field", additionalProperties: "unknown_field", type: "invalid_type",
   enum: "invalid_value", const: "invalid_value", pattern: "invalid_value", minLength: "size_limit", maxLength: "size_limit",
@@ -119,7 +120,7 @@ export function diagnoseArchitectureReferences(input: unknown, { requirements = 
   for (const [index, item] of groups.decisions.entries()) for (const [child, id] of entries(item?.evidenceIds).entries())
     reference(id, evidenceIds, `design.decisions[${index}].evidenceIds[${child}]`, { host: true, declaredPath: declared.evidenceIds });
   const kinds = new Set(groups.acceptance.map((item) => item?.kind));
-  const requiredKinds = ["success", "missing_input", "boundary", ...(groups.capabilities.some((item) => item?.id !== "conversation") ? ["tool_failure"] : [])];
+  const requiredKinds = requiredArchitectureAcceptanceKinds(groups.capabilities.map(item => ({ id: String(item?.id) })));
   const missingKinds = requiredKinds.filter((kind) => !kinds.has(kind));
   if (missingKinds.length) add({ path: "design.acceptance", reason: "missing_acceptance_kind", missingKinds, remedy: "补齐这些实际验收场景，不能用重复成功场景代替。" });
   for (const [index, item] of groups.acceptance.entries()) if (requirementIds.size) for (const [child, id] of entries(item?.requirementIds).entries())
