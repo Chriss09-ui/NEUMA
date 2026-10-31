@@ -17,6 +17,25 @@ import { AgentStorage } from "../agents/agent-storage.mjs";
 import { MAX_RUNTIME_FILE_BYTES } from "../runtime/file-limits.mjs";
 
 export const DEVELOPMENT_LIMITS = Object.freeze({ fileBytes: 2 * 1024 * 1024, totalBytes: 10 * 1024 * 1024, files: 200 });
+
+/** Validate the complete proposed tree before a repair becomes a durable accepted result. */
+export function validateDevelopmentCodeFiles(files: Record<string, unknown>, { checkTotal = true } = {}) {
+  const entries = Object.entries(files);
+  if (entries.length > DEVELOPMENT_LIMITS.files) throw new InputError("代码超过 200 个文件限制");
+  let total = 0;
+  for (const [path, content] of entries) {
+    validateCodePath(path);
+    const segments = path.split("/");
+    for (let index = 1; index < segments.length; index++) if (Object.hasOwn(files, segments.slice(0, index).join("/")))
+      throw new InputError("代码文件不能同时作为其他文件的父目录");
+    if (typeof content !== "string" || content.includes("\0") || Buffer.from(content).toString("utf8") !== content)
+      throw new InputError("代码必须是无空字符的 UTF-8 文本");
+    const bytes = Buffer.byteLength(content);
+    if (bytes > DEVELOPMENT_LIMITS.fileBytes) throw new InputError("代码文本不得超过 2 MB");
+    total += bytes;
+  }
+  if (checkTotal && total > DEVELOPMENT_LIMITS.totalBytes) throw new InputError("代码超过 10 MB 总量限制");
+}
 const digest = (value: BinaryLike) => createHash("sha256").update(value).digest("hex");
 const forbidden = /^(?:\..*|metadata|node_modules|credentials?(?:\..*)?|secrets?(?:\..*)?|auth(?:\..*)?|tokens?(?:\..*)?|passwords?(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore))$/i;
 const schema = (properties: Record<string, ToolSchema>, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
@@ -237,6 +256,7 @@ export class DevelopmentWorkspace {
   }
 
   async applyRepair(agentId: string, runId: string, snapshot: DevelopmentSnapshot, files: Record<string, string>, allowedFiles: string[], signal?: AbortSignal) {
+    validateDevelopmentCodeFiles(files);
     const original = await inspectDevelopmentCode((await this.validateSnapshot(snapshot, agentId)).path);
     await this.serial(agentId, runId, async () => {
       checkAbort(signal);
@@ -248,7 +268,9 @@ export class DevelopmentWorkspace {
           || actual !== before && actual !== desired) throw new InputError("代码在修复期间发生冲突；保留子任务成果，请检查当前版本。");
       }
       const writer = this.makeTools(root, { allowed, readOnly: false, signal }).find(tool => tool.name === "write_code_file")!;
-      for (const file of allowed) if (files[file] !== undefined && files[file] !== current.contents.get(file)?.toString("utf8"))
+      // Shrink first so a valid final tree cannot exceed the quota halfway through replacement.
+      const delta = (file: string) => Buffer.byteLength(files[file] ?? "") - (current.contents.get(file)?.length ?? 0);
+      for (const file of [...allowed].sort((a, b) => delta(a) - delta(b))) if (files[file] !== undefined && files[file] !== current.contents.get(file)?.toString("utf8"))
         await writer.execute("repair", { path: file, content: files[file] }, signal);
     });
     return this.snapshot(agentId, runId);

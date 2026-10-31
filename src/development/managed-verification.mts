@@ -4,6 +4,7 @@ import type { JsonValue, UnknownRecord } from "../contracts/json.mjs";
 import type { DevelopmentSnapshot } from "./development-workspace.mjs";
 import type { DevelopmentExecutor, IsolationAvailability } from "./development-executor.mjs";
 import { objectFields, errorField } from "../runtime/type-boundary.mjs";
+import { repairableDevelopmentResult } from "./development-failures.mjs";
 export interface ManagedVerificationRunner {
   probe(options: { language: string; host: string; signal?: AbortSignal | undefined }): Promise<IsolationProbe>;
   prepare(options: { agentId: string; deliveryVersion: string; manifest: DevelopmentService; codeDir: string; signal?: AbortSignal | undefined }): Promise<unknown>;
@@ -162,8 +163,12 @@ export async function verifyManagedApplication({ services, executor, agentId, sn
     report.runtime = { language: application.service.language, host: application.service.host, manifestHash: hashServiceManifest(application.service) };
     return report;
   } catch (error) {
+    const reason = /^[a-z_]{1,80}$/.test(String(errorField(error, "reason") ?? "")) ? String(errorField(error, "reason")) : "service_verification_failed";
+    if (!signal?.aborted && repairableDevelopmentResult({ status: "error", reason }) && !report.results.length)
+      return { ...report, status: "error", reason, summary: "生成服务代码未完成本轮执行，需要修复后重新验收",
+        results: cases.map(item => ({ caseId: item.id, taskId: item.taskId, status: "error", reason })) };
     return { ...report, status: "error", summary: signal?.aborted ? "服务验收已取消" : "服务验收未完成；运行环境、契约或执行结果需要检查",
-      reason: /^[a-z_]{1,80}$/.test(String(errorField(error, "reason") ?? "")) ? String(errorField(error, "reason")) : "service_verification_failed" };
+      reason };
   } finally {
     const failures: unknown[] = [];
     const closed = await Promise.allSettled(controllers.map(async (controller) => controller.close({ permanent: true })));

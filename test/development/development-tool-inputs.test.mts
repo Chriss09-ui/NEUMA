@@ -15,7 +15,7 @@ import { developmentArchitecture } from "../helpers/development.mjs";
 
 const textOf = (value: unknown) => typeof value === "string" ? value : recordArray(value).filter((entry) => entry.type === "text").map((entry) => entry.text).join("\n");
 
-async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, count: number) => unknown, { extraTools = [], repeatedCallId = false }: {extraTools?: NeumaTool[];repeatedCallId?:boolean} = {}) {
+async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, count: number) => unknown, { extraTools = [], repeatedCallId = false, turns = 12, boundedWorkload = false }: {extraTools?: NeumaTool[];repeatedCallId?:boolean;turns?:number;boundedWorkload?:boolean} = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-tool-inputs-")), requests: FixtureChatRequest[] = [], executed: unknown[] = [];
   let serverError: unknown; const capture: {current?: PiSessionOptions} = {};
   const server = createServer(async (request, response) => {
@@ -31,7 +31,8 @@ async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, co
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const architecture = developmentArchitecture(), record = { id: "dev_inputs", agentId: "inputs", architecture,
-    architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash }, phase: "implementing", revision: 0 };
+    architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash }, phase: "implementing", revision: 0,
+    ...(boundedWorkload ? { workloadPolicyVersion: 1 as const } : {}) };
   const controller = Reflect.construct(DevelopmentController, [{ cwd: root, dataDir: join(root, "data"),
     config: { llmConfigured: true, chatUrl: `http://127.0.0.1:${listeningAddress(server).port}/v1/chat/completions`, model: "local-model", apiKey: "local-only" },
     store: { save: async (value: object) => ({ ...value, revision: Number(objectFields(value).revision) + 1 }) },
@@ -42,10 +43,21 @@ async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, co
   const tool: NeumaTool = { name: "change_input", label: "本地结构测试", description: "只接受文本值", executionMode: "sequential",
     parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
     async execute(_id, args) { executed.push(objectFields(args).value); return { content: [{ type: "text", text: "saved" }], details: {} }; } };
-  const tools = [tool, ...extraTools], counter = { turns: 0 }, handle = await callFixture(controller.role, controller, [ctx, { kind: "developer", tools, scope: {}, counter, limit: 12, validate: (value: unknown) => value }]);
+  const tools = [tool, ...extraTools], counter = { turns: 0 }, handle = await callFixture(controller.role, controller, [ctx, { kind: "developer", tools, scope: {}, counter, limit: turns, validate: (value: unknown) => value }]);
   t.after(async () => { callFixture(controller.dispose, controller, [ctx, handle]); server.closeAllConnections(); await new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve())); await rm(root, { recursive: true, force: true }); });
   return { controller, ctx, handle, captured: capture.current, tools, requests, executed, counter, error: () => serverError };
 }
+
+test("新研发会话的最后一次真实模型请求只暴露提交工具，不把剩余额度花在读取上", async t => {
+  const f = await fixture(t, (body, count) => {
+    if (count === 1) return [{ name: "read_development_context", args: { requests: [{ section: "task" }] } }];
+    assert.equal(count, 2);
+    assert.deepEqual(recordArray(body.tools).map(tool => objectFields(tool.function).name), ["submit_development_work"]);
+    return [{ name: "submit_development_work", args: { summary: "完成有界任务", changedFiles: [], knownIssues: [], nextAction: "验收", continue: false } }];
+  }, { turns: 2, boundedWorkload: true });
+  await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, { task: { id: "bounded" } }]);
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 2); assert.equal(f.counter.turns, 2);
+});
 
 test("研发真实Pi原始参数不被强转，下一请求包含具体字段诊断，修正后正常提交", async (t) => {
   const f = await fixture(t, (body, count: unknown) => {

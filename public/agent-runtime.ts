@@ -66,12 +66,12 @@ export function agentDevelopmentState(agent: { id: string; name?: string | undef
   const canRestart = Boolean(!canConfigure && accepted && record?.status === "failed" && record.phase === "planning"
     && !record.tasks?.length && !record.currentTaskId && !record.package
     && record.continuation?.mode === "fresh" && record.continuation.sourceRunId === record.id);
-  const canResume = Boolean(!canConfigure && !canRestart && accepted && record && (["blocked", "failed", "cancelled", "interrupted"].includes(record.status) || recheck));
+  const canResume = Boolean(!canConfigure && !canRestart && record?.continuation?.mode !== "blocked" && accepted && record && (["blocked", "failed", "cancelled", "interrupted"].includes(record.status) || recheck));
   const canStart = Boolean(canRestart || accepted && !record && ["needs_development", "needs_connection"].includes(architecture.delivery));
   const statusLabel = record ? developmentLabels[record.status] || "研发状态待确认" : "准备研发";
   const deliveryLabel = record?.status === "completed" ? developmentDeliveries[record.delivery] || "运行状态待确认" : "";
   return { visible: Boolean(record || canStart), record, active, canResume, canStart, canConfigure, canRestart,
-    actionLabel: canConfigure ? "配置本机接口" : canRestart ? "新一轮研发" : recheck ? "重新检查交付" : canResume ? "继续研发" : "开始研发",
+    actionLabel: canConfigure ? "配置本机接口" : canRestart ? "新一轮研发" : record?.continuation?.mode === "blocked" ? "需先处理阻断" : recheck ? "重新检查交付" : canResume ? "继续研发" : "开始研发",
     label: [statusLabel, deliveryLabel].filter(Boolean).join(" · "),
     summary: canRestart ? "本轮研发次数已用完，进度记录已保留。可以开启新一轮继续完善。" : typeof record?.summary === "string" && record.summary.trim() ? record.summary
       : record ? "研发进度已保存，下一步以实际检查结果为准。" : "方案已通过评估，开始后会按任务开发并检查验收。" };

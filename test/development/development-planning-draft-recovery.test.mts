@@ -35,7 +35,7 @@ test("正常run耗尽后同批次不补预算，新批次仅续接未通过草�
     page: null, stateVersion: 1, evidenceIds: [], actions: [{ id: "echo", title: "回显", inputSchema: { type: "string" },
       outputSchema: { type: "object" }, connectionIds: [] }] }, caseFiles: ["missing.json"] };
   const payloads: Record<string,unknown>[] = [], bindings: unknown[] = [];
-  const controller = new DevelopmentController({ dataDir: join(root, "data"), cwd: root, config: {}, limits: { reviewerTurns: 1 },
+  const controller = new DevelopmentController({ dataDir: join(root, "data"), cwd: root, config: {}, limits: { reviewerTurns: 2 },
     executor: { probe: async () => ({ available: true }) }, sessionFactory: async (options: PiSessionOptions) => {
       assert.equal(options.reasoningMode, "auto");
       bindings.push(options.sessionStorage!.binding);
@@ -77,33 +77,34 @@ test("正常run耗尽后同批次不补预算，新批次仅续接未通过草�
           }
           payloads.push(payload);
           await options.onModelCall!();
+          await options.onModelCall!();
         } };
     } });
   const first = await controller.run(architecture);
-  assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "turn_limit"); assert.equal(first.planning.turns, 1);
+  assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "turn_limit"); assert.equal(first.planning.turns, 2);
   assert.deepEqual(developmentSummary(first)!.continuation, { mode: "fresh", sourceRunId: first.id, reason: "planning_budget_exhausted", historyPreserved: true });
   for (const delta of [{ status: "interrupted" }, { status: "cancelled" }, { plan: { summary: "accepted" } }, { tasks: [{ id: "executed", status: "verified" }] }])
-    assert.equal(callFixture(developmentSummary, undefined, [{ ...first, ...delta }])!.continuation, undefined);
+    assert.notEqual(callFixture(developmentSummary, undefined, [{ ...first, ...delta }])!.continuation?.mode, "fresh");
   assert.equal(first.plan, null); assert.equal(first.planningDraft!.snapshot.kind, "untrusted-planning-draft");
   const original = await readFile(join(await controller.artifacts.directory(first.agentId, first.id), "index.json"));
   const resumed = await controller.run(architecture, { resume: true });
-  assert.equal(resumed.id, first.id); assert.equal(resumed.planning.turns, 1); assert.equal(payloads.length, 1);
+  assert.equal(resumed.id, first.id); assert.equal(resumed.planning.turns, 2); assert.equal(payloads.length, 1);
   const fresh = await controller.run(architecture);
   assert.notEqual(fresh.id, first.id); assert.equal(fresh.plan, null); assert.equal(fresh.planHash, null); assert.deepEqual<NonNullable<typeof fresh>["tasks"]>(fresh.tasks, []);
   assert.equal(payloads.length, 2); assert.equal(objectFields(payloads[1]!.historicalPlanningDraft).trust, "unverified");
   assert.equal(objectFields(objectFields(payloads[1]!.historicalPlanningDraft).source).runId, first.id);
   assert.ok(Number(objectFields(objectFields(objectFields(payloads[1]!.historicalPlanningDraft).currentCheck).diagnostics).total) > 0);
-  assert.equal(objectFields(payloads[1]!.modelBudget).limit, 1); assert.equal(objectFields(payloads[1]!.modelBudget).used, 0);
+  assert.equal(objectFields(payloads[1]!.modelBudget).limit, 2); assert.equal(objectFields(payloads[1]!.modelBudget).used, 0);
   assert.notEqual(objectFields(bindings.at(-1)).runId, objectFields(bindings[0]).runId);
   assert.deepEqual(await readFile(join(await controller.artifacts.directory(fresh.agentId, fresh.id), "index.json")), original);
-  assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 1);
+  assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 2);
   const legacy = await controller.store.getRun(fresh.id); delete legacy!.planningDraft;
   const measured = await controller.artifacts.diagnose(legacy!.agentId, legacy!.id, "index.json");
   legacy!.planDraftChecks = [{ hash: measured.hash }];
   await controller.store.save(legacy);
   const compatible = await controller.run(architecture);
   assert.equal(compatible.planningDraftSource!.snapshot.runId, fresh.id);
-  assert.equal(compatible.planning.turns, 1); assert.equal(compatible.plan, null);
+  assert.equal(compatible.planning.turns, 2); assert.equal(compatible.plan, null);
   const changed = structuredClone(architecture); changed.version++;
   const different = await controller.run(changed);
   assert.equal(different.planningDraftSource, undefined);
@@ -144,7 +145,7 @@ test("正式候选被独立评审退回后，新批次保留精确版本评语�
       outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: [], additionalProperties: false }, connectionIds: [] }] } });
   plan.cases = plan.cases.map((entry) => ({ ...entry, kind: "action", actionId: "echo", mocks: [], input: JSON.stringify(entry.input) }));
   let initialRun: unknown, continued;
-  const controller = new DevelopmentController({ dataDir: join(root, "data"), cwd: root, config: {}, limits: { reviewerTurns: 1 },
+  const controller = new DevelopmentController({ dataDir: join(root, "data"), cwd: root, config: {}, limits: { reviewerTurns: 2 },
     executor: { probe: async () => ({ available: true }) }, sessionFactory: async (options: PiSessionOptions) => {
       const tools = fixtureTools(options.customTools!);
       initialRun ??= objectFields(options.sessionStorage!.binding).runId;
@@ -158,6 +159,7 @@ test("正式候选被独立评审退回后，新批次保留精确版本评语�
           const { cases, ...index } = plan;
           await tools.write!.execute("cases", { path: "cases.json", content: JSON.stringify(cases) });
           await tools.write!.execute("index", { path: "index.json", content: JSON.stringify({ ...index, caseFiles: ["cases.json"] }) });
+          await options.onModelCall!();
           await tools.submit_development_plan!.execute("formal", { indexPath: "index.json" });
         } else {
           continued = payload.historicalPlanningDraft;
@@ -165,6 +167,7 @@ test("正式候选被独立评审退回后，新批次保留精确版本评语�
             const page = await tools.read_development_context!.execute("history", { section: "historicalPlanningDraft", limit: 8000 });
             continued = JSON.parse(JSON.parse(toolText(page)).text);
           }
+          await options.onModelCall!();
           await options.onModelCall!();
         }
       } };
@@ -177,7 +180,7 @@ test("正式候选被独立评审退回后，新批次保留精确版本评语�
   assert.equal(continued!.trust, "unverified"); assert.equal(continued!.source.runId, first.id);
   assert.equal(continued!.historicalReview.reviewedPlanHash, first.planAttempts[0]!.planHash);
   assert.equal(continued!.historicalReview.review.verdict, "revise");
-  assert.equal(continued!.currentCheck.status, "valid"); assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 1);
+  assert.equal(continued!.currentCheck.status, "valid"); assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 2);
   await controller.run(architecture);
   assert.equal(continued!.historicalReview.sourceRunId, first.id);
   assert.equal(continued!.historicalReview.reviewedPlanHash, first.planAttempts[0]!.planHash);

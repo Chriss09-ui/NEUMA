@@ -206,6 +206,42 @@ function bindPlatform<A extends PassedDevelopmentArchitecture>(architecture: A, 
     platformHash, reviewContext: { candidateHash: architecture.candidateHash, platformHash } });
 }
 
+test("二百个用例同时失败按原责任与诊断合组，进入修复并完整复评", async t => {
+  const f = await fixture(t, {
+    onVerify: (_options, report, number) => number === 1 ? { ...report, status: "failed", results: report.results.map(row => ({ ...row, status: "failed", reason: "assertion_mismatch: result" })) } : report,
+    onPrompt: async ({ record, payload, submit, respond }) => {
+      if (record.role === "planner") {
+        const plan = developmentPlan({ requirements: payload.requirements!, design: payload.design! });
+        plan.tasks = [{ ...plan.tasks[0]!, files: ["main.mjs", "guard.mjs"], acceptanceIds: payload.design!.acceptance.map(row => row.id) }];
+        plan.cases = Array.from({ length: 200 }, (_, index) => ({ ...plan.cases[index % plan.cases.length]!, id: `case_${index}`, taskId: "core" }));
+        return submit(plan);
+      }
+      if (record.role === "reviewer" && objectFields(payload.report).status === "failed") return submit(developmentReview(payload.subjectHash!, {
+        verdict: "revise", issues: [{ ...developmentIssue(), taskIds: ["core"], files: ["main.mjs"] }] }));
+      return respond();
+    },
+  });
+  const original = f.controller.sessionFactory; let children = 0;
+  f.controller.sessionFactory = async options => {
+    const tools = fixtureTools(options.customTools);
+    if (!tools.submit_repair_patch) return original(options);
+    return { sessionFile: join(options.sessionStorage!.directory, "case-repair.jsonl"), async prompt(text) {
+      children++;
+      const assignment = JSON.parse(text).repairAssignment;
+      await tools.submit_repair_patch!.execute("repair", { baseHash: assignment.baseHash,
+        issueIds: assignment.issues.map((row: { id: string }) => row.id), summary: "按全部失败证据修复同一责任文件，等待完整回归",
+        updates: [{ path: "/files/main.mjs", value: "console.log(JSON.stringify({ok:true}));\n// repaired" }] });
+    }, abort() {}, dispose() {} };
+  };
+  const result = await f.controller.run(f.architecture);
+  assert.equal(result.status, "completed", result.summary); assert.equal(result.plan!.cases.length, 200);
+  assert.equal(children, 1); assert.equal(result.budgets.corrections, 5);
+  const batch = Object.values(result.repairBatches!)[0]!;
+  assert.equal(batch.checkpoint.version, 2); assert.equal(batch.checkpoint.issues.length, 2);
+  assert.equal(result.reports[0]!.results.length, 200);
+  assert.equal(result.reports.at(-1)!.results.filter(row => row.status === "passed").length, 200);
+});
+
 async function contextField<K extends keyof ModelPayload & string>(record: ModelRecord, payload: ModelPayload, section: K): Promise<ModelPayload[K]> {
   if (Object.hasOwn(payload, section)) return payload[section];
   assert.ok(payload.contextSections!.some((item) => item.section === section), `压缩输入必须保留 ${section} 的读取入口`);
