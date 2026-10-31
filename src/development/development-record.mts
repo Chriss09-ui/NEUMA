@@ -1,5 +1,6 @@
 import { Ajv } from "ajv";
 import { readRepairCheckpoint } from "../runtime/repair-scheduler.mjs";
+import { readDevelopmentWorkCheckpoint } from "./development-dispatch.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, REVIEW_SCHEMA as ARCHITECTURE_REVIEW_SCHEMA } from "../architecture/architecture-contract.mjs";
 import { LEGACY_PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA } from "./development-contract.mjs";
@@ -101,7 +102,12 @@ const valid = new Ajv({ strict: false, allErrors: false }).compile<DevelopmentRu
 /** Checks persisted controller fields without filling historical gaps or changing stored bytes. Semantic bindings remain controller gates. */
 export function readDevelopmentRunRecord(value: unknown): DevelopmentRunRecord {
   if (!valid(value)) throw new InputError("研发检查点字段已损坏，不能恢复阶段状态或模型预算");
-  if (value.repairDispatchVersion !== undefined && value.repairDispatchVersion !== 1
+  if (value.workloadPolicyVersion !== undefined && value.workloadPolicyVersion !== 1
+    || value.dispatchedWork !== undefined && (!Array.isArray(value.dispatchedWork) || value.dispatchedWork.some(key => typeof key !== "string"))
+    || value.workDispatches !== undefined && (!value.workDispatches || typeof value.workDispatches !== "object" || Array.isArray(value.workDispatches)))
+    throw new InputError("研发工作分派记录无效。");
+  for (const checkpoint of Object.values(value.workDispatches ?? {})) readDevelopmentWorkCheckpoint(checkpoint);
+  if (value.repairDispatchVersion !== undefined && value.repairDispatchVersion !== 1 && value.repairDispatchVersion !== 2
     || value.pendingPlanRepair !== undefined && typeof value.pendingPlanRepair !== "boolean"
     || value.repairBatches !== undefined && (!value.repairBatches || typeof value.repairBatches !== "object" || Array.isArray(value.repairBatches)))
     throw new InputError("研发修复调度版本或进度无效。");

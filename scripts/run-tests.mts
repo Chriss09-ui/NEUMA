@@ -79,7 +79,7 @@ export const TEST_LAYERS = Object.freeze({
     "development/development-file-tools.test.mjs", "development/development-fixture-integration.test.mjs", "development/development-fixture-text-integration.test.mjs",
     "development/development-index-contract.test.mjs", "development/development-input-admission.test.mjs", "development/development-integration.test.mjs",
     "development/development-plan-diagnostics.test.mjs", "development/development-planning-blocker.test.mjs", "development/development-planning-draft-recovery.test.mjs",
-    "development/development-planning-recovery.test.mjs", "development/development-planning-tool-failures.test.mjs", "development/development-session-recovery.test.mjs",
+    "development/development-planning-recovery.test.mjs", "development/development-planning-tool-failures.test.mjs", "development/development-session-recovery.test.mjs", "development/development-recovery-routing.test.mjs", "development/development-work-dispatch.test.mjs",
     "development/development-submission-continuation.test.mjs", "development/development-task-order.test.mjs", "development/development-test-material-audit.test.mjs",
     "development/development-tool-inputs.test.mjs", "development/managed-development-integration.test.mjs", "development/managed-workflow-verification.test.mjs",
     "development/node-action.test.mjs", "development/raw-json-input-integration.test.mjs", "installation/installation.test.mjs",

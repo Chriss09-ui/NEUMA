@@ -52,6 +52,20 @@ test("分组代码合并拒绝外部冲突，部分写入中断后可沿同一�
   assert.equal((await call(tools, "read_code_file", { path: "b.mjs" })).content, "new-b");
 });
 
+test("有效最终树接近总量上限时先缩小文件，避免中途扩容造成永久重放失败", async t => {
+  const { workspace } = await fixture(t), unit = 1024 * 1024;
+  const files = Object.fromEntries([1, 2, 2, 2, 2, 1].map((size, index) => [`file${index}.mjs`, "x".repeat(size * unit)]));
+  const tools = await workspace.tools("agent_one", "capacity", { allowedFiles: Object.keys(files) });
+  for (const [path, content] of Object.entries(files)) await call(tools, "write_code_file", { path, content });
+  const before = await workspace.snapshot("agent_one", "capacity");
+  const candidate = { ...files, "file0.mjs": "y".repeat(2 * unit), "file1.mjs": "z".repeat(unit) };
+  const after = await workspace.applyRepair("agent_one", "capacity", before, candidate, ["file0.mjs", "file1.mjs"]);
+  assert.equal(after.files.reduce((sum, file) => sum + file.size, 0), DEVELOPMENT_LIMITS.totalBytes);
+  assert.equal(await readFile(join(after.path, "file0.mjs"), "utf8"), candidate["file0.mjs"]);
+  assert.equal(await readFile(join(after.path, "file1.mjs"), "utf8"), candidate["file1.mjs"]);
+  assert.equal(await readFile(join(before.path, "file0.mjs"), "utf8"), files["file0.mjs"]);
+});
+
 test("路径穿越、隐藏凭据、元数据、符号链接及硬链接均拒绝", async (t) => {
   const { workspace, root } = await fixture(t);
   const code = await workspace.create("agent_one", "safe");

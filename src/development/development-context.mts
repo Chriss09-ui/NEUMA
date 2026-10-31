@@ -4,7 +4,7 @@ import type { DevelopmentCandidateDesign } from "./development-controller-types.
 import type { DevelopmentTask, DevelopmentCase } from "../contracts/development.mjs";
 import type { NeumaTool } from "../runtime/execution-port.mjs";
 import type { ContextEvent } from "../runtime/execution-port.mjs";
-import { objectFields, isRecord, isInteger, isArray } from "../runtime/type-boundary.mjs";
+import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 interface ContextTask { id?: string; dependsOn?: string[]; requirementIds?: string[]; acceptanceIds?: string[]; feedback?: unknown;
   status?: unknown; attempts?: unknown; repairs?: unknown; turns?: unknown; integration?: unknown; title?: unknown; description?: unknown; goal?: unknown; summary?: unknown; nextAction?: unknown }
 interface ContextDesign { profile?: unknown; rationale?: unknown; execution?: unknown; decisions?: unknown; interaction?: unknown; connections?: unknown; capabilities?: unknown; state?: unknown; failureHandling?: unknown; unknowns?: unknown;
@@ -23,7 +23,7 @@ type ContextMessages = ContextEvent["messages"];
 export interface PreparedDevelopmentContext { message: string; kind: string | undefined; delivery: ContextDelivery | undefined }
 import { InputError } from "../requirements/core.mjs";
 import { createHash } from "node:crypto";
-import { modelContextValue } from "../runtime/model-context.mjs";
+import { createModelContextReader } from "../runtime/model-context.mjs";
 import { deferredObligations, platformOverview } from "../architecture/architecture-model-context.mjs";
 
 const forbiddenSections = new Set(["__proto__", "prototype", "constructor"]);
@@ -48,10 +48,8 @@ function checkedPayload(value: unknown): UnknownRecord {
   return objectFields(value);
 }
 
-const lowSurrogate = (value: number) => value >= 0xdc00 && value <= 0xdfff;
-const highSurrogate = (value: number) => value >= 0xd800 && value <= 0xdbff;
 const dividesCharacter = (value: string, offset: number) => offset > 0 && offset < value.length
-  && highSurrogate(value.charCodeAt(offset - 1)) && lowSurrogate(value.charCodeAt(offset));
+  && /[\uD800-\uDBFF]/u.test(value[offset - 1]!) && /[\uDC00-\uDFFF]/u.test(value[offset]!);
 
 function shortText(value: unknown, limit: number) {
   if (typeof value !== "string") return undefined;
@@ -179,7 +177,7 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
       : encoded(value[item.section]) === sectionSources.get(item.section) ? "full" : "summary",
   })) });
   const bindings: UnknownRecord = {};
-  for (const field of ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract"]) {
+  for (const field of ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment"]) {
     if (Object.hasOwn(payload, field) && payload[field] !== undefined) bindings[field] = structuredClone(payload[field]);
   }
   const base = describeDelivery({ contextTruncated: true, contextNotice: notice, ...bindings });
@@ -188,7 +186,7 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
     let result = describeDelivery({ ...base, ...summaries(payload, limit, count) });
     if (encoded(result).length <= maxChars) {
       // Put actual task material ahead of repeated schema guides; full evidence remains pageable.
-      for (const field of ["task", "feedback", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "deferredObligations", "platformOverview", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
+      for (const field of ["task", "caseAssignments", "reviewScope", "feedback", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "deferredObligations", "platformOverview", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
         if (!Object.hasOwn(payload, field)) continue;
         const candidate = describeDelivery({ ...result, [field]: payload[field] });
         if (encoded(candidate).length <= maxChars) result = { ...candidate, [field]: structuredClone(payload[field]) };
@@ -200,9 +198,10 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
 }
 
 export function developmentNodeContext(payload: DevelopmentContextPayload, kind: string) {
-  const fields = ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "task", "feedback", "submissionFeedback", "issues", "remaining",
+  const fields = ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment", "caseAssignments", "reviewScope", "partSchema", "task", "feedback", "submissionFeedback", "issues", "remaining",
     "requirements", "design", "verificationAssignments", "entrypoint", "runtime", "application", "checkpoint", "planningWorkspace"];
   if (kind === "planner") fields.push("previousPlan", "historicalPlanningDraft", "caseFacts", "completedTasks", "planningFiles");
+  if (payload.workAssignment) fields.push("plan");
   if (kind === "developer") fields.push("cases", "activationCases", "activationChecks");
   if (kind === "reviewer") fields.push("plan", "planHash", "report", "codeHash", "caseFacts", "admissionFacts");
   const result: DevelopmentContextPayload = Object.fromEntries(fields.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
@@ -333,39 +332,25 @@ export function restoreDevelopmentContext(messages: SessionMessage[], payload: D
 
 export function createContextReadTool(getPayload: () => unknown | Promise<unknown>): NeumaTool {
   if (typeof getPayload !== "function") throw new InputError("上下文读取工具需要当前任务上下文入口");
-  return {
-    name: "read_development_context", label: "分页读取当前研发资料",
-    description: "只读当前轮完整资料。section 使用 contextSections 字段名；可用pointer直接读取JSON子字段，offset/nextOffset为UTF-16字符索引，不访问文件。",
-    parameters: { type: "object", properties: {
-      section: { type: "string", minLength: 1, maxLength: 80, pattern: "^[A-Za-z_][A-Za-z0-9_]*$", description: "原始输入顶层字段名，例如 report、feedback、plan、cases" },
-      pointer: { type: "string", maxLength: 500, description: "可选JSON Pointer，例如 /properties/cases；缺省读取整个section" },
-      offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 8000 },
-    }, required: ["section"], additionalProperties: false },
-    executionMode: "sequential",
-    execute: async (_id, params, signal) => {
+  const reader = createModelContextReader(async () => checkedPayload(await getPayload()));
+  const legacy = reader.parameters.properties!.requests!.items!;
+  return { ...reader, name: "read_development_context", label: "读取当前研发资料",
+    description: "读取当前研发完整资料，每项最多10000字符；requests可同时读取1至8项、合计24000字符。续读原样使用nextRequest，绑定原文版本。兼容旧section/pointer/offset/limit；不访问文件或网络。",
+    parameters: { type: "object", additionalProperties: false,
+      properties: { ...legacy.properties, ...reader.parameters.properties }, anyOf: [reader.parameters, legacy] },
+    execute: async (id, params, signal) => {
+      if (Array.isArray(objectFields(params).requests)) return reader.execute(id, params, signal);
       signal?.throwIfAborted();
-      if (!params || typeof params !== "object" || Array.isArray(params)
-        || Object.keys(params).some((key) => !["section", "pointer", "offset", "limit"].includes(key))) throw new InputError("上下文分页参数无效");
-      const { section: rawSection, pointer = "", offset = 0, limit = 4000 } = objectFields(params);
-      const section = validSection(rawSection);
-      if (!isInteger(offset) || offset < 0 || !isInteger(limit) || limit < 1 || limit > 8000) {
-        throw new InputError("上下文分页位置或长度无效；每页最多 8000 字符");
-      }
-      const payload = checkedPayload(await getPayload());
-      signal?.throwIfAborted();
-      if (!Object.hasOwn(payload, section)) {
-        const sections = Object.keys(payload).filter((key) => sectionPattern.test(key) && !forbiddenSections.has(key));
-        throw new InputError("当前轮上下文不存在这个顶层字段；可读取的section：" + JSON.stringify(sections));
-      }
-      const source = encoded(modelContextValue(payload, section, pointer));
-      if (source === undefined) throw new InputError("当前字段没有可读取的 JSON 内容");
-      if (offset > source.length || dividesCharacter(source, offset)) throw new InputError("续读位置无效，请使用上一页返回的 nextOffset");
-      let end = Math.min(source.length, offset + limit);
-      if (dividesCharacter(source, end)) end--;
-      if (end === offset && offset < source.length) throw new InputError("当前字符需要两个字符索引位置，请将分页长度至少设为 2");
-      const truncated = end < source.length;
-      const page = { section, ...(pointer ? { pointer } : {}), offset, text: source.slice(offset, end), truncated, nextOffset: truncated ? end : null, totalChars: source.length };
-      return { content: [{ type: "text", text: JSON.stringify(page) }], details: {} };
-    },
-  };
+      const source = checkedPayload(await getPayload()), section = objectFields(params).section;
+      if (typeof section === "string" && sectionPattern.test(section) && !forbiddenSections.has(section) && !Object.hasOwn(source, section))
+        throw new InputError("当前轮上下文不存在这个顶层字段；可读取的section：" + JSON.stringify(Object.keys(source)
+          .filter(key => sectionPattern.test(key) && !forbiddenSections.has(key))));
+      const result = await createModelContextReader(() => source).execute(id, { requests: [params] }, signal);
+      const content = result.content[0];
+      if (content?.type !== "text") throw new InputError("研发资料读取回执无效");
+      const row = objectFields((JSON.parse(content.text) as { results: unknown[] }).results[0]);
+      if (row.error) throw new InputError(String(objectFields(row.error).message));
+      return { content: [{ type: "text", text: JSON.stringify({ ...row, totalChars: row.totalCharacters,
+        truncated: row.nextOffset !== null }) }], details: {} };
+    } };
 }

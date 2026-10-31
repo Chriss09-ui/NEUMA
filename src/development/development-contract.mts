@@ -310,6 +310,15 @@ export function activationCheckIssues(input: unknown, { architecture, previousPl
 }
 
 export function validatePlan(input: unknown, { architecture, previousPlan, freshWorkspace = false }: PlanOptions = {}): DevelopmentPlan {
+  return validatePlanValue(input, { architecture, previousPlan, freshWorkspace });
+}
+
+/** A planning fragment is never a delivery authorization; the assembled plan still uses validatePlan. */
+export function validatePlanningFragment(input: unknown, options: Pick<PlanOptions, "architecture" | "freshWorkspace">, budget: FixtureBudget = { bytes: 0 }) {
+  return validatePlanValue(input, options, budget);
+}
+
+function validatePlanValue(input: unknown, { architecture, previousPlan, freshWorkspace = false }: PlanOptions, fragmentBudget?: FixtureBudget): DevelopmentPlan {
   const raw = objectFields(input);
   if (architecture?.design?.schemaVersion === 3 && architecture.design.execution?.language === "none")
     fail("已评审方案无需代码研发，应返回架构层核对交付分流", { path: "plan.runtime", reason: "development_not_required" });
@@ -317,12 +326,14 @@ export function validatePlan(input: unknown, { architecture, previousPlan, fresh
   if (architecture?.design?.schemaVersion === 2 && (raw.schemaVersion !== 2 || raw.runtime !== "node-action")) {
     fail("已批准的 v2 架构必须使用 schemaVersion=2 和 node-action，不能降级为旧执行协议");
   }
-  validateSchema(input, raw.schemaVersion === 3 ? PLAN_V3_SCHEMA : raw.schemaVersion === 2 ? PLAN_V2_SCHEMA : LEGACY_PLAN_SCHEMA, "plan");
+  const schema = raw.schemaVersion === 3 ? PLAN_V3_SCHEMA : raw.schemaVersion === 2 ? PLAN_V2_SCHEMA : LEGACY_PLAN_SCHEMA;
+  validateSchema(input, fragmentBudget ? { ...schema, properties: { ...schema.properties,
+    cases: { ...schema.properties.cases, minItems: 0 } } } : schema, "plan");
   // The schema check above establishes field types; semantic validation below retains all original gates.
   const value = input as DevelopmentPlan;
   const allCases = activationCaseEntries(value);
   if (allCases.length > 200) fail("研发与激活专用用例合计不能超过200例", { path: "plan.activationCases", reason: "case_limit" });
-  const fixtureBudget: FixtureBudget = { bytes: 0 };
+  const fixtureBudget: FixtureBudget = fragmentBudget ?? { bytes: 0 };
   for (const { test } of allCases) if (value.runtime === "node-json" || test.kind === "node-check")
     assertCaseMaterials(test, { input: test.input, mocks: [] }, { budget: fixtureBudget });
   if (value.schemaVersion === 2 || value.schemaVersion === 3) {
@@ -381,7 +392,7 @@ export function validatePlan(input: unknown, { architecture, previousPlan, fresh
       if (source === "activation" && !value.application.actions.some((item) => item.id === test.actionId))
         fail("激活专用用例只能执行公开动作", { path: `plan.activationCases[${caseIndex}].actionId`, reason: "activation_case_invalid" });
     }
-    const missingExecutions = actionExecutionIssues(value);
+    const missingExecutions = fragmentBudget ? [] : actionExecutionIssues(value);
     if (missingExecutions.some((item) => !item.migration)) fail("每个动作必须有实际验收用例");
     if (missingExecutions.length) fail("迁移与迁移验证动作必须分别有实际验收用例");
   }
@@ -450,7 +461,7 @@ export function validatePlan(input: unknown, { architecture, previousPlan, fresh
       assertionPaths.add(assertion.path);
     }
   }
-  for (const id of taskIds) if (!testedTasks.has(id)) fail(`任务 ${id} 缺少实际验收用例`);
+  if (!fragmentBudget) for (const id of taskIds) if (!testedTasks.has(id)) fail(`任务 ${id} 缺少实际验收用例`);
   for (const [index, test] of (value.activationCases ?? []).entries()) {
     if (test.taskId !== undefined) referenced(test.taskId, taskIds, "activationCase.taskId");
     const assertionPaths = new Set();
@@ -460,11 +471,11 @@ export function validatePlan(input: unknown, { architecture, previousPlan, fresh
       assertionPaths.add(assertion.path);
     }
   }
-  for (const id of developmentAcceptanceIds) if (!testedAcceptance.has(id)) fail(`验收 ${id} 缺少实际验收用例`);
-  for (const task of value.tasks) for (const id of task.acceptanceIds) {
+  if (!fragmentBudget) for (const id of developmentAcceptanceIds) if (!testedAcceptance.has(id)) fail(`验收 ${id} 缺少实际验收用例`);
+  if (!fragmentBudget) for (const task of value.tasks) for (const id of task.acceptanceIds) {
     if (!testedPairs.has(`${task.id}:${id}`)) fail(`任务 ${task.id} 的验收 ${id} 缺少实际用例`);
   }
-  const activationIssues = activationCheckIssues(value, { architecture, previousPlan });
+  const activationIssues = fragmentBudget ? [] : activationCheckIssues(value, { architecture, previousPlan });
   if (activationIssues.length) fail("启用业务验收必须完整映射已有公开业务用例并覆盖同一需求，既有映射不能删除或减弱", activationIssues[0]);
   if (previousPlan !== undefined) {
     const previous = validatePlan(previousPlan, { architecture });

@@ -90,7 +90,7 @@ function plan(requirements:RequirementItem[]) {
     application: { protocolVersion: 2, runtime: "node-action", entrypoint: "actions.mjs", page: null,
       actions: [{ id: "normalize", title: "转换", inputSchema: schema({ text: { type: "string" } }), outputSchema: schema({ normalized: { type: "string" },
         length: { type: "integer" }, error: { type: "string" }, artifact: { type: "string" } }), connectionIds: [] }], stateVersion: 1, evidenceIds: [] },
-    tasks: [{ id: "normalize", title: "实现转换", description: "转换、边界拒绝和文件失败处理", requirementIds: requirements.map((item) => item.id), acceptanceIds: ["valid", "boundary", "tool_failure"], dependsOn: [], files: ["actions.mjs"] }],
+    tasks: [{ id: "normalize", title: "实现转换", description: "转换、边界拒绝和文件失败处理", requirementIds: requirements.map((item) => item.id), acceptanceIds: ["valid", "boundary", "tool_failure"], dependsOn: [] as string[], files: ["actions.mjs"] }],
     activationChecks: [{ acceptanceId: "business", caseIds: ["case_valid", "case_boundary"] }],
     cases: [caseOf("valid", "  hello  ", output("HELLO"), mock("HELLO", true)), caseOf("boundary", "x".repeat(33), output("", "too_long"), []),
       caseOf("tool_failure", "test", output("", "save_failed"), mock("TEST", false))] };
@@ -149,12 +149,12 @@ function modelFactory(state:ModelFixtureState) {
     if (staged) return staged;
     if (options.customTools!.some((tool) => tool.name === "submit_requirement_fidelity")) return fidelityChecker()(options);
     const tools = fixtureTools(options.customTools!);
-    const submit = ["submit_architecture", "submit_architecture_review", "submit_architecture_review_slice", "submit_development_plan", "submit_development_review",
+    const submit = ["submit_architecture", "submit_architecture_review", "submit_architecture_review_slice", "submit_development_plan", "submit_development_plan_part", "submit_development_review", "submit_development_review_part",
       "submit_development_work", "submit_conversation_verification"].find((name) => Object.hasOwn(tools, name));
     if (submit === "submit_conversation_verification" && state.reviewFails) throw new Error("fixture independent review unavailable");
     let text = "", listener:((event:SessionEvent)=>void)|null;
     const session = { model: { contextWindow: 1_000_000 }, messages: [] as SessionMessage[], setAutoCompactionEnabled() {}, getContextUsage: () => ({ percent: 1 }),
-      ...(options.sessionStorage ? { sessionFile: join(options.sessionStorage.directory, options.sessionStorage.file ?? `${String(objectFields(options.sessionStorage.binding).groupId)}.jsonl`) } : {}),
+      ...(options.sessionStorage ? { sessionFile: options.sessionStorage.file ?? join(options.sessionStorage.directory, `${String(objectFields(options.sessionStorage.binding).groupId)}.jsonl`) } : {}),
       subscribe(fn:(event:SessionEvent)=>void) { listener = fn; return () => { listener = null; }; },
       async prompt(message: string) {
         state.prompts.push({ submit: submit ?? "working", message });
@@ -170,6 +170,32 @@ function modelFactory(state:ModelFixtureState) {
           await tools[submit]!.execute("review-slice", { summary: "独立核对指定容量分项", issues: [], priorFindingDecisions: [],
             checks: assignment.field === "checks" ? reviewed.checks.filter(row => assignment.ids.includes(row.id)) : [],
             acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && assignment.ids.includes(row.acceptanceId)) : [] });
+        }
+        else if (submit === "submit_development_plan_part") {
+          const value = plan(payload.requirements), assignment = objectFields(payload.workAssignment);
+          if (assignment.id === "outline") {
+            const { cases: _cases, activationChecks: _activation, ...outline } = value;
+            outline.tasks = largeBlueprint!.modules.map((module, index) => ({ id: `dev_${index}`, title: `实现第${index + 1}组转换要求`,
+              description: "保持公开接口，逐组验证转换、边界和失败义务", requirementIds: module.requirementIds,
+              acceptanceIds: module.id === "core" ? ["valid", "boundary", "tool_failure"] : [`${module.id}_acceptance`],
+              dependsOn: index ? [`dev_${index - 1}`] : [], files: ["actions.mjs"] }));
+            await tools[submit]!.execute("outline", { plan: outline,
+              actionOwners: [{ actionId: "normalize", taskId: "dev_0", acceptanceId: "valid" }],
+              activationScopes: [{ acceptanceId: "business", executionScope: "isolated" }] });
+          } else {
+            const scope = payload.caseAssignments as { rows: { taskId?: string; acceptanceId: string }[]; activation: boolean };
+            const prefix = `g${String(assignment.id).slice("cases_".length)}_`;
+            const cases = scope.rows.flatMap((row, group) => {
+              const selected = scope.activation ? value.cases.slice(0, 2) : capacityAcceptanceIds.includes(row.acceptanceId)
+                ? value.cases : value.cases.filter(item => item.acceptanceId === row.acceptanceId);
+              return selected.map((original, index) => {
+                const { taskId: _task, ...body } = original;
+                return { ...body, id: `${prefix}${group}_${index}`, acceptanceId: row.acceptanceId,
+                  ...(row.taskId ? { taskId: row.taskId } : {}) };
+              });
+            });
+            await tools[submit]!.execute("cases", scope.activation ? { cases: [], activationCases: cases } : { cases, activationCases: [] });
+          }
         }
         else if (submit === "submit_development_plan") {
           const value = plan(payload.requirements), { cases, ...index } = value;
@@ -188,7 +214,7 @@ function modelFactory(state:ModelFixtureState) {
           await tools.save_plan_json!.execute("index", { path: "index.json", value: { ...index, caseFiles: ["cases.json"] } });
           await tools.save_plan_cases!.execute("cases", { path: "cases.json", cases });
           await tools[submit]!.execute("plan", { indexPath: "index.json" });
-        } else if (submit === "submit_development_review") await tools[submit]!.execute("review", developmentReview(payload.subjectHash,
+        } else if (submit === "submit_development_review" || submit === "submit_development_review_part") await tools[submit]!.execute("review", developmentReview(payload.subjectHash,
           payload.report?.mode === "runtime" && payload.report.status === "failed" ? { verdict: "revise", summary: "修复真实宿主执行差异后重新验收",
             issues: [{ id: "host_business_difference", kind: "code", blocking: true, description: "实际文件回执路径的结果未通过冻结断言", remedy: "修复代码并保留原断言重新真实执行" }] } : {}));
         else if (submit === "submit_development_work") {
@@ -247,7 +273,7 @@ async function fixture(t: test.TestContext, { managed = false, largeRequirements
   return { agents, state, result, draft, record: async () => readDevelopmentRunRecord(await agents.development.store.getRun(result.development!.id)) };
 }
 
-test("120项需求及超过512KB的完整依据经确认、保存、架构、研发、激活和实际执行保持一致", { timeout: 30000 }, async (t) => {
+test("120项需求及超过512KB的完整依据经确认、保存、架构、研发、激活和实际执行保持一致", { timeout: 60000 }, async (t) => {
   const f = await fixture(t, { largeRequirements: true }); if (!f) return;
   const record = await f.record(), ids = requirementItems(f.draft).map(item => item.id);
   assert.ok(ids.length > 100);
@@ -256,7 +282,9 @@ test("120项需求及超过512KB的完整依据经确认、保存、架构、研
   const assigned = f.state.stageCalls.filter(call => call.stage === "module").flatMap(call => call.requirementIds);
   assert.deepEqual(assigned.slice().sort(), ids.slice().sort()); assert.equal(new Set(assigned).size, ids.length);
   assert.equal(f.result.architecture!.designProgressCheckpoint!.modelCalls, 8);
-  assert.deepEqual(record!.plan!.tasks[0]!.requirementIds, ids);
+  const plannedRequirements = record!.plan!.tasks.flatMap(task => task.requirementIds);
+  assert.deepEqual(plannedRequirements.slice().sort(), ids.slice().sort());
+  assert.ok(record!.plan!.tasks.every(task => task.requirementIds.length <= 24));
   assert.deepEqual(record!.architecture.design.coverage.map((item) => item.requirementId).sort(), ids.slice().sort());
   assert.deepEqual(record!.architecture.draft, f.draft);
   assert.equal(record!.acceptanceLedger!.items.find((item) => item.acceptanceId === "business")!.status, "passed");

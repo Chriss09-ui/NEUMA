@@ -39,7 +39,10 @@ export interface DevelopmentDiagnostic extends UnknownRecord { stage: string; ph
 export interface HistoricalReview { sourceRunId: string; reviewedPlanHash: string; review: DevelopmentReview & { subjectVersion?: number }; instruction: string }
 export interface PlanningDraft { bindingHash: string; snapshot: PlanningDraftSnapshot; historicalReview?: HistoricalReview }
 export interface DevelopmentRunRecord extends SubmissionRecord {
-  repairDispatchVersion?: 1; dispatchedRepairs?: string[]; repairBatches?: Record<string, import("./development-repair.mjs").DevelopmentRepairBatch>; pendingPlanRepair?: boolean;
+  workloadPolicyVersion?: 1;
+  dispatchedWork?: string[];
+  workDispatches?: Record<string, import("./development-dispatch.mjs").DevelopmentWorkCheckpoint>;
+  repairDispatchVersion?: 1 | 2; dispatchedRepairs?: string[]; repairBatches?: Record<string, import("./development-repair.mjs").DevelopmentRepairBatch>; pendingPlanRepair?: boolean;
   id: string; agentId: string; name: string; version: number; revision: number; createdAt: string; updatedAt: string;
   architectureRef: ArchitectureReference; architecture: PassedDevelopmentArchitecture; status: string; phase: string; delivery: string; summary: string;
   budgets: { corrections: number; planRevisions: number; integrationRepairs: number }; planning: { turns: number }; tasks: TaskProgress[];
@@ -58,6 +61,8 @@ export interface DevelopmentRunRecord extends SubmissionRecord {
 export type DevelopmentRole = "planner" | "developer" | "reviewer";
 export interface DevelopmentSession extends PiSessionPort { sessionFile?: string | undefined; modelCallAccounting?: boolean; model?: { contextWindow?: number } | undefined }
 export interface DevelopmentHandle<Result = unknown> {
+  compactionAllowed?: boolean;
+  nodeGuide?: string;
   kind: DevelopmentRole; submitName: string; accepting: boolean; submitted: boolean; result: Result | undefined; counter: { turns: number }; limit: number; failed: boolean;
   turnsInPrompt: number; disposed: boolean; submissionCalls: Map<string, { value: unknown; recorded: boolean }>; planningBlocker?: unknown;
   checkToolInputs?: () => void; charge: (options?: { purpose?: string; retryAttempt?: number }) => Promise<void>;

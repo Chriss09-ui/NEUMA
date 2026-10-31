@@ -377,8 +377,10 @@ subprocessDenied:['EPERM','EACCES'].includes(child.error?.code)}));`;
           catch { return { ...report, status: "error", summary: "Node 检查入口无效" }; }
           if (!application!.page || !/\.(?:mjs|js)$/.test(item.entrypoint!) || item.entrypoint === entrypoint
             || Object.hasOwn(item, "actionId") || Object.hasOwn(item, "mocks")
-            || application!.page.resources.some((resource) => resource.path === item.entrypoint)
-            || !snapshot.files.some((file) => file.path === item.entrypoint)) return { ...report, status: "error", summary: "Node 检查必须使用独立且未公开的快照入口" };
+            || application!.page.resources.some((resource) => resource.path === item.entrypoint)) return { ...report, status: "error", summary: "Node 检查必须使用独立且未公开的快照入口" };
+          if (!snapshot.files.some(file => file.path === item.entrypoint)) return { ...report, status: "error",
+            summary: "当前任务的 Node 检查入口尚未写入代码快照，需要修复实现",
+            results: [{ caseId: item.id, status: "error", input: item.input, exitCode: null, reason: "entrypoint_missing" }] };
         } else if (Object.hasOwn(item, "entrypoint")) return { ...report, status: "error", summary: "动作验收不能指定其他入口" };
       }
       try {

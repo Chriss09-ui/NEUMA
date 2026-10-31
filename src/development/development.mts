@@ -1,5 +1,8 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import { needsDevelopmentRepairDispatch, repairDevelopmentPlan, repairDevelopmentCode } from "./development-repair.mjs";
+import { repairableDevelopmentReport } from "./development-failures.mjs";
+import { planDevelopmentParts, shouldDistributeDevelopmentPlanning, planningResolverTools } from "./development-planning-dispatch.mjs";
+import { reviewDevelopmentParts, shouldDistributeDevelopmentReview } from "./development-review-dispatch.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { RegisteredTool as ToolDefinition } from "../runtime/execution-port.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
@@ -30,7 +33,9 @@ interface ControllerOptions { config: ModelConfig; cwd: string; dataDir: string;
 interface ActivationResult { delivery: string; summary?: string; repair?: Omit<DevelopmentEvidence, "id" | "codeHash"> & { codeHash?: string | null }; acceptanceLedger?: AcceptanceLedger; runtimeCheck?: unknown }
 interface RunOptions { signal?: AbortSignal | undefined; onProgress?: (value: UnknownRecord) => void; resume?: boolean;
   activate?: (record: DevelopmentRunRecord, signal: AbortSignal) => Promise<ActivationResult> }
-type RoleOptions<T> = { kind: DevelopmentRole; tools?: RegisteredTool[]; validate: (value: unknown) => T | Promise<T>; counter: { turns: number }; limit: number; scope: unknown };
+type RoleOptions<T> = { kind: DevelopmentRole; tools?: RegisteredTool[]; validate: (value: unknown) => T | Promise<T>; counter: { turns: number }; limit: number; scope: unknown;
+  submission?: { name: string; schema: ToolSchema; instruction: string }; blocker?: boolean; compaction?: false;
+  onModelCall?: (event: { purpose?: string; retryAttempt?: number }) => Promise<void> };
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
@@ -47,7 +52,7 @@ import { serviceErrorMessage } from "../services/service-errors.mjs";
 import { DevelopmentStore } from "./development-store.mjs";
 import { DevelopmentWorkspace } from "./development-workspace.mjs";
 import { DevelopmentExecutor } from "./development-executor.mjs";
-import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT, developmentNodePrompt } from "./development-prompts.mjs";
+import { PLAN_PROMPT, CODE_PROMPT, REVIEW_PROMPT, developmentNodePrompt, developmentPartGuide } from "./development-prompts.mjs";
 import { compactDevelopmentContext, developmentContextMessage, restoreDevelopmentContext, createContextReadTool } from "./development-context.mjs";
 import { developmentCaseFacts } from "./development-case-facts.mjs";
 import { bindApplicationManifest, VALUE_SCHEMA_DESCRIPTION } from "../applications/application-contract.mjs";
@@ -121,15 +126,27 @@ function validateTaskWork(value: unknown, task: TaskProgress) {
 
 export function developmentSummary(record: DevelopmentRunRecord | DevelopmentSummaryRecord | null) {
   if (!record) return null;
+  const exhaustedWork = Object.values(record.workDispatches ?? {}).some(({ dispatch }) => {
+    const pending = dispatch.groups.filter(group => !group.result);
+    return pending.some(group => group.calls >= dispatch.groupCallLimit) || dispatch.callLimit - dispatch.calls < pending.length;
+  });
+  const exhaustedRepairs = Object.values(record.repairBatches ?? {}).some(({ checkpoint, applied }) => {
+    const pending = checkpoint.groups.filter(group => !group.result);
+    return !applied && (pending.some(group => group.calls >= checkpoint.groupCallLimit) || checkpoint.callLimit - checkpoint.calls < pending.length);
+  });
   const freshPlanningRound = record.status === "failed" && unacceptedPlanning(record)
     && (["turn_limit", "correction_limit"].includes(typeof record.diagnostic?.reason === "string" ? record.diagnostic.reason : "")
       || record.budgets?.planRevisions === 0 && record.reviews?.findLast((entry) => entry.mode === "plan")?.verdict === "revise"
-      || Object.values(record.sessions ?? {}).some((entry) => entry.role === "planner" && isInteger(entry.limit)
+      || exhaustedWork || exhaustedRepairs || !record.workloadPolicyVersion && Object.values(record.sessions ?? {}).some((entry) => entry.role === "planner" && isInteger(entry.limit)
         && entry.limit > 0 && entry.turns >= entry.limit));
+  const cannotResume = !freshPlanningRound && (exhaustedWork || exhaustedRepairs
+    || ["turn_limit", "correction_limit", "repeated_tool_error"].includes(String(record.diagnostic?.reason)));
   return clone({ id: record.id, agentId: record.agentId, name: record.name, version: record.version,
     architectureRef: record.architectureRef, status: record.status, phase: record.phase, summary: record.summary,
     diagnostic: record.diagnostic ?? null,
     ...(freshPlanningRound ? { continuation: { mode: "fresh", sourceRunId: record.id, reason: "planning_budget_exhausted", historyPreserved: true } } : {}),
+    ...(cannotResume ? { continuation: { mode: "blocked", sourceRunId: record.id,
+      reason: record.diagnostic?.reason ?? "work_budget_exhausted", historyPreserved: true } } : {}),
     acceptance: record.acceptanceLedger ? summarizeAcceptanceLedger(record.acceptanceLedger, { allowPendingActivationAdapters: ["host-gateway"] }) : null,
     submissionCounts: record.submissionCounts ?? {},
     delivery: record.delivery, currentTaskId: record.currentTaskId, budgets: record.budgets,
@@ -233,20 +250,25 @@ export class DevelopmentController {
     });
   }
 
+  async role<T>(ctx: DevelopmentContext, options: RoleOptions<T> & { submission: NonNullable<RoleOptions<T>["submission"]>; blocker: false }): Promise<DevelopmentHandle<T>>;
+  async role<T>(ctx: DevelopmentContext, options: RoleOptions<T> & { submission: NonNullable<RoleOptions<T>["submission"]>; blocker: boolean }): Promise<DevelopmentHandle<T | { report: PlanningBlockerReport }>>;
   async role(ctx: DevelopmentContext, options: RoleOptions<DevelopmentPlan> & { kind: "planner" }): Promise<DevelopmentHandle<DevelopmentPlan | { report: PlanningBlockerReport }>>;
   async role(ctx: DevelopmentContext, options: RoleOptions<DevelopmentWork> & { kind: "developer" }): Promise<DevelopmentHandle<DevelopmentWork>>;
   async role(ctx: DevelopmentContext, options: RoleOptions<DevelopmentReview> & { kind: "reviewer" }): Promise<DevelopmentHandle<DevelopmentReview>>;
-  async role(ctx: DevelopmentContext, { kind, tools = [], validate, counter, limit, scope }: RoleOptions<DevelopmentPlan | DevelopmentWork | DevelopmentReview>): Promise<DevelopmentHandle<DevelopmentPlan | DevelopmentWork | DevelopmentReview | { report: PlanningBlockerReport }>> {
+  async role(ctx: DevelopmentContext, { kind, tools = [], validate, counter, limit, scope, submission, blocker, compaction, onModelCall }: RoleOptions<unknown>): Promise<DevelopmentHandle> {
     validatePlatformMetadata(ctx.record.architecture);
     const platform = ctx.record.architecture.platformSnapshot;
-    const name = kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review";
+    const name = submission?.name ?? (kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review");
     const schemas = { planner: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
-    const filePlan = kind === "planner" && Number(ctx.record.architecture.design.schemaVersion) >= 2;
+    const resultSchema = submission?.schema ?? schemas[kind];
+    const filePlan = !submission && kind === "planner" && Number(ctx.record.architecture.design.schemaVersion) >= 2;
     const freshWorkspace = filePlan && ctx.planningWorkspace?.empty === true;
     const submitSchema = filePlan ? { type: "object", properties: { indexPath: { type: "string", minLength: 1, maxLength: 500,
-      description: "独立规划目录内的 JSON 索引相对路径；计划和用例已用 write/edit 保存" } }, required: ["indexPath"], additionalProperties: false } : schemas[kind];
-    const handle = { kind, submitName: name, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false, submissionCalls: new Map<string, { value: unknown; recorded: boolean }>() } as DevelopmentHandle<DevelopmentPlan | DevelopmentWork | DevelopmentReview | { report: PlanningBlockerReport }>;
-    const planningBlocker = kind === "planner" ? createDevelopmentPlanningBlocker(ctx.record, {
+      description: "独立规划目录内的 JSON 索引相对路径；计划和用例已用 write/edit 保存" } }, required: ["indexPath"], additionalProperties: false } : resultSchema;
+    const handle = { kind, submitName: name, accepting: false, submitted: false, result: undefined, counter, limit, failed: false, turnsInPrompt: 0, disposed: false, submissionCalls: new Map<string, { value: unknown; recorded: boolean }>(),
+      compactionAllowed: compaction !== false && kind === "developer",
+      ...(submission ? { nodeGuide: developmentPartGuide(kind, name, submission.instruction) } : {}) } as DevelopmentHandle;
+    const planningBlocker = kind === "planner" && blocker !== false ? createDevelopmentPlanningBlocker(ctx.record, {
       acceptanceAdapterGuide: ctx.record.architecture.runtimeCapabilities ? ACCEPTANCE_ADAPTER_GUIDE : null }) : null;
     if (planningBlocker) handle.planningBlocker = planningBlocker.context;
     let rejectedPlanningMaterial: { hash: string | null; indexPath: unknown } | null = null;
@@ -283,6 +305,8 @@ export class DevelopmentController {
         persistent.reference.turns = counter.turns;
         if (purpose === "compaction") persistent.reference.compactions = (persistent.reference.compactions ?? 0) + 1;
       }
+      if (counter.turns >= limit - 1) handle.session?.setAutoCompactionEnabled?.(false);
+      await onModelCall?.({ purpose, retryAttempt });
       await this.save(ctx);
     };
     handle.charge = charge;
@@ -295,7 +319,7 @@ export class DevelopmentController {
       const call = handle.submissionCalls.get(id);
       if (call?.recorded) return;
       if (call) call.recorded = true;
-      const issues = status === "rejected" ? diagnosticIssues ?? submissionIssues(value, stage === "sdk" ? submitSchema : schemas[kind], {
+      const issues = status === "rejected" ? diagnosticIssues ?? submissionIssues(value, stage === "sdk" ? submitSchema : resultSchema, {
         root, error, sdk: stage === "sdk", architecture: ctx.record.architecture }) : [];
       recordSubmission(ctx.record, { role: kind, phase: ctx.record.phase, taskId: ctx.record.currentTaskId,
         turn: counter.turns, stage, status, issues });
@@ -357,7 +381,7 @@ export class DevelopmentController {
         handle.session?.setAutoCompactionEnabled?.(false);
         return { ...toolResult({ submitted: true }), terminate: true };
       } };
-    const webTools = kind === "reviewer" ? [] : createWebTools({ web: this.web, agentId: ctx.record.agentId,
+    const webTools = kind === "reviewer" || submission ? [] : createWebTools({ web: this.web, agentId: ctx.record.agentId,
       scope: `development:${ctx.record.id}`, signal: ctx.signal,
       allowNetwork: objectFields(objectFields(platform).network).allowNetwork !== false && networkAllowed(ctx.record.architecture.requirements) });
     const blockerTool: NeumaTool | null = planningBlocker ? { name: "submit_development_blocker", label: "提交规划技术阻断",
@@ -384,6 +408,8 @@ export class DevelopmentController {
       this.guard(ctx);
       checkToolInputs();
       if (!handle.accepting || handle.submitted) throw new InputError("当前阶段不能继续修改或读取工具，请等待下一项工作");
+      if (ctx.record.workloadPolicyVersion === 1 && counter.turns >= limit)
+        throw new InputError("最后一次请求只用于正式提交，不能继续读取、写入或自测。");
       const result = await tool.execute(args[0], args[1], args[2], args[3], args[4]);
       this.guard(ctx);
       await clearToolInputFailure(tool.name);
@@ -462,9 +488,12 @@ export class DevelopmentController {
       reasoningMode: kind === "reviewer" ? "off" : "auto",
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
       systemPrompt: developmentNodePrompt(kind)
-        + (kind === "reviewer" ? "" : "\n" + WEB_RUNTIME_PROMPT)
+        + (submission ? "\n本次分派优先规则：" + submission.instruction : "")
+        + (webTools.length ? "\n" + WEB_RUNTIME_PROMPT : "")
         + "\n" + renderPiSubmissionContract({ role: kind, submitName: name, tools: sessionTools, alternativeTools: blockerTool ? [blockerTool.name] : [], structuredResponse: true }),
       customTools: sessionTools, sessionStorage: persistent.options, onModelCall: charge,
+      ...(ctx.record.workloadPolicyVersion === 1 ? { toolAvailability: ({ retryAttempt }: { retryAttempt: number }) =>
+        counter.turns - (retryAttempt > 0 ? 1 : 0) >= limit - 1 ? [name, ...(blockerTool ? [blockerTool.name] : [])] : sessionTools.map(tool => tool.name) } : {}),
       transformContext: (messages) => handle.contextMessage
         ? restoreDevelopmentContext(messages, handle.payload, handle.contextMaxChars, handle.contextMessage) : messages,
       rawInputValidators: Object.fromEntries(sessionTools.map((tool) => [tool.name, async ({ args, toolCallId }) => {
@@ -546,7 +575,7 @@ export class DevelopmentController {
     handle.checkToolInputs?.();
     ctx.lastRole = handle.kind;
     handle.payload = clone({ ...payload, ...(handle.planningBlocker ? { planningBlockerContract: handle.planningBlocker } : {}) });
-    handle.payload.roleGuide = { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[handle.kind];
+    handle.payload.roleGuide = handle.nodeGuide ?? { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[handle.kind];
     if (ctx.record.architecture.platformSnapshot) handle.payload.platformGuide = renderPlatformRules(ctx.record.architecture.platformSnapshot,
       { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities });
     handle.payload.modelBudget = { limit: handle.limit, used: handle.counter.turns, remaining: Math.max(0, handle.limit - handle.counter.turns) };
@@ -574,7 +603,7 @@ export class DevelopmentController {
       stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "turn_limit",
     });
     Object.assign(handle, { accepting: true, submitted: false, result: undefined, turnsInPrompt: 0 });
-    handle.session.setAutoCompactionEnabled?.(true);
+    handle.session.setAutoCompactionEnabled?.(Boolean(handle.compactionAllowed && handle.counter.turns < handle.limit - 2));
     try {
       const maxChars = Math.min(handle.kind === "developer" ? 24_000 : 64_000, Math.max(4096, Math.floor((handle.session.model?.contextWindow ?? 32768) / 2)));
       const prepared = developmentContextMessage(handle.payload, maxChars, { reference: handle.reference, messages: handle.session.messages, kind: handle.kind });
@@ -682,6 +711,13 @@ export class DevelopmentController {
     ctx.record.pendingReview = { mode, subjectHash, planHash: payload.planHash ?? null, codeHash: snapshot?.hash ?? null,
       reportId: payload.report?.id ?? null };
     await this.save(ctx);
+    if (shouldDistributeDevelopmentReview(ctx, payload, snapshot)) {
+      const result = await reviewDevelopmentParts(this, ctx, mode, subjectHash, payload, snapshot);
+      const checked = subjectVersion === 2 ? { ...result, subjectVersion } : result;
+      ctx.record.reviews.push({ ...checked, mode, codeHash: snapshot?.hash ?? null, planHash: payload.planHash ?? null });
+      ctx.record.pendingReview = null;
+      await this.save(ctx); return checked;
+    }
     const counter = { turns: 0 };
     const handle = await this.role(ctx, { kind: "reviewer", counter, limit: this.limits.reviewerTurns,
       scope: { subjectHash },
@@ -729,30 +765,17 @@ export class DevelopmentController {
           planSchema: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA,
           architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined, historicalDraft, freshWorkspace })
         : await this.workspace.tools(ctx.record.agentId, ctx.record.id, { readOnly: true, signal: ctx.signal })),
-        ...(this.services && ctx.record.architecture.design.schemaVersion === 3 ? [{ name: "resolve_service_dependencies", label: "核实服务依赖",
-          description: "从受支持的官方包目录解析固定版本及完整依赖工件，不执行包代码。返回的URL与摘要用于服务清单，不能自己猜测。",
-          parameters: { type: "object", properties: { packages: { type: "array", maxItems: 40, items: { type: "object", properties: {
-            name: { type: "string" }, version: { type: "string" } }, required: ["name", "version"], additionalProperties: false } } }, required: ["packages"], additionalProperties: false },
-          executionMode: "sequential" as const, execute: async (_id: string, value: unknown) => {
-            this.guard(ctx);
-            if (!networkAllowed(ctx.record.architecture.draft)) throw new InputError("当前需求禁止联网，不能下载未缓存的依赖");
-            const result = await this.services!.resolveDependencies({ language: ctx.record.architecture.design.execution!.language,
-              host: ctx.record.architecture.design.execution!.hosting, packages: objectFields(value).packages, signal: ctx.signal });
-            this.guard(ctx); return toolResult(result);
-          } }, { name: "resolve_service_image", label: "核实容器镜像",
-          description: "查询 Docker Hub 官方镜像的 linux/arm64 固定摘要；仅核实清单，不执行或安装容器。",
-          parameters: { type: "object", properties: { image: { type: "string" } }, required: ["image"], additionalProperties: false },
-          executionMode: "sequential" as const, execute: async (_id: string, value: unknown) => {
-            this.guard(ctx); if (!networkAllowed(ctx.record.architecture.draft)) throw new InputError("当前需求不允许联网核实镜像");
-            const result = await this.services!.resolveDockerImage({ image: objectFields(value).image, signal: ctx.signal });
-            this.guard(ctx); return toolResult(result);
-          } }] : [])],
+        ...planningResolverTools(this, ctx)],
       validate: (value) => validatePlan(value, { architecture: ctx.record.architecture, previousPlan: oldPlan ?? undefined, freshWorkspace }) });
       for (;;) {
         if (ctx.record.pendingPlanRepair) {
           const feedback = ctx.record.feedback;
           if (!feedback?.review || !feedback.rejectedPlan) throw new InputError("待修订计划的原候选或评语缺失。");
           await repairDevelopmentPlan(this, ctx, feedback.rejectedPlan, { review: feedback.review });
+        }
+        if (!ctx.record.pendingPlan && !ctx.record.feedback?.rejectedPlan && shouldDistributeDevelopmentPlanning(ctx)) {
+          try { await planDevelopmentParts(this, ctx); }
+          catch (error) { if (ctx.record.status === "blocked") return; throw error; }
         }
         const caseFacts = ctx.record.pendingPlan?.plan == null ? planningCaseFacts(ctx.record, ctx.signal) : undefined;
         const plan = ctx.record.pendingPlan?.plan ?? await this.ask(ctx, handle, { ...this.base(ctx, caseFacts), previousPlan: ctx.record.plan,
@@ -790,7 +813,7 @@ export class DevelopmentController {
         if (review.verdict === "blocked" || review.issues.some((item) => item.blocking && ["architecture", "environment"].includes(item.kind)))
           throw new Stop(review.summary);
         await this.correction(ctx, "plan", null, () => {
-          if (needsDevelopmentRepairDispatch(ctx, { review })) ctx.record.pendingPlanRepair = true;
+          if (needsDevelopmentRepairDispatch(ctx, { review }) || shouldDistributeDevelopmentPlanning(ctx)) ctx.record.pendingPlanRepair = true;
         });
       }
     } finally { await this.dispose(ctx, handle); delete ctx.planningWorkspace; }
@@ -798,9 +821,7 @@ export class DevelopmentController {
 
   async verify(ctx: DevelopmentContext, task: TaskProgress | null, snapshot: DevelopmentSnapshot) {
     await this.phase(ctx, "verifying", task ? `正在验收「${task.title}」并检查已有功能…` : "正在对全部任务进行整体验收…");
-    const selected = new Set(ctx.record.tasks.filter((item) => item.status === "verified").map((item) => item.id));
-    if (task) selected.add(task.id);
-    const cases = !task || task.integration ? ctx.record.plan!.cases : ctx.record.plan!.cases.filter((item) => selected.has(item.taskId));
+    const cases = this.verificationCases(ctx, task);
     const pending = ctx.record.pendingReview;
     let evidence = pending?.mode === (task ? "task" : "integration") && pending.codeHash === snapshot.hash
       && pending.planHash === ctx.record.planHash ? ctx.record.reports.find((item) => item.id === pending.reportId
@@ -815,10 +836,18 @@ export class DevelopmentController {
       ctx.record.reports.push(evidence);
       await this.save(ctx);
     }
-    if (["not_run", "error"].includes(evidence.status)) throw new Stop(evidence.summary || "执行验证尚未完成，不能交付");
+    if (["not_run", "error"].includes(evidence.status) && !repairableDevelopmentReport(evidence))
+      throw new Stop(evidence.summary || "执行验证尚未完成，不能交付");
     const review = await this.review(ctx, task ? "task" : "integration", { plan: ctx.record.plan!, planHash: ctx.record.planHash!,
       task: task ? clone(task) : null, report: evidence, codeHash: snapshot.hash }, snapshot);
     return { passed: evidence.status === "passed" && review.verdict === "pass", report: evidence, review };
+  }
+
+  verificationCases(ctx: DevelopmentContext, task: TaskProgress | null) {
+    if (!task || task.integration) return ctx.record.plan!.cases;
+    const selected = new Set(ctx.record.tasks.filter(item => item.status === "verified").map(item => item.id));
+    selected.add(task.id);
+    return ctx.record.plan!.cases.filter(item => selected.has(item.taskId));
   }
 
   verifyExecution(ctx: DevelopmentContext, options: Parameters<DevelopmentExecutor["verify"]>[0]) {
@@ -842,7 +871,8 @@ export class DevelopmentController {
           execute: async () => {
             const snapshot = await this.workspace.snapshot(ctx.record.agentId, ctx.record.id);
             const report = await this.verifyExecution(ctx, { snapshot, entrypoint: ctx.record.plan!.entrypoint,
-              cases: ctx.record.plan!.cases, runtime: ctx.record.plan!.runtime, application: ctx.record.plan!.application, stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
+              cases: this.verificationCases(ctx, task), validateResources: Boolean(task.integration), runtime: ctx.record.plan!.runtime,
+              application: ctx.record.plan!.application, stateful: ctx.record.architecture.design.state.mode === "persistent", signal: ctx.signal });
             this.guard(ctx);
             const evidence = { ...report, id: randomUUID(), mode: "self_test", planHash: ctx.record.planHash };
             ctx.record.reports.push(evidence); await this.save(ctx);
@@ -888,7 +918,8 @@ export class DevelopmentController {
         await this.save(ctx);
         if (result.review.issues.some((issue) => issue.blocking && ["architecture", "environment"].includes(issue.kind))) throw new Stop(result.review.summary);
         if (result.review.issues.some((issue) => issue.blocking && issue.kind === "plan")) {
-          await this.correction(ctx, "plan", null, () => { ctx.record.feedback = result; ctx.record.needsReplan = true; });
+          await this.correction(ctx, "plan", null, () => { ctx.record.feedback = { ...result, rejectedPlan: ctx.record.plan! }; ctx.record.needsReplan = true;
+            if (needsDevelopmentRepairDispatch(ctx, result) || ctx.record.workloadPolicyVersion === 1) ctx.record.pendingPlanRepair = true; });
           return "replan";
         }
         await this.correction(ctx, "task", task, () => { task.attempts++; task.nextAction = "implement"; });
@@ -930,7 +961,9 @@ export class DevelopmentController {
           version: (previous?.version ?? 0) + 1, architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash },
           architecture: clone(architecture), status: "running", phase: "intake", delivery: "blocked", summary: LABELS.intake,
           budgets: { corrections: this.limits.corrections, planRevisions: this.limits.planRevisions, integrationRepairs: this.limits.integrationRepairs },
-          repairDispatchVersion: 1, dispatchedRepairs: [], repairBatches: {}, planning: { turns: 0 }, tasks: [], plan: null, planHash: null, planAttempts: [], reviews: [], reports: [], handoffs: [],
+          repairDispatchVersion: 2, dispatchedRepairs: [], repairBatches: {},
+          ...(Number(architecture.design.schemaVersion) >= 2 ? { workloadPolicyVersion: 1 as const, dispatchedWork: [], workDispatches: {} } : {}),
+          planning: { turns: 0 }, tasks: [], plan: null, planHash: null, planAttempts: [], reviews: [], reports: [], handoffs: [],
           currentTaskId: null, snapshot: null, verifiedSnapshot: null, package: null, deliveries: [], feedback: null }));
         if (previous?.status === "failed" && unacceptedPlanning(previous) && Number(architecture.design.schemaVersion) >= 2
           && planningDraftBinding(previous) === planningDraftBinding(ctx.record)) {
@@ -1032,7 +1065,8 @@ export class DevelopmentController {
           await this.save(ctx);
           if (result.review.issues.some((issue) => issue.blocking && ["architecture", "environment"].includes(issue.kind))) throw new Stop(result.review.summary);
           if (result.review.issues.some((issue) => issue.blocking && issue.kind === "plan")) {
-            await this.correction(ctx, "plan", null, () => { ctx.record.needsReplan = true; }); continue;
+            await this.correction(ctx, "plan", null, () => { ctx.record.needsReplan = true; ctx.record.feedback = { ...result, rejectedPlan: ctx.record.plan! };
+              if (needsDevelopmentRepairDispatch(ctx, result) || ctx.record.workloadPolicyVersion === 1) ctx.record.pendingPlanRepair = true; }); continue;
           }
           await this.integrationRepair(ctx, result); continue;
         }

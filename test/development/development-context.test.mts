@@ -274,12 +274,26 @@ test("页边界或大小非法时明确拒绝，不越界也不返回无法继�
   for (const params of [
     { section: "value", offset: -1 }, { section: "value", offset: 0.5 }, { section: "value", offset: 99 },
     { section: "value", offset: 2 }, { section: "value", offset: 1, limit: 1 },
-    { section: "value", limit: 0 }, { section: "value", limit: -1 }, { section: "value", limit: 8001 },
+    { section: "value", limit: 0 }, { section: "value", limit: -1 }, { section: "value", limit: 10001 },
     { section: "value", limit: 3.5 }, { section: "value", limit: "4000" },
     { section: "value", offset: Number.MAX_SAFE_INTEGER + 1 }, { section: "value", path: "/private/data" },
   ]) await assert.rejects(call(tool, params), InputError);
   const page = await call(tool, { section: "value", offset: 1, limit: 2 });
   assert.equal(page.text, "😀"); assert.equal(page.nextOffset, 3);
+});
+
+test("研发批读统一使用一万字符页和版本游标，旧原文变化后拒绝续读", async () => {
+  const source = { requirements: "原文".repeat(9000), design: { instruction: "明确的设计" } };
+  const reader = createContextReadTool(() => source);
+  const read = async (input: unknown) => JSON.parse(toolText(await reader.execute("read", input)));
+  const first = await read({ requests: [{ section: "requirements" }, { section: "design" }] });
+  assert.equal(first.results[0].text.length, 10000);
+  assert.deepEqual(JSON.parse(first.results[1].text), source.design);
+  const second = await read({ requests: [first.results[0].nextRequest] });
+  assert.equal(first.results[0].text + second.results[0].text, JSON.stringify(source.requirements));
+  source.requirements += "变化";
+  const stale = await read({ requests: [first.results[0].nextRequest] });
+  assert.match(stale.results[0].error.message, /变化/);
 });
 
 test("只允许当前输入的自有顶层字段，拒绝原型字段、文件路径和嵌套路径", async () => {

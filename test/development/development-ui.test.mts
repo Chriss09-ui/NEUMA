@@ -22,6 +22,9 @@ test("研发入口只接受当前通过的架构，恢复不会把完成或旧�
     const state = agentDevelopmentState(agent, { architecture, development: development({ status }) });
     assert.equal(state.canResume, true); assert.equal(state.actionLabel, "继续研发");
   }
+  const exhausted = agentDevelopmentState(agent, { architecture, development: development({ status: "failed",
+    continuation: { mode: "blocked", sourceRunId: "dev-1" } }) });
+  assert.equal(exhausted.canResume, false); assert.equal(exhausted.canStart, false);
   for (const status of ["completed", "running"]) assert.equal(agentDevelopmentState(agent, { architecture,
     development: development({ status, delivery: "ready" }) }).canResume, false);
   for (const delivery of ["needs_connection", "needs_development"]) {

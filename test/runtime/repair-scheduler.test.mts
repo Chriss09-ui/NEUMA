@@ -24,6 +24,31 @@ test("十个独立问题动态分派，最多三个子Agent同时工作，全部
   assert.equal(checkpoint.groups.filter(group => group.result).length, 10);
 });
 
+test("新版本可完整调度二百个独立问题，旧版本容量与预算保持不变", async () => {
+  const base = Object.fromEntries(Array.from({ length: 200 }, (_, index) => [`field_${index}`, "old"]));
+  const issues = Object.keys(base).map(key => issue(key, `/${key}`));
+  assert.throws(() => createRepairCheckpoint("legacy", base, issues, 3), /问题或额度/);
+  let checkpoint = createRepairCheckpoint("large", base, issues, 3, 2);
+  const originalLimit = checkpoint.callLimit;
+  const result = await runRepairSchedule({ checkpoint, binding: "large", base, save: async next => { checkpoint = next; },
+    run: worker => submit(worker, "fixed") });
+  assert.deepEqual(result, Object.fromEntries(Object.keys(base).map(key => [key, "fixed"])));
+  assert.equal(checkpoint.calls, 200); assert.equal(checkpoint.callLimit, originalLimit);
+  assert.equal(readRepairCheckpoint(checkpoint).groups.filter(group => group.result).length, 200);
+  assert.equal(createRepairCheckpoint("legacy", base, issues.slice(0, 100), 3).callLimit, 120);
+});
+
+test("分项合法但合并超额时自动退回原组，在原额度内修正并保留旧提案", async () => {
+  const base = { a: 1, b: 1 };
+  let checkpoint = createRepairCheckpoint("combined", base, [issue("a", "/a"), issue("b", "/b")], 3, 2);
+  const result = await runRepairSchedule({ checkpoint, binding: "combined", base, retryInvalidMerge: true,
+    save: async value => { checkpoint = value; },
+    validateCandidate: (value, final) => { const row = value as typeof base; if (final && row.a + row.b > 10) throw new Error("合计必须不超过10"); },
+    run: worker => submit(worker, worker.group.history?.length ? 4 : 8) });
+  assert.deepEqual(result, { a: 4, b: 4 }); assert.equal(checkpoint.calls, 4);
+  assert.ok(checkpoint.groups.every(group => group.calls === 2 && group.history?.[0]?.result?.updates[0]?.value === 8));
+});
+
 test("同一模块十个问题分成有界子任务，重叠字段按已合并版本顺序修复", async () => {
   const base = { instructions: "原要求" }, issues = Array.from({ length: 10 }, (_, n) => issue(`i${n}`, "/instructions", "same"));
   let checkpoint = createRepairCheckpoint("batch", base, issues, 3);
