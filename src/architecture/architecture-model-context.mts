@@ -7,7 +7,7 @@ import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE } from "./archi
 
 const pick = (value: unknown, fields: string[]) => { const record = objectFields(value); return Object.fromEntries(fields.filter(key => record[key] !== undefined).map(key => [key, record[key]])); };
 const metadata = ["type", "pipelineStage", "blueprintProtocol", "submitName", "candidateHash", "baseHash", "blueprintHash", "allowedRoots", "integrationPolicy", "revisionSource",
-  "stageContract", "consultations", "moduleCapacity", "moduleLimit",
+  "stageContract", "consultations", "moduleCapacity", "moduleLimit", "requirementScope",
   "modelBudget", "designModelBudget", "remaining", "stageRepair", "editableSubmission", "rejectedSubmission", "lastSubmissionIssue",
   "unsubmittedDraft", "unsubmittedDraftDiagnostic", "structuredSubmissionFeedback", "repairInstruction", "instruction"];
 
@@ -15,6 +15,22 @@ export function deferredObligations(value: unknown, { includeResolution = false 
   const issues = objectFields(value).issues;
   return issues == null ? value : array(issues).map(input => { const item = objectFields(input); return ({ ...pick(item, ["id", "requirementId", "requirementIds", "owner", "stage", "status", "blocking", "question", "impact", "stageDecision"]),
     ...(includeResolution && objectFields(item.resolution).reason ? { resolution: { reason: objectFields(item.resolution).reason } } : {}) }); });
+}
+
+function scopedDeferredObligations(source: UnknownRecord) {
+  const obligations = deferredObligations(source.deferredVerifications, { includeResolution: source.pipelineStage === "blueprint" });
+  const scope = objectFields(source.requirementScope);
+  if (source.pipelineStage !== "module" || typeof scope.moduleId !== "string" || !Array.isArray(obligations)) return obligations;
+  const owners = new Map<string, string>();
+  for (const input of [{ moduleId: scope.moduleId, requirementIds: scope.ownedRequirementIds }, ...array(scope.referenceOnly ?? [])]) {
+    const group = objectFields(input);
+    if (typeof group.moduleId !== "string" || !Array.isArray(group.requirementIds)) continue;
+    for (const id of group.requirementIds) if (typeof id === "string") owners.set(id, group.moduleId);
+  }
+  return obligations.map(input => {
+    const item = objectFields(input), ownerModuleId = typeof item.requirementId === "string" ? owners.get(item.requirementId) ?? null : null;
+    return { ...item, architectureResponsibility: { ownerModuleId, usage: ownerModuleId === scope.moduleId ? "owned" : "reference_only" } };
+  });
 }
 
 export function platformOverview(source: UnknownRecord) {
@@ -45,8 +61,7 @@ export function architectureModelContext(source: UnknownRecord, { role, continua
       fields.push("capabilities");
       delete objectFields(derived.platformOverview).capabilities;
     }
-    if (source.deferredVerifications) derived.deferredObligations = deferredObligations(source.deferredVerifications,
-      { includeResolution: source.pipelineStage === "blueprint" });
+    if (source.deferredVerifications) derived.deferredObligations = scopedDeferredObligations(source);
     if (source.acceptanceAdapterGuide) {
       if (role === "reviewer" || source.pipelineStage === "review_slice") fields.push("acceptanceAdapterGuide");
       else derived.acceptanceOverview = { composition: objectFields(source.acceptanceAdapterGuide).composition,
@@ -78,6 +93,9 @@ export function architectureModelContext(source: UnknownRecord, { role, continua
   const candidateSchemaIndex = packet.contextIndex?.find(item => item.section === "candidateSchema");
   if (candidateSchemaIndex) Object.assign(candidateSchemaIndex, { scope: "完整方案结构；本阶段提交参数以提交工具的schema为准。",
     propertyKeys: Object.keys(objectFields(objectFields(source.candidateSchema).properties)) });
+  const deferredIndex = packet.contextIndex?.find(item => item.section === "deferredVerifications");
+  if (deferredIndex && source.requirementScope) Object.assign(deferredIndex, {
+    scope: "完整原始后续义务；requirementId的模块主责见requirementScope，关联requirementIds不授予本模块覆盖或验收权限。" });
   // The frozen manifest describes storage; it must not claim omitted text was delivered to the model.
   if (source.contextManifest && !continuation) packet.sourceManifest = Object.fromEntries(Object.entries(objectFields(source.contextManifest)).map(([key, value]) =>
     [key, pick(value, ["characters", "sha256"])]));
@@ -141,6 +159,7 @@ ${pipelineStage === "blueprint" ? BLUEPRINT_ASSIGNMENT_RULE : ""}
 ${pipelineStage === "blueprint" ? "interaction.assistant仅指托管页面的浮窗助手，不是普通对话入口；未确认启用则不得添加，启用必须page=true且保留用途。profile=workflow表示需要持久检查点的流程，不能配builtin；单次专属代码动作按实际需求选择custom。Python不能配builtin；无代码必须none/builtin。保持已确认的默认入口、页面和操作交付。" : ""}
 ${pipelineStage === "module" ? "capabilities中status=available的id必须逐字来自本轮能力目录，不能为已有能力另起别名；平台交付机制不等于新工具编号。专属待开发代码单独标needs_development，不把目录已可用的运行器改标为待开发。" : ""}
 ${pipelineStage === "module" ? "moduleId和blueprintHash由宿主在正式提交时绑定本次assignment，无需复制历史摘要。遵守moduleCapacity的本模块条数额度，保留完整业务义务，合并重复表达而不截断内容。" : ""}
+${pipelineStage === "module" ? "requirementScope明确本模块主责与其他模块的参考要求。coverage和acceptance[*].requirementIds仅使用ownedRequirementIds；参考内容可用于接口配合和本模块测试，但不能认领其中其他模块负责的正式编号。后续义务的单独requirementId决定主责，其requirementIds仅表示关联原始要求。" : ""}
 ${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内联，可直接核对；最后一次请求仅用于正式提交，不能再次读取或只保存草稿。" : ""}
 已确认需求、用户选择、原验证阶段和全部验收义务不能缩水。技术问题由系统核实；只有需求本身仍不清楚且改变业务承诺才允许返需。历史评语和拒稿均可有误，须用当前原文核对，不能当作新需求或通过证据。需求操作清单为空不等于禁止必要专属代码。平台可用、环境准备、业务实现及实际验收分别判断，不伪造测量或通过。
 正式重查可修正技术验收与证据分工；完整保留已确认业务范围、边界、结果、验证义务及明确选择，重新程序检查和独立评审，不以纠错缩水。

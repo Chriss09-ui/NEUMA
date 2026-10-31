@@ -45,7 +45,7 @@ import { architectureStageRepairPlan } from "./architecture-stage-recovery.mjs";
 import { copyArchitectureReviewJson, reviewCheckpointObject } from "./architecture-review-binding.mjs";
 import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule, architectureModuleLayers,
   assembleArchitectureCandidate, applyArchitectureIntegration, readArchitectureBlueprintStructure, readArchitectureModuleStructure,
-  readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureModuleCapacities, architectureModuleCapacitySchema } from "./architecture-design-stages.mjs";
+  readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureModuleCapacities, architectureModuleSubmissionSchema } from "./architecture-design-stages.mjs";
 import { BLUEPRINT_CONSULTATION_LIMIT, BLUEPRINT_CONSULTATION_CALL_LIMIT, BLUEPRINT_CONSULTATION_ASSIGNMENT_SCHEMA,
   BLUEPRINT_CONSULTATION_RESULT_SCHEMA, blueprintConsultationContext, validateBlueprintConsultationAssignment,
   validateBlueprintConsultationResult } from "./architecture-blueprint-consultation.mjs";
@@ -746,12 +746,16 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       const dependencyModules = checkedModules(checkpoint, blueprint, context).filter(module => assignment.dependsOn.includes(module.moduleId));
       const dependencyInterfaces = dependencyModules.map(module => ({ moduleId: module.moduleId,
         components: module.components, steps: module.steps.map(({ id, componentId, input, output, completion }) => ({ id, componentId, input, output, completion })) }));
+      const parameters = architectureModuleSubmissionSchema(schemas.module, assignment, capacities[assignment.id]!);
       return runStage("module", assignment.id,
         { ...facts, assignment, blueprint, blueprintHash: designHash(blueprint), moduleCapacity: capacities[assignment.id],
+          requirementScope: { moduleId: assignment.id, ownedRequirementIds: [...assignment.requirementIds],
+            referenceOnly: blueprint.modules.filter(owner => owner.id !== assignment.id).map(owner => ({ moduleId: owner.id, requirementIds: [...owner.requirementIds] })),
+            instruction: "coverage与acceptance[*].requirementIds只能登记ownedRequirementIds；referenceOnly列出其他模块主责，供理解接口、配合实现或测试，不能在本模块登记覆盖或验收。后续义务的主责按其单独的requirementId查本表；requirementIds只是关联的原始需求，不转移主责。跨模块验证由主责模块保留完整检查，本模块仍须提交自己负责要求的具体测试。" },
           ...(!context.legacyBlueprint ? { dependencyInterfaces } : {}),
           requirements: context.requirements.filter(item => assignment.requirementIds.includes(item.id)) },
-        architectureModuleCapacitySchema(schemas.module, capacities[assignment.id]!), value => {
-          const feedback = architectureToolValidation(value, architectureModuleCapacitySchema(schemas.module, capacities[assignment.id]!), { root: "module" });
+        parameters, value => {
+          const feedback = architectureToolValidation(value, parameters, { root: "module" });
           if (!feedback.valid) throw Object.assign(new InputError("模块超出已分配的结构或容量范围：" + JSON.stringify(feedback)), {
             validationIssue: feedback.issues[0], validationIssues: feedback.issues });
           return validateArchitectureModule(value, { ...context, blueprint, assignment, dependencyModules });

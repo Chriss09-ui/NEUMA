@@ -50,7 +50,7 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false } = {}) {
+  acceptanceCount = 0, failReviewSlice = false, legacyModuleContext = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false,
@@ -213,7 +213,13 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
   const config = { llmConfigured: true, model: "native-stage-model", apiKey: "fixed-local-fixture", chatUrl: `http://127.0.0.1:${listeningAddress(model).port}/v1/chat/completions`,
     ...(stallModule ? { llmIdleTimeoutMs: 150 } : {}) };
   const sessionFactory = async (options: PiSessionOptions) => {
-    const session = await createPiSession(options); sessions.push({ session, options });
+    const session = await createPiSession({ ...options,
+      ...(legacyModuleContext && objectFields(options.sessionStorage?.binding).stage === "module" ? { preparePrompt: async (raw: string) => {
+        const payload = JSON.parse(await options.preparePrompt?.(raw) ?? raw);
+        if (payload.type !== "resume_architecture_stage") delete payload.requirementScope;
+        return JSON.stringify(payload);
+      } } : {}) });
+    sessions.push({ session, options });
     session.setAutoRetryEnabled(false); session.setAutoCompactionEnabled(false);
     session.subscribe(event => {
       const name = state.cancelStage === "research" ? "search_technical_sources" : state.cancelStage ? stageNames[state.cancelStage] : undefined;
@@ -473,7 +479,7 @@ for (const outcome of ["success", "exhausted"]) test(`原生模块五轮提交�
 });
 
 test("真实原生节点length后重建控制器，仅恢复模块与整合并完成原独立评审和范围复核", { timeout: 30000 }, async t => {
-  const f = await fixture(t, { failModule: true });
+  const f = await fixture(t, { failModule: true, legacyModuleContext: true });
   await assert.rejects(f.run());
   assert.deepEqual(f.errors, []);
   const failed = await f.designer.get(f.definition.id), checkpoint = nativeCheckpoint(failed!.designProgressCheckpoint);
@@ -494,6 +500,12 @@ test("真实原生节点length后重建控制器，仅恢复模块与整合并�
   assert.equal(objectFields(objectFields(objectFields(passed.designProgressCheckpoint!.modules)[0]).sessionRef).file, moduleFile);
   const resumed = users(f.requests[start]!.body).at(-1);
   assert.equal(resumed!.type, "resume_architecture_stage");
+  const assignment = recordArray(objectFields(checkpoint.blueprint.result).modules)[0]!;
+  assert.equal(users(f.requests[1]!.body).at(-1)!.requirementScope, undefined, "旧会话首包尚未标明主责与参考范围");
+  assert.deepEqual(objectFields(resumed!.requirementScope).ownedRequirementIds, assignment.requirementIds,
+    "恢复必须用新消息提供当前冻结分工，不能因旧首包缺少范围标记而继续含糊交接");
+  assert.equal(objectFields(resumed!.requirementScope).moduleId, assignment.id);
+  assert.deepEqual(objectFields(resumed!.requirementScope).referenceOnly, []);
   assert.equal(Object.hasOwn(resumed!, "requirements"), false); assert.equal(Object.hasOwn(resumed!, "draft"), false);
   assert.ok(text(recordArray(objectFields(f.requests[start]!.body).messages).find((message) => message.role === "user")!.content).includes('"assignment"'));
 });
