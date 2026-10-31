@@ -107,3 +107,23 @@ export function createPlatformContractTool(context: object): NeumaTool {
       return { content: [{ type: "text", text: JSON.stringify({ scope: "explicit-current-platform-facts-only", grantsCapability: false, results }) }], details: {} };
     } };
 }
+
+/** Prepare the two public fact snapshots before spending a repair turn. Never uses old claims as facts. */
+export function prepareArchitectureRepairFacts(previous: unknown, context: object) {
+  const facts = factSources(context), material: Record<string, unknown> = {}, sourceHashes: Record<string, string> = {};
+  for (const key of sources) {
+    const item = facts[key]!;
+    if (item.reason || !item.value) throw Object.assign(new InputError("修复所需平台事实不可用或摘要不符，不能消耗最后一轮后再查询。"), {
+      diagnostic: { stage: "architecture", reason: "repair_materials_incomplete", source: key, detail: item.reason },
+    });
+    material[key] = item.value; sourceHashes[key] = item.sourceHash!;
+  }
+  const claims = objectFields(copy(previous ?? {}, 2 * 1024 * 1024)).platformClaims ?? [];
+  if (!claimsValid(claims)) fail("repair.platformClaims", "invalid_contract", "历史平台声明结构无效，不能据此准备修复资料。");
+  const checks = claims.map(claim => ({ id: claim.id, source: claim.source, path: claim.path, ...check(claim, facts) }));
+  const bytes = Buffer.byteLength(JSON.stringify(material));
+  if (bytes > 64 * 1024) return { version: 1, ready: false, minimumCalls: 2, reason: "repair_materials_need_paging",
+    bytes, sourceHashes, checks, instruction: "平台原文超过修复首包额度，必须预留读取与正式提交两轮；只读工具按需提供原文。" };
+  return { version: 1, ready: true, minimumCalls: 1, sourceHashes, checks, material,
+    instruction: "这是宿主从本轮冻结来源预先核验并直接提供的完整公开平台事实；无需再次读资料或调用check_platform_contract。检查结果不授予业务通过，修订稿仍须完整校验。" };
+}

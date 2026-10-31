@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
 import { designSubmissionSchema, designHash, validateDesign } from "../../src/architecture/architecture-contract.mjs";
 import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule,
-  assembleArchitectureCandidate, applyArchitectureIntegration } from "../../src/architecture/architecture-design-stages.mjs";
+  assembleArchitectureCandidate, applyArchitectureIntegration, diagnoseBlueprintAssignments } from "../../src/architecture/architecture-design-stages.mjs";
+import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { validDesign, validDraft } from "../helpers/architecture.mjs";
 import { validateArchitecturePlatformClaims } from "../../src/architecture/architecture-platform-claims.mjs";
 import type { ArchitectureBlueprint,ArchitectureModule,CandidateDraft,ArchitectureConflict } from "../../src/contracts/architecture-stages.mjs";
@@ -52,6 +53,108 @@ function boundaryFixture() {
   const options = { ...f.options, legacyBlueprint: false };
   return { ...options, options, moduleOptions: (index: number) => ({ ...options, assignment: f.blueprint.modules[index]!, dependencyModules: f.modules.slice(0, index!) }) };
 }
+
+test("连接协议缺项在蓝图提交时报告，不能留给无连接修改权限的整合节点", () => {
+  const f = boundaryFixture();
+  f.blueprint.global.connections = [{ id: "business_api", purpose: "business", required: true, description: "业务接口",
+    protocol: "http", operations: [{ id: "fetch" }] }];
+  rejected(() => validateArchitectureBlueprint(f.blueprint, f), "blueprint.global.connections[0]");
+  f.blueprint.global.connections[0]!.operations[0] = { id: "fetch", method: "GET", path: "/records" };
+  assert.doesNotThrow(() => validateArchitectureBlueprint(f.blueprint, f));
+  f.blueprint.global.connections.push(structuredClone(f.blueprint.global.connections[0]!));
+  rejected(() => validateArchitectureBlueprint(f.blueprint, f), "blueprint.global.connections[1].id");
+});
+
+test("结构合法模块一次报告版本、未用组件、覆盖、验收和能力等独立错误", () => {
+  const f = boundaryFixture(), module = structuredClone(f.modules[0]!);
+  module.blueprintHash = "0".repeat(64);
+  module.components.push({ ...module.components[0]!, id: "unused_component" });
+  module.coverage[0]!.componentIds = ["missing_component"];
+  module.acceptance = []; module.capabilities[0]!.id = "invented_capability";
+  assert.throws(() => validateArchitectureModule(module, f.moduleOptions(0)), error => {
+    const issues = objectFields(error).validationIssues as { path: string }[];
+    assert.deepEqual(issues.map(issue => issue.path), ["module.blueprintHash", "module.steps.componentId",
+      "module.coverage[0].componentIds", "module.acceptance", "module.capabilities[0].id"]);
+    assert.equal(objectFields(error).validationIssueTotal, 5); return true;
+  });
+});
+
+test("蓝图在派模块前同时拒绝交互与运行组合矛盾，模块在整合前拒绝全部伪可用编号", () => {
+  const f = boundaryFixture();
+  const schemaHash = designHash(createArchitectureStageSchemas(f));
+  const bad = changed(f.blueprint, value => {
+    value.global.profile = "workflow";
+    value.global.interaction!.assistant = { enabled: true, purpose: "普通对话统计" };
+  });
+  assert.throws(() => validateArchitectureBlueprint(bad, f), (error: TestFailure) => {
+    const paths = (objectFields(error).validationIssues as { path: string }[]).map(item => item.path);
+    assert.ok(paths.includes("blueprint.global.interaction.assistant"));
+    assert.ok(paths.includes("blueprint.global.execution.hosting"));
+    return true;
+  });
+  const module = changed(f.modules[0]!, value => {
+    value.capabilities = [{ id: "invented_conversation", status: "available", reason: "错误别名" },
+      { id: "invented_host", status: "available", reason: "错误平台编号" },
+      { id: "custom_validation_code", status: "needs_development", reason: "专属代码需研发" }];
+  });
+  assert.throws(() => validateArchitectureModule(module, f.moduleOptions(0)), (error: TestFailure) => {
+    const issues = objectFields(error).validationIssues as { path: string; allowedReferences: string[] }[];
+    assert.deepEqual(issues.map(item => item.path), ["module.capabilities[0].id", "module.capabilities[1].id"]);
+    assert.ok(issues.every(item => item.allowedReferences.includes("conversation")));
+    return true;
+  });
+  assert.equal(designHash(createArchitectureStageSchemas(f)), schemaHash, "语义校验不改变历史阶段schema摘要");
+});
+
+test("蓝图保持已确认入口与助手选择，专属代码动作可以使用custom和builtin", () => {
+  const f = boundaryFixture();
+  const blueprint = changed(f.blueprint, value => {
+    value.global.profile = "custom"; value.global.execution!.language = "javascript"; value.global.interaction!.operations = true;
+  });
+  const draft = { interaction: { defaultEntry: "conversation", page: false, operations: ["统计"] } };
+  assert.deepEqual(validateArchitectureBlueprint(blueprint, { ...f, draft }), blueprint);
+  const changedChoice = changed(blueprint, value => { value.global.interaction!.page = true; value.global.interaction!.defaultEntry = "application"; });
+  rejected(() => validateArchitectureBlueprint(changedChoice, { ...f, draft }), "interaction.defaultEntry");
+});
+
+test("全局选型引用不替代模块主责，缺失、重复和未知编号同时明确报告", () => {
+  const f = boundaryFixture();
+  const missing = changed(f.blueprint, value => { value.modules.pop(); });
+  const before = structuredClone(missing);
+  const report = diagnoseBlueprintAssignments(missing, f.requirements)!;
+  assert.deepEqual(report.missing, [{ id: "summary", referencedGlobally: true }]);
+  assert.deepEqual(report.totals, { missing: 1, duplicates: 0, unknown: 0 });
+  assert.equal(report.truncated, false);
+  assert.throws(() => validateArchitectureBlueprint(missing, f), error => {
+    assert.deepEqual(objectFields(error).blueprintAllocation, report);
+    assert.equal(objectFields(objectFields(error).validationIssue).path, "blueprint.modules.requirementIds");
+    return true;
+  });
+  assert.deepEqual(missing, before, "诊断不猜测主责、不修改候选");
+  const mixed = changed(f.blueprint, value => {
+    value.modules[0]!.requirementIds = ["notes", "unknown_requirement"];
+    value.modules[1]!.requirementIds = ["notes"];
+  });
+  const all = diagnoseBlueprintAssignments(mixed, f.requirements)!;
+  assert.deepEqual(all.missing, [{ id: "summary", referencedGlobally: true }]);
+  assert.deepEqual(all.duplicates, [{ id: "notes", moduleIndexes: [0, 1], occurrences: 2 }]);
+  assert.deepEqual(all.unknown, [{ id: "unknown_requirement", moduleIndexes: [0], occurrences: 1 }]);
+  assert.throws(() => validateArchitectureBlueprint(mixed, f), error => {
+    assert.deepEqual(objectFields(error).blueprintAllocation, all); return true;
+  });
+});
+
+test("主责诊断有界并保留真实总数，不回显任意坏参数或执行访问器", () => {
+  const requirements = Array.from({ length: 254 }, (_, i) => ({ id: `req_${i}_${"x".repeat(60)}`, text: "原要求" }));
+  const report = diagnoseBlueprintAssignments({ modules: [{ requirementIds: [requirements[0]!.id] }] }, requirements)!;
+  assert.equal(report.totals.missing, 253); assert.equal(report.requiredCount, 254);
+  assert.equal(report.truncated, true); assert.ok(report.missing.length < 253);
+  assert.ok(JSON.stringify(report).length < 6000);
+  assert.equal(diagnoseBlueprintAssignments({ modules: [{ requirementIds: ["private arbitrary payload"] }] }, requirements), null);
+  let touched = false;
+  assert.equal(diagnoseBlueprintAssignments({ get modules() { touched = true; return []; } }, requirements), null);
+  assert.equal(touched, false);
+});
 
 test("新蓝图只声明模块边界，模块可补齐第四组件的执行步骤", () => {
   const f = boundaryFixture(), schemas = createArchitectureStageSchemas(f);

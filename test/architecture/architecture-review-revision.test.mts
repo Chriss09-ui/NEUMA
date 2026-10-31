@@ -71,6 +71,28 @@ test("十条架构评审问题分派多个独立修复会话，原需求与验�
   await f.run({ runWorker: () => assert.fail("已保存修复不得重跑") });
 });
 
+test("分组补丁业务无效时不保存完成，保留成功组并使用剩余次数修正", async () => {
+  const f = fixture();
+  f.source.issues.push({ id: "rationale", blocking: true, candidateFields: ["rationale"], description: "补充选型依据" });
+  await assert.rejects(f.run({ runWorker: async worker => {
+    const path = worker.group.paths[0]!;
+    await worker.onSession(`${worker.group.id}.jsonl`); await worker.onCall();
+    await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "修订本组",
+      updates: [{ path, value: path === "/instructions" ? "" : f.source.design.rationale + "保留事实" }] });
+  } }), /instructions/u);
+  assert.equal(f.record.reviewRevisionCheckpoint!.dispatch!.groups.filter(group => group.result).length, 1);
+  assert.equal(f.record.reviewRevisionCheckpoint!.modelCalls, 2);
+  const resumed: string[] = [];
+  const candidate = await f.run({ runWorker: async worker => {
+    resumed.push(worker.group.paths[0]!); assert.equal(worker.group.calls, 1);
+    await worker.onSession(worker.group.sessionFile!); await worker.onCall();
+    await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "保留原指令并补齐",
+      updates: [{ path: "/instructions", value: f.source.design.instructions + "逐项核对边界" }] });
+  } });
+  assert.deepEqual(resumed, ["/instructions"]); assert.match(candidate.instructions, /逐项核对边界/u);
+  assert.equal(f.record.reviewRevisionCheckpoint!.modelCalls, 3);
+});
+
 test("已耗尽原设计的完整候选可显式按评审修订，原15轮及模块检查点保持", async () => {
   const f = fixture(), original = structuredClone(f.source), ledger = structuredClone(f.record.designProgressCheckpoint);
   const recovery = architectureReviewRevisionRecovery(f.source);
@@ -85,7 +107,7 @@ test("已耗尽原设计的完整候选可显式按评审修订，原15轮及模
 });
 
 test("新设计二十五轮总账允许正式评审后修订，旧版和未知预算版本不能借此放宽", async () => {
-  for (const progressVersion of [2, 3]) {
+  for (const progressVersion of [2, 3, 4]) {
     const f = fixture({ progressVersion, designCalls: 25 });
     assert.equal(architectureReviewRevisionRecovery(f.source)!.status, "available");
     await f.run();
@@ -93,7 +115,7 @@ test("新设计二十五轮总账允许正式评审后修订，旧版和未知�
     assert.equal(f.record.reviewRevisionCheckpoint!.modelCalls, 1);
   }
   for (const options of [{ progressVersion: 1, designCalls: 16 }, { progressVersion: 2, designCalls: 26 },
-    { progressVersion: 3, designCalls: 26 }, { progressVersion: 4, designCalls: 1 }]) {
+    { progressVersion: 3, designCalls: 26 }, { progressVersion: 4, designCalls: 26 }, { progressVersion: 5, designCalls: 1 }]) {
     const invalid = fixture(options);
     await assert.rejects(invalid.run());
     assert.equal(invalid.calls.length, 0);

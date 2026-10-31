@@ -7,16 +7,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
 import { designSubmissionSchema, designHash, validateDesign } from "../../src/architecture/architecture-contract.mjs";
-import { architectureDesignRecovery, runArchitectureDesignPipeline, readArchitectureDesignProgress } from "../../src/architecture/architecture-design-pipeline.mjs";
-import { validDesign } from "../helpers/architecture.mjs";
+import { architectureDesignRecovery, runArchitectureDesignPipeline, readArchitectureDesignProgress, architectureDesignCallLimits, architectureDesignTestContinuation } from "../../src/architecture/architecture-design-pipeline.mjs";
+import { validDesign, validDraft } from "../helpers/architecture.mjs";
 import { assembleArchitectureCandidate, applyArchitectureIntegration, createArchitectureStageSchemas } from "../../src/architecture/architecture-design-stages.mjs";
 import type { ArchitectureAcceptance,ArchitectureComponent,ArchitectureStep,ArchitectureDecision } from "../../src/contracts/architecture.mjs";
 import type { AcceptanceVerification } from "../../src/contracts/verification.mjs";
+import type { BlueprintConsultationResult } from "../../src/architecture/architecture-blueprint-consultation.mjs";
 
 
 
 type IntegrationPatch = { baseHash: unknown; updates: { path: string; value: unknown }[] };
-type FixtureValue = ArchitectureBlueprint | ArchitectureModule | IntegrationPatch;
+type FixtureValue = ArchitectureBlueprint | ArchitectureModule | IntegrationPatch | BlueprintConsultationResult;
 type FixturePayload = Record<string, unknown> & {
   blueprintHash?: string; baseHash?: string; baseCandidate?: CandidateDraft;
   requirements?: { id: string; text: string }[];
@@ -65,7 +66,9 @@ function fixture(count = 2) {
     calls.push({ stage: options.stage, key: options.key, modelCalls: options.modelCalls, storage: structuredClone(options.sessionStorage), payload: options.payload });
     await options.onSessionRef({ file: options.sessionStorage.file ?? `${options.stage}-${options.key}-${objectFields(options.sessionStorage.binding).generation}.jsonl` });
     const send = async (event?: unknown): Promise<void> => { await options.onModelCall(event); };
-    const value: FixtureValue = options.stage === "blueprint" ? structuredClone(blueprint) : options.stage === "module"
+    const value: FixtureValue = options.stage === "consultation"
+      ? { conclusion: "仅分析责任需求", recommendations: ["按现有平台边界设计"], unknowns: [], references: [{ section: "requirements", pointer: "/0" }] }
+      : options.stage === "blueprint" ? structuredClone(blueprint) : options.stage === "module"
       ? { ...structuredClone(modules.find(module => module.moduleId === options.key)!), blueprintHash: options.payload.blueprintHash! }
       : { baseHash: options.payload.baseHash, updates: [] };
     if (handler) return handler({ options, send, value });
@@ -74,6 +77,132 @@ function fixture(count = 2) {
   const run = (overrides: Partial<Parameters<typeof runArchitectureDesignPipeline>[0]> = {}) => runArchitectureDesignPipeline({ record, context, binding, onSave, runRole: mockRole(), sessionDirectory: "/tmp/neuma-design-pipeline-fixture", ...overrides });
   return { record, context, binding, blueprint, modules, saved, calls, onSave, mockRole, run };
 }
+
+async function oldSemanticFailure(integrationCalls = 3) {
+  const f = fixture(3); await f.run();
+  const checkpoint = f.record.designProgressCheckpoint!;
+  checkpoint.blueprint.result!.global.profile = "workflow";
+  checkpoint.blueprint.resultHash = designHash(checkpoint.blueprint.result);
+  checkpoint.blueprint.modelCalls = 5;
+  for (const entry of checkpoint.modules) {
+    entry.modelCalls = 4; entry.result!.blueprintHash = checkpoint.blueprint.resultHash;
+    entry.result!.capabilities = [{ id: "invented_host", status: "available", reason: "历史错误编号" }];
+    entry.resultHash = designHash(entry.result);
+  }
+  checkpoint.integration.result = null; checkpoint.integration.resultHash = null; checkpoint.integration.modelCalls = integrationCalls;
+  checkpoint.modelCalls = 17 + integrationCalls;
+  const { hash: _hash, ...body } = checkpoint; checkpoint.hash = designHash(body);
+  const draft = validDraft(); draft.taskSpec = { version: 1, items: [{ id: "fixed", dimension: "processing", content: "固定原需求",
+    applicability: "applies", critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "固定原需求" }] } }] };
+  Object.assign(f.record, { draft, requirements: f.context.requirements, status: "cancelled" });
+  return f;
+}
+
+test("旧蓝图与模块语义问题按归属复核，五个原剩余调用完成且不重写历史", async () => {
+  const f = await oldSemanticFailure();
+  const original = structuredClone(f.record.designProgressCheckpoint!);
+  const recovery = architectureDesignRecovery(f.record)!;
+  assert.equal(recovery.status, "available");
+  assert.equal(recovery.stageKey, "blueprint");
+  const before = f.calls.length, histories: SessionStorage[] = [];
+  f.record.version = 2;
+  await f.run({ repair: recovery.request, validateHistory: async storage => { histories.push(structuredClone(storage)); },
+    runRole: f.mockRole(async ({ options, send, value }) => {
+      assert.ok(objectFields(options.payload).validationRepair);
+      assert.equal(options.modelCallLimit - options.modelCalls, 1, "模型看到的额度扣除其他待完成责任节点的预留");
+      await send(); await options.onResult(value); return value;
+    }) });
+  assert.deepEqual(f.calls.slice(before).map(item => item.key), ["blueprint", "module_0", "module_1", "module_2", "integration"]);
+  const saved = f.record.designProgressCheckpoint!;
+  assert.equal(saved.modelCalls, 25);
+  assert.deepEqual(saved.validationRepair!.source, original);
+  assert.equal(histories.length, 5);
+  assert.equal(saved.blueprint.modelCalls, 6);
+  assert.ok(saved.modules.every(item => item.modelCalls === 5 && item.generation === 1));
+  assert.equal(saved.integration.modelCalls, 4);
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+  await f.run({ runRole: async () => { assert.fail("已通过复核的成果不得再次调用模型"); } });
+  const forged = structuredClone(saved);
+  forged.validationRepair!.targets.pop();
+  const { hash: _hash, ...body } = forged; forged.hash = designHash(body);
+  assert.throws(() => readArchitectureDesignProgress({ designProgressCheckpoint: forged }, f), /进度/u);
+});
+
+test("旧成果修复额度不足或原会话不可核验时零新增调用，成果与用量保留", async () => {
+  for (const insufficient of [true, false]) {
+    const f = await oldSemanticFailure(insufficient ? 4 : 3), before = f.calls.length;
+    const original = structuredClone(f.record.designProgressCheckpoint!);
+    const recovery = architectureDesignRecovery(f.record)!;
+    assert.equal(recovery.status, insufficient ? "blocked" : "available");
+    f.record.version = 2;
+    await assert.rejects(f.run({ ...(insufficient ? {} : { repair: recovery.request }), validateHistory: async () => { throw new Error("历史会话缺失"); } }),
+      insufficient ? /剩余额度/u : /历史会话缺失/u);
+    assert.equal(f.calls.length, before);
+    assert.equal(f.record.designProgressCheckpoint!.modelCalls, original.modelCalls);
+    assert.deepEqual(f.record.designProgressCheckpoint!.blueprint, original.blueprint);
+    assert.deepEqual(f.record.designProgressCheckpoint!.modules, original.modules);
+  }
+});
+
+test("模块历史问题只复核责任模块及依赖下游，独立兄弟和蓝图逐字保留", async () => {
+  const f = fixture(3);
+  f.blueprint.modules[2]!.dependsOn = []; f.modules[2]!.steps[0]!.dependsOn = [];
+  for (const module of f.modules) module.blueprintHash = designHash(f.blueprint);
+  await f.run();
+  const checkpoint = f.record.designProgressCheckpoint!;
+  checkpoint.modules[0]!.result!.capabilities[0]!.id = "invented_available";
+  checkpoint.modules[0]!.resultHash = designHash(checkpoint.modules[0]!.result);
+  checkpoint.integration.result = null; checkpoint.integration.resultHash = null;
+  const { hash: _hash, ...body } = checkpoint; checkpoint.hash = designHash(body);
+  const preserved = structuredClone({ blueprint: checkpoint.blueprint, sibling: checkpoint.modules[2] });
+  const start = f.calls.length; f.record.version = 2;
+  await f.run({ validateHistory: async () => {} });
+  assert.deepEqual(f.calls.slice(start).map(item => item.key), ["module_0", "module_1", "integration"]);
+  assert.deepEqual(f.record.designProgressCheckpoint!.blueprint, preserved.blueprint);
+  assert.deepEqual(f.record.designProgressCheckpoint!.modules[2], preserved.sibling);
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, 8);
+});
+
+test("局部复核发生失败保留原稿和已用次数，不能以恢复再次领取额度", async () => {
+  const f = await oldSemanticFailure(), recovery = architectureDesignRecovery(f.record)!;
+  f.record.version = 2;
+  await assert.rejects(f.run({ repair: recovery.request, validateHistory: async () => {},
+    runRole: f.mockRole(async ({ options, send }) => { await send(); assert.equal(options.stage, "blueprint"); throw new Error("固定复核失败"); }) }), /固定复核失败/u);
+  const checkpoint = f.record.designProgressCheckpoint!;
+  assert.equal(checkpoint.modelCalls, 21); assert.equal(checkpoint.blueprint.modelCalls, 6);
+  assert.ok(checkpoint.validationRepair!.source.blueprint.result);
+  assert.equal(architectureDesignRecovery(f.record)!.status, "blocked");
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+});
+
+test("明确测试续跑只补一个耗尽节点与总账各一次，绑定失败快照且不能重复领取", async () => {
+  const f = await oldSemanticFailure(), first = architectureDesignRecovery(f.record)!;
+  f.record.version = 2;
+  await assert.rejects(f.run({ repair: first.request, validateHistory: async () => {}, runRole: f.mockRole(async ({ options, send, value }) => {
+    await send(); if (options.key === "module_0") throw new Error("固定末轮仅完成资料读取");
+    await options.onResult(value); return value;
+  }) }), /资料读取/u);
+  const failed = structuredClone(f.record.designProgressCheckpoint!), grant = architectureDesignTestContinuation(f.record)!;
+  assert.equal(failed.modelCalls, 22); assert.equal(grant.additionalCalls, 1);
+  const recovery = architectureDesignRecovery(f.record)!;
+  assert.equal(recovery.status, "available"); assert.equal(objectFields(recovery.request).kind, "stage_validation_retry");
+  const before = f.calls.length; f.record.version = 3;
+  await assert.rejects(f.run({ repair: { ...objectFields(recovery.request), additionalCalls: 2 } }), /授权/u);
+  assert.equal(f.calls.length, before);
+  await f.run({ repair: recovery.request });
+  const completed = f.record.designProgressCheckpoint!;
+  assert.equal(completed.modelCalls, 26); assert.equal(architectureDesignCallLimits(completed).pipeline, 26);
+  assert.equal(completed.modules[0]!.modelCalls, 6); assert.equal(completed.blueprint.modelCalls, 6);
+  assert.deepEqual(completed.validationContinuation!.source, failed);
+  assert.deepEqual(f.calls.slice(before).map(item => item.key), ["module_0", "module_1", "module_2", "integration"]);
+  assert.equal(architectureDesignTestContinuation(f.record), null);
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+  await assert.rejects(f.run({ repair: recovery.request }), /授权/u);
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, 26);
+  const bad = structuredClone(completed); bad.validationContinuation!.source.hash = "0".repeat(64);
+  const { hash: _hash, ...body } = bad; bad.hash = designHash(body);
+  assert.throws(() => readArchitectureDesignProgress({ designProgressCheckpoint: bad }, f), /进度/u);
+});
 
 test("蓝图、并行模块、整合逐项落盘，最终候选仍须完整校验且不授予评审通过", async () => {
   const f = fixture();
@@ -96,6 +225,226 @@ test("蓝图、并行模块、整合逐项落盘，最终候选仍须完整校�
   assert.equal(loaded!.integration.result !== null, true);
   assert.equal(f.record.design, null); assert.equal(f.record.review, null); assert.deepEqual(f.record.attempts, []);
   assert.deepEqual(await f.run({ runRole: () => { throw new Error("已完成节点不能重跑"); } }), result);
+});
+
+test("蓝图按问题动态并行分析，失败保留成功组且恢复沿用会话与总额度", async () => {
+  const f = fixture(3);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let dispatched = false, active = 0, maximum = 0, arrived = 0, fail = true;
+  const handler: FixtureHandler = async ({ options, send, value }) => {
+    await send();
+    if (options.stage === "consultation") {
+      assert.equal(options.modelCallLimit, 3);
+      assert.equal(options.payload.requirements!.length, 1);
+      assert.equal(options.payload.candidateSchema, undefined);
+      assert.equal(options.tools, undefined, "专项子Agent不能递归委派");
+      active++; maximum = Math.max(maximum, active); if (++arrived === 3) release();
+      await gate; active--;
+      if (objectFields(options.payload.assignment).topic === "verification" && fail) { fail = false; throw new Error("专项中断"); }
+    }
+    if (options.stage === "blueprint" && !dispatched) {
+      dispatched = true;
+      await options.tools!.find(tool => tool.name === "consult_architecture")!.execute("dispatch", { assignments:
+        ["platform", "interfaces", "verification"].map((topic, i) => ({ topic, question: `分析本组问题${i}`, requirementIds: [`req_${i}`] })) });
+    } else if (options.stage === "blueprint") {
+      assert.equal((options.payload.consultations as unknown[]).length, 3);
+    }
+    await options.onResult(value); return value;
+  };
+  await assert.rejects(f.run({ runRole: f.mockRole(handler) }), /专项中断/);
+  assert.equal(maximum, 3);
+  const before = structuredClone(f.record.designProgressCheckpoint!);
+  assert.equal(before.modelCalls, 4);
+  assert.equal(before.consultations!.filter(entry => entry.result).length, 2);
+  assert.equal(before.blueprint.result, null);
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+  const start = f.calls.length;
+  const result = candidateResult(await f.run({ runRole: f.mockRole(handler) }));
+  const resumed = f.calls.slice(start).filter(call => call.stage === "consultation");
+  assert.equal(resumed.length, 1);
+  const pending = before.consultations!.find(entry => !entry.result)!;
+  assert.equal(resumed[0]!.storage.file, pending.sessionRef!.file);
+  assert.equal(resumed[0]!.modelCalls, 1);
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, 10);
+  assert.doesNotThrow(() => validateDesign(result, { requirements: f.context.requirements }));
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+});
+
+test("专项分派先保存，保存失败不启动子Agent；旧v3不会新增分派或重置额度", async () => {
+  const f = fixture(1);
+  await assert.rejects(f.run({ onSave: async checkpoint => {
+    if (checkpoint.consultations?.length) throw new Error("分派落盘失败");
+    await f.onSave(checkpoint);
+  }, runRole: f.mockRole(async ({ options, send }) => {
+    await send(); assert.equal(options.stage, "blueprint");
+    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", question: "核对运行路径", requirementIds: ["req_0"] }] });
+  }) }), /分派落盘失败/);
+  assert.equal(f.calls.length, 1);
+  const cp = f.record.designProgressCheckpoint!;
+  cp.schemaVersion = 3; delete cp.consultations;
+  const { hash: _hash, ...body } = cp; cp.hash = designHash(body);
+  await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage === "blueprint") { assert.equal(options.tools, undefined); assert.equal(options.modelCalls, 1); }
+    await send(); await options.onResult(value); return value;
+  }) });
+  assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 3);
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, 4);
+});
+
+test("专项额度耗尽及丢失分派记录均不能重领预算或绕过已分派问题", async () => {
+  const f = fixture(1);
+  await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send }) => {
+    await send();
+    if (options.stage === "consultation") { await send(); await send(); await send(); }
+    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", question: "核实运行能力", requirementIds: ["req_0"] }] });
+  }) }), error => failureFields(error).diagnostic?.reason === "turn_limit");
+  const cp = structuredClone(f.record.designProgressCheckpoint!);
+  assert.equal(cp.consultations![0]!.modelCalls, 3);
+  assert.equal(cp.modelCalls, 4);
+  const start = f.calls.length;
+  await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "turn_limit");
+  assert.equal(f.calls.length, start);
+  assert.deepEqual(f.record.designProgressCheckpoint, cp);
+  delete f.record.designProgressCheckpoint!.consultations;
+  const { hash: _hash, ...body } = f.record.designProgressCheckpoint!;
+  f.record.designProgressCheckpoint!.hash = designHash(body);
+  assert.throws(() => readArchitectureDesignProgress(f.record, f), /损坏/);
+  await assert.rejects(f.run()); assert.equal(f.calls.length, start);
+});
+
+test("耗尽专项有明确恢复入口，唯一局部修复授权沿原会话累计后完成", async () => {
+  const f = fixture(1);
+  await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send }) => {
+    await send();
+    if (options.stage === "consultation") { await send(); await send(); await send(); }
+    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", question: "核实能力", requirementIds: ["req_0"] }] });
+  }) }));
+  const recovery = architectureDesignRecovery({ ...f.record, status: "failed" });
+  assert.equal(recovery?.status, "available"); assert.equal(recovery?.stage, "consultation");
+  const original = structuredClone(f.record.designProgressCheckpoint!);
+  f.record.version++;
+  await f.run({ repair: recovery!.request });
+  const current = f.record.designProgressCheckpoint!;
+  assert.equal(current.consultations![0]!.modelCalls, 4);
+  assert.deepEqual(current.consultations![0]!.sessionRef, original.consultations![0]!.sessionRef);
+  assert.equal(current.modelCalls, 8); assert.equal(current.repair!.stage, "consultation");
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+});
+
+test("专项消耗预算后模块得到实际可用次数，受限节点仍有正式提交机会", async () => {
+  const f = fixture(3), limits: Record<string, number> = {};
+  await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage === "blueprint") {
+      await send();
+      await options.tools![0]!.execute("dispatch", { assignments: ["platform", "interfaces", "verification"].map((topic, i) => ({
+        topic, question: `核对${topic}`, requirementIds: [`req_${i}`] })) });
+      await send(); await send(); await send();
+    } else if (options.stage === "consultation") { await send(); await send(); await send(); }
+    else {
+      limits[options.key] = options.modelCallLimit - options.modelCalls;
+      for (let i = options.modelCalls; i < options.modelCallLimit; i++) await send();
+    }
+    await options.onResult(value); return value;
+  }) });
+  assert.deepEqual(limits, { module_0: 5, module_1: 1, module_2: 1, integration: 5 });
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, 25);
+});
+
+test("新的复杂需求按工作量扩展模块并限制每组职责，最多三个模块同时运行", async () => {
+  const f = fixture(4), requirements = Array.from({ length: 84 }, (_, i) => ({ id: `scope_${i}`, text: `明确要求${i}` }));
+  f.context.requirements.splice(0, f.context.requirements.length, ...requirements);
+  f.context.candidateSchema = designSubmissionSchema({ taskSpec: { version: 1 } }, { requirements });
+  f.blueprint.global.selectionBasis!.requirementIds = requirements.map(row => row.id);
+  f.blueprint.modules.forEach((assignment, index) => {
+    assignment.requirementIds = requirements.slice(index * 21, index * 21 + 21).map(row => row.id); assignment.dependsOn = [];
+    const module = f.modules[index]!; module.steps[0]!.dependsOn = [];
+    module.coverage = assignment.requirementIds.map(requirementId => ({ requirementId, componentIds: [module.components[0]!.id], verification: "逐项核对原要求" }));
+    module.acceptance.forEach(row => { row.requirementIds = assignment.requirementIds; });
+  });
+  let active = 0, maximum = 0;
+  await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage === "blueprint") {
+      assert.equal(options.parameters.properties!.modules!.maxItems, 4);
+      assert.equal(options.parameters.properties!.modules!.items!.properties!.requirementIds!.maxItems, 24);
+    }
+    if (options.stage === "module") { active++; maximum = Math.max(maximum, active); }
+    await send(); await options.onResult(value);
+    if (options.stage === "module") active--;
+    return value;
+  }) });
+  assert.equal(maximum, 3); assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 5);
+  assert.equal(f.record.designProgressCheckpoint!.moduleLimit, 4); assert.equal(f.record.designProgressCheckpoint!.modules.length, 4);
+  const before = structuredClone(f.record.designProgressCheckpoint);
+  await f.run({ runRole: async () => assert.fail("已完成节点不能重新领取额度") });
+  assert.deepEqual(f.record.designProgressCheckpoint, before);
+});
+
+test("模块分派显式限制全局容量，旧超限成果退回责任模块而非反复重放", async () => {
+  const f = fixture(2);
+  await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage === "module") assert.equal(options.parameters.properties!.components!.maxItems, options.key === "module_0" ? 40 : 79);
+    await send(); await options.onResult(value); return value;
+  }) });
+  const cp = f.record.designProgressCheckpoint!;
+  for (const entry of cp.modules) {
+    const module = entry.result!;
+    for (let i = 1; i < 41; i++) {
+      const id = `${module.moduleId}_extra_${i}`;
+      module.components.push({ ...module.components[0]!, id });
+      module.steps.push({ ...module.steps[0]!, id, componentId: id, dependsOn: [] });
+    }
+    entry.resultHash = designHash(module);
+  }
+  cp.integration.result = null; cp.integration.resultHash = null;
+  const { hash: _hash, ...body } = cp; cp.hash = designHash(body);
+  const source = structuredClone(cp);
+  const draft = validDraft(); draft.taskSpec = { version: 1, items: [] };
+  const recovery = architectureDesignRecovery({ ...f.record, status: "failed", draft, requirements: f.context.requirements });
+  assert.equal(objectFields(recovery).kind, "stage_validation");
+  const start = f.calls.length;
+  await f.run({ validateHistory: async () => {} });
+  assert.deepEqual(f.calls.slice(start).map(call => call.key), ["module_0", "module_1", "integration"]);
+  assert.deepEqual(f.record.designProgressCheckpoint!.validationRepair!.source, source);
+  assert.equal(f.record.designProgressCheckpoint!.modules[0]!.modelCalls, 2);
+  assert.ok(readArchitectureDesignProgress(f.record, f));
+});
+
+test("恢复保留旧模块41条真实成果，剩余模块只能使用39条，合并不再溢出", async () => {
+  const f = fixture(2);
+  await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    await send(); await options.onResult(value);
+    if (options.key === "module_0") throw new Error("第一模块提交后中断");
+    return value;
+  }) }), /第一模块提交后中断/u);
+  const checkpoint = f.record.designProgressCheckpoint!, entry = checkpoint.modules[0]!;
+  // Old versions allowed independently valid modules to use more than today's initial share.
+  for (let i = 1; i < 41; i++) {
+    const id = `historical_${i}`;
+    entry.result!.components.push({ ...entry.result!.components[0]!, id });
+    entry.result!.steps.push({ ...entry.result!.steps[0]!, id, componentId: id, dependsOn: [] });
+  }
+  entry.resultHash = designHash(entry.result);
+  const { hash: _hash, ...body } = checkpoint; checkpoint.hash = designHash(body);
+  const original = structuredClone(entry), start = f.calls.length;
+  const candidate = candidateResult(await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage === "module") {
+      assert.equal(options.key, "module_1");
+      assert.equal(options.parameters.properties!.components!.maxItems, 39);
+      assert.equal(options.parameters.properties!.steps!.maxItems, 39);
+      const module = moduleValue(value);
+      for (let i = 1; i < 39; i++) {
+        const id = `remaining_${i}`;
+        module.components.push({ ...module.components[0]!, id });
+        module.steps.push({ ...module.steps[0]!, id, componentId: id, dependsOn: [] });
+      }
+    }
+    await send(); await options.onResult(value); return value;
+  }) }));
+  assert.equal(candidate.components.length, 80); assert.equal(candidate.steps.length, 80);
+  assert.deepEqual(f.calls.slice(start).map(call => call.key), ["module_1", "integration"]);
+  assert.deepEqual(f.record.designProgressCheckpoint!.modules[0], original);
+  assert.doesNotThrow(() => validateDesign(candidate, { requirements: f.context.requirements }));
 });
 
 test("正式蓝图提交后进程中断仍保留成果，恢复只补未完成节点", async () => {
@@ -147,6 +496,7 @@ test("历史v1/v2完整检查点按原协议和摘要读取，不迁移或刷新
       assignment.stepIds = cp.modules[index]!.result!.steps.map((row) => row.id);
     }
     cp.schemaVersion = schemaVersion;
+    delete cp.consultations;
     cp.schemaHash = designHash({ candidateSchema: f.context.candidateSchema,
       schemas: createArchitectureStageSchemas({ ...f.context, legacyBlueprint: true }) });
     cp.blueprint.resultHash = designHash(blueprint); cp.assignmentHash = designHash(blueprint!.modules);
@@ -160,6 +510,43 @@ test("历史v1/v2完整检查点按原协议和摘要读取，不迁移或刷新
     assert.deepEqual(readArchitectureDesignProgress(f.record, f), before);
     assert.deepEqual(await f.run({ runRole: () => { throw new Error("已完成历史不得重跑"); } }), candidate);
     assert.deepEqual(f.record.designProgressCheckpoint, before);
+  }
+});
+
+test("旧蓝图已冻结41与39个组件时沿原分工恢复，不被新的均分额度拒绝", async () => {
+  for (const schemaVersion of [1, 2] as const) {
+    const f = fixture(2);
+    await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+      await send(); await options.onResult(value);
+      if (options.stage === "blueprint") throw new Error("蓝图已保存后中断");
+      return value;
+    }) }), /蓝图已保存后中断/u);
+    const cp = f.record.designProgressCheckpoint!, blueprint = cp.blueprint.result!;
+    for (const [index, module] of f.modules.entries()) {
+      const count = index === 0 ? 41 : 39;
+      module.steps[0]!.dependsOn = [];
+      for (let i = 1; i < count; i++) {
+        const id = `${module.moduleId}_frozen_${i}`;
+        module.components.push({ ...module.components[0]!, id });
+        module.steps.push({ ...module.steps[0]!, id, componentId: id, dependsOn: [] });
+      }
+      blueprint.modules[index]!.componentIds = module.components.map(row => row.id);
+      blueprint.modules[index]!.stepIds = module.steps.map(row => row.id);
+    }
+    cp.schemaVersion = schemaVersion; delete cp.consultations;
+    cp.schemaHash = designHash({ candidateSchema: f.context.candidateSchema, schemas: createArchitectureStageSchemas({ ...f.context, legacyBlueprint: true }) });
+    cp.blueprint.resultHash = designHash(blueprint); cp.assignmentHash = designHash(blueprint.modules);
+    const { hash: _hash, ...body } = cp; cp.hash = designHash(body);
+    const frozen = structuredClone(cp.blueprint), start = f.calls.length;
+    const candidate = candidateResult(await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+      await send(); await options.onResult(value); return value;
+    }) }));
+    assert.equal(candidate.components.length, 80); assert.equal(candidate.steps.length, 80);
+    assert.deepEqual(f.record.designProgressCheckpoint!.blueprint, frozen);
+    assert.equal(f.record.designProgressCheckpoint!.schemaVersion, schemaVersion);
+    assert.equal(f.record.designProgressCheckpoint!.modelCalls, 4);
+    assert.deepEqual(f.calls.slice(start).map(call => call.key), ["module_0", "module_1", "integration"]);
+    assert.doesNotThrow(() => validateDesign(candidate, { requirements: f.context.requirements }));
   }
 });
 
@@ -299,7 +686,7 @@ test("全局25轮及每节点5轮并发记账，压缩计费而网络重连沿�
     await send({ purpose: "agent", retryAttempt: 1 });
     await options.onResult(value); return value;
   }) });
-  assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 3);
+  assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 4);
   assert.equal(f.record.designProgressCheckpoint!.modelCalls, 25);
   assert.ok(f.saved.every(checkpoint => checkpoint.modelCalls <= 25));
   for (const entry of [f.record.designProgressCheckpoint!.blueprint, ...f.record.designProgressCheckpoint!.modules, f.record.designProgressCheckpoint!.integration])
@@ -326,6 +713,7 @@ test("历史三轮检查点仍使用十五轮总账，已授权修复只续接�
     }) }));
     const checkpoint = f.record.designProgressCheckpoint!;
     checkpoint.schemaVersion = 1;
+    delete checkpoint.consultations;
     checkpoint.schemaHash = designHash({ candidateSchema: f.context.candidateSchema,
       schemas: createArchitectureStageSchemas({ ...f.context, legacyBlueprint: true }) });
     if (repaired) {

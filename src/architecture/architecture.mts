@@ -1,5 +1,6 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import { runRepairAgent } from "../runtime/repair-agent.mjs";
+import { runArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "./architecture-review-dispatch.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import { feedbackLedger } from "./architecture-feedback-port.mjs";
 import type { ArchitectureOptions, ArchitectureRoleOptions, ArchitectureDesignOptions, StoredArchitectureRecord, Definition, ModuleConsultation, ArchitectureDiagnostic, ArchitectureRoleDiagnostic, HandoffResult } from "./architecture-controller-port.mjs";
@@ -30,9 +31,9 @@ import type { RevisionContext } from "./architecture-revision-source.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   architectureTurnBudgetSpent, CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
-  LEGACY_DESIGN_SCHEMA, requirementItems, validateDesign, validateReview, checkDesign, designHash, requiresDevelopment, validateArchitectureDecisionReferences } from "./architecture-contract.mjs";
+  requirementItems, validateDesign, validateReview, checkDesign, designHash, requiresDevelopment, validateArchitectureDecisionReferences } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, renderArchitectureReviewPrompt, SPECIALIST_PROMPT, PLATFORM_CLAIMS_PROMPT,
-  CAPABILITY_VERIFICATION_RULE, REVIEW_REVISION_PROMPT } from "./architecture-prompts.mjs";
+  BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, REVIEW_REVISION_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
 import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
 import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT } from "../runtime/web-capabilities.mjs";
@@ -56,12 +57,12 @@ import { createMainReviewCheckpoint, readMainReviewCheckpoint, mainReviewCheckpo
 import { createReviewProgressCheckpoint, readReviewProgressCheckpoint, reviewProgressCheckpointMatches, advanceReviewProgressCheckpoint, copyRejectedReviewInput } from "./architecture-review-progress.mjs";
 import { ARCHITECTURE_REVIEW_PROTOCOL_VERSION } from "./architecture-review-protocol.mjs";
 import { createArchitectureReviewParts } from "./architecture-review-parts.mjs";
-import { createPlatformContractTool, validateArchitecturePlatformClaims } from "./architecture-platform-claims.mjs";
+import { createPlatformContractTool, validateArchitecturePlatformClaims, prepareArchitectureRepairFacts } from "./architecture-platform-claims.mjs";
 import { createArchitectureFidelityProgress, architectureFidelityProgressMatches } from "./architecture-fidelity-progress.mjs";
 import { ARCHITECTURE_FIDELITY_CONTEXT_VERSION, architectureFidelityContextVersion, createArchitectureFidelityContext } from "./architecture-fidelity-context.mjs";
-import { architectureDesignRecovery, runArchitectureDesignPipeline, architectureDesignCallLimits,
+import { architectureDesignRecovery, runArchitectureDesignPipeline, architectureDesignCallLimits, architectureDesignTestContinuation,
   ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT } from "./architecture-design-pipeline.mjs";
-import { applyArchitectureIntegration } from "./architecture-design-stages.mjs";
+import { applyArchitectureIntegration, diagnoseBlueprintAssignments } from "./architecture-design-stages.mjs";
 import { architectureReviewRevisionRecovery, createArchitectureReviewRevision, readArchitectureReviewRevision, runArchitectureReviewRevision,
   createArchitectureReviewRetry, createArchitectureReviewTestRetry, createArchitectureReviewContinuation, readArchitectureReviewRetry,
   architectureReviewRetryCallLimit, ARCHITECTURE_REVIEW_TEST_RETRY_CALL_LIMIT } from "./architecture-review-revision.mjs";
@@ -193,8 +194,20 @@ function failure(reason = "request_failed", details: UnknownRecord = {}) {
 }
 
 function modelFailure(value: unknown, details: UnknownRecord) {
-  const mapped = classifyModelFailure(value);
-  return new ArchitectureError(mapped.message, { stage: "architecture", reason: mapped.reason, ...details });
+  const source = value instanceof ProviderError ? value.diagnostic : undefined;
+  const idle = source?.stage === "llm" && source.reason === "api_idle_timeout";
+  const mapped = classifyModelFailure(idle ? "NEUMA_MODEL_IDLE_TIMEOUT" : value instanceof Error ? value.message : value);
+  const modelTransport: UnknownRecord = {};
+  if (idle) {
+    if (source.phase === "headers" || source.phase === "body") modelTransport.phase = source.phase;
+    for (const key of ["idleTimeoutMs", "elapsedMs", "firstResponseMs", "lastDataMs", "chunkCount", "receivedBytes"]) {
+      const entry = source[key];
+      if (isInteger(entry) && entry >= (key === "idleTimeoutMs" ? 1 : 0)
+        || entry === null && (key === "firstResponseMs" || key === "lastDataMs")) modelTransport[key] = entry;
+    }
+  }
+  return new ArchitectureError(mapped.message, { stage: "architecture", reason: mapped.reason, ...details,
+    ...(Object.keys(modelTransport).length ? { modelTransport } : {}) });
 }
 
 /** Two isolated model roles, optional research/delegation, and a deterministic handoff gate. */
@@ -257,13 +270,18 @@ export class ArchitectureDesigner {
       value.agentId === id && value.version <= record.version && value.candidateHash === record.candidateHash
       && value.sourceFingerprint === record.sourceFingerprint
       && value.designProgressCheckpoint?.pipelineId === record.designProgressCheckpoint?.pipelineId && value.reviewRetryCheckpoint);
-    const recovery = missingRetry ? { kind: "review_retry", status: "blocked", actionLabel: "检查续评材料",
+    const missingDispatch = record && typeof record.candidateHash === "string" && !Object.hasOwn(record, "reviewDispatchCheckpoint")
+      && [...this.records.values()].some(value => value.agentId === id && value.version <= record.version
+        && value.candidateHash === record.candidateHash && value.reviewDispatchSource);
+    const recovery = missingDispatch ? { kind: "review_specialists", status: "blocked", actionLabel: "检查分组评审材料",
+      message: "本方案已分派独立评审，但当前检查点缺失；不能重新领取子任务额度。" }
+      : missingRetry ? { kind: "review_retry", status: "blocked", actionLabel: "检查续评材料",
       message: "同一方案已使用手动续评授权，但当前授权记录缺失；不能重新领取额度。" }
       : missingRevision ? { kind: "review_revision", status: "blocked", actionLabel: "检查修订材料",
       message: "同一次设计已使用评审修订授权，但当前进度缺失；不能重开额度，请保留材料检查。" }
-      : architectureReviewRevisionRecovery(record) ?? architectureDesignRecovery(record);
+      : architectureReviewDispatchRecovery(record) ?? architectureReviewRevisionRecovery(record) ?? architectureDesignRecovery(record);
     if (recovery && record) {
-      if (["review_revision", "review_retry"].includes(String(objectFields(recovery).kind))) { record.designRecovery = recovery; return record; }
+      if (["review_revision", "review_retry", "review_specialists"].includes(String(objectFields(recovery).kind))) { record.designRecovery = recovery; return record; }
       const stageKey = objectFields(recovery).stageKey;
       if (typeof stageKey !== "string") throw new InputError("设计恢复阶段无效");
       const checkpoint = objectFields(record.designProgressCheckpoint);
@@ -357,6 +375,7 @@ export class ArchitectureDesigner {
     const sessionDirectory = await this.storage.directory(record.agentId, "architecture-design/sessions", { create: true });
     try {
       return await runArchitectureDesignPipeline({ record, context, binding, revision, repair, forceIntegration, signal, onProgress, sessionDirectory,
+        validateHistory: storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }),
         validateProgramCandidate: async (candidate, { sessionStorage }) => {
           await readExecutionHistory({ cwd: this.cwd, storage: sessionStorage, ...(signal ? { signal } : {}) });
           return validateDesign(candidate, context);
@@ -385,7 +404,7 @@ export class ArchitectureDesigner {
             if (node.stage === "module") validateArchitecturePlatformClaims({ ...objectFields(checked), schemaVersion: 3 }, context);
             if (node.stage === "module") {
               const decisions = objectFields(checked).decisions;
-              if (!architectureToolValidation(decisions, LEGACY_DESIGN_SCHEMA.properties.decisions).valid)
+              if (!architectureToolValidation(decisions, node.parameters.properties!.decisions!).valid)
                 throw new InputError("模块决策结构无效");
               validateArchitectureDecisionReferences({ decisions: decisions as ArchitectureDecision[] }, context, "module");
             }
@@ -396,7 +415,8 @@ export class ArchitectureDesigner {
           return this.role({ role: node.role, agentId: record.agentId,
             systemPrompt: `${node.stageInstruction}\n${CAPABILITY_VERIFICATION_RULE}\n${platformRules}${node.stage === "blueprint" ? `\n${researchRules}` : ""}`,
             payload: node.payload, submitName: node.submitName, parameters: node.parameters, validate,
-            tools: node.stage === "blueprint" ? tools : node.stage === "module" ? [createPlatformContractTool(context)] : [],
+            tools: [...(node.tools ?? []), ...(node.stage === "blueprint" ? tools
+              : node.stage === "module" || node.stage === "consultation" ? [createPlatformContractTool(context)] : [])],
             modelCallLimit: node.modelCallLimit,
             initialModelCalls: node.modelCalls, onStageModelCall: node.onModelCall, onStageResult: node.onResult,
             onDiagnostics: async diagnostic => {
@@ -408,8 +428,8 @@ export class ArchitectureDesigner {
               }
             },
             sessionStorage: node.sessionStorage, onSessionRef: node.onSessionRef,
-            resumeStage: Boolean(node.sessionStorage.file), technicalRevision: Boolean(revision),
-            stageReasoningMode: node.stage === "integration" || revision || node.payload.stageRepair ? "off" : "auto",
+            resumeStage: Boolean(node.sessionStorage.file) && !node.payload.validationRepair, technicalRevision: Boolean(revision),
+            stageReasoningMode: node.stage === "integration" || revision || node.payload.stageRepair || node.payload.validationRepair ? "off" : "auto",
             maxOutputTokens: architectureModelOutputBudget(this.config, node.stage === "integration" ? "reviewer" : "module"),
             allowHandoff: node.stage === "blueprint",
             signal, onProgress });
@@ -429,7 +449,18 @@ export class ArchitectureDesigner {
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = ARCHITECTURE_ROLE_TURN_LIMIT, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
     stageReasoningMode, maxOutputTokens, formatSubmissionLimit, resumeSubmissionIssue, reviewRetry = false }: ArchitectureRoleOptions<T>): Promise<T | HandoffResult> {
-    let modelMaterials = { ...payload, roleGuide: systemPrompt };
+    const validationRepair = payload.validationRepair !== undefined;
+    const boundedStage = Boolean(payload.pipelineStage) || validationRepair;
+    const moduleBinding = payload.pipelineStage === "module" && typeof payload.blueprintHash === "string"
+      && typeof objectFields(payload.assignment).id === "string"
+      ? { moduleId: String(objectFields(payload.assignment).id), blueprintHash: payload.blueprintHash } : null;
+    if (validationRepair || boundedStage && modelCallLimit - initialModelCalls <= 2 && payload.runtimeCapabilities && payload.acceptanceAdapterGuide) {
+      const preparation = prepareArchitectureRepairFacts(objectFields(payload.validationRepair).previousResult ?? payload.baseCandidate, payload);
+      if (modelCallLimit - initialModelCalls < preparation.minimumCalls) throw new ProviderError("修复材料仍需分页读取，剩余次数不足以完成读取与正式提交，已停止在模型调用之前。", {
+        stage: "architecture", reason: "repair_materials_incomplete", role, requiredModelCalls: preparation.minimumCalls, remainingModelCalls: modelCallLimit - initialModelCalls });
+      payload = { ...payload, repairPreparation: preparation };
+    }
+    let modelMaterials: UnknownRecord = { ...payload, roleGuide: systemPrompt };
     const contextReader = createModelContextReader(() => ({ ...modelMaterials,
       ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(), rejectedDraft: reviewParts.rejectedSnapshot() } } : {}),
       ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) }));
@@ -445,11 +476,37 @@ export class ArchitectureDesigner {
       || formatSubmissionLimit !== undefined && formatSubmissionLimit !== ARCHITECTURE_FORMAT_SUBMISSION_LIMIT)
       throw new InputError("架构节点模型轮次配置无效");
     const canonicalParameters = structuredClone(parameters);
+    // Explanatory annotations belong to the wire contract, not the persisted stage schema hash.
+    if (payload.pipelineStage === "blueprint") {
+      parameters = structuredClone(parameters);
+      parameters.description = BLUEPRINT_ASSIGNMENT_RULE;
+      const responsibilities = parameters.properties?.modules?.items?.properties?.requirementIds;
+      if (responsibilities) responsibilities.description = BLUEPRINT_ASSIGNMENT_RULE;
+      const basis = parameters.properties?.global?.properties?.selectionBasis?.properties?.requirementIds;
+      if (basis) basis.description = "仅列出支持全局选型的需求编号；这些编号仍须在modules[*].requirementIds中各分配一个主责模块，此处引用不算模块覆盖。";
+      const global = parameters.properties?.global?.properties;
+      if (global?.interaction?.properties?.assistant) global.interaction.properties.assistant.description = "仅指已确认启用的托管页面浮窗助手，必须有page=true及具体用途；普通对话入口不添加此开关。";
+      if (global?.profile) global.profile.description = "workflow用于需要持久检查点的流程，须managed或docker；单次专属代码动作按实际需要选custom，可使用javascript/builtin。";
+    }
+    if (payload.pipelineStage === "module") {
+      parameters = structuredClone(parameters);
+      if (moduleBinding) {
+        if (parameters.required) parameters.required = parameters.required.filter(field => !["moduleId", "blueprintHash"].includes(field));
+        if (parameters.properties?.blueprintHash) parameters.properties.blueprintHash.description = "当前任务的蓝图绑定由宿主附加，无需填写或在补丁中复制；历史字段仅为兼容保留。";
+        if (parameters.properties?.moduleId) parameters.properties.moduleId.description = "模块身份由本次assignment固定，宿主在正式提交时附加；不能提交其他模块。";
+      }
+      const capabilityId = parameters.properties?.capabilities?.items?.properties?.id;
+      if (capabilityId) capabilityId.description = "available时逐字使用本轮capabilities目录的正式id，不自造别名；专属待开发代码可自定义id并标needs_development。";
+    }
     if (payload.pipelineStage === "integration" && payload.integrationPolicy) {
       parameters = structuredClone(parameters);
       const roots = payload.integrationPolicy.allowedRoots;
       parameters.properties!.updates!.items!.properties!.path = { ...parameters.properties!.updates!.items!.properties!.path,
         pattern: `^/(?:${roots.join("|")})(?:/|$)`, description: payload.integrationPolicy.instruction };
+    }
+    if (payload.stageSchema) {
+      payload = { ...payload, stageSchema: parameters };
+      modelMaterials = { ...modelMaterials, stageSchema: parameters };
     }
     const evidenceReader = role === "reviewer" && reviewEvidenceContext ? createArchitectureEvidenceReader({ context: reviewEvidenceContext,
       candidateHash: payload.candidateHash, candidateSchema: payload.candidateSchema, priorFindings: payload.priorFindings, role }) : null;
@@ -462,6 +519,15 @@ export class ArchitectureDesigner {
       && (["designer", "reviewer"].includes(role) || role === "specialist" && payload.pipelineStage === "module")
       ? createArchitectureSubmissionRepair({ schema: parameters }) : null;
     let editableSubmission: (NonNullable<ReturnType<ReturnType<typeof createArchitectureSubmissionRepair>["reference"]>> & { baseCandidateHash: string; source: string; trust: string }) | undefined, hasRejectedSubmission = false;
+    if (validationRepair && submissionRepair && objectFields(payload.validationRepair).previousResult != null) {
+      const previous = objectFields(payload.validationRepair).previousResult;
+      try {
+        editableSubmission = { ...submissionRepair.capture(previous, { signal })!, baseCandidateHash: designHash(previous),
+          source: "historical-stage-repair", trust: "untrusted-reference" };
+      } catch (error) {
+        if (!(error instanceof InputError) || objectFields(error.validationIssue).reason !== "size_limit") throw error;
+      }
+    }
     const editableReference = () => !hasRejectedSubmission ? editableSubmission : undefined;
     const rejectedReference = () => hasRejectedSubmission ? submissionRepair!.reference() : null;
     const unsubmittedDraft = createArchitectureUnsubmittedDraft({ schema: parameters,
@@ -694,10 +760,16 @@ export class ArchitectureDesigner {
       parameters, executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
         unsubmittedDraft.clear();
-        const originalSubmission = value;
+        let originalSubmission = value;
         attempted(_id);
         if (result !== undefined) throw new InputError("本阶段已经提交，请结束本轮");
         try {
+          if (moduleBinding) {
+            const submitted = objectFields(value);
+            if (submitted.moduleId !== undefined && submitted.moduleId !== moduleBinding.moduleId)
+              throw Object.assign(new InputError("提交模块与本次分工不一致。"), { validationIssue: { path: "module.moduleId", reason: "invalid_reference" } });
+            value = { ...submitted, ...moduleBinding }; originalSubmission = value;
+          }
           if (evidenceReader) value = evidenceReader.resolveSubmission(value);
           if (role === "reviewer") await retainReviewProgress(value, "semantic-rejected");
           reviewParts?.validateSubmission(value);
@@ -729,6 +801,11 @@ export class ArchitectureDesigner {
         }
         catch (error) {
           if (error instanceof InputError) {
+            if (payload.pipelineStage === "blueprint") {
+              const allocation = diagnoseBlueprintAssignments(originalSubmission, payload.requirements ?? [], typeof payload.moduleLimit === "number" ? payload.moduleLimit : undefined);
+              if (allocation) error.message += "；蓝图需求分工诊断：" + JSON.stringify(allocation)
+                + "；只修正相关modules[i].requirementIds，保留其他内容。truncated=true时按原requirements继续核对未列出的编号；宿主不会替你猜测主责模块。";
+            }
             await retainRejectedInput(submitName, originalSubmission);
             const diagnostic = rejected(error);
             noteSubmissionFailure(_id, diagnosticIssues(error.validationIssues ?? (diagnostic ? [diagnostic] : [])));
@@ -749,6 +826,12 @@ export class ArchitectureDesigner {
               lastSubmissionDiagnostics = { total: error.validationIssueTotal, truncated: error.validationIssuesTruncated,
                 issues: diagnosticIssues(error.validationIssues).slice(0, 64) };
               error.message += "；本次评审全部可独立确定的证据问题：" + JSON.stringify(lastSubmissionDiagnostics);
+            }
+            if (payload.pipelineStage && Array.isArray(error.validationIssues)) {
+              const issues = diagnosticIssues(error.validationIssues);
+              lastSubmissionDiagnostics = { total: error.validationIssueTotal ?? issues.length,
+                truncated: error.validationIssuesTruncated === true || issues.length > 64, issues: issues.slice(0, 64) };
+              error.message += "；本阶段可独立确定的问题请一并修正：" + JSON.stringify(lastSubmissionDiagnostics);
             }
             if (evidenceReader?.referenceHints) {
               const hints = await evidenceReader.referenceHints(value, diagnosticIssues(error.validationIssues ?? (diagnostic ? [diagnostic] : [])));
@@ -789,7 +872,9 @@ export class ArchitectureDesigner {
         if (!feedback.valid) {
           attempted(callId); rejected(null, false, feedback.issues[0]);
           lastSubmissionDiagnostics = { total: feedback.total, truncated: feedback.truncated, issues: feedback.issues };
+          const allocation = payload.pipelineStage === "blueprint" ? diagnoseBlueprintAssignments(candidate, payload.requirements ?? [], typeof payload.moduleLimit === "number" ? payload.moduleLimit : undefined) : null;
           throw Object.assign(new InputError("局部修订后的完整提交未通过原工具结构校验：" + JSON.stringify({ ...feedback,
+            ...(allocation ? { blueprintAllocation: allocation } : {}),
             ...(rejectedReference() ? { rejectedSubmission: rejectedReference() } : {}),
             ...(editableReference() ? { editableSubmission: editableReference() } : {}) })), { validationIssue: feedback.issues[0] });
         }
@@ -827,11 +912,15 @@ export class ArchitectureDesigner {
           throw error;
         }
       } } : null;
+    const terminalTools = () => new Set([submitName, ...(reviseSubmission && (editableSubmission || hasRejectedSubmission) ? [reviseSubmission.name] : [])]);
     const roleTools = [...tools, contextReader, ...(evidenceReader ? [evidenceReader.tool] : []), ...(platformContractTool ? [platformContractTool] : []), ...(allowHandoff ? [requestRequirements] : []),
       ...(reviewParts ? [saveReviewParts!, submitReviewParts!] : []),
       submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), submit]
+      .filter(tool => !boundedStage || modelCallLimit - initialModelCalls > 1 || terminalTools().has(tool.name))
       .map((tool): NeumaTool => ({ ...tool, execute: async (...args: Parameters<NeumaTool["execute"]>) => {
         signal?.throwIfAborted();
+        if (boundedStage && turns >= modelCallLimit && !terminalTools().has(tool.name))
+          throw new InputError("本轮剩余次数只用于正式提交，读取或单独保存不能替代提交。");
         assertProgressWritable();
         reviewParts?.assertActive();
         if (delegatedFailure) throw failure(typeof objectFields(delegatedFailure.diagnostic).reason === "string" ? String(objectFields(delegatedFailure.diagnostic).reason) : "module_failed", details());
@@ -903,7 +992,9 @@ export class ArchitectureDesigner {
       }
       if (!feedback.valid && [submitName, "revise_architecture_submission", "submit_architecture_draft", "save_architecture_review_parts", "submit_architecture_review_parts"].includes(toolName))
         noteSubmissionFailure(toolCallId, feedback.issues);
-      return feedback;
+      const allocation = !feedback.valid && payload.pipelineStage === "blueprint" && toolName === submitName
+        ? diagnoseBlueprintAssignments(args, payload.requirements ?? [], typeof payload.moduleLimit === "number" ? payload.moduleLimit : undefined) : null;
+      return { ...feedback, ...(allocation ? { blueprintAllocation: allocation } : {}) };
     };
     try {
       signal?.throwIfAborted();
@@ -951,6 +1042,10 @@ export class ArchitectureDesigner {
       if (reviewParts?.reference().batch && turns >= modelCallLimit) throw failure("turn_limit", details());
       signal?.addEventListener("abort", abort, { once: true });
       session = await this.sessionFactory({ config: this.config, cwd: this.cwd,
+        ...(boundedStage ? { toolAvailability: ({ retryAttempt }: { retryAttempt: number; purpose: string }) => {
+          const remaining = modelCallLimit - turns + (retryAttempt > 0 ? 1 : 0);
+          return roleTools.filter(tool => remaining > 1 || terminalTools().has(tool.name)).map(tool => tool.name);
+        } } : {}),
         reasoningMode: stageReasoningMode ?? (role === "reviewer" || role === "designer" && editableDesign
           || role === "specialist" && technicalRevision ? "off" : "auto"),
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
@@ -960,8 +1055,10 @@ export class ArchitectureDesigner {
           return projected?.role === "user" && typeof projected.content === "string" ? projected.content : text;
         },
         systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName })
+          + (validationRepair ? "\n这是历史阶段局部修复。repairPreparation提供宿主核验的平台事实，validationRepair.previousResult是待修原稿。保留有效内容，优先用editableSubmission的submissionHash调用局部修订工具；仍须完整校验。最后一次调用只开放正式提交与可用局部修订，旧历史中的读取工具本轮不可用，不再请求重复核对。确有不能解决的问题须在结果中如实保留，不能声称已通过。" : "")
           + (platformContractTool && role === "designer" ? "\n" + PLATFORM_CLAIMS_PROMPT : "") + "\n" + renderPiSubmissionContract({ role, submitName, tools: roleTools,
-          alternativeTools: [submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), ...(submitReviewParts ? [submitReviewParts] : []), ...(allowHandoff ? [requestRequirements] : [])].map((tool) => tool.name), structuredResponse: true })
+          alternativeTools: [submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), ...(submitReviewParts ? [submitReviewParts] : []), ...(allowHandoff ? [requestRequirements] : [])]
+            .filter(tool => roleTools.some(registered => registered.name === tool.name)).map(tool => tool.name), structuredResponse: true })
           + (reviewParts?.reference().batch ? "\n当前batch的save_architecture_review_parts也明确允许用单个严格JSON正文提交分项参数，或submission包装。宿主执行同一保存校验并落盘后才派发下一批；这不是整阶段终止或通过，其他读写和外部操作仍须真实工具调用。" : ""), customTools: roleTools,
         rawInputValidators: Object.fromEntries(roleTools.map(({ name }) => [name, async (call) => {
           const feedback = validationFeedback(call);
@@ -976,6 +1073,7 @@ export class ArchitectureDesigner {
         onModelCall: chargeRequest,
         ...(sessionStorage ? { sessionStorage } : {}),
         maxOutputTokens: requestedMaxOutputTokens });
+      if (boundedStage) session.setAutoCompactionEnabled?.(false);
       if (onSessionRef && session.sessionFile) await onSessionRef({ file: basename(session.sessionFile) });
       signal?.throwIfAborted();
       if (resumeStage && payload.stageRepair && role === "specialist" && submissionRepair) {
@@ -1025,6 +1123,8 @@ export class ArchitectureDesigner {
       }) ?? (() => {});
       let prompt = resumeStage ? modelPrompt({ type: "resume_architecture_stage", pipelineStage: payload.pipelineStage,
         submitName, modelBudget: modelBudget(),
+        ...(payload.stageContract ? { stageContract: payload.stageContract, stageSchema: payload.stageSchema } : {}),
+        ...(payload.consultations ? { consultations: payload.consultations } : {}),
         ...(payload.stageRepair ? { stageRepair: payload.stageRepair } : {}),
         ...(rejectedReference() ? { rejectedSubmission: rejectedReference(), lastSubmissionIssue,
           repairInstruction: "宿主已从原会话恢复上次被拒的完整模块稿。可使用当前submissionHash调用revise_architecture_submission，只替换需要修正的已有字段；仍执行完整校验。" } : {}),
@@ -1125,7 +1225,7 @@ export class ArchitectureDesigner {
         error.diagnostic = { stage: "architecture", reason: "invalid_result", ...details() };
         throw error;
       }
-      throw modelFailure(retryError || objectFields(error).message, details());
+      throw modelFailure(error instanceof ProviderError ? error : retryError || objectFields(error).message, details());
     } finally {
       unsubmittedDraft.clear();
       const lifecycle = new ExecutionLifecycle();
@@ -1165,6 +1265,13 @@ export class ArchitectureDesigner {
       && previous.sourceFingerprint === definition.fingerprint && designHash(previous.draft) === designHash(definition.draft)
       && Object.hasOwn(previous, "designProgressCheckpoint") && previous.status !== "passed" ? previous : null;
     const recovery = objectFields(designProgressSource?.designRecovery ?? (designProgressSource && architectureDesignRecovery(designProgressSource)));
+    const designContinuation = objectFields(designProgressSource?.designProgressCheckpoint).validationContinuation;
+    if (designContinuation) {
+      const source = await this.getVersion(definition.id, objectFields(designContinuation).sourceVersion);
+      const expected = architectureDesignTestContinuation(source);
+      if (!expected || designHash(expected) !== designHash(designContinuation))
+        throw new InputError("设计测试续跑的原失败检查点或授权已变化，不能重新领取额度。");
+    }
     if (architectureRepair !== undefined && (!recovery?.request
       || designHash(architectureRepair) !== designHash(recovery.request)))
       throw new InputError("局部修复授权已过期、已使用或需求已变化，请刷新已保存进度。");
@@ -1267,6 +1374,8 @@ export class ArchitectureDesigner {
         designProgressEvidenceHash: designProgressSource.designProgressEvidenceHash,
         ...(designProgressSource.designStageDiagnostics ? { designStageDiagnostics: structuredClone(designProgressSource.designStageDiagnostics) } : {}) } : {}),
       ...(savedReviewRevision ? { reviewRevisionCheckpoint: structuredClone(savedReviewRevision) } : {}),
+      ...(designProgressSource?.reviewDispatchSource ? { reviewDispatchSource: designProgressSource.reviewDispatchSource,
+        ...(designProgressSource.reviewDispatchCheckpoint !== undefined ? { reviewDispatchCheckpoint: structuredClone(designProgressSource.reviewDispatchCheckpoint) } : {}) } : {}),
       ...(reviewRevision && previous?.reviewRevisionSource ? { reviewRevisionSource: previous.reviewRevisionSource } : {}),
       ...(definition.draft.taskSpec ? { designResearchCalls: designProgressSource?.designResearchCalls ?? 0 } : {}),
       ...(revisionSeed ? { revisionSource: revisionSeed.source } : {}),
@@ -1486,7 +1595,7 @@ export class ArchitectureDesigner {
             platformRules, researchRules, signal, onProgress,
             forceIntegration: Boolean(revisionSeed?.fidelityRevision || revisionSeed?.rejectedFidelityReference
               || objectFields(objectFields(revisionSeed?.developmentRevision).planningToolFailures).status === "available"),
-            repair: record.designProgressCheckpoint?.repair ? undefined : architectureRepair,
+            repair: objectFields(architectureRepair).kind === "stage_validation_retry" ? architectureRepair : record.designProgressCheckpoint?.repair ? undefined : architectureRepair,
             ...(editableDesign ? { revision: { candidate: editableDesign,
               issues: record.design ? record.issues : revisionSeed?.issues ?? record.issues } } : {}) }) : null;
         const revisedCandidate = !resumeReview && reviewRevision ? await runArchitectureReviewRevision({ record, source: reviewRevisionSource,
@@ -1634,7 +1743,7 @@ export class ArchitectureDesigner {
           await this.save(record);
         };
         const resumeMainReview = savedMainReview?.fidelityStatus === "pending" ? savedMainReview : undefined;
-        const resumeReviewProgress = savedMainReview ? undefined : savedProgress;
+        let resumeReviewProgress = savedMainReview ? undefined : savedProgress;
         if (reviewRetry && (!savedProgress || !readArchitectureReviewRetry(record)))
           throw new InputError("手动续评的冻结材料或累计用量已变化，不能重开评审。");
         let savedFidelityProgress;
@@ -1646,6 +1755,55 @@ export class ArchitectureDesigner {
             Math.max(savedFidelityProgress.parentModelCalls, savedMainReview!.modelCalls));
           if (!record.requirementFidelityProgress) throw new InputError("范围复核进度不能续接");
           await this.save(record);
+        }
+        let distributedReview: UnknownRecord | undefined;
+        if (record.reviewDispatchCheckpoint && objectFields(record.reviewDispatchCheckpoint).candidateHash !== record.candidateHash) {
+          delete record.reviewDispatchCheckpoint; delete record.reviewDispatchSource;
+        }
+        if (evidenceContext && !resumeMainReview && !(resumeReviewProgress?.modelCalls ?? 0)
+          && (record.reviewDispatchSource || !resumeReview && shouldDistributeArchitectureReview(evidenceContext, priorFindings))) {
+          const schema = reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: Boolean(priorFindings) });
+          record.reviewProgressCheckpoint = createReviewProgressCheckpoint(record, null, 0);
+          if (!record.reviewProgressCheckpoint) throw new InputError("分组评审前无法保存主评审零调用进度。");
+          try {
+            const dispatched = await runArchitectureReviewDispatch({ record, candidateHash: record.candidateHash!, platformHash: platformContext.platformHash,
+              context: evidenceContext, priorFindings, schema, signal,
+              save: async checkpoint => {
+                const before = { checkpoint: record.reviewDispatchCheckpoint, source: record.reviewDispatchSource };
+                record.reviewDispatchCheckpoint = checkpoint; record.reviewDispatchSource = checkpoint.bindingHash;
+                try { await this.save(record); } catch (error) {
+                  if (before.checkpoint === undefined) delete record.reviewDispatchCheckpoint; else record.reviewDispatchCheckpoint = before.checkpoint;
+                  if (before.source === undefined) delete record.reviewDispatchSource; else record.reviewDispatchSource = before.source;
+                  throw error;
+                }
+              },
+              runRole: async node => {
+                const { worker, assignment } = node;
+                onProgress({ type: "status", phase: "evaluating", label: `正在分组独立评审（本组${assignment.ids.length}项）…` });
+                return this.role({ role: "specialist", agentId: definition.id,
+                  systemPrompt: "你是独立评审子Agent，只核对本组指定分项，引用本次冻结证据。结果供主评审核对，不改设计，不代交最终结论。",
+                  payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
+                  parameters: node.parameters, tools: node.tools, validate: node.validate,
+                  modelCallLimit: worker.callLimit, initialModelCalls: worker.group.calls,
+                  onStageModelCall: event => worker.onCall(event.retryAttempt),
+                  onStageResult: result => worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds,
+                    summary: "独立评审分项，等待完整主评审", updates: [{ path: worker.group.paths[0]!, value: result }] }),
+                  sessionStorage: { directory: await this.storage.directory(record.agentId, "architecture-review-dispatch/sessions", { create: true }),
+                    binding: { version: 1, role: "architecture-review-slice", agentId: record.agentId, candidateHash: record.candidateHash,
+                      dispatchHash: record.reviewDispatchSource, groupId: worker.group.id, baseHash: worker.baseHash },
+                    ...(worker.group.sessionFile ? { file: worker.group.sessionFile } : {}) },
+                  onSessionRef: reference => worker.onSession(reference.file), stageReasoningMode: "off",
+                  maxOutputTokens: architectureModelOutputBudget(this.config, "reviewer"), signal, onProgress });
+              } });
+            const progress = createReviewProgressCheckpoint(record, null, 0, { parts: dispatched.parts });
+            if (!progress) throw new InputError("独立评审分项不能保存为主评审待核对进度。");
+            record.reviewProgressCheckpoint = progress; resumeReviewProgress = progress; distributedReview = dispatched.summary;
+            await this.save(record);
+          } catch (error) {
+            throw new ArchitectureError(error instanceof Error ? error.message : "分组独立评审未完成。", {
+              ...objectFields(objectFields(error).diagnostic), stage: "architecture", reason: "review_slice_incomplete", role: "reviewer",
+              phase: "evaluating", modelCalls: 0 });
+          }
         }
         const batchMode = Boolean(evidenceContext && definition.draft.taskSpec && !resumeReviewProgress?.review && !resumeMainReview);
         const review = await this.role({ role: "reviewer", agentId: definition.id,
@@ -1708,6 +1866,7 @@ export class ArchitectureDesigner {
             record.reviewDiagnostics = record.reviewDiagnostics.slice(-2); await this.save(record);
           },
           payload: { requirement: definition.draft, ...context(), candidateHash: record.candidateHash,
+            ...(distributedReview ? { distributedReview } : {}),
             ...(reviewRetry ? { reviewRetry: { originalCalls: reviewRetryCheckpoint!.source.modelCalls, additionalCalls: reviewRetryCheckpoint!.additionalCalls,
               lastSubmissionIssue: previous!.diagnostic?.lastSubmissionIssue ?? null,
               instruction: "本次手动续评仅补未完成检查或纠正提交引用，保留已保存分项；使用当前候选真实路径。不得修改候选、跳过完整校验或宣称通过。" } } : {}),

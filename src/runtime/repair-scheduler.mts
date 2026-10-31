@@ -5,8 +5,10 @@ import { objectFields } from "./type-boundary.mjs";
 export interface RepairIssue { id: string; description: string; remedy: string; paths: string[]; owner: string; afterOwners?: string[] }
 export interface RepairUpdate { path: string; value: unknown }
 export interface RepairResult { baseHash: string; issueIds: string[]; summary: string; updates: RepairUpdate[] }
+interface RepairHistory { wave: number; calls: number; sessionFile: string | null; inputHash: string | null;
+  result: RepairResult | null; reason: string }
 export interface RepairGroup { id: string; issueIds: string[]; paths: string[]; wave: number; calls: number;
-  dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null }
+  dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null; history?: RepairHistory[] }
 export interface RepairCheckpoint { version: 1; bindingHash: string; baseHash: string; issues: RepairIssue[];
   calls: number; callLimit: number; groupCallLimit: number; concurrency: number; groups: RepairGroup[]; hash: string }
 export interface RepairWorker { group: RepairGroup; issues: RepairIssue[]; base: unknown; baseHash: string;
@@ -111,12 +113,21 @@ export function readRepairCheckpoint(input: unknown): RepairCheckpoint {
     || state.issues.some(issue => !ids.includes(issue.id))) fail();
   for (const group of state.groups) {
     const owned = state.issues.filter(issue => group.issueIds.includes(issue.id));
+    const history = group.history ?? [];
+    if (!Array.isArray(history) || history.length > 12 || history.some((entry, index) => !Number.isSafeInteger(entry.calls)
+      || entry.calls < 1 || entry.calls > group.calls || index > 0 && entry.calls < history[index - 1]!.calls
+      || !Number.isSafeInteger(entry.wave) || entry.wave < 1 || typeof entry.inputHash !== "string"
+      || !entry.sessionFile || !/^[\w.-]+\.jsonl$/u.test(entry.sessionFile)
+      || typeof entry.reason !== "string" || !entry.reason || entry.reason.length > 4000
+      || entry.result && entry.result.baseHash !== entry.inputHash)) fail();
+    if (history.some(entry => entry.sessionFile === group.sessionFile && entry.inputHash !== group.inputHash)) fail();
+    const rebased = history.length > 0 && history.at(-1)!.calls === group.calls && !group.sessionFile;
     if (group.issueIds.length > 3 || repairHash([...new Set(owned.flatMap(issue => issue.paths))].sort()) !== repairHash(group.paths)
       || !Array.isArray(group.dependsOn) || group.dependsOn.some(id => id === group.id || !state.groups.some(other => other.id === id))
       || !Array.isArray(group.paths) || !group.paths.length || !Number.isSafeInteger(group.wave) || group.wave < 0
       || !Number.isSafeInteger(group.calls) || group.calls < 0 || group.calls > state.groupCallLimit
-      || group.calls > 0 && !group.sessionFile || group.sessionFile !== null && !/^[\w.-]+\.jsonl$/u.test(group.sessionFile)
-      || group.wave === 0 && (group.calls || group.result || group.inputHash)
+      || group.calls > 0 && !group.sessionFile && !rebased || group.sessionFile !== null && !/^[\w.-]+\.jsonl$/u.test(group.sessionFile)
+      || group.wave === 0 && (group.calls && !rebased || group.result || group.inputHash)
       || group.wave > 0 && typeof group.inputHash !== "string" || group.result && !group.calls) fail();
     for (const path of group.paths) keys(path);
   }
@@ -125,7 +136,8 @@ export function readRepairCheckpoint(input: unknown): RepairCheckpoint {
 
 /** Workers only propose patches. A persisted wave is replayed before any new work is scheduled. */
 export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint; binding: unknown; base: unknown;
-  save(state: RepairCheckpoint): Promise<void>; run(worker: RepairWorker): Promise<unknown>; signal?: AbortSignal | undefined }): Promise<unknown> {
+  save(state: RepairCheckpoint): Promise<void>; run(worker: RepairWorker): Promise<unknown>; signal?: AbortSignal | undefined;
+  validateCandidate?: ((candidate: unknown, final: boolean) => unknown | Promise<unknown>) | undefined }): Promise<unknown> {
   let state = readRepairCheckpoint(options.checkpoint), writes = Promise.resolve(), persistenceError: unknown;
   if (state.bindingHash !== repairHash(options.binding) || state.baseHash !== repairHash(options.base)) fail();
   const active = () => { options.signal?.throwIfAborted(); if (persistenceError) throw persistenceError; };
@@ -138,6 +150,19 @@ export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint;
     writes = pending.catch(() => {}); return pending;
   };
   await update(() => {});
+  const reopen = async (ids: string[], wave: number, error: unknown) => update(next => {
+    const reason = (error instanceof Error ? error.message : "合并校验未通过，须重新核对本组及下游补丁。").slice(0, 4000);
+    for (const group of next.groups) if (ids.includes(group.id) || group.wave > wave) {
+      if (group.calls && group.sessionFile) {
+        if ((group.history?.length ?? 0) >= 12) fail("修复退回次数已达到保存上限。");
+        (group.history ??= []).push({ wave: group.wave, calls: group.calls, sessionFile: group.sessionFile,
+          inputHash: group.inputHash, result: clone(group.result), reason });
+      }
+      group.result = null;
+      // Later waves consumed the rejected base. Keep their history and usage, but bind a new session to the corrected base.
+      if (group.wave > wave) { group.wave = 0; group.inputHash = null; group.sessionFile = null; }
+    }
+  });
   let base = clone(options.base), wave = 1;
   for (;;) {
     active();
@@ -158,24 +183,43 @@ export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint;
     if (groups.length > state.concurrency || groups.some(group => group.inputHash !== repairHash(base)
       || group.dependsOn.some(id => { const dependency = state.groups.find(other => other.id === id); return !dependency?.result || dependency.wave >= wave; }))
       || groups.some((group, index) => groups.slice(0, index).some(other => other.paths.some(a => group.paths.some(b => overlaps(a, b)))))) fail();
+    for (const group of groups.filter(group => group.result)) {
+      const result = validateRepairResult(group.result, group, base);
+      try { await options.validateCandidate?.(applyRepairUpdates(base, result.updates), false); }
+      catch (error) { await reopen([group.id], wave, error); }
+    }
+    groups = state.groups.filter(group => group.wave === wave);
+    const pending = groups.filter(group => !group.result), quotas = new Map(pending.map(group => [group.id, group.calls]));
+    let available = state.callLimit - state.calls - state.groups.filter(group => !group.result && group.wave !== wave).length;
+    if (available < pending.length) fail("剩余修复次数不足以让每个未完成组正式提交；已完成结果与累计用量保留。");
+    for (;;) {
+      let assigned = false;
+      for (const group of pending) if (available > 0 && quotas.get(group.id)! < state.groupCallLimit) {
+        quotas.set(group.id, quotas.get(group.id)! + 1); available--; assigned = true;
+      }
+      if (!assigned) break;
+    }
     const settled = await Promise.allSettled(groups.filter(group => !group.result).map(async original => {
       const current = () => state.groups.find(group => group.id === original.id)!;
-      if (current().calls >= state.groupCallLimit || state.calls >= state.callLimit) fail("修复子任务额度已用完，已完成组保留，不能重新分派刷新额度。");
+      const limit = quotas.get(original.id)!;
+      if (current().calls >= limit || state.calls >= state.callLimit) fail("修复子任务额度已用完，已完成组保留，不能重新分派刷新额度。");
       await options.run({ group: clone(original), base: clone(base), baseHash: repairHash(base),
-        issues: clone(state.issues.filter(issue => original.issueIds.includes(issue.id))), callLimit: state.groupCallLimit,
+        issues: clone(state.issues.filter(issue => original.issueIds.includes(issue.id))), callLimit: limit,
         onSession: file => update(next => {
           const group = next.groups.find(group => group.id === original.id)!;
           if (!/^[\w.-]+\.jsonl$/u.test(file) || group.sessionFile && group.sessionFile !== file) fail();
+          if (group.history?.some(entry => entry.sessionFile === file && entry.inputHash !== group.inputHash)) fail();
           group.sessionFile = file;
         }),
         onCall: (retryAttempt = 0) => update(next => {
           const group = next.groups.find(group => group.id === original.id)!;
           if (retryAttempt > 0) return;
-          if (!group.sessionFile || group.result || group.calls >= next.groupCallLimit || next.calls >= next.callLimit) fail("修复调用额度已耗尽。");
+          if (!group.sessionFile || group.result || group.calls >= limit || next.calls >= next.callLimit) fail("修复调用额度已耗尽。");
           group.calls++; next.calls++;
         }),
         submit: async value => {
           active(); const result = validateRepairResult(value, current(), base);
+          await options.validateCandidate?.(applyRepairUpdates(base, result.updates), false);
           await update(next => {
             const group = next.groups.find(group => group.id === original.id)!;
             if (!group.calls || group.result) fail("本修复子任务已提交或尚未调用模型。");
@@ -188,6 +232,9 @@ export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint;
     if (failure) throw failure.reason;
     const completed = state.groups.filter(group => group.wave === wave);
     for (const group of completed) validateRepairResult(group.result, group, base);
-    base = applyRepairUpdates(base, completed.flatMap(group => group.result!.updates)); wave++;
+    const candidate = applyRepairUpdates(base, completed.flatMap(group => group.result!.updates));
+    try { await options.validateCandidate?.(candidate, state.groups.every(group => group.result)); }
+    catch (error) { await reopen(completed.map(group => group.id), wave, error); throw error; }
+    base = candidate; wave++;
   }
 }

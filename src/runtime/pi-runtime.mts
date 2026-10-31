@@ -232,7 +232,7 @@ function controlledResources(extensions: LoadExtensionsResult, systemPrompt: str
 }
 
 export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager!, turn!), systemPrompt = SYSTEM_PROMPT,
-  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, reasoningMode = "off" }: PiSessionOptions): Promise<NeumaPiSession> {
+  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, toolAvailability, reasoningMode = "off" }: PiSessionOptions): Promise<NeumaPiSession> {
   if (!["off", "auto"].includes(reasoningMode)) throw new InputError("模型思考配置无效");
   if (transformContext !== undefined && typeof transformContext !== "function") throw new InputError("模型上下文投影配置无效");
   if (preparePrompt !== undefined && typeof preparePrompt !== "function") throw new InputError("模型首包投影配置无效");
@@ -330,14 +330,25 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
         throw new Error("NEUMA_MODEL_CALL_BLOCKED");
       }
       options?.signal?.throwIfAborted();
-      try { await admitModelRequest({ signal: options?.signal, persist: () => onModelCall?.({ signal: options?.signal, purpose, retryAttempt }) }); }
+      let requestContext = context;
+      try {
+        if (toolAvailability) {
+          const names = toolAvailability({ purpose, retryAttempt }), registered = new Set(customTools.map(tool => tool.name));
+          if (!Array.isArray(names) || new Set(names).size !== names.length || names.some(name => typeof name !== "string" || !registered.has(name)))
+            throw new InputError("本轮工具范围必须是已注册工具的子集");
+          // The pinned SDK carries declarations in system transcript entries, not context.tools.
+          requestContext = { ...context, messages: context.messages.map(message => message.role === "system" && message.toolsAdded
+            ? { ...message, toolsAdded: message.toolsAdded.filter(tool => names.includes(tool.name)) } : message) };
+        }
+        await admitModelRequest({ signal: options?.signal, persist: () => onModelCall?.({ signal: options?.signal, purpose, retryAttempt }) });
+      }
       catch (error) {
         lastRequestRejection = modelRequestRejection(error, { purpose, retryAttempt });
         halt(error); throw new Error("NEUMA_MODEL_CALL_BLOCKED");
       }
       options?.signal?.throwIfAborted();
       policy.startRequest();
-      return streamSimple(model, context, { ...options, maxTokens: maxOutputTokens, fetch: fetchModel, maxRetries: 0 });
+      return streamSimple(model, requestContext, { ...options, maxTokens: maxOutputTokens, fetch: fetchModel, maxRetries: 0 });
     }),
     models: [{ id: config.model!, name: config.model!, reasoning: profile.reasoning, input: [...profile.input],
       // Pi requires cost metadata. These placeholders do not represent the provider's actual prices.

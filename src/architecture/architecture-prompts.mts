@@ -1,5 +1,7 @@
 import { ARCHITECTURE_ROLE_TURN_LIMIT } from "./architecture-contract.mjs";
 
+export const BLUEPRINT_ASSIGNMENT_RULE = "requirements中的每个id必须在全部modules[*].requirementIds中恰好出现一次，包括全局约束、触发方式、数据保存和操作要求。global.selectionBasis.requirementIds只是选型依据，不能替代模块主责分配。全局约束也指定一个现有模块负责贯彻或核验；不同id即使语义接近也分别保留追溯。只补分工时修改相应modules[i].requirementIds，保留其他内容并重新完整校验。";
+
 export const CAPABILITY_VERIFICATION_RULE = `capabilities只记录当前执行路径实际要调用的工具、连接或专属代码能力，不记录“尚未验收”的业务效果。available须有当前完整能力目录依据；已有明确且受平台支持的实现路径、需研发的专属代码用needs_development，实际依赖是否存在或可用仍不确定时保留unverified。已排除或未来才采用的方案写入decisions。
 分别核对执行依赖与验收义务：生成页面、数值计算的代码是实现内容，浏览器视觉、滑块交互效果或数值精度尚未验收是验证状态，不能仅凭名称分类。单纯待验收的效果保留在unknowns及适用的acceptance或后续验证义务中，必要时用decisions解释分工；逐条保留原需求引用、验证阶段、具体证据和失败处置，不新增不存在的验收适配器。deferredVerifications已有明确后续安排且不影响当前架构可行性的事项，不因尚未执行就升级为能力缺口，也不代表已验证或可直接交付。
 候选误将验收义务列入unverified能力时，设计/修订者修正capabilities中的分类并保留完整验收义务；评审者只指出当前实际字段及保留义务的修正建议，不修改候选。不能伪改为available、删除验收或修改程序blocking标记。真实缺失的必需引擎、浏览器自动执行工具、接口或权限仍须阻断，不能仅移入unknowns或改验证阶段来放行。降级仍须满足逐条需求覆盖、具体步骤、可观察验收和证据。`;

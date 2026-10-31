@@ -15,6 +15,8 @@ import { hostDeliveryCapabilityCatalog, runtimeCapabilityContract } from "../run
 import { PLATFORM_CLAIMS_SCHEMA, validateArchitecturePlatformClaims } from "./architecture-platform-claims.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
 import { textLength } from "../runtime/text-length.mjs";
+import { architectureGlobalIssues, architectureCapabilityIssues } from "./architecture-stage-semantics.mjs";
+import type { StageSemanticIssue } from "./architecture-stage-semantics.mjs";
 
 export const ARCHITECTURE_VERSION = 1;
 export const CURRENT_ARCHITECTURE_VERSION = 3;
@@ -204,6 +206,13 @@ function fail(message: string, validationIssue?: UnknownRecord): never {
   throw Object.assign(new InputError(`架构契约无效：${message}`), validationIssue ? { validationIssue } : {});
 }
 
+export function assertStageSemantics(issues: StageSemanticIssue[]): void {
+  if (!issues.length) return;
+  throw Object.assign(new InputError("架构契约无效：" + [...new Set(issues.map(item => item.message))].join("；")), {
+    validationIssue: issues[0], validationIssues: issues,
+  });
+}
+
 function validateSchema(value: unknown, schema: Schema, path = "design"): void {
   if (schema.anyOf) {
     if (!schema.anyOf.some((branch) => { try { validateSchema(value, branch, path); return true; } catch { return false; } })) fail(`${path} 格式无效`);
@@ -336,11 +345,8 @@ export function validateDesign(input: unknown, { requirements, capabilities = CA
   validateSchema(input, version === 3 ? DESIGN_V3_SCHEMA : version === 2 ? DESIGN_V2_SCHEMA : LEGACY_DESIGN_SCHEMA);
   // The exact version schema above checked every field before semantic references are inspected.
   const value = input as ArchitectureDesign;
+  assertStageSemantics(architectureGlobalIssues(value));
   if (value.schemaVersion === 2 || value.schemaVersion === 3) {
-    if (value.interaction.defaultEntry === "application" && !value.interaction.page) fail("应用入口必须交付页面",
-      { path: "design.interaction.page", reason: "invalid_contract" });
-    if (value.interaction.assistant?.enabled && (!value.interaction.page || !value.interaction.assistant.purpose.trim())) fail("页面助手必须有托管页面及具体用途",
-      { path: "design.interaction.assistant", reason: "invalid_contract" });
     uniqueIds(value.connections, "connections");
     for (const [index, connection] of value.connections.entries()) {
       if (value.schemaVersion === 3) {
@@ -366,12 +372,6 @@ export function validateDesign(input: unknown, { requirements, capabilities = CA
   const requirementIds = uniqueIds(requirements, "requirements");
   if (value.schemaVersion === 3) {
     value.selectionBasis.requirementIds.forEach((id, index) => assertReference(id, requirementIds, `design.selectionBasis.requirementIds[${index}]`, true));
-    if (value.execution.language === "none" && value.execution.hosting !== "builtin") fail("独立服务必须选择实际运行语言",
-      { path: "design.execution.language", reason: "invalid_contract" });
-    if (value.execution.language === "python" && value.execution.hosting === "builtin") fail("Python 必须通过受管或 Docker 运行器交付",
-      { path: "design.execution.hosting", reason: "invalid_contract" });
-    if (value.profile === "workflow" && value.execution.hosting === "builtin") fail("新流程必须使用支持持久检查点的受管运行方式",
-      { path: "design.execution.hosting", reason: "invalid_contract" });
   }
   const componentIds = uniqueIds(value.components, "components");
   const stepIds = uniqueIds(value.steps, "steps");
@@ -412,11 +412,7 @@ export function validateDesign(input: unknown, { requirements, capabilities = CA
     validateSchema(item.id, identifier, "context.id");
   }
   uniqueIds(capabilities, "capability catalog");
-  const knownCapabilities = new Set(capabilities.filter((item) => item.status === "available").map((item) => item.id));
-  for (const [index, capability] of value.capabilities.entries()) {
-    if (capability.status === "available" && !knownCapabilities.has(capability.id)) fail(`design.capabilities[${index}].id 未被工具目录证实可用`,
-      { path: `design.capabilities[${index}].id`, reason: "invalid_reference", allowedReferences: [...knownCapabilities] });
-  }
+  assertStageSemantics(architectureCapabilityIssues(value.capabilities, capabilities));
   uniqueIds(evidence, "evidence");
   validateArchitectureDecisionReferences(value, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const kinds = new Set<string>(value.acceptance.map((item) => item.kind));

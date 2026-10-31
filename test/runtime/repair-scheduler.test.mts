@@ -80,3 +80,40 @@ test("不同文件仍按显式任务依赖等待，下游读取上游修复后�
   } });
   assert.deepEqual(order, ["upstream", "downstream"]); assert.deepEqual(result, { upstream: "new", downstream: "new" });
 });
+
+test("业务校验拒绝的补丁不标完成，恢复只修未完成组并保留真实用量", async () => {
+  const base = { a: "old", b: "old" };
+  let checkpoint = createRepairCheckpoint("validated", base, [issue("a", "/a"), issue("b", "/b")], 3);
+  const options = { binding: "validated", base, save: async (value: typeof checkpoint) => { checkpoint = value; },
+    validateCandidate: (candidate: unknown) => { assert.notEqual((candidate as typeof base).a, "", "必填字段不能为空"); } };
+  await assert.rejects(runRepairSchedule({ ...options, checkpoint, run: worker => submit(worker, worker.group.issueIds[0] === "a" ? "" : "new-b") }), /必填字段/u);
+  assert.equal(checkpoint.groups.filter(group => group.result).length, 1);
+  assert.equal(checkpoint.calls, 2);
+  const resumed: string[] = [];
+  const result = await runRepairSchedule({ ...options, checkpoint, run: async worker => {
+    resumed.push(worker.group.issueIds[0]!); assert.equal(worker.group.calls, 1); await submit(worker, "new-a");
+  } });
+  assert.deepEqual(resumed, ["a"]); assert.deepEqual(result, { a: "new-a", b: "new-b" }); assert.equal(checkpoint.calls, 3);
+});
+
+test("旧已提交坏补丁退回原组，消费旧基底的下游保留历史后重绑而不清零", async () => {
+  const base = { a: "old", b: "old" };
+  let checkpoint = createRepairCheckpoint("legacy", base, [issue("a", "/a"), { ...issue("b", "/b"), afterOwners: ["a"] }], 3);
+  const options = { binding: "legacy", base, save: async (value: typeof checkpoint) => { checkpoint = value; } };
+  await runRepairSchedule({ ...options, checkpoint, run: worker => submit(worker, worker.group.issueIds[0] === "a" ? "" : "new-b") });
+  const previous = structuredClone(checkpoint), resumed: string[] = [];
+  const result = await runRepairSchedule({ ...options, checkpoint, validateCandidate: value => {
+    assert.notEqual((value as typeof base).a, "", "必填字段不能为空");
+  }, run: async worker => {
+    resumed.push(worker.group.issueIds[0]!); assert.equal(worker.group.calls, 1);
+    if (worker.group.issueIds[0] === "b") {
+      assert.equal(worker.group.sessionFile, null); assert.equal(worker.group.history!.length, 1);
+      await assert.rejects(worker.onSession(previous.groups[1]!.sessionFile!), /进度/u);
+      await worker.onSession("rebased-b.jsonl"); await worker.onCall();
+      await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "核对新上游", updates: [{ path: "/b", value: "verified-b" }] });
+    } else await submit(worker, "verified-a");
+  } });
+  assert.deepEqual(resumed, ["a", "b"]); assert.deepEqual(result, { a: "verified-a", b: "verified-b" });
+  assert.equal(checkpoint.calls, 4); assert.deepEqual(checkpoint.groups[0]!.history![0]!.result, previous.groups[0]!.result);
+  assert.deepEqual(readRepairCheckpoint(checkpoint), checkpoint);
+});

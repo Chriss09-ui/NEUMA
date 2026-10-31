@@ -26,6 +26,7 @@ export interface StoredArchitectureRecord extends UnknownRecord {
   designProgressCheckpoint?: UnknownRecord | null; designProgressEvidenceHash?: string; designResearchCalls?: number; designStageDiagnostics?: Record<string, { lastSubmissionIssue: { path: string; reason: string } }>;
   reviewProgressCheckpoint?: UnknownRecord | null; mainReviewCheckpoint?: UnknownRecord | null; requirementFidelityProgress?: UnknownRecord | null;
   reviewRevisionCheckpoint?: UnknownRecord | null; reviewRetryCheckpoint?: UnknownRecord | null; reviewRevisionSource?: string; revisionSource?: UnknownRecord;
+  reviewDispatchCheckpoint?: unknown; reviewDispatchSource?: string;
   requirementFidelity?: UnknownRecord; designRecovery?: UnknownRecord;
   developmentRevision?: unknown;
   feedbackLedger?: unknown;

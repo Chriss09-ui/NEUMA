@@ -12,15 +12,19 @@ test("蓝图主要能力与后续义务直接给齐，完整方案结构不会�
   const source = { pipelineStage: "blueprint", requirements: [{ id: "r", text: "交互演示" }],
     capabilities: [{ id: "write_workspace_file", status: "available", scope: "保存UTF-8文本" }],
     candidateSchema: { properties: { profile: { type: "string" }, execution: { type: "object" } } },
+    stageSchema: { properties: { global: { type: "object" }, modules: { type: "array" } } },
+    stageContract: { submitName: "submit_architecture_blueprint", fields: ["global", "modules"], source: "tool_parameters" },
     deferredVerifications: { issues: [{ id: "v", stage: "development", resolution: { reason: "交付前核对数值基准，浏览器交互另行验收。", audit: "不重复提供的审计原文" } }] } };
   const packet = objectFields(architectureModelContext(source, { role: "designer" }));
   assert.deepEqual(packet.capabilities, source.capabilities);
   assert.equal(objectFields(packet.platformOverview).capabilities, undefined);
   assert.equal(recordArray(packet.contextIndex).some(row => row.section === "capabilities"), false);
   assert.deepEqual(recordArray(packet.deferredObligations)[0]!.resolution, { reason: source.deferredVerifications.issues[0]!.resolution.reason });
-  const index = recordArray(packet.contextIndex).find(row => row.section === "candidateSchema");
-  assert.deepEqual(index!.propertyKeys, ["profile", "execution"]);
-  assert.match(fixtureString(index!.scope), /完整方案/);
+  assert.equal(recordArray(packet.contextIndex).some(row => row.section === "candidateSchema"), false);
+  const index = recordArray(packet.contextIndex).find(row => row.section === "stageSchema");
+  assert.deepEqual(index!.propertyKeys, ["global", "modules"]);
+  assert.deepEqual(packet.stageContract, source.stageContract);
+  assert.match(fixtureString(index!.scope), /本阶段/);
   assert.equal(recordArray(objectFields(verificationModelContext(source)).deferredObligations)[0]!.resolution, undefined,
     "范围复核的原始精简消息格式保持兼容，不能因蓝图补资料改变旧会话绑定");
 });

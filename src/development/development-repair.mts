@@ -55,7 +55,7 @@ export function needsDevelopmentRepairDispatch(ctx: DevelopmentContext, feedback
 }
 
 async function dispatch(controller: DevelopmentController, ctx: DevelopmentContext, key: string, binding: unknown, base: unknown,
-  issues: RepairIssue[], feedback: Feedback, snapshot?: DevelopmentSnapshot) {
+  issues: RepairIssue[], feedback: Feedback, snapshot?: DevelopmentSnapshot, validateCandidate?: (value: unknown) => unknown) {
   const batches = ctx.record.repairBatches ??= {};
   let batch = batches[key];
   if (!batch) {
@@ -67,7 +67,7 @@ async function dispatch(controller: DevelopmentController, ctx: DevelopmentConte
     readRepairCheckpoint(batch.checkpoint);
     if (repairHash(batch.checkpoint.issues) !== repairHash(issues)) throw new InputError("修复分组与原问题不一致。");
   }
-  const result = await runRepairSchedule({ checkpoint: batch.checkpoint, binding, base, signal: ctx.signal,
+  const result = await runRepairSchedule({ checkpoint: batch.checkpoint, binding, base, signal: ctx.signal, validateCandidate,
     save: async checkpoint => { controller.guard(ctx); batch!.checkpoint = checkpoint; await controller.save(ctx); },
     run: async worker => {
       controller.guard(ctx);
@@ -89,8 +89,9 @@ async function dispatch(controller: DevelopmentController, ctx: DevelopmentConte
 export async function repairDevelopmentPlan(controller: DevelopmentController, ctx: DevelopmentContext, plan: DevelopmentPlan, feedback: Feedback) {
   const binding = { runId: ctx.record.id, architectureRef: ctx.record.architectureRef, kind: "plan", planHash: repairHash(plan), feedbackHash: repairHash(feedback) };
   const key = repairHash(binding), issues = issuesFor(plan, feedback, "plan", []);
-  const candidate = validatePlan(await dispatch(controller, ctx, key, binding, plan, issues, feedback), {
+  const validate = (value: unknown) => validatePlan(value, {
     architecture: ctx.record.architecture, previousPlan: ctx.record.plan ?? undefined, freshWorkspace: ctx.planningWorkspace?.empty === true });
+  const candidate = validate(await dispatch(controller, ctx, key, binding, plan, issues, feedback, undefined, validate));
   if (Number(candidate.schemaVersion) >= 2) {
     const saved = await controller.artifacts.saveRepairCandidate(ctx.record.agentId, ctx.record.id, candidate, { signal: ctx.signal });
     if (repairHash(saved.plan) !== repairHash(candidate)) throw new InputError("修复规划材料与候选不一致。");
@@ -119,7 +120,12 @@ export async function repairDevelopmentCode(controller: DevelopmentController, c
   const allowedFiles = [...new Set([...task.files, ...related.filter(file => eligible.some(entry => entry.files.includes(file)))])];
   const files = Object.fromEntries([...inspected.contents].map(([path, content]) => [path, content.toString("utf8")]));
   for (const path of allowedFiles) files[path] ??= "";
-  const candidate = objectFields(await dispatch(controller, ctx, key, binding, { files }, issuesFor(plan, feedback, "code", allowedFiles), feedback, snapshot));
+  const validateFiles = (value: unknown) => {
+    const proposed = objectFields(objectFields(value).files);
+    if (Object.keys(proposed).length !== Object.keys(files).length || Object.entries(proposed).some(([path, content]) => !Object.hasOwn(files, path) || typeof content !== "string"))
+      throw new InputError("修复代码文件集合不合法。");
+  };
+  const candidate = objectFields(await dispatch(controller, ctx, key, binding, { files }, issuesFor(plan, feedback, "code", allowedFiles), feedback, snapshot, validateFiles));
   const updated = objectFields(candidate.files);
   if (Object.keys(updated).length !== Object.keys(files).length || Object.entries(updated).some(([path, content]) => !Object.hasOwn(files, path) || typeof content !== "string"))
     throw new InputError("修复代码文件集合不合法。");

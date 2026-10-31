@@ -9,7 +9,7 @@ import type {ArchitectureDesign} from "../../src/contracts/architecture.mjs";
 import type {AcceptanceAdapterId} from "../../src/contracts/verification.mjs";
 import type {SessionEvent,SessionMessage} from "../../src/runtime/pi-port.mjs";
 import type {DevelopmentTask} from "../../src/contracts/development.mjs";
-interface ModelFixtureState {managed:boolean;reviewFails:boolean;planSummary?:string;sourceForTask?:(task:DevelopmentTask)=>string|Promise<string>;prompts:{submit:string;message:string}[];stageCalls:{stage:string;requirementIds:string[]}[]}
+interface ModelFixtureState {managed:boolean;largeRequirements:boolean;reviewFails:boolean;planSummary?:string;sourceForTask?:(task:DevelopmentTask)=>string|Promise<string>;prompts:{submit:string;message:string}[];stageCalls:{stage:string;requirementIds:string[]}[]}
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { fixtureTools } from "../helpers/m7-test-boundaries.mjs";
 import { failureFields } from "../helpers/failure-fields.mjs";
@@ -30,6 +30,7 @@ import { requirementItems } from "../../src/architecture/architecture-contract.m
 import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
 import { sufficientPreflight } from "../helpers/consultation.mjs";
 import { createArchitectureStageSessionFactory } from "../helpers/architecture-stages.mjs";
+import type { ArchitectureBlueprint, ArchitectureModule } from "../../src/contracts/architecture-stages.mjs";
 import type { TestJson } from "../../src/contracts/development.mjs";
 import type { AcceptanceLedger } from "../../src/contracts/verification.mjs";
 import type { RequirementDraft } from "../../public/ui-types.js";
@@ -96,6 +97,8 @@ function plan(requirements:RequirementItem[]) {
 }
 
 function modelFactory(state:ModelFixtureState) {
+  let largeCandidate: ArchitectureDesign | undefined, largeBlueprint: ArchitectureBlueprint | undefined;
+  const capacityAcceptanceIds: string[] = [];
   const stages = createArchitectureStageSessionFactory((payload) => {
     const candidate = design(payload.requirements);
     if (state.managed) candidate.execution!.hosting = "managed";
@@ -104,15 +107,54 @@ function modelFactory(state:ModelFixtureState) {
     state.stageCalls.push({ stage, requirementIds: payload.requirements.map((item) => item.id) });
   } });
   return async (options: PiSessionOptions) => {
+    if (state.largeRequirements && objectFields(options.sessionStorage?.binding).role === "architecture-design-stage") {
+      const storage = options.sessionStorage!, stage = String(objectFields(storage.binding).stage), key = String(objectFields(storage.binding).key);
+      const tools = fixtureTools(options.customTools!);
+      return { messages: [], modelCallAccounting: true, sessionFile: join(storage.directory, storage.file ?? `${key}.jsonl`),
+        subscribe: () => () => {}, setAutoCompactionEnabled() {}, async abort() {}, dispose() {}, async prompt(message: string) {
+          await options.onModelCall?.({});
+          const payload = JSON.parse(message), requirements = payload.requirements as RequirementItem[];
+          state.stageCalls.push({ stage, requirementIds: requirements.map(row => row.id) });
+          if (stage === "blueprint") {
+            largeCandidate = design(requirements);
+            assert.ok(largeCandidate.schemaVersion === 3);
+            const { components, steps, capabilities, failureHandling, decisions, coverage, acceptance, unknowns, platformClaims, ...global } = largeCandidate;
+            const specs = requirements.filter(row => row.id.startsWith("spec_")), core = requirements.filter(row => !row.id.startsWith("spec_"));
+            largeBlueprint = { global, modules: [{ id: "core", purpose: "实现转换与宿主交付", requirementIds: core.map(row => row.id), dependsOn: [], inputs: "文字", outputs: "转换结果与产物" },
+              ...Array.from({ length: 5 }, (_, i) => ({ id: `capacity_${i}`, purpose: `逐项核对容量要求组${i}`, requirementIds: specs.slice(i * 24, i * 24 + 24).map(row => row.id),
+                dependsOn: ["core"], inputs: "已转换结果", outputs: "本组要求的核对结果" }))] };
+            await tools.submit_architecture_blueprint!.execute("blueprint", largeBlueprint);
+          } else if (stage === "module") {
+            assert.ok(largeCandidate && largeBlueprint);
+            const assignment = largeBlueprint.modules.find(row => row.id === key)!;
+            const module: ArchitectureModule = { moduleId: key, blueprintHash: payload.blueprintHash, instructions: "保留本组全部要求并核对真实转换结果。",
+              components: structuredClone(largeCandidate.components), steps: structuredClone(largeCandidate.steps), capabilities: structuredClone(largeCandidate.capabilities),
+              failureHandling: structuredClone(largeCandidate.failureHandling), decisions: structuredClone(largeCandidate.decisions),
+              coverage: largeCandidate.coverage.filter(row => assignment.requirementIds.includes(row.requirementId)),
+              acceptance: largeCandidate.acceptance.map(row => ({ ...row, requirementIds: row.requirementIds.filter(id => assignment.requirementIds.includes(id)) })).filter(row => row.requirementIds.length), unknowns: [] };
+            if (key !== "core") {
+              module.components = [{ ...largeCandidate.components[0]!, id: key, purpose: `核对${key}的全部冻结要求` }];
+              module.steps = [{ ...largeCandidate.steps[0]!, id: key, componentId: key, dependsOn: [{ moduleId: "core", id: largeCandidate.steps[0]!.id }] }];
+              module.coverage = assignment.requirementIds.map(requirementId => ({ requirementId, componentIds: [key], verification: "核对本组全部冻结要求" }));
+              module.failureHandling = []; module.decisions = [];
+              const acceptanceId = `${key}_acceptance`; capacityAcceptanceIds.push(acceptanceId);
+              module.acceptance = [{ ...largeCandidate.acceptance[0]!, id: acceptanceId, requirementIds: assignment.requirementIds,
+                expected: "正常输入真实转换并保存完整文件，超过长度边界明确拒绝，保存失败明确返回失败；全部按原冻结断言核对。" }];
+            }
+            await tools.submit_architecture_module!.execute(key, module);
+          } else await tools.submit_architecture_integration!.execute("integration", { baseHash: payload.baseHash, updates: [] });
+        } };
+    }
     const staged = await stages(options);
     if (staged) return staged;
     if (options.customTools!.some((tool) => tool.name === "submit_requirement_fidelity")) return fidelityChecker()(options);
     const tools = fixtureTools(options.customTools!);
-    const submit = ["submit_architecture", "submit_architecture_review", "submit_development_plan", "submit_development_review",
+    const submit = ["submit_architecture", "submit_architecture_review", "submit_architecture_review_slice", "submit_development_plan", "submit_development_review",
       "submit_development_work", "submit_conversation_verification"].find((name) => Object.hasOwn(tools, name));
     if (submit === "submit_conversation_verification" && state.reviewFails) throw new Error("fixture independent review unavailable");
     let text = "", listener:((event:SessionEvent)=>void)|null;
     const session = { model: { contextWindow: 1_000_000 }, messages: [] as SessionMessage[], setAutoCompactionEnabled() {}, getContextUsage: () => ({ percent: 1 }),
+      ...(options.sessionStorage ? { sessionFile: join(options.sessionStorage.directory, options.sessionStorage.file ?? `${String(objectFields(options.sessionStorage.binding).groupId)}.jsonl`) } : {}),
       subscribe(fn:(event:SessionEvent)=>void) { listener = fn; return () => { listener = null; }; },
       async prompt(message: string) {
         state.prompts.push({ submit: submit ?? "working", message });
@@ -123,8 +165,18 @@ function modelFactory(state:ModelFixtureState) {
           await tools[submit]!.execute("design", candidate);
         }
         else if (submit === "submit_architecture_review") await tools[submit]!.execute("architecture-review", passingReview(payload.candidateHash, payload.design));
+        else if (submit === "submit_architecture_review_slice") {
+          const reviewed = passingReview(payload.candidateHash, payload.design), assignment = payload.assignment as { field: string; ids: string[] };
+          await tools[submit]!.execute("review-slice", { summary: "独立核对指定容量分项", issues: [], priorFindingDecisions: [],
+            checks: assignment.field === "checks" ? reviewed.checks.filter(row => assignment.ids.includes(row.id)) : [],
+            acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && assignment.ids.includes(row.acceptanceId)) : [] });
+        }
         else if (submit === "submit_development_plan") {
           const value = plan(payload.requirements), { cases, ...index } = value;
+          for (const acceptanceId of capacityAcceptanceIds) {
+            index.tasks[0]!.acceptanceIds.push(acceptanceId);
+            for (const original of value.cases.slice(0, 3)) cases.push({ ...structuredClone(original), id: `${original.id}_${acceptanceId}`, acceptanceId });
+          }
           if (state.managed) {
             index.runtime = "managed-service";
             Object.assign(index.application, { protocolVersion: 3, runtime: "managed-service", service: {
@@ -162,7 +214,7 @@ function modelFactory(state:ModelFixtureState) {
 async function unseal(path:string) { await chmod(path, 0o700); for (const entry of await readdir(path, { withFileTypes: true })) if (entry.isDirectory()) await unseal(join(path, entry.name)); }
 async function fixture(t: test.TestContext, { managed = false, largeRequirements = false } = {}) {
   const probe = await new DevelopmentExecutor().probe(); if (!probe.available) { t.skip(probe.reason); return null; }
-  const root = await mkdtemp(join(tmpdir(), "neuma-acceptance-delivery-")), state:ModelFixtureState = { prompts: [], stageCalls: [], reviewFails: false, managed };
+  const root = await mkdtemp(join(tmpdir(), "neuma-acceptance-delivery-")), state:ModelFixtureState = { prompts: [], stageCalls: [], reviewFails: false, managed, largeRequirements };
   const options={config:{llmConfigured:true},cwd:root,dataDir:join(root,"data"),sessionFactory:modelFactory(state),fidelityChecker:fidelityChecker()};
   const agents=legacyAgents(options);
   t.after(async () => { await agents.close(); await unseal(root); await rm(root, { recursive: true, force: true }); });
@@ -199,11 +251,13 @@ test("120项需求及超过512KB的完整依据经确认、保存、架构、研
   const f = await fixture(t, { largeRequirements: true }); if (!f) return;
   const record = await f.record(), ids = requirementItems(f.draft).map(item => item.id);
   assert.ok(ids.length > 100);
-  assert.deepEqual(f.state.stageCalls.map(call => call.stage), ["blueprint", "module", "integration"]);
-  assert.ok(f.state.stageCalls.every(call => JSON.stringify(call.requirementIds) === JSON.stringify(ids)));
-  assert.equal(f.result.architecture!.designProgressCheckpoint!.modelCalls, 3);
+  assert.equal(f.state.stageCalls.filter(call => call.stage === "module").length, 6);
+  assert.ok(f.state.stageCalls.filter(call => call.stage !== "module").every(call => JSON.stringify(call.requirementIds) === JSON.stringify(ids)));
+  const assigned = f.state.stageCalls.filter(call => call.stage === "module").flatMap(call => call.requirementIds);
+  assert.deepEqual(assigned.slice().sort(), ids.slice().sort()); assert.equal(new Set(assigned).size, ids.length);
+  assert.equal(f.result.architecture!.designProgressCheckpoint!.modelCalls, 8);
   assert.deepEqual(record!.plan!.tasks[0]!.requirementIds, ids);
-  assert.deepEqual(record!.architecture.design.coverage.map((item) => item.requirementId), ids);
+  assert.deepEqual(record!.architecture.design.coverage.map((item) => item.requirementId).sort(), ids.slice().sort());
   assert.deepEqual(record!.architecture.draft, f.draft);
   assert.equal(record!.acceptanceLedger!.items.find((item) => item.acceptanceId === "business")!.status, "passed");
   const descriptor = await f.agents.applications.descriptor(id);

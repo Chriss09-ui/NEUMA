@@ -61,6 +61,7 @@ export interface ExecutionOptions {
   sessionStorage?: SessionStorage;
   beforeModelRequest?: (event: { signal?: AbortSignal | null | undefined }) => unknown | Promise<unknown>;
   onModelCall?: (event?: { signal?: AbortSignal | undefined; purpose?: string; retryAttempt?: number }) => unknown | Promise<unknown>;
+  toolAvailability?: (event: { purpose: string; retryAttempt: number }) => readonly string[];
   onToolDiagnostic?: (event: UnknownRecord) => unknown | Promise<unknown>;
   toolErrorResult?: (input: RawToolInput) => (ToolResult & { details: JsonValue }) | undefined | Promise<(ToolResult & { details: JsonValue }) | undefined>;
   rawInputValidators?: Record<string, (input: RawToolInput) => RawDecision | Promise<RawDecision>>;

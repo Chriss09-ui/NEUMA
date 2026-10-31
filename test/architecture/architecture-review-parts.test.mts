@@ -18,6 +18,8 @@ import { designHash, reviewSubmissionSchema, validateReview } from "../../src/ar
 import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { createArchitectureEvidenceReader } from "../../src/architecture/architecture-evidence-reader.mjs";
 import { createArchitectureReviewParts, canonicalArchitectureReviewParts } from "../../src/architecture/architecture-review-parts.mjs";
+import { runArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "../../src/architecture/architecture-review-dispatch.mjs";
+import type { ReviewSliceRole, ReviewDispatchCheckpoint } from "../../src/architecture/architecture-review-dispatch.mjs";
 import { createReviewProgressCheckpoint, readReviewProgressCheckpoint, reviewProgressCheckpointMatches,
   advanceReviewProgressCheckpoint } from "../../src/architecture/architecture-review-progress.mjs";
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
@@ -37,6 +39,66 @@ function material() {
   const options = { schema, toolSchema: reader.submissionSchema(schema), candidateHash, context, resolve: reader.resolveSubmission };
   return { design, candidateHash, context, schema, reader, options, review: passingReview(candidateHash, design) };
 }
+
+test("复杂评审按主题与验收分组，独立会话最多三并发，中断只续未完成组", async () => {
+  const initial = material(), design = structuredClone(initial.design);
+  design.acceptance = Array.from({ length: 13 }, (_, i) => ({ ...design.acceptance[i % design.acceptance.length]!, id: `acceptance_${i}` }));
+  const candidateHash = designHash(design), context = architectureReviewEvidenceContext({ design, requirements: initial.context.requirements, runtimeCapabilities: {} });
+  const schema = reviewSubmissionSchema({ evidenceRequired: true }), review = passingReview(candidateHash, design);
+  const record: Record<string, unknown> = { candidateHash, status: "failed" }, started: string[] = [];
+  let active = 0, maximum = 0, interrupted = false;
+  const runRole = async (node: ReviewSliceRole) => {
+    active++; maximum = Math.max(maximum, active); started.push(node.assignment.id);
+    try {
+      await node.worker.onSession(node.worker.group.sessionFile ?? `${node.assignment.id}.jsonl`); await node.worker.onCall();
+      if (!interrupted && node.assignment.ids.includes("interfaces")) { interrupted = true; throw new Error("分项连接中断"); }
+      const parts = node.validate({ summary: "核对本组冻结原文", issues: [], priorFindingDecisions: [],
+        checks: node.assignment.field === "checks" ? review.checks.filter(row => node.assignment.ids.includes(row.id)) : [],
+        acceptanceScopeChecks: node.assignment.field === "acceptanceScopeChecks"
+          ? review.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && node.assignment.ids.includes(row.acceptanceId)) : [] });
+      await node.worker.submit({ baseHash: node.worker.baseHash, issueIds: node.worker.group.issueIds, summary: parts.summary,
+        updates: [{ path: node.worker.group.paths[0]!, value: parts }] });
+    } finally { active--; }
+  };
+  const options = { record, candidateHash, platformHash: "a".repeat(64), context, schema, runRole, save: async (_checkpoint: ReviewDispatchCheckpoint) => {} };
+  assert.equal(shouldDistributeArchitectureReview(context, null), true);
+  await assert.rejects(runArchitectureReviewDispatch(options), /分项连接中断/u);
+  const saved = structuredClone(record.reviewDispatchCheckpoint) as ReviewDispatchCheckpoint;
+  assert.equal(saved.dispatch.calls, 3); assert.equal(saved.dispatch.groups.filter(group => group.result).length, 2);
+  assert.equal(architectureReviewDispatchRecovery(record)?.status, "continuing");
+  const before = started.length, resumed = await runArchitectureReviewDispatch(options);
+  for (const group of saved.dispatch.groups.filter(group => group.result)) assert.equal(started.slice(before).includes(group.issueIds[0]!), false);
+  assert.equal(maximum, 3); assert.equal(resumed.summary.modelCalls, 8);
+  assert.equal(resumed.parts.checks.length, 8); assert.equal(resumed.parts.acceptanceScopeChecks.length, 13);
+  const parts = createArchitectureReviewParts({ schema, candidateHash, context, initial: resumed.parts });
+  const assembled = parts.assemble({ candidateHash, progressHash: parts.reference().progressHash, verdict: "pass", summary: "已逐项汇总" });
+  assert.equal(validateReview(assembled, { candidateHash, schemaVersion: 3, evidenceContext: context }).verdict, "pass");
+  const calls = started.length;
+  await runArchitectureReviewDispatch(options); assert.equal(started.length, calls);
+  const broken = { ...record }; delete broken.reviewDispatchCheckpoint;
+  await assert.rejects(runArchitectureReviewDispatch({ ...options, record: broken }), /检查点缺失/u);
+  assert.equal(started.length, calls);
+});
+
+test("评审子组不能代交其他组，分项未通过也不能在主评审中被当作整体通过", async () => {
+  const f = material(), record: Record<string, unknown> = {};
+  const result = await runArchitectureReviewDispatch({ record, candidateHash: f.candidateHash, platformHash: "a".repeat(64), context: f.context,
+    schema: f.schema, save: async () => {}, runRole: async node => {
+      await node.worker.onSession(`${node.assignment.id}.jsonl`); await node.worker.onCall();
+      const input = { summary: "独立核对本组", issues: [], priorFindingDecisions: [],
+        checks: node.assignment.field === "checks" ? f.review.checks.filter(row => node.assignment.ids.includes(row.id)).map(row => ({ ...row, passed: row.id !== "requirements" })) : [],
+        acceptanceScopeChecks: node.assignment.field === "acceptanceScopeChecks" ? f.review.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && node.assignment.ids.includes(row.acceptanceId)) : [] };
+      if (node.assignment.field === "checks") assert.throws(() => node.validate({ ...input, checks: f.review.checks }), /本组编号/u);
+      const parts = node.validate(input);
+      await node.worker.submit({ baseHash: node.worker.baseHash, issueIds: node.worker.group.issueIds, summary: parts.summary,
+        updates: [{ path: node.worker.group.paths[0]!, value: parts }] });
+    } });
+  assert.equal(result.summary.failedChecks.length, 1);
+  const parts = createArchitectureReviewParts({ ...f.options, initial: result.parts });
+  const reference = parts.reference();
+  assert.throws(() => validateReview(parts.assemble({ candidateHash: f.candidateHash, progressHash: reference.progressHash, verdict: "pass", summary: "不能跳过未通过项" }),
+    { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }));
+});
 
 test("分项保存只更新明确编号，精确校验后仍须完整正式评审", async () => {
   const f = material(), saved = [], parts = createArchitectureReviewParts({ ...f.options, onSave: value => saved.push(value) });

@@ -338,7 +338,7 @@ export function interruptedArchitectureRevisionSeed(previous: StoredArchitecture
 }
 
 function architectureInterruptionReason(reason: unknown) {
-  return ["turn_limit", "cancelled", "scope_evaluation_incomplete", "handoff_evaluation_incomplete", "submission_incomplete", "review_repair_stalled", "process_interrupted",
+  return ["turn_limit", "cancelled", "scope_evaluation_incomplete", "handoff_evaluation_incomplete", "submission_incomplete", "review_repair_stalled", "review_slice_incomplete", "process_interrupted",
     "output_limit", "module_output_limit", "module_failed", "request_blocked", "api_authentication", "api_rate_limit", "api_not_found", "api_unavailable", "api_context", "api_output_limit",
     "api_rejected", "api_stream_interrupted", "api_protocol", "api_connection", "api_idle_timeout"].some(value => value === reason);
 }
