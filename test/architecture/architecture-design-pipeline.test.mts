@@ -10,6 +10,8 @@ import { designSubmissionSchema, designHash, validateDesign } from "../../src/ar
 import { architectureDesignRecovery, runArchitectureDesignPipeline, readArchitectureDesignProgress, architectureDesignCallLimits, architectureDesignTestContinuation } from "../../src/architecture/architecture-design-pipeline.mjs";
 import { validDesign, validDraft } from "../helpers/architecture.mjs";
 import { assembleArchitectureCandidate, applyArchitectureIntegration, createArchitectureStageSchemas } from "../../src/architecture/architecture-design-stages.mjs";
+import { architectureModelContext } from "../../src/architecture/architecture-model-context.mjs";
+import { architectureToolValidation } from "../../src/architecture/architecture-tool-diagnostics.mjs";
 import type { ArchitectureAcceptance,ArchitectureComponent,ArchitectureStep,ArchitectureDecision } from "../../src/contracts/architecture.mjs";
 import type { AcceptanceVerification } from "../../src/contracts/verification.mjs";
 import type { BlueprintConsultationResult } from "../../src/architecture/architecture-blueprint-consultation.mjs";
@@ -225,6 +227,47 @@ test("蓝图、并行模块、整合逐项落盘，最终候选仍须完整校�
   assert.equal(loaded!.integration.result !== null, true);
   assert.equal(f.record.design, null); assert.equal(f.record.review, null); assert.deepEqual(f.record.attempts, []);
   assert.deepEqual(await f.run({ runRole: () => { throw new Error("已完成节点不能重跑"); } }), result);
+});
+
+test("跨模块后续义务标明主责，模块工具与最终校验只允许本模块编号，完整义务保留到整合", async () => {
+  const f = fixture();
+  Object.assign(f.context, { deferredVerifications: { issues: [{ id: "development_validation", requirementId: "req_1", requirementIds: ["req_0"],
+    owner: "system", stage: "development", question: "验证统计动作实际执行并覆盖全部输入拒绝分支" }] } });
+  const candidate = candidateResult(await f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    await send();
+    if (options.stage === "module") {
+      const ownedId = options.key === "module_0" ? "req_0" : "req_1", foreignId = ownedId === "req_0" ? "req_1" : "req_0";
+      const properties = options.parameters.properties!;
+      assert.deepEqual(objectFields(objectFields(objectFields(properties.coverage!.items).properties).requirementId).enum,
+        [ownedId], "coverage可选编号必须来自本模块冻结分工");
+      const references = objectFields(objectFields(objectFields(properties.acceptance!.items).properties).requirementIds);
+      assert.deepEqual(objectFields(references.items).enum, [ownedId]);
+      const invalid = structuredClone(moduleValue(value));
+      invalid.coverage.push({ ...invalid.coverage[0]!, requirementId: foreignId });
+      invalid.acceptance[0]!.requirementIds = [ownedId, foreignId];
+      const rejected = architectureToolValidation(invalid, options.parameters, { root: "module" });
+      assert.equal(rejected.valid, false, "越界编号必须在原始工具结构校验时被拒，不能等到最终语义检查");
+      assert.ok(rejected.issues.some(issue => issue.path === "module.coverage[1].requirementId"));
+      assert.ok(rejected.issues.some(issue => issue.path === "module.acceptance[0].requirementIds[1]"));
+      assert.throws(() => options.validate(invalid), InputError);
+      const packet = architectureModelContext(options.payload, { role: "specialist" });
+      const scope = objectFields(packet.requirementScope);
+      assert.deepEqual(scope.ownedRequirementIds, [ownedId]);
+      assert.deepEqual(scope.referenceOnly, [{ moduleId: options.key === "module_0" ? "module_1" : "module_0", requirementIds: [foreignId] }]);
+      const obligation = objectFields((packet.deferredObligations as unknown[])[0]);
+      assert.deepEqual(obligation.architectureResponsibility, {
+        ownerModuleId: "module_1", usage: options.key === "module_0" ? "reference_only" : "owned",
+      }, "后续义务的主责由单独的requirementId决定，不能因关联了输入要求就转给输入模块");
+      assert.deepEqual(obligation.requirementIds, ["req_0"]);
+    }
+    await options.onResult(value); return value;
+  }) }));
+  assert.deepEqual(candidate.coverage.map(row => row.requirementId), ["req_0", "req_1"]);
+  assert.ok(candidate.acceptance.some(row => row.requirementIds.includes("req_1")), "整合后的方案仍须验收另一个模块负责的完整义务");
+  assert.doesNotThrow(() => validateDesign(candidate, { requirements: f.context.requirements }));
+  assert.equal(f.record.designProgressCheckpoint!.schemaHash, "ee19879933b08ec9f60fdd616e79b2b321661d0e29946d8f70240a172b780a85",
+    "沿用修复前的阶段契约摘要；模块当前提交限制不破坏历史检查点绑定");
+  assert.ok(readArchitectureDesignProgress(f.record, f));
 });
 
 test("蓝图按问题动态并行分析，失败保留成功组且恢复沿用会话与总额度", async () => {

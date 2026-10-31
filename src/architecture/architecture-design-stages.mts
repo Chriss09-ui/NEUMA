@@ -174,9 +174,17 @@ export function architectureModuleCapacities(blueprint: ArchitectureBlueprint, c
   return allocations;
 }
 
-export function architectureModuleCapacitySchema(schema: StageSchema, limits: Record<string, number>): StageSchema {
+/** Derive the current writer's wire contract without changing the checkpoint's frozen stage schema. */
+export function architectureModuleSubmissionSchema(schema: StageSchema, assignment: BlueprintAssignment, limits: Record<string, number>): StageSchema {
   const result = copy(schema);
   for (const [field, limit] of Object.entries(limits)) if (result.properties?.[field]) result.properties[field]!.maxItems = limit;
+  const coverage = result.properties?.coverage?.items?.properties?.requirementId;
+  const acceptance = result.properties?.acceptance?.items?.properties?.requirementIds?.items;
+  if (!coverage || !acceptance) throw new TypeError("模块提交契约缺少正式需求引用字段");
+  for (const reference of [coverage, acceptance]) {
+    reference.enum = [...assignment.requirementIds];
+    reference.description = "仅使用本模块assignment.requirementIds中的正式需求编号；其他模块的要求和后续验证义务只供理解与配合，不能在本模块认领。";
+  }
   return result;
 }
 

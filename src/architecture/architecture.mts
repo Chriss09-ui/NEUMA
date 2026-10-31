@@ -1124,6 +1124,7 @@ export class ArchitectureDesigner {
       let prompt = resumeStage ? modelPrompt({ type: "resume_architecture_stage", pipelineStage: payload.pipelineStage,
         submitName, modelBudget: modelBudget(),
         ...(payload.stageContract ? { stageContract: payload.stageContract, stageSchema: payload.stageSchema } : {}),
+        ...(payload.requirementScope ? { requirementScope: payload.requirementScope } : {}),
         ...(payload.consultations ? { consultations: payload.consultations } : {}),
         ...(payload.stageRepair ? { stageRepair: payload.stageRepair } : {}),
         ...(rejectedReference() ? { rejectedSubmission: rejectedReference(), lastSubmissionIssue,
