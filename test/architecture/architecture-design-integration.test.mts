@@ -50,7 +50,8 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false } = {}) {
+  acceptanceCount = 0, failReviewSlice = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
+  interruptIntegration = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false,
@@ -77,10 +78,11 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         return;
       }
       let name, args;
-      if (kind === "review_slice" && failReviewSlice || kind === "consultation" && failConsultation
+      if (stage === "integration" && interruptIntegration || kind === "review_slice" && failReviewSlice || kind === "consultation" && failConsultation
         || kind === "review_revision" && state.failRevisionCalls-- > 0
         || kind === "repair" && failRepairCalls-- > 0
         || kind === "reviewer" && state.reviewRejected && state.failRevisedReview-- > 0) {
+        if (stage === "integration") interruptIntegration = false;
         if (kind === "consultation") failConsultation = false;
         if (kind === "review_slice") failReviewSlice = false;
         response.writeHead(200, { "content-type": "text/event-stream" });
@@ -295,6 +297,33 @@ test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选
   assert.equal(recordArray(boundary.moduleHandoffs)[0]!.handoffText, result.handoffText);
   assert.deepEqual(built.review!.issues, []);
   await f.reload(); assert.equal((await f.designer.get(f.definition.id))!.candidateHash, built.candidateHash);
+});
+
+test("整合首次派发和原会话恢复都给出本轮验收修改范围与空补丁写法", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { interruptIntegration: true });
+  await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "output_limit");
+  await f.reload();
+  const passed = await f.run();
+  assert.equal(passed.status, "passed");
+  assert.deepEqual(f.errors, []);
+  const requests = f.requests.filter(row => row.kind === "integration");
+  assert.equal(requests.length, 2);
+  const packets = requests.map(({ body }) => users(body).at(-1)!);
+  assert.equal(packets[1]!.type, "resume_architecture_stage");
+  const integrated = objectFields(nativeCheckpoint(passed.designProgressCheckpoint).integration.result);
+  for (const packet of packets) {
+    assert.deepEqual(packet.conflicts, []);
+    assert.equal(packet.baseHash, integrated.baseHash);
+    const policy = fixtureString(objectFields(packet.integrationPolicy).instruction);
+    assert.match(policy, /conflicts/);
+    assert.match(policy, /verification/);
+    assert.match(policy, /追加/);
+    assert.match(policy, /updates\s*:\s*\[\]/);
+  }
+  assert.equal(Object.hasOwn(packets[1]!, "baseCandidate"), false);
+  const prompt = requests[1]!.body.messages.filter(row => ["system", "developer"].includes(row.role)).map(row => text(row.content)).join("\n");
+  assert.match(prompt, /verification/);
+  assert.doesNotMatch(prompt, /正式重查可修正技术验收与证据分工/);
 });
 
 test("结构损坏的覆盖清单先被拒，原生会话只补该字段即可完整复验", { timeout: 30000 }, async t => {

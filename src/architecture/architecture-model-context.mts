@@ -3,7 +3,7 @@ import type { ContextEvent } from "../runtime/execution-port.mjs";
 import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 function array(value: unknown): unknown[] { if (!isArray(value)) throw new TypeError("Model context list is invalid"); return value; }
 import { modelContextPacket, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
-import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE } from "./architecture-prompts.mjs";
+import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, INTEGRATION_ACCEPTANCE_RULE } from "./architecture-prompts.mjs";
 import { MODULE_OBLIGATION_RULE } from "./architecture-module-obligations.mjs";
 
 const pick = (value: unknown, fields: string[]) => { const record = objectFields(value); return Object.fromEntries(fields.filter(key => record[key] !== undefined).map(key => [key, record[key]])); };
@@ -52,6 +52,7 @@ export function architectureModelContext(source: UnknownRecord, { role, continua
   const fields = [...metadata];
   const derived: UnknownRecord = {};
   if (continuation && source.blueprintProtocol === "module-handoff-v3") fields.push("assignment");
+  if (continuation && source.pipelineStage === "integration") fields.push("conflicts");
   if (!continuation) {
     fields.push("requirements", "confirmedRequirementContext", "assignment", "dependencyInterfaces", "blueprintBoundary", "baseCandidate", "previousDesign",
       "design", "issues", "conflicts", "deterministicIssues", "researchGaps", "reviewRetry", "developmentRevision", "requirementFidelityFeedback", "rejectedRequirementFidelitySubmission", "validationRepair", "repairPreparation", "distributedReview");
@@ -178,7 +179,7 @@ ${pipelineStage === "module" && !flatHandoffs ? "requirementScope明确本模块
 ${pipelineStage === "module" ? MODULE_OBLIGATION_RULE : ""}
 ${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内联，可直接核对；最后一次请求仅用于正式提交，不能再次读取或只保存草稿。" : ""}
 已确认需求、用户选择、原验证阶段和全部验收义务不能缩水。技术问题由系统核实；只有需求本身仍不清楚且改变业务承诺才允许返需。历史评语和拒稿均可有误，须用当前原文核对，不能当作新需求或通过证据。需求操作清单为空不等于禁止必要专属代码。平台可用、环境准备、业务实现及实际验收分别判断，不伪造测量或通过。
-正式重查可修正技术验收与证据分工；完整保留已确认业务范围、边界、结果、验证义务及明确选择，重新程序检查和独立评审，不以纠错缩水。
+${pipelineStage === "integration" ? INTEGRATION_ACCEPTANCE_RULE : "正式重查可修正技术验收与证据分工；完整保留已确认业务范围、边界、结果、验证义务及明确选择，重新程序检查和独立评审，不以纠错缩水。"}
 ${CAPABILITY_VERIFICATION_RULE}
 适配器只证明自己的范围：action真实执行生成动作，冻结模拟回执不证明真实宿主；page-resources仅适用于实际托管页面，在隔离Node执行资源与共享纯逻辑检查，不证明浏览器DOM、布局或视觉；host-business真实重跑冻结业务用例。对无法证明的跨范围承诺明确拆分并保留全部义务。
 ${role === "reviewer" ? "逐项核对所有验收及priorFindings，不照抄旧结论。reviewParts是状态与本批编号，完整已保存分项可按需读取；续轮只提交新增或修正行。恢复只内联最近待修稿，其他旧稿在contextIndex；不得把被拒内容当作接受结果。原文引用用read_architecture_evidence回执或明确source/path选择；验收规则路径在reviewEvidenceIndex.adapterRules，来源manifest只说明冻结存储，未内联原文需先读取。关闭历史问题须逐条提供当前相关候选依据。" : "正式需求编号使用requirements中的id；证据编号从evidenceCatalog选择，具体论据须读取原文。能力与容量存疑时按具体路径读取runtimeCapabilities或验收指南，不能凭记忆猜测。"}`;

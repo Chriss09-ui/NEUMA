@@ -41,6 +41,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { CAPABILITIES, completeDecisionNotes, designHash, designSubmissionSchema } from "./architecture-contract.mjs";
+import { INTEGRATION_ACCEPTANCE_RULE } from "./architecture-prompts.mjs";
 import { platformCapabilityCatalog } from "./platform-contract.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { architectureStageRepairPlan } from "./architecture-stage-recovery.mjs";
@@ -799,7 +800,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     baseCandidate: assembled.candidate, baseHash: designHash(assembled.candidate), conflicts: assembled.conflicts,
     integrationPolicy: { allowedRoots: [...new Set(["instructions", "failureHandling", "coverage", "acceptance", "unknowns",
       ...assembled.conflicts.map(entry => entry.path.split("/")[1])])], frozenRoots: ["components", "steps"],
-      instruction: "updates的path只指向baseCandidate。不得修改冻结的组件、步骤或编号。单项可按声明直接交path、value；批量交updates；没有修改则updates为空数组。始终绑定当前baseHash。" } }, integrationParameters, value => {
+      instruction: "path 指向 baseCandidate 的已有位置，保留冻结的组件、步骤和编号。按本轮工具声明提交单项或批量修改，并绑定当前 baseHash。" + INTEGRATION_ACCEPTANCE_RULE } }, integrationParameters, value => {
     if (!architectureToolValidation(value, integrationParameters, { root: "integration" }).valid) throw new InputError("整合补丁必须选择单项path/value或完整updates。");
     const batch = context.compactSubmissions ? modelUpdateBatch(value) : value;
     applyArchitectureIntegration(batch, integrationContext);

@@ -178,7 +178,9 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `baseCandidate` | `CandidateDraft` | 程序组装出的候选 | 见 2.4 输出 |
 | `baseHash` | sha256 | 组装候选哈希 | `"9f86d081…0a08"` |
 | `conflicts[]` | `{path,reason,relatedPaths,moduleIds}` | 跨模块冲突清单 | `[{ path:"/instructions", reason:"两模块指令重叠", relatedPaths:[], moduleIds:["contract-ingest","clause-analysis"] }]` |
-| `integrationPolicy` | `{allowedRoots,frozenRoots,instruction}` | 允许/冻结的修改根字段 | `allowedRoots:["instructions","failureHandling",…]` |
+| `integrationPolicy` | `{allowedRoots,frozenRoots,instruction}` | 可修改的根字段、冻结字段以及已有验收用例的修改条件 | `allowedRoots:["instructions","failureHandling",…]` |
+
+首次整合和继续原会话时，模型都直接收到当前 `baseHash`、`conflicts` 和这份规则。只有冲突清单明确覆盖某条已有用例时，才可修正该条。所有原用例保留编号和需求归属，其余用例的内容和验证分工照原稿保留。跨模块场景可用新编号追加。没有待解冲突且无需补充时，提交当前 `baseHash` 和 `updates: []`。
 
 **输出（最全形态）**：
 

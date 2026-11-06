@@ -467,7 +467,11 @@ export class ArchitectureDesigner {
     const contextReader = createModelContextReader(() => ({ ...modelMaterials,
       ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(), rejectedDraft: reviewParts.rejectedSnapshot() } } : {}),
       ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) }));
-    const modelPrompt = (value: UnknownRecord, _continuation = false) => {
+    const modelPrompt = (value: UnknownRecord, continuation = false) => {
+      if (continuation && payload.pipelineStage === "integration" && payload.integrationPolicy) {
+        value = { ...value, pipelineStage: payload.pipelineStage, baseHash: payload.baseHash,
+          conflicts: payload.conflicts, integrationPolicy: payload.integrationPolicy };
+      }
       modelMaterials = { ...modelMaterials, ...value };
       return JSON.stringify(value);
     };
