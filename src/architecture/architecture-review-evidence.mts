@@ -107,7 +107,7 @@ export function validateArchitectureReviewEvidence<T extends Pick<ArchitectureRe
   const checks = new Map(review.checks.map((entry) => [entry.id, entry]));
   for (const [index, issue] of review.issues.entries()) {
     const path = `review.issues[${index}]`;
-    if (!issue.blocking && issue.checkId === undefined) continue;
+    if (!issue.blocking && issue.checkId === undefined && issue.kind === undefined && issue.factClaims === undefined) continue;
     if (!partial && !checks.has(issue.checkId ?? "")) fail(`${path}.checkId`, "invalid_reference", "必须引用本次评审检查项");
     if (issue.blocking && checks.get(issue.checkId ?? "")?.passed) fail(`${path}.checkId`, "contradictory_review", "阻断必须关联未通过检查项，不能同时声称该项已通过");
     if (!Array.isArray(issue.candidatePaths) || !issue.candidatePaths.length)
@@ -126,9 +126,14 @@ export function validateArchitectureReviewEvidence<T extends Pick<ArchitectureRe
       else if (typeof reference.quote !== "string" || !reference.quote.trim() || !serialized?.includes(reference.quote))
         fail(`${path}.references[${position}]`, "reference_quote_mismatch", "路径存在但逐字摘录不匹配；请复制本轮该路径的实际文本，不要沿用旧评语或改写，可用 read_architecture_evidence 读取本轮原文并以 receiptId 引用");
     }
-    if (!Array.isArray(issue.factClaims) || ["platform", "context"].includes(issue.kind ?? "") && !issue.factClaims.length)
-      fail(`${path}.factClaims`, "required_field", "平台或上下文缺失的阻断必须提交可由宿主核实的事实断言");
-    for (const [position, claim] of (Array.isArray(issue.factClaims) ? issue.factClaims : []).entries()) {
+    const claims = Array.isArray(issue.factClaims) ? issue.factClaims : [];
+    if (issue.factClaims !== undefined && !Array.isArray(issue.factClaims))
+      fail(`${path}.factClaims`, "invalid_type", "事实断言须放在 factClaims 数组中。");
+    if (issue.kind === "platform" && !claims.some(claim => claim.source === "runtimeCapabilities"))
+      fail(`${path}.factClaims`, "required_field", "判断平台支持或不支持某项能力时，请提供 runtimeCapabilities 中可核验的路径和实际值。仅待后续验证的事项可用 blocking:false 的 context 意见，引用候选中的待验证条款。");
+    if (issue.kind === "context" && issue.blocking && !claims.length)
+      fail(`${path}.factClaims`, "required_field", "以材料缺失为由阻断时，请提供本轮材料中可核验的事实。");
+    for (const [position, claim] of claims.entries()) {
       const current = ["runtimeCapabilities", "contextManifest"].includes(claim.source) ? at(objectFields(context)[claim.source], claim.path) : { found: false as const, value: undefined };
       let expected;
       try { expected = JSON.parse(claim.expectedJson); } catch {

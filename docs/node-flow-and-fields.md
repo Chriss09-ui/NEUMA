@@ -250,7 +250,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `checks[].evidence` | string ≤4000 | 判断依据 | `"req-001~006 均有 coverage 行"` |
 | `issue` | 单项问题 | 多项用 `issues`，明确 `pass` 可省略问题清单 | 证据规则同下行 |
 | `issues[].id/blocking/description/remedy` | 问题 | `{ id:"iss-01", blocking:false, description:"unknowns 未给占比来源", remedy:"运行期统计即可" }` | — |
-| `issues[].checkId/kind/candidatePaths/references/factClaims` | 证据属性 | kind：`design`/`platform`/`context`；candidatePaths 为 JSON Pointer | `candidatePaths:["/unknowns/0"]` |
+| `issues[].checkId/kind/candidatePaths/references/factClaims` | 证据属性 | 非阻断的 `context` 待验证项引用候选或验证安排，可省略 `factClaims` 或填 `[]`。断言平台能力时用 `platform`，须给出 `runtimeCapabilities` 的路径和实际值。 | `candidatePaths:["/unknowns/0"]` |
 | `summary` | string ≤4000 | 结论摘要 | `"方案可行、最小，验收可区分质量"` |
 | `acceptanceScopeChecks[]` | 每项验收一行 | `{ acceptanceId:"acc-01", adapterId:"action", scope:"动作执行断言", sufficient:true, reason:…, criterionQuote:…, adapterQuote:… }` | — |
 | `priorFindingDecisions[]` | 历史问题处置 | `{ findingId:"f-07", status:"resolved", reason:…, checkIds:[…], candidatePaths:[…] }` | — |

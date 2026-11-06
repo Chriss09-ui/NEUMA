@@ -62,15 +62,25 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
   save(checkpoint: ReviewDispatchCheckpoint): Promise<void>; runRole(node: ReviewSliceRole): Promise<unknown> }) {
   const { record, candidateHash, schema, context, priorFindings, signal } = options;
   const plan = assignments(schema, context, priorFindings);
-  const binding = { version: 1, candidateHash, platformHash: options.platformHash, contextHash: repairHash(context),
+  let binding = { version: 1, candidateHash, platformHash: options.platformHash, contextHash: repairHash(context),
     priorHash: repairHash(priorFindings ?? null), schemaHash: repairHash(schema), plan };
-  const bindingHash = repairHash(binding);
+  let bindingHash = repairHash(binding);
   const base = { slices: Object.fromEntries(plan.map(item => [item.id, null])) };
   const issues = plan.map(item => ({ id: item.id, owner: item.id, paths: [`/slices/${item.id}`],
     description: `独立核对${item.field}中的指定编号：${item.ids.join("、")}`, remedy: "按真实候选和冻结依据提交本组检查分项；不能修改候选或提前宣布整体通过。" }));
   let checkpoint: ReviewDispatchCheckpoint;
   if (record.reviewDispatchCheckpoint !== undefined) {
     const saved = objectFields(record.reviewDispatchCheckpoint);
+    // Older dispatches bound the same review schema with factClaims required on every issue.
+    if (saved.bindingHash !== bindingHash) {
+      const oldSchema = structuredClone(schema), issue = oldSchema.properties?.issues?.items;
+      if (issue?.required?.includes("kind") && !issue.required.includes("factClaims")) {
+        issue.required.push("factClaims");
+        const oldBinding = { ...binding, schemaHash: repairHash(oldSchema) };
+        const oldHash = repairHash(oldBinding);
+        if (saved.bindingHash === oldHash) { binding = oldBinding; bindingHash = oldHash; }
+      }
+    }
     if (Object.keys(saved).sort().join() !== "bindingHash,candidateHash,dispatch,version" || saved.version !== 1
       || saved.candidateHash !== candidateHash || saved.bindingHash !== bindingHash || record.reviewDispatchSource !== bindingHash)
       fail("分组评审的候选、材料或分派已变化，不能重开子会话刷新额度。");

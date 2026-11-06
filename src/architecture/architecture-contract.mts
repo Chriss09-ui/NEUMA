@@ -210,7 +210,7 @@ Object.assign(REVIEW_SCHEMA.properties, { priorFindingDecisions: list(object({ f
 export function reviewSubmissionSchema({ evidenceRequired = false, priorFindingsRequired = false } = {}) {
   const schema = structuredClone(REVIEW_SCHEMA);
   if (evidenceRequired) {
-    schema.properties.issues.items.required.push(...Object.keys(REVIEW_ISSUE_EVIDENCE_PROPERTIES));
+    schema.properties.issues.items.required.push(...Object.keys(REVIEW_ISSUE_EVIDENCE_PROPERTIES).filter(key => key !== "factClaims"));
     schema.required.push("acceptanceScopeChecks");
   }
   if (priorFindingsRequired) schema.required.push("priorFindingDecisions");

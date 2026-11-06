@@ -184,6 +184,47 @@ test("伪造候选路径、逐字依据和已截断说法不会形成正式架�
   assert.doesNotThrow(() => validateReview(review, options), "事实引用正确仍允许独立评审指出真实设计缺陷，不自动通过");
 });
 
+test("待验证的上下文提醒可凭当前候选指出验证事项，声明的平台事实仍逐条核验", () => {
+  const { review, issue, options } = fixture();
+  issue.blocking = false; issue.kind = "context";
+  issue.description = "研发时验证传入的是原始文本还是解析后的数字"; issue.remedy = "用 3 和 3.0 验证两种输入";
+  delete issue.factClaims;
+  review.issues = [issue];
+  assert.deepEqual(validateReview(review, options), review);
+  issue.factClaims = [];
+  assert.deepEqual(validateReview(review, options), review);
+  issue.factClaims = [{ source: "runtimeCapabilities", path: "/hostDeliveryCapabilities/0/status", expectedJson: '"unavailable"' }];
+  assert.throws(() => validateReview(review, options), (error) => failureFields(error).validationIssue?.reason === "fact_mismatch");
+  delete issue.factClaims;
+  issue.references![0]!.quote = "不存在的条款";
+  assert.throws(() => validateReview(review, options), (error) => failureFields(error).validationIssue?.reason === "reference_quote_mismatch");
+});
+
+test("平台支持和不支持的结论在非阻断时也须有真实能力事实，材料缺失的阻断须有事实", () => {
+  const { review, issue, options } = fixture();
+  issue.blocking = false; issue.kind = "platform"; review.issues = [issue];
+  const missing = (error: unknown) => failureFields(error).validationIssue?.path === "review.issues[0].factClaims"
+    && failureFields(error).validationIssue?.reason === "required_field";
+  delete issue.factClaims;
+  assert.throws(() => validateReview(review, options), missing);
+  issue.factClaims = [{ source: "contextManifest", path: "/candidate/delivery", expectedJson: '"full"' }];
+  assert.throws(() => validateReview(review, options), missing);
+  const runtimes = runtimeCapabilityContract().hostDeliveryCapabilities;
+  const index = runtimes.findIndex(entry => entry.id === "managed_javascript_runtime");
+  assert.notEqual(index, -1);
+  issue.description = "平台不支持托管 JavaScript 运行通道";
+  issue.factClaims = [{ source: "runtimeCapabilities", path: `/hostDeliveryCapabilities/${index}/status`, expectedJson: '"unavailable"' }];
+  assert.throws(() => validateReview(review, options), (error) => failureFields(error).validationIssue?.reason === "fact_mismatch");
+  issue.description = "平台支持托管 JavaScript 运行通道"; issue.factClaims[0]!.expectedJson = '"available"';
+  assert.deepEqual(validateReview(review, options), review);
+  issue.description = "jsonValue 不能作根参数类型";
+  issue.factClaims = [{ source: "runtimeCapabilities", path: "/valueSchemas/rules/jsonValue/nestedOnly", expectedJson: "true" }];
+  assert.deepEqual(validateReview(review, options), review);
+  issue.blocking = true; issue.kind = "context"; issue.factClaims = [];
+  review.verdict = "revise"; review.checks.find(row => row.id === issue.checkId)!.passed = false;
+  assert.throws(() => validateReview(review, options), missing);
+});
+
 test("公开新评审结构要求关联元数据，旧记录仍可兼容读取", () => {
   const { review, issue, options } = fixture();
   review.verdict = "revise"; review.checks.find((entry) => entry.id === "interfaces")!.passed = false; review.issues = [issue];
