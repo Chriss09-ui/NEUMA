@@ -63,7 +63,10 @@ export function modelSubmissionArguments(input: unknown, schema: ContainerSchema
 }
 
 export function modelSubmissionTool(tool: NeumaTool): NeumaTool {
-  const prepareArguments = (input: unknown) => modelSubmissionArguments(input, tool.parameters);
+  const prepareArguments = (input: unknown) => {
+    const args = modelSubmissionArguments(input, tool.parameters);
+    return tool.prepareArguments ? tool.prepareArguments(args) : args;
+  };
   return { ...tool, prepareArguments, execute: (id, input, ...rest) => tool.execute(id, prepareArguments(input), ...rest) };
 }
 

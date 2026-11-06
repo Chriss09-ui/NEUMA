@@ -397,7 +397,12 @@ test("新模块只用明确关联生成覆盖，对漏项、双重来源或越�
     if (options.stage !== "module") { await options.onResult(value); return value; }
     const { coverage, ...part } = moduleValue(value);
     const ids = coverage.map(row => row.requirementId);
-    const linked = { ...part, handoffText: body, components: part.components.map(c => ({ ...c, requirementIds: ids })) };
+    const linked = { ...part, handoffText: body, components: part.components.map(c => ({ ...c, requirementIds: ids })),
+      decisions: part.decisions.map(row => ({ ...row, uncertainties: ["是否满足真实输入规模仍须验收。"] })) };
+    assert.throws(() => options.validate({ ...linked, decisions: linked.decisions.map(row => ({ ...row, uncertainties: null })) }),
+      error => failureFields(error).validationIssue?.path === "module.decisions[0].uncertainties");
+    assert.throws(() => options.validate({ ...linked, decisions: linked.decisions.map(({ evidenceIds: _evidence, ...row }) => row) }),
+      error => failureFields(error).validationIssue?.path === "module.decisions[0].evidenceIds");
     assert.throws(() => options.validate({ ...linked, coverage }), e => failureFields(e).validationIssue?.path === "module.coverage");
     assert.throws(() => options.validate({ ...linked, components: part.components }), e => {
       assert.deepEqual(objectFields(objectFields(e).validationIssue).missingReferences, ids); return true;
@@ -413,6 +418,7 @@ test("新模块只用明确关联生成覆盖，对漏项、双重来源或越�
     await options.onResult(linked); return linked;
   }) }));
   assert.deepEqual(candidate.coverage.map(row => row.componentIds), [["component_0"], ["component_1", "component_0"]]);
+  assert.deepEqual(candidate.decisions[0]!.uncertainties, ["是否满足真实输入规模仍须验收。"]);
   assert.ok(readArchitectureDesignProgress(f.record, f));
 });
 

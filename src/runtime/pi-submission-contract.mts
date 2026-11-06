@@ -3,7 +3,7 @@ import type { ValidateFunction } from "ajv";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import { modelSubmissionArguments } from "./model-submission-arguments.mjs";
 import { objectFields, isArray, isRecord } from "./type-boundary.mjs";
-interface SubmissionTool { name: string; parameters: object }
+interface SubmissionTool { name: string; parameters: object; prepareArguments?: (input: unknown) => unknown }
 
 const identifier = /^[A-Za-z][A-Za-z0-9_-]{0,119}$/;
 const ajv = new Ajv({ strict: false, coerceTypes: false });
@@ -51,7 +51,7 @@ export function readPiStructuredSubmission<T extends SubmissionTool>(raw: unknow
     named = { name: value.name ?? value.tool, arguments: value.arguments };
   }
   const match = (tool: T, input: unknown) => {
-    const args = modelSubmissionArguments(input, tool.parameters as ToolSchema);
+    const args = tool.prepareArguments ? tool.prepareArguments(input) : modelSubmissionArguments(input, tool.parameters as ToolSchema);
     return validate(args, tool.parameters) ? { tool, args } : null;
   };
   if (named) {

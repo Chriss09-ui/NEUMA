@@ -163,7 +163,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `steps[].dependsOn[]` | `StageReference[]` | 步骤依赖（无环） | `[{ moduleId:"contract-ingest", id:"step-parse" }]` |
 | `capabilities[].id/status/reason` | 能力声明 | status：`available`/`needs_connection`/`needs_development`/`unverified` | `{ id:"pdf-render", status:"available", reason:"平台公共材料工具已具备" }` |
 | `failureHandling[].scenario/response` | 失败处理 | `{ scenario:"扫描件无文本层", response:"标记需 OCR，不入风险统计" }` | — |
-| `decisions[].*` | 决策 | `{ id:"dec-01", problem:"分级规则", choice:"三级", alternatives:[{option:"五级",reason:"过细"}], reason:"用户只要高/中/低", evidenceIds:["ev-01"], uncertainties:[] }` | — |
+| `decisions[].*` | 决策；模型可省略补充疑点，程序保存 `uncertainties:[]` | `{ id:"dec-01", problem:"分级规则", choice:"三级", alternatives:[{option:"五级",reason:"过细"}], reason:"用户只要高/中/低", evidenceIds:["ev-01"], uncertainties:[] }` | — |
 | `coverage[].requirementId/componentIds/verification` | 规范覆盖或旧格式输入 | 新格式由明确组件关联生成，与主责编号相等，每条另有验收 | `{ requirementId:"req-003", componentIds:["risk-classifier"], verification:"对照冻结用例核对分级输出" }` |
 | `acceptance[].*` | 验收场景 | `{ id:"acc-01", kind:"success", requirementIds:["req-003"], input:"含违约条款的样例合同", expected:"输出 level=高 的风险项", verification:{ stage:"development", owner:"generated-code", adapterId:"action" } }`；kind 另有 `missing_input`/`boundary`/`tool_failure` | — |
 | `unknowns[].question/blocking/resolution` | 未知项 | `{ question:"扫描件占比未知", blocking:false, resolution:"运行期统计" }` | — |

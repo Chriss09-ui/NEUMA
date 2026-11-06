@@ -221,7 +221,9 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           const { coverage, ...rest } = fields;
           const components = recordArray(fields.components).map(component => ({ ...component, requirementIds: recordArray(coverage)
             .filter(row => (row.componentIds as string[]).includes(String(component.id))).map(row => row.requirementId) }));
-          args = { ...rest, handoffText: "下游请核对逐条归纳的结果。", components, acceptance: JSON.stringify(fields.acceptance) };
+          const decisions = recordArray(fields.decisions).map(({ uncertainties, ...decision }) =>
+            Array.isArray(uncertainties) && !uncertainties.length ? decision : { ...decision, uncertainties });
+          args = { ...rest, handoffText: "下游请核对逐条归纳的结果。", components, decisions, acceptance: JSON.stringify(fields.acceptance) };
         } else if (name === "submit_architecture_review") {
           const { issues, ...rest } = fields;
           args = { ...rest, ...(Array.isArray(issues) && issues.length ? { issue: issues[0] } : {}) };
@@ -286,6 +288,7 @@ test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选
   assert.equal(checkpoint.modules[0]!.modelCalls, 1);
   assert.equal(result.handoffText, "下游请核对逐条归纳的结果。");
   assert.doesNotMatch(built.design!.instructions, /下游请核对/u);
+  assert.deepEqual(built.design!.decisions[0]!.uncertainties, []);
   assert.deepEqual(built.design!.coverage.map(row => row.requirementId), built.requirements.map(row => row.id));
   assert.ok(built.design!.coverage.every(row => row.componentIds.length > 0 && built.design!.acceptance.some(item => item.requirementIds.includes(row.requirementId))));
   const boundary = objectFields(users(f.requests.find(row => row.kind === "integration")!.body)[0]!.blueprintBoundary);

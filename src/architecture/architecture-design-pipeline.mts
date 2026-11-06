@@ -40,7 +40,7 @@ import { modelUpdateBatch, singleUpdateSchema } from "../runtime/model-submissio
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
-import { CAPABILITIES, designHash, designSubmissionSchema } from "./architecture-contract.mjs";
+import { CAPABILITIES, completeDecisionNotes, designHash, designSubmissionSchema } from "./architecture-contract.mjs";
 import { platformCapabilityCatalog } from "./platform-contract.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { architectureStageRepairPlan } from "./architecture-stage-recovery.mjs";
@@ -771,7 +771,8 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
           const feedback = architectureToolValidation(value, parameters, { root: "module" });
           if (!feedback.valid) throw Object.assign(new InputError("模块超出已分配的结构或容量范围：" + JSON.stringify(feedback)), {
             validationIssue: feedback.issues[0], validationIssues: feedback.issues });
-          const canonical = context.compactSubmissions ? materializeModuleCoverage(value, assignment, parameters) : value;
+          const withNotes = completeDecisionNotes(value);
+          const canonical = context.compactSubmissions ? materializeModuleCoverage(withNotes, assignment, parameters) : withNotes;
           return validateArchitectureModule(canonical, { ...context, blueprint, assignment, dependencyModules });
         });
     }));

@@ -32,7 +32,8 @@ import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   architectureTurnBudgetSpent, CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
-  requirementItems, validateDesign, validateReview, checkDesign, designHash, requiresDevelopment, validateArchitectureDecisionReferences } from "./architecture-contract.mjs";
+  requirementItems, validateDesign, validateReview, checkDesign, designHash, requiresDevelopment, validateArchitectureDecisionReferences,
+  completeDecisionNotes } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, renderArchitectureReviewPrompt, SPECIALIST_PROMPT, PLATFORM_CLAIMS_PROMPT,
   BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, REVIEW_REVISION_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
@@ -768,9 +769,11 @@ export class ArchitectureDesigner {
         necessity: { contextHash: decision.contextHash, ...decision.decisions.find((entry) => entry.issueId === item.id) } }));
     };
     const submit: NeumaTool = { name: submitName, label: "提交检查结果", description: "提交本阶段的结构化结果；提交不代表整体通过。",
-      parameters, executionMode: "sequential", execute: async (_id, value) => {
+      parameters, ...(submitName === "submit_architecture" ? { prepareArguments: completeDecisionNotes } : {}),
+      executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
         unsubmittedDraft.clear();
+        if (submitName === "submit_architecture") value = completeDecisionNotes(value);
         let originalSubmission = value;
         attempted(_id);
         if (result !== undefined) throw new InputError("本阶段已经提交，请结束本轮");

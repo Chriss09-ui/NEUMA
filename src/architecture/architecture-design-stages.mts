@@ -4,7 +4,7 @@ import type { ArchitectureBlueprint, BlueprintAssignment, ArchitectureModule, Re
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { InputError } from "../requirements/core.mjs";
-import { ARCHITECTURE_MODULE_LIMIT, CAPABILITIES, designHash, normalizeArchitectureDecisionReferences, assertStageSemantics } from "./architecture-contract.mjs";
+import { ARCHITECTURE_MODULE_LIMIT, CAPABILITIES, designHash, decisionNotesSubmissionSchema, normalizeArchitectureDecisionReferences, assertStageSemantics } from "./architecture-contract.mjs";
 import { architectureGlobalIssues, architectureCapabilityIssues, type StageSemanticIssue } from "./architecture-stage-semantics.mjs";
 import { copyArchitectureReviewJson } from "./architecture-review-binding.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
@@ -192,7 +192,7 @@ export function architectureModuleSubmissionSchema(schema: StageSchema, assignme
     result.properties.dependencyCoverage.items!.properties!.requirementIds!.items!.enum = [...assignment.requirementIds];
     result.properties.dependencyCoverage.items!.properties!.moduleId!.description = "仅引用已完成的直接依赖模块。";
   }
-  return result;
+  return decisionNotesSubmissionSchema(result);
 }
 
 function componentCoverageSubmission(module: StageSchema) {

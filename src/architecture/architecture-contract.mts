@@ -2,7 +2,7 @@ import type { ArchitectureDesign, ArchitectureEvidenceContext, ArchitectureRevie
 import type { RequirementDraft } from "../contracts/requirements.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
-import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
+import { objectFields, isArray, isInteger, isRecord } from "../runtime/type-boundary.mjs";
 interface Schema extends ToolSchema { type?: string | string[]; properties?: Record<string, Schema>; items?: Schema; anyOf?: Schema[]; enum?: unknown[]; additionalProperties?: boolean | Schema;
   minItems?: number; maxItems?: number; minLength?: number; maxLength?: number; pattern?: string; minimum?: number; maximum?: number; uniqueItems?: boolean }
 import { createHash } from "node:crypto";
@@ -162,6 +162,21 @@ Object.assign(DESIGN_V3_SCHEMA.properties, { platformClaims: PLATFORM_CLAIMS_SCH
 export const DESIGN_SCHEMA = { ...DESIGN_V3_SCHEMA,
   properties: { ...Object.fromEntries(Object.entries(DESIGN_V3_SCHEMA.properties).filter(([key]) => key !== "platformClaims")) as Omit<typeof DESIGN_V3_SCHEMA.properties, "platformClaims">, schemaVersion: { type: "integer", enum: [2, 3] },
     connections: list({ anyOf: [CONNECTION_SCHEMA, CONNECTION_DEFINITION_SCHEMA] }, 0, 40) }, required: LEGACY_DESIGN_SCHEMA.required };
+
+/** Decision notes are optional on the model wire; frozen candidates always contain the full list. */
+export function decisionNotesSubmissionSchema<T extends ToolSchema>(schema: T): T {
+  const item = schema.properties?.decisions?.items;
+  if (item?.properties?.uncertainties?.type !== "array" || item.properties.uncertainties.minItems !== 0) return schema;
+  const writer = structuredClone(schema), row = writer.properties!.decisions!.items!;
+  row.required = row.required?.filter(key => key !== "uncertainties") ?? [];
+  row.properties!.uncertainties!.description = "本条决策的补充疑点。有已知疑点请逐项列出；未列出时保存为空清单，仍须独立评审和实际验收。";
+  return writer;
+}
+
+export function completeDecisionNotes(value: unknown): unknown {
+  if (!isRecord(value) || !isArray(value.decisions) || !value.decisions.some(row => isRecord(row) && !Object.hasOwn(row, "uncertainties"))) return value;
+  return { ...value, decisions: value.decisions.map(row => isRecord(row) && !Object.hasOwn(row, "uncertainties") ? { ...row, uncertainties: [] } : row) };
+}
 
 export function designSubmissionSchema(draft: { taskSpec?: unknown } | null | undefined, { requirements = [] }: { requirements?: RequirementItem[] } = {}) {
   const schema = structuredClone(draft?.taskSpec ? DESIGN_V3_SCHEMA : DESIGN_SCHEMA);
