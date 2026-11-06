@@ -190,9 +190,9 @@ async function exhaustedNativeReview(t: test.TestContext, { olderReviewed = fals
   return { f, source, unchanged };
 }
 
-test("有绑定原生拒绝且旧评审12轮耗尽时先交设计者，原样候选在新review请求前受原额度阻断", async (t) => {
+test("有绑定原生拒绝且旧评审12轮耗尽时先交设计者，原样候选按未修正的问题阻断", async (t) => {
   const { f, source, unchanged } = await exhaustedNativeReview(t), start = f.prompts.length;
-  await assert.rejects(f.agents.build(f.input), (error: TestFailure) => error.diagnostic!.reason === "turn_limit" && error.diagnostic!.modelCalls === 12);
+  await assert.rejects(f.agents.build(f.input), (error: TestFailure) => error.diagnostic!.reason === "review_revision_unchanged" && error.diagnostic!.modelCalls === 12);
   const current = f.prompts.slice(start), first = current[0];
   assert.equal(first!.designer, true); assert.deepEqual(objectFields(first!.payload).previousDesign, source!.design!); assertEnvelopePrompt(first!.payload);
   assert.deepEqual(objectFields(objectFields(first!.payload).revisionSource).reviewRepair, { candidateHash: source!.candidateHash!, modelCalls: 12, reason: "native_planning_rejection" });
@@ -236,7 +236,7 @@ test("耗尽评审后的设计修订再次中断，重启沿显式候选续接�
     storage: f.agents.storage, sessionFactory: f.sessionFactory, fidelitySessionFactory: f.fidelitySessionFactory });
   f.state.draftSuffix = "";
   const start = f.prompts.length;
-  await assert.rejects(f.agents.build(f.input), (error: TestFailure) => error.diagnostic!.reason === "turn_limit" && error.diagnostic!.modelCalls === 12);
+  await assert.rejects(f.agents.build(f.input), (error: TestFailure) => error.diagnostic!.reason === "review_revision_unchanged" && error.diagnostic!.modelCalls === 12);
   const current = f.prompts.slice(start), first = current[0];
   assert.equal(first!.designer, true); assertEnvelopePrompt(first!.payload);
   assert.deepEqual(objectFields(first!.payload).previousDesign, source!.design!);

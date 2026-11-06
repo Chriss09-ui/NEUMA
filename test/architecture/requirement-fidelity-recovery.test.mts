@@ -113,8 +113,8 @@ test("native fidelity recovery keeps the rejected tool history and exact feedbac
       return { value: invalid };
     }
     assert.equal(turn, 2);
-    assert.deepEqual(Object.keys(payload).sort(), ["contextHash", "correction", "lastSubmission", "remainingModelCalls"]);
-    assert.equal(payload.contextHash, valid.contextHash); assert.equal(payload.remainingModelCalls, 1);
+    assert.deepEqual(Object.keys(payload).sort(), ["contextHash", "correction", "lastSubmission"]);
+    assert.equal(payload.contextHash, valid.contextHash); assert.equal(payload.remainingModelCalls, undefined);
     assert.deepEqual(payload.lastSubmission, rejectedFeedback);
     const previousCall = body.messages.find((message) => message.role === "assistant"
       && message.tool_calls?.some((call) => call.id === "fidelity_recovery_1"));
@@ -167,7 +167,7 @@ test("旧大需求原生会话保留精确40条契约、原文件及剩余一次
   const { contextHash: _context, schemaHash: _schema, ...feedback } = diagnoseRequirementFidelitySubmission(current, invalid, { schemaHash });
   const f = await fixture(t, (body) => {
     assert.equal(body.tools![0]!.function.parameters.properties.restrictions!.maxItems, 40);
-    assert.equal(latestUser(body).remainingModelCalls, 1);
+    assert.equal(latestUser(body).remainingModelCalls, undefined);
     assert.match(textOf(body.messages.find((message) => message.role === "tool")!.content), /candidate_path_missing/);
     return { value: valid };
   }, current);
@@ -379,7 +379,7 @@ test("full-v2实际wire使用ID selector，原生成功回执恢复canonical证�
   assert.equal(f.requests.length, 1); assert.equal(f.factories[1]!.file, f.factories[0]!.file);
 });
 
-test("full-v2两次非法selector保留原生失败和已用数，恢复不创建第三个请求", { timeout: 15000 }, async (t) => {
+test("full-v2三次同因退回保留原生失败和已用数，恢复不创建第四个请求", { timeout: 15000 }, async (t) => {
   const current = { ...context(), fidelityContextVersion: "full-v2" }, saved: FidelitySnapshot[] = [];
   const f = await fixture(t, (body) => {
     const original = body.messages.filter((message) => message.role === "user").map((message) => {
@@ -389,13 +389,13 @@ test("full-v2两次非法selector保留原生失败和已用数，恢复不创�
     return { value };
   });
   await assert.rejects(f.run({ context: current, onProgress: (state: FidelitySnapshot) => saved.push(structuredClone(state)) }),
-    (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && error.modelCalls === 2);
+    (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && error.modelCalls === 3);
   const progress = saved.at(-1);
-  assert.equal(progress!.contextVersion, "full-v2"); assert.equal(progress!.calls, 2);
-  assert.equal(progress!.diagnostic.schemaRejections, 2); assert.equal(progress!.diagnostic.resultAvailable, false);
-  assert.doesNotMatch(JSON.stringify(progress!.diagnostic), /PRIVATE_/u); assert.equal(f.requests.length, 2);
+  assert.equal(progress!.contextVersion, "full-v2"); assert.equal(progress!.calls, 3);
+  assert.equal(progress!.diagnostic.schemaRejections, 3); assert.equal(progress!.diagnostic.resultAvailable, false);
+  assert.doesNotMatch(JSON.stringify(progress!.diagnostic), /PRIVATE_/u); assert.equal(f.requests.length, 3);
   await assert.rejects(callFixture(f.run, f, [{ context: current, progress, sessionStorage: { ...f.storage, file: progress!.sessionFile },
     charge() { assert.fail("耗尽的同源selector不能新增请求"); } }]),
-  (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && error.modelCalls === 2);
-  assert.equal(f.requests.length, 2); assert.equal(f.factories[1]!.file, f.factories[0]!.file);
+  (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && error.modelCalls === 3);
+  assert.equal(f.requests.length, 3); assert.equal(f.factories[1]!.file, f.factories[0]!.file);
 });

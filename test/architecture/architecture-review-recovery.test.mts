@@ -61,6 +61,7 @@ async function fixture(t: test.TestContext, { initial = "submission_incomplete",
           if (initial === "cancelled") { controller.abort(); throw new Error("cancelled fixture"); }
           if (initial === "api_connection") throw new Error("fetch failed");
           if (initial === "json_then_valid") {
+            if (initialReviews === 3) throw new Error("fetch failed after the rejected draft");
             initialReview ??= passingReview(payload.candidateHash, payload.design);
             const review = structuredClone(initialReview);
             if (initialReviews === 1) Reflect.deleteProperty(review, "candidateHash");
@@ -91,7 +92,7 @@ async function fixture(t: test.TestContext, { initial = "submission_incomplete",
     } });
   t.after(async () => { await designer.persistence; await rm(root, { recursive: true, force: true }); });
   await assert.rejects(designer.design(definition, { signal: controller.signal }), (error: TestFailure) =>
-    error.diagnostic!.reason === (initial === "revise_then_api_error" ? "api_error" : initial === "json_then_valid" ? "submission_incomplete" : initial));
+    error.diagnostic!.reason === (initial === "revise_then_api_error" ? "api_error" : initial === "json_then_valid" ? "api_connection" : initial));
   const source = await designer.get(definition.id);
   assert.equal(source!.status!, initial === "cancelled" ? "cancelled" : "failed");
   assert.ok(source!.design!); assert.equal(source!.candidateHash!, designHash(source!.design!));
@@ -121,7 +122,7 @@ for (const reason of ["submission_incomplete", "api_connection", "cancelled"]) {
     assert.equal(result.revisionSource!.version, f.source!.version);
     const previousCalls = f.source!.reviewProgressCheckpoint!.modelCalls;
     assert.equal(previousCalls, reason === "submission_incomplete" ? 2 : 1);
-    assert.deepEqual(objectFields(calls[0]!.payload).modelBudget, { limit: 5, used: previousCalls + 1, remaining: 4 - previousCalls });
+    assert.deepEqual(objectFields(calls[0]!.payload).modelBudget, { policy: "task_rejections", limit: null, used: previousCalls + 1 });
     assert.equal(result.diagnostic, undefined);
     assert.equal(designHash(await f.designer.getVersion(f.definition.id, f.source!.version)), before);
   });
@@ -130,7 +131,7 @@ for (const reason of ["submission_incomplete", "api_connection", "cancelled"]) {
 test("首轮正文结构坏、次轮完整稿语义拒绝时保存，重启用新编号局部续交而不自动通过", async (t) => {
   const f = await fixture(t, { initial: "json_then_valid" }), sourceHash = designHash(f.source);
   assert.equal(f.source!.reviewProgressCheckpoint!.origin, "semantic-rejected");
-  assert.equal(f.source!.reviewProgressCheckpoint!.modelCalls, 2);
+  assert.equal(f.source!.reviewProgressCheckpoint!.modelCalls, 3);
   assert.ok(f.source!.reviewProgressCheckpoint!.review); assert.equal(f.source!.review, null);
   await f.reload();
   const next = await f.resume({ result: "continue_draft" }), resumed = f.calls.filter((entry) => entry.phase === "resume");
@@ -139,17 +140,18 @@ test("首轮正文结构坏、次轮完整稿语义拒绝时保存，重启用�
   assert.deepEqual(objectFields(objectFields(resumed[0]!.payload).reviewDraft).review, f.source!.reviewProgressCheckpoint!.review);
   assert.match(fixtureText(objectFields(objectFields(objectFields(resumed[0]!.payload).reviewDraft).rejectedSubmission).submissionHash), /^[a-f0-9]{64}$/);
   assert.equal(next.status, "passed"); assert.equal(next.review!.summary, "继续同一评审并核对完整材料");
-  assert.equal(next.reviewProgressCheckpoint!.modelCalls, 3);
+  assert.equal(next.reviewProgressCheckpoint!.modelCalls, 4);
   assert.equal(designHash(await f.designer.getVersion(f.definition.id, f.source!.version)), sourceHash);
 });
 
-test("同材料评审累计额度耗尽后显式重试也不再发请求", async (t) => {
+test("同材料评审已用十二次请求后仍可正式提交", async (t) => {
   const f = await fixture(t), source = structuredClone(f.source);
   source!.reviewProgressCheckpoint! = createReviewProgressCheckpoint(source, null, 12)!;
   assert.ok(source!.reviewProgressCheckpoint!); await f.designer.save(source!); await f.reload();
   const before = f.calls.length;
-  await assert.rejects(f.resume(), (error: TestFailure) => error.diagnostic!.reason === "turn_limit" && error.diagnostic!.modelCalls === 12);
-  assert.equal(f.calls.length, before); assert.equal((await f.designer.get(f.definition.id))!.review!, null);
+  const result = await f.resume();
+  assert.equal(result.status, "passed"); assert.equal(result.reviewProgressCheckpoint!.modelCalls, 13);
+  assert.equal(f.calls.length, before + 1);
 });
 
 test("进程退出没有机会写最终诊断时，重启仍识别请求前保存的评审草稿和累计额度", async (t) => {
@@ -158,10 +160,10 @@ test("进程退出没有机会写最终诊断时，重启仍识别请求前保�
   await f.designer.save(interrupted!); await f.reload();
   const loaded = await f.designer.get(f.definition.id);
   assert.equal(loaded!.diagnostic!.reason, "process_interrupted");
-  assert.equal(loaded!.reviewProgressCheckpoint!.modelCalls, 2); assert.equal(loaded!.review!, null);
+  assert.equal(loaded!.reviewProgressCheckpoint!.modelCalls, 3); assert.equal(loaded!.review!, null);
   const next = await f.resume({ result: "continue_draft" }), resumed = f.calls.filter((entry) => entry.phase === "resume");
   assert.deepEqual(resumed.map((entry) => entry.role), ["reviewer"]);
-  assert.equal(objectFields(objectFields(resumed[0]!.payload).modelBudget).used, 3); assert.equal(next.status, "passed");
+  assert.equal(objectFields(objectFields(resumed[0]!.payload).modelBudget).used, 4); assert.equal(next.status, "passed");
 });
 
 test("待评候选只能续接当前同来源完整材料，损坏绑定或不受控原因回到设计", async (t) => {

@@ -13,11 +13,11 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
-import { readRepairCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
+import { readReviewTaskCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { designHash } from "../../src/architecture/architecture-contract.mjs";
 import { createReviewProgressCheckpoint } from "../../src/architecture/architecture-review-progress.mjs";
-import { createArchitectureReviewTestRetry } from "../../src/architecture/architecture-review-revision.mjs";
+import { createArchitectureReviewRetry, createArchitectureReviewTestRetry } from "../../src/architecture/architecture-review-revision.mjs";
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
 import { architectureStageSubmission } from "../helpers/architecture-stages.mjs";
 import { fidelityResult } from "../helpers/fidelity.mjs";
@@ -50,7 +50,7 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
+  acceptanceCount = 0, failReviewSlice = false, readReviewPages = false, rejectSlice = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
   interruptIntegration = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
@@ -206,6 +206,13 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         const payload = payloads.findLast((row) => row.contextHash && row.candidate);
         assert.ok(payload); name = "submit_requirement_fidelity"; args = fidelityResult(payload);
       }
+      const reviewNode = ["review_slice", "reviewer", "fidelity"].includes(kind);
+      if (reviewNode && readReviewPages && body.messages.filter(row => row.role === "tool").length < 4) {
+        name = "read_model_context"; args = { requests: [{ section: "requirements" }] };
+        assert.ok(names.includes(name));
+      } else if (rejectSlice && kind === "review_slice" && payloads.some(row => objectFields(row.assignment).id === "review_checks_0")) {
+        name = "submit_architecture_review_slice"; args = { summary: "缺少受派分项" };
+      }
       if (stage === "module" && malformedCoverage) {
         const rejection = body.messages.filter(m => m.role === "tool").map(m => text(m.content)).find(m => m.includes('"rejectedSubmission"'));
         if (rejection) {
@@ -339,7 +346,7 @@ test("复杂架构分组评审中断后沿原子会话继续，主评审和范�
   const f = await fixture(t, { acceptanceCount: 13, failReviewSlice: true });
   await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "review_slice_incomplete");
   const before = (await f.designer.get(f.definition.id))!;
-  const saved = readRepairCheckpoint(objectFields(before.reviewDispatchCheckpoint).dispatch);
+  const saved = readReviewTaskCheckpoint(objectFields(before.reviewDispatchCheckpoint).dispatch);
   assert.equal(saved.groups.length, 7); assert.equal(saved.calls, 3);
   assert.equal(saved.groups.filter(group => group.result).length, 2);
   assert.equal(before.reviewProgressCheckpoint!.modelCalls, 0);
@@ -348,13 +355,40 @@ test("复杂架构分组评审中断后沿原子会话继续，主评审和范�
   await f.reload(); const result = await f.run();
   assert.equal(result.status, "passed");
   assert.equal(f.requests.slice(start).some(request => ["blueprint", "module", "integration"].includes(request.kind)), false);
-  const completed = readRepairCheckpoint(objectFields(result.reviewDispatchCheckpoint).dispatch);
+  const completed = readReviewTaskCheckpoint(objectFields(result.reviewDispatchCheckpoint).dispatch);
   assert.equal(completed.calls, 8);
   for (const group of saved.groups.filter(group => group.result))
     assert.deepEqual(completed.groups.find(item => item.id === group.id), group);
   assert.equal(result.reviewProgressCheckpoint!.modelCalls, 2);
   assert.ok(f.requests.slice(start).some(request => request.kind === "fidelity"));
   assert.deepEqual(f.errors, []);
+});
+
+test("子组、主评审和范围复核都能在四次读取后提交，累计用量可重新载入", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, readReviewPages: true });
+  assert.equal((await f.run()).status, "passed");
+  await f.reload();
+  const record = (await f.designer.get(f.definition.id))!;
+  const dispatch = readReviewTaskCheckpoint(objectFields(record.reviewDispatchCheckpoint).dispatch);
+  assert.ok(dispatch.groups.every(group => group.calls === 5 && group.result && !group.rejection));
+  assert.equal(dispatch.callLimit, null);
+  assert.equal(record.reviewProgressCheckpoint!.modelCalls, 10);
+  assert.equal(objectFields(record.requirementFidelityProgress!.state).calls, 5);
+  assert.equal(record.designProgressCheckpoint!.modelCalls, 3);
+  assert.deepEqual(f.errors, []);
+});
+
+test("子组连续三次因同一问题正式提交失败后锁住原任务，恢复不再发请求", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, rejectSlice: true });
+  await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "review_slice_incomplete");
+  await f.reload();
+  const record = (await f.designer.get(f.definition.id))!;
+  const group = readReviewTaskCheckpoint(objectFields(record.reviewDispatchCheckpoint).dispatch).groups[0]!;
+  assert.equal(group.calls, 3); assert.equal(group.rejection?.count, 3);
+  assert.equal(record.designRecovery!.status, "blocked");
+  const requests = f.requests.length;
+  await assert.rejects(f.run(), /连续三次/);
+  assert.equal(f.requests.length, requests);
 });
 
 test("原生模块响应停滞保留超时收包诊断与蓝图检查点，重读仍为失败且不续调", { timeout: 30000 }, async t => {
@@ -646,6 +680,7 @@ async function exhaustedReviewFixture(t: test.TestContext) {
   await f.run(); const source = await f.designer.get(f.definition.id);
   await assert.rejects(f.run({ architectureRepair: source!.designRecovery!.request }));
   const failed = await f.designer.get(f.definition.id);
+  delete failed!.reviewRequestPolicy;
   // Replay a persisted five-call failure with saved scope rows, without making real model requests.
   failed!.diagnostic! = { stage: "architecture", role: "reviewer", phase: "evaluating", reason: "turn_limit", modelCalls: 5,
     lastSubmissionIssue: { path: "review.issues[0].candidatePaths[1]", reason: "candidate_path_missing" } };
@@ -658,107 +693,38 @@ async function exhaustedReviewFixture(t: test.TestContext) {
   return f;
 }
 
-test("耗尽评审可手动追加两次，授权先保存、原候选与分项保留，独审及范围复核仍实际执行", { timeout: 30000 }, async t => {
-  const f = await exhaustedReviewFixture(t), source = await f.designer.get(f.definition.id), before = f.requests.length;
-  assert.equal(source!.designRecovery!.kind, "review_retry"); assert.equal(source!.designRecovery!.status, "available");
-  const request = source!.designRecovery!.request;
-  await assert.rejects(f.run(), /手动追加/u);
-  await assert.rejects(f.run({ architectureRepair: { ...objectFields(request), version: 0 } }), /授权已过期/u);
-  assert.equal(f.requests.length, before);
+test("旧五次主评审通过普通继续恢复分项与累计用量，保存失败不派发", { timeout: 30000 }, async t => {
+  const f = await exhaustedReviewFixture(t), source = (await f.designer.get(f.definition.id))!, before = f.requests.length;
+  assert.equal(source.designRecovery!.status, "continuing");
+  assert.equal(source.designRecovery!.request, undefined);
   const save = f.designer.storage.writeJson.bind(f.designer.storage);
   f.designer.storage.writeJson = async (id, file, data) => {
-    if (file === "architecture.json" && recordArray(objectFields(data).records).some((row) => row.reviewRetryCheckpoint)) throw new Error("固定授权保存失败");
+    if (file === "architecture.json") throw new Error("固定保存失败");
     return save(id, file, data);
   };
-  await assert.rejects(f.run({ architectureRepair: request }), /固定授权保存失败/u);
-  assert.equal(f.requests.length, before); assert.equal((await f.designer.get(f.definition.id))!.version!, source!.version!);
+  await assert.rejects(f.run(), /固定保存失败/);
+  assert.equal(f.requests.length, before);
   f.designer.storage.writeJson = save;
-  const passed = await f.run({ architectureRepair: request });
-  assert.deepEqual(f.errors, []);
-  assert.equal(passed.status, "passed"); assert.equal(passed.candidateHash, source!.candidateHash!);
-  assert.deepEqual(passed.design, source!.design!); assert.deepEqual(passed.designProgressCheckpoint, source!.designProgressCheckpoint!);
-  assert.deepEqual(passed.reviewRevisionCheckpoint, source!.reviewRevisionCheckpoint!);
+  const passed = await f.run();
+  assert.equal(passed.status, "passed");
+  assert.deepEqual(passed.designProgressCheckpoint, source.designProgressCheckpoint);
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["reviewer", "fidelity"]);
-  const payload = users(f.requests[before]!.body).find((row) => row.candidateHash);
-  assert.deepEqual(payload!.modelBudget, { limit: 7, used: 5, remaining: 2 });
-  assert.equal(payload!.reviewParts!.saved, undefined);
-  const reader = f.sessions.findLast(row => row.options.customTools!.some((tool: { name: string; }) => tool.name === "submit_architecture_review"))!.options;
-  assert.equal(objectFields((await readModelContextSection(reader, "reviewParts", "/saved/acceptanceScopeChecks"))).length, source!.design!.acceptance.length);
-  assert.deepEqual(payload!.reviewParts!.missing.acceptanceScopeChecks, []);
+  const payload = users(f.requests[before]!.body).find(row => row.candidateHash)!;
+  assert.deepEqual(payload.modelBudget, { policy: "task_rejections", limit: null, used: 5 });
+  assert.deepEqual(payload.reviewParts!.missing.acceptanceScopeChecks, []);
   assert.equal(passed.reviewProgressCheckpoint!.modelCalls, 7);
-  assert.equal(objectFields(passed.reviewRetryCheckpoint!.source).modelCalls, 5);
-  await assert.rejects(f.run({ architectureRepair: request }), /授权已过期/u);
-});
-
-test("手动续评中断后保留6次用量，耗尽须点击新轮按钮，重启或删除授权不能自动补数", { timeout: 30000 }, async t => {
-  const f = await exhaustedReviewFixture(t), source = await f.designer.get(f.definition.id), before = f.requests.length;
-  f.state.failRevisedReview = 2;
-  await assert.rejects(f.run({ architectureRepair: source!.designRecovery!.request }));
-  let stopped = await f.designer.get(f.definition.id);
-  assert.equal(stopped!.reviewProgressCheckpoint!.modelCalls, 6); assert.equal(stopped!.designRecovery!.status, "continuing");
-  assert.equal(stopped!.designRecovery!.request, undefined);
-  const grant = structuredClone(stopped!.reviewRetryCheckpoint!);
-  await f.reload(); await assert.rejects(f.run());
-  stopped = await f.designer.get(f.definition.id);
-  assert.equal(stopped!.reviewProgressCheckpoint!.modelCalls, 7); assert.equal(stopped!.designRecovery!.status, "available");
-  assert.equal(stopped!.designRecovery!.actionLabel, "继续设计");
-  assert.deepEqual(stopped!.reviewRetryCheckpoint!, grant);
-  assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["reviewer", "reviewer"]);
-  const count = f.requests.length;
-  await assert.rejects(f.run()); await assert.rejects(f.run({ architectureRepair: source!.designRecovery!.request }));
-  assert.equal(f.requests.length, count);
-  Reflect.deleteProperty(stopped!, "reviewRetryCheckpoint"); await f.designer.save(stopped!); await f.reload();
-  assert.equal((await f.designer.get(f.definition.id))!.designRecovery!.status, "blocked");
-  await assert.rejects(f.run()); assert.equal(f.requests.length, count);
-});
-
-test("继续设计点击才开轮，旧点击失效，跨轮累计超过12次仍能恢复原检查与独立复核", { timeout: 30000 }, async t => {
-  const f = await exhaustedReviewFixture(t), initial = await f.designer.get(f.definition.id);
-  f.state.failRevisedReview = 2;
-  await assert.rejects(f.run({ architectureRepair: initial!.designRecovery!.request })); await assert.rejects(f.run());
-  const source = await f.designer.get(f.definition.id), before = f.requests.length, request = source!.designRecovery!.request;
-  assert.equal(objectFields(request).kind, "review_continue"); assert.equal(source!.designRecovery!.actionLabel, "继续设计");
-  await assert.rejects(f.run()); await f.reload(); assert.equal(f.requests.length, before);
-  const save = f.designer.storage.writeJson.bind(f.designer.storage);
-  f.designer.storage.writeJson = async (id, name, data) => {
-    if (objectFields(objectFields(recordArray(objectFields(data).records).at(-1)).reviewRetryCheckpoint).schemaVersion === 3) throw new Error("固定新轮授权保存失败");
-    return save(id, name, data);
-  };
-  await assert.rejects(f.run({ architectureRepair: request }), /固定新轮授权保存失败/u);
-  assert.equal(f.requests.length, before); assert.equal((await f.designer.get(f.definition.id))!.version!, source!.version!);
-  f.designer.storage.writeJson = save; f.state.failRevisedReview = 6;
-  await assert.rejects(f.run({ architectureRepair: request }));
-  const first = await f.designer.get(f.definition.id);
-  assert.equal(first!.reviewProgressCheckpoint!.modelCalls, 8); assert.equal(objectFields(first!.reviewRetryCheckpoint!.source).modelCalls, 7);
-  assert.deepEqual(first!.reviewProgressCheckpoint!.parts, source!.reviewProgressCheckpoint!.parts);
-  await assert.rejects(f.run({ architectureRepair: request }), /授权已过期/u);
-  assert.equal(f.requests.length, before + 1);
-  for (let used = 9; used <= 12; used++) {
-    await f.reload(); await assert.rejects(f.run()); assert.equal((await f.designer.get(f.definition.id))!.reviewProgressCheckpoint!.modelCalls, used);
-  }
-  const exhausted = await f.designer.get(f.definition.id);
-  assert.equal(exhausted!.designRecovery!.status, "available"); assert.equal(exhausted!.designRecovery!.modelCallLimit, 17);
-  assert.equal(f.requests.length, before + 5); await assert.rejects(f.run()); assert.equal(f.requests.length, before + 5);
-  await assert.rejects(f.run({ architectureRepair: exhausted!.designRecovery!.request }));
-  assert.equal((await f.designer.get(f.definition.id))!.reviewProgressCheckpoint!.modelCalls, 13);
-  await f.reload(); const passed = await f.run();
-  assert.equal(passed.status, "passed"); assert.equal(passed.reviewProgressCheckpoint!.modelCalls, 15);
-  assert.deepEqual(passed.design, source!.design!); assert.deepEqual(passed.designProgressCheckpoint, source!.designProgressCheckpoint!);
-  assert.deepEqual(passed.reviewRevisionCheckpoint, source!.reviewRevisionCheckpoint!);
-  assert.deepEqual((await f.designer.getVersion(f.definition.id, source!.version!))!.reviewProgressCheckpoint!, source!.reviewProgressCheckpoint!);
-  const lastPayload = users(f.requests.at(-2)!.body).find((row) => row.candidateHash);
-  assert.deepEqual(lastPayload!.modelBudget, { limit: 17, used: 13, remaining: 4 });
-  assert.equal(f.requests.at(-1)!.kind, "fidelity"); assert.deepEqual(f.errors, []);
+  assert.equal(passed.reviewRetryCheckpoint, undefined);
+  assert.deepEqual((await f.designer.getVersion(f.definition.id, source.version))!.reviewProgressCheckpoint, source.reviewProgressCheckpoint);
 });
 
 test("修复后显式测试续评核对两级授权，保存后等待手动运行，保留7次及已保存检查", { timeout: 30000 }, async t => {
   const f = await exhaustedReviewFixture(t), initial = await f.designer.get(f.definition.id);
-  f.state.failRevisedReview = 2;
-  await assert.rejects(f.run({ architectureRepair: initial!.designRecovery!.request }));
-  await assert.rejects(f.run());
-  const source = await f.designer.get(f.definition.id), before = f.requests.length;
-  assert.equal(source!.reviewProgressCheckpoint!.modelCalls, 7);
-  await assert.rejects(f.run());
+  // Restore the two authorized historical versions as written by the old policy.
+  const source = { ...initial!, version: initial!.version + 1, reviewRetryCheckpoint: createArchitectureReviewRetry(initial) };
+  const saved = initial!.reviewProgressCheckpoint!;
+  source.reviewProgressCheckpoint = createReviewProgressCheckpoint(source, null, 7, { diagnostic: saved.diagnostic, parts: saved.parts });
+  await f.designer.save(source); await f.reload();
+  const before = f.requests.length;
   const authorization = { kind: "user_requested_test", authorizedAt: "2026-10-22T14:00:00.000Z", reason: "用户明确要求保留材料恢复测试" };
   const grant = createArchitectureReviewTestRetry(source, authorization);
   const restored = structuredClone({ ...source!, version: source!.version! + 1, reviewRetryCheckpoint: grant });
@@ -776,19 +742,29 @@ test("修复后显式测试续评核对两级授权，保存后等待手动运�
   await assert.rejects(f.run(), /原始方案或检查点已变化/u);
   assert.equal(f.requests.length, before);
   await f.designer.save(restored); await f.reload();
+  f.state.failRevisedReview = 6;
+  for (let used = 8; used <= 13; used++) {
+    await assert.rejects(f.run());
+    await f.reload();
+    const current = (await f.designer.get(f.definition.id))!;
+    assert.equal(current.reviewProgressCheckpoint!.modelCalls, used);
+    assert.equal(current.designRecovery!.status, "continuing");
+    assert.equal(current.designRecovery!.request, undefined);
+    assert.deepEqual(current.reviewRetryCheckpoint, grant);
+  }
   const passed = await f.run();
   assert.deepEqual(f.errors, []);
   assert.equal(passed.status, "passed"); assert.equal(passed.candidateHash, source!.candidateHash!);
   assert.deepEqual(passed.design, source!.design!);
   assert.deepEqual(passed.designProgressCheckpoint, source!.designProgressCheckpoint!);
   assert.deepEqual(passed.reviewRevisionCheckpoint, source!.reviewRevisionCheckpoint!);
-  assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["reviewer", "fidelity"]);
+  assert.deepEqual(f.requests.slice(before).map(row => row.kind), [...Array(7).fill("reviewer"), "fidelity"]);
   const payload = users(f.requests[before]!.body).find((row) => row.candidateHash);
-  assert.deepEqual(payload!.modelBudget, { limit: 9, used: 7, remaining: 2 });
+  assert.deepEqual(payload!.modelBudget, { policy: "task_rejections", limit: null, used: 7 });
   assert.equal(payload!.reviewParts!.saved, undefined);
   const reader = f.sessions.findLast(row => row.options.customTools!.some((tool: { name: string; }) => tool.name === "submit_architecture_review"))!.options;
   assert.deepEqual(await readModelContextSection(reader, "reviewParts", "/saved/acceptanceScopeChecks"), objectFields(progress.parts).acceptanceScopeChecks);
-  assert.equal(passed.reviewProgressCheckpoint!.modelCalls, 9);
+  assert.equal(passed.reviewProgressCheckpoint!.modelCalls, 15);
   assert.deepEqual(passed.reviewRetryCheckpoint, grant);
   assert.deepEqual((await f.designer.getVersion(f.definition.id, source!.version!))!.reviewProgressCheckpoint!, progress);
   assert.throws(() => createArchitectureReviewTestRetry(passed, authorization));

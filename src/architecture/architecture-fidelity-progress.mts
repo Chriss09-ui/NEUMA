@@ -4,7 +4,7 @@ interface FidelityState { contextHash: string; schemaHash: string; sessionFile: 
 interface FidelityProgress { schemaVersion: 1; source: { agentId: string; architectureVersion: number; candidateHash: string; reviewHash: string }; bindingHash: string; state: FidelityState; parentModelCalls: number; hash: string }
 import { hashValue } from "../development/development-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
-  reviewCheckpointObject as object, reviewCheckpointOwn as own, architectureReviewStoredCallLimit } from "./architecture-review-binding.mjs";
+  reviewCheckpointObject as object, reviewCheckpointOwn as own, metersReviewRequests, architectureReviewStoredCallLimit } from "./architecture-review-binding.mjs";
 import { readMainReviewCheckpoint, mainReviewCheckpointMatches } from "./architecture-main-review-checkpoint.mjs";
 import { architectureFidelityContextVersion } from "./architecture-fidelity-context.mjs";
 
@@ -18,11 +18,11 @@ const count = (value: unknown, maximum: number): value is number => isInteger(va
 const exact = (value: unknown, keys: string[]): value is UnknownRecord => object(value) && Reflect.ownKeys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key));
 
-function stateCopy(state: unknown): FidelityState {
+function stateCopy(state: unknown, record: unknown): FidelityState {
   const value = jsonCopy(state, { maxDepth: 18, maxNodes: 5010, maxBytes: MAX_BYTES });
   const contextVersion = architectureFidelityContextVersion(value);
   if (!exact(value, contextVersion ? [...stateFields, "contextVersion"] : stateFields) || !hash(value.contextHash) || !hash(value.schemaHash) || !hash(value.sessionBindingHash)
-    || !count(value.calls, 2) || typeof value.sessionFile !== "string" || value.sessionFile.length > 255
+    || !count(value.calls, metersReviewRequests(record) ? Number.MAX_SAFE_INTEGER : 2) || typeof value.sessionFile !== "string" || value.sessionFile.length > 255
     || !/^[A-Za-z0-9_.-]+\.jsonl$/.test(value.sessionFile) || !object(value.diagnostic))
     throw new TypeError("Invalid fidelity progress state");
   const diagnostic = jsonCopy(value.diagnostic, diagnosticLimits);
@@ -46,7 +46,7 @@ function checkedProgress(progress: unknown, record: unknown, sameVersion: boolea
     || !hash(value.source.reviewHash) || value.source.reviewHash !== checkpoint.reviewHash
     || !hash(value.bindingHash) || value.bindingHash !== current.bindingHash || !hash(value.hash)
     || !count(value.parentModelCalls, architectureReviewStoredCallLimit(record))) return null;
-  const state = stateCopy(value.state);
+  const state = stateCopy(value.state, record);
   if (value.parentModelCalls < state.calls) return null;
   const { hash: savedHash, ...body } = value;
   return hashValue(body) === savedHash ? { ...value, schemaVersion: 1, source: { agentId: current.source.agentId, architectureVersion: value.source.architectureVersion, candidateHash: current.source.candidateHash, reviewHash: value.source.reviewHash }, bindingHash: value.bindingHash, state, parentModelCalls: value.parentModelCalls, hash: savedHash } : null;
@@ -55,7 +55,7 @@ function checkedProgress(progress: unknown, record: unknown, sameVersion: boolea
 /** A bound native-session reference and safe diagnostics; it grants no fidelity or review status. */
 export function createArchitectureFidelityProgress(record: unknown, state: unknown, parentModelCalls: unknown) {
   try {
-    const current = recordBinding(record), checkpoint = mainCheckpoint(record, true), savedState = stateCopy(state);
+    const current = recordBinding(record), checkpoint = mainCheckpoint(record, true), savedState = stateCopy(state, record);
     if (!current || !checkpoint || !count(parentModelCalls, architectureReviewStoredCallLimit(record)) || parentModelCalls < savedState.calls) return null;
     const body = { schemaVersion: 1, source: { ...current.source, reviewHash: checkpoint.reviewHash },
       bindingHash: current.bindingHash, state: savedState, parentModelCalls };

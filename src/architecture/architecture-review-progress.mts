@@ -54,7 +54,7 @@ function diagnosticCopy(value: unknown = {}): ReviewDiagnostic {
   if (!reviewCheckpointObject(result) || Object.keys(result).some((key) => !diagnosticFields.includes(key))) throw new TypeError("Invalid progress diagnostic");
   if (Object.hasOwn(result, "reason") && !token(result.reason)) throw new TypeError("Invalid progress diagnostic reason");
   for (const key of ["submissionAttempts", "submissionContinuations", "localRevisions"])
-    if (Object.hasOwn(result, key) && (!isInteger(result[key]) || result[key] < 0 || result[key] > 1000)) throw new TypeError("Invalid progress diagnostic count");
+    if (Object.hasOwn(result, key) && (!isInteger(result[key]) || result[key] < 0 || !Number.isSafeInteger(result[key]))) throw new TypeError("Invalid progress diagnostic count");
   const issue = (item: unknown): item is ReviewDiagnosticIssue => exact(item, ["path", "reason", ...(Object.hasOwn(objectFields(item), "candidatePath") ? ["candidatePath"] : [])])
     && typeof item.path === "string" && item.path.length <= 500 && !/[\x00-\x1f\x7f]/.test(item.path) && token(item.reason)
     && (!Object.hasOwn(item, "candidatePath") || typeof item.candidatePath === "string" && item.candidatePath.startsWith("/")

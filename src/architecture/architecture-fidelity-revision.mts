@@ -1,3 +1,4 @@
+import { metersReviewRequests } from "./architecture-review-binding.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
 import { designHash, validateReview } from "./architecture-contract.mjs";
@@ -31,7 +32,7 @@ export function readArchitectureFidelityRevision(record: unknown, evidenceInput:
     const fields = ["contextHash", "verdict", "checks", "restrictions", "modelCalls", "fidelityDiagnostic", "contextVersion"];
     const contextVersion = architectureFidelityContextVersion(evidence);
     if (!["narrowed", "unproven"].some(verdict => verdict === evidence.verdict) || Object.keys(evidence).some((key) => !fields.includes(key))
-      || !isInteger(evidence.modelCalls) || evidence.modelCalls < 1 || evidence.modelCalls > 2
+      || !isInteger(evidence.modelCalls) || evidence.modelCalls < 1 || !metersReviewRequests(record) && evidence.modelCalls > 2
       || !snapshot || designHash(objectFields(evidenceContext).contextManifest) !== designHash(snapshot.contextManifest)
       || designHash(objectFields(evidenceContext).acceptanceAdapterGuide) !== designHash(snapshot.acceptanceAdapterGuide)) return null;
     for (const [key, field] of [["candidate", "design"], ["requirements", "requirements"], ["runtimeCapabilities", "runtimeCapabilities"],

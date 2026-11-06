@@ -161,12 +161,12 @@ test("假引文、错误候选路径、错需求引用、未对应的缩水flags
   } }) }), (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && !error.message.includes("PRIVATE_"));
 });
 
-test("子复核至多两次实际调用、网络重试不重扣共享预算，耗尽仍是系统未完成", async () => {
+test("范围复核累计每次请求，网络重试不重复记账，缺少正式结果保持未完成", async () => {
   let charges = 0;
   await assert.rejects(invoke({ charge() { charges++; }, sessionFactory: async (options) => ({ modelCallAccounting: true, dispose() {}, async prompt() {
     await options.onModelCall!({}); await options.onModelCall!({ retryAttempt: 1 }); await options.onModelCall!({}); await options.onModelCall!({});
-  } }) }), (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && error.modelCalls === 2);
-  assert.equal(charges, 2);
+  } }) }), (error: TestFailure) => error.reason === "scope_evaluation_incomplete" && error.modelCalls === 3);
+  assert.equal(charges, 3);
   const stop = Object.assign(new InputError("原评审预算已用完"), { reason: "turn_limit" });
   await assert.rejects(invoke({ charge() { throw stop; }, sessionFactory: fidelityChecker() }), (error) => error === stop);
 });
@@ -197,7 +197,7 @@ async function roleFixture(t: test.TestContext, { classification = "preserved", 
         await tool!.execute!("final", review);
       } }; } });
   t.after(async () => { await designer.ready; await designer.persistence; await rm(root, { recursive: true, force: true }); });
-  return { designer, run: () => designer.role({ role: "reviewer", systemPrompt: "固定独立评审", submitName: "submit_architecture_review",
+  return { designer, run: () => designer.role({ role: "reviewer", modelCallLimit: 5, systemPrompt: "固定独立评审", submitName: "submit_architecture_review",
     parameters: reviewSubmissionSchema(), payload: { requirements: current.requirements, draft: current.draft,
       design: current.candidate, candidateHash, requireAcceptanceVerification: hook },
     validate: (value) => validateReview(value, { candidateHash }), onProgress() {}, onDiagnostics: onDiagnostics! }), counts: () => ({ childSessions, mainSessions }) };
@@ -460,7 +460,7 @@ test("真实Pi结构化范围判断语义失败后保留精确反馈，在原第
       const invalid = structuredClone(valid); invalid.restrictions![0]!.quote = "PRIVATE_FALSE_QUOTE";
       return { text: JSON.stringify(invalid) };
     }
-    assert.equal(turn, 2); assert.equal(payload.remainingModelCalls, 1);
+    assert.equal(turn, 2); assert.equal(payload.remainingModelCalls, undefined);
     assert.equal(payload.lastSubmission.stage, "semantic");
     assert.equal(payload.lastSubmission.issues[0].reason, "reference_quote_mismatch");
     assert.doesNotMatch(JSON.stringify(payload.lastSubmission), /PRIVATE_/u);

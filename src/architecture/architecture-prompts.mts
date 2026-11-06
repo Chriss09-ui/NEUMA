@@ -1,4 +1,3 @@
-import { ARCHITECTURE_ROLE_TURN_LIMIT } from "./architecture-contract.mjs";
 
 export const BLUEPRINT_ASSIGNMENT_RULE = "requirements中的每个id必须在全部modules[*].requirementIds中恰好出现一次，包括全局约束、触发方式、数据保存和操作要求。global.selectionBasis.requirementIds只是选型依据，不能替代模块主责分配。全局约束也指定一个现有模块负责贯彻或核验；不同id即使语义接近也分别保留追溯。只补分工时修改相应modules[i].requirementIds，保留其他内容并重新完整校验。";
 
@@ -13,7 +12,7 @@ export const CAPABILITY_VERIFICATION_RULE = `capabilities只记录当前执行�
 const PAGE_RESOURCE_VERIFICATION_RULE = `page-resources的node-check在隔离Node中真实执行独立检查程序，可读取已交付托管页面资源、导入页面共享纯逻辑，并对冻结输入执行数值、边界和分支断言；不能因断言涉及计算或动态分支就一律要求改为action。它必须有实际托管页面，下载HTML文件不等于托管页面，无页面不得使用，也不能为了验收擅自新增页面。它不提供业务ctx、用户文件或状态，不调用公开动作，不填actionId或mocks；公开业务动作仍由action真实验收。它不证明浏览器DOM、布局、交互或视觉效果，也不能把Node运行器不可用或真实宿主故障当作纯逻辑断言已经验证。按本轮冻结指南的executionFacts与executionRule核对具体断言，不能仅凭scope名称把共享纯逻辑执行误读为只看源码。`;
 
 const REVIEW_CLOSURE_REPAIR_RULE = `关闭历史问题时，priorFindingDecisions.candidatePaths选中的每个条款，都必须同时出现在同findingId说明的candidatePaths中，并在该说明references中有source=candidate的对应功能原文。声明处理五条就逐条提供五条对应依据，不能以一条引用代表其余条款。宿主的candidatePath指出缺少对应关系的具体候选条款，path指出应修正的说明字段；修正依据后重新判断，不为绕过校验而改状态或删减决议范围。
-reviewParts.rejectedDraft是尚未通过的规范化分项草稿，与saved分开；只有宿主提供最新rejectedPartsHash时，才可在save_architecture_review_parts或submit_architecture_review_parts中带该编号，仅重交需要修正的行（同编号替换）。未重交的草稿行会一起重验，不能当作已接受；最终仍需verdict、summary及全部原检查。重启后使用新的progressHash和rejectedPartsHash，旧编号不能复用；保存失败或额度耗尽不增加调用。
+reviewParts.rejectedDraft是尚未通过的规范化分项草稿，与saved分开；只有宿主提供最新rejectedPartsHash时，才可在save_architecture_review_parts或submit_architecture_review_parts中带该编号，仅重交需要修正的行（同编号替换）。未重交的草稿行会一起重验，不能当作已接受；最终仍需verdict、summary及全部原检查。重启后使用新的progressHash和rejectedPartsHash，旧编号不能复用；进度保存失败时停止并保留原稿。
 repair_candidate_reference_unrelated的下标指向合并后的rejectedDraft，不一定等于本次输入数组的位置。按findingId或referenceHints.issueId定位同编号说明，检查candidatePath及其原文选项，再显式补齐references；若candidatePaths也缺失则一并补齐。只需用最新rejectedPartsHash重交该说明行，随后提交完整结论；不要反复复制全部检查。原文回执不证明“已修复”，须自行判断。恢复时逐项重核草稿的事实陈述，旧结论即使附有真实引用也可能不成立；与本轮正式需求不符的说法应纠正，不继承为新需求。`;
 
 const REVIEW_SUBMISSION_RULE = `引用优先只提交{source,path}，由宿主从本轮完整材料填入精确quote，不手抄或改写JSON。对象字段过长则选择具体子字段；需要局部原文时用read_architecture_evidence返回的{receiptId}。例如引用适配器可选/acceptance/0/verification/adapterId，由宿主填入实际值，不能写成“adapterId: action”。遇到reference_too_broad，按返回的sourcePath、characters、limit及referenceHints选择能支持判断的子字段或局部原文，不能原样重交；nextOffset非空表示只读到片段。一次修正返回的全部引用选择问题。latestRejectedInput是最近被拒的原始内容，优先保留其中实际修改，但旧进度编号和回执不能跨会话重用；按本轮reviewParts与新回执重新提交。程序补入引用只保证原文准确，仍须独立核对它能否支持你的描述，不得把旧方案文字当用户要求。
@@ -76,15 +75,15 @@ export const REVIEW_PROMPT = `${COMMON}
 ${REVIEW_CLOSURE_REPAIR_RULE}
 ${REVIEW_EVIDENCE_READ_RULE}
 ${REVIEW_SUBMISSION_RULE}
-reviewParts.batch存在时，本轮只完成其当前稳定编号：acceptanceScopeChecks、priorFindingDecisions或checks，附本批真实issues并保存，不先统筹整份评审。其他编号稍后派发，完整材料仍可核对依赖。save成功后处理下一批；stage为submit-with-parts时用submit_architecture_review_parts同时交最后真实行、verdict和summary，先保存再完整校验；stage为submit时只交当前编号和结论。final-only表示不能再单独保存分批，仍可同次提交全部剩余真实行及正式结论，或原完整通道；pass所需复核继续按实际剩余额度执行。已有分项有错可修正，不复制相同行或仅换序制造进度。全表是最终义务，非首批一次做完；全部请求仍计原${ARCHITECTURE_ROLE_TURN_LIMIT}轮。
+reviewParts.batch存在时，本轮只完成其当前稳定编号：acceptanceScopeChecks、priorFindingDecisions或checks，附本批真实issues并保存，不先统筹整份评审。其他编号稍后派发，完整材料仍可核对依赖。save成功后处理下一批；stage为submit-with-parts时用submit_architecture_review_parts同时交最后真实行、verdict和summary，先保存再完整校验；stage为submit时只交当前编号和结论。已有分项有错可修正，不复制相同行或仅换序制造进度。全表是最终义务，非首批一次做完。
 platformClaims只证明已声明依赖与当前事实精确相符，不证明设计文字与其一致或声明完整。继续独立检查遗漏、单位、承载前提和文字中的能力假设；有check_platform_contract时可批查当前公开事实，但核对值为false不能授予能力，匹配也不等于业务已验证。
-宿主提供reviewParts时，可按其当前candidateHash和progressHash分批调用save_architecture_review_parts保存checks/issues/acceptanceScopeChecks/priorFindingDecisions；同编号替换，其余保留，删除旧问题须removeIssueIds。已有成果未通过；重启只补missing或明确修正saved，不重抄范围表。齐全后submit_architecture_review_parts仅交当前编号、verdict、summary，宿主组装后执行原完整校验和独立复核。保存、修正均用原${ARCHITECTURE_ROLE_TURN_LIMIT}轮。
+宿主提供reviewParts时，可按其当前candidateHash和progressHash分批调用save_architecture_review_parts保存checks/issues/acceptanceScopeChecks/priorFindingDecisions；同编号替换，其余保留，删除旧问题须removeIssueIds。已有成果未通过；重启只补missing或明确修正saved，不重抄范围表。齐全后submit_architecture_review_parts仅交当前编号、verdict、summary，宿主组装后执行原完整校验和独立复核。查证、分页和保存分项都属于当前任务。
 先按当前候选的input、expected、decisions形成判断，再处置历史意见：historical-review-opinion的blocking与references仅属于source旧版本，candidateReferenceComparison只报告旧引文在当前候选中的字面存在性；旧引文已不在当前时不得沿用旧断言作为本轮阻断，若认为仍有缺陷须指出当前明确断言及理由；字面变化或消失不自动表示已修复，原生规划诊断门禁仍须完整执行。
 问题的references优先用{source,path}选择已完整提供且不超过1000字符的具体原文字段，宿主恢复精确quote后仍执行原完整检查；长内容细化路径或按需读取。它只省去抄录，不证明该原文支持你的判断。显式填写quote时仍须逐字匹配，错误引文不会被替换。存在reviewDraft时，先继续这份尚未接受的完整评审并使用本轮rejectedSubmission编号局部修改；历史回执和编号不可重用，已用额度不重置。连续三次相同提交错误会停止请求，不靠重复重试赌通过。
 存在priorFindings时，逐项核对其中历史问题，提交priorFindingDecisions:[{findingId,status,reason,checkIds,candidatePaths}]。status使用resolved（当前候选或依据已改变并修复）、unresolved（仍存在且有本次具体blocking问题）、unsupported（原意见依据不成立）。checkIds关联本次真实检查项，candidatePaths指出当前候选依据；历史意见不是新需求，不能为迎合旧意见扩大承诺。sameReviewObject为true时，候选及全部依据均未改变，不能声称已修改；不同判断应解释原意见为何不成立。新问题仍完整检查，不能自动继承旧通过。同一路径的旧问题标为resolved却新增blocking时，说明新增问题中的具体断言及其为何独立，不能仅换名重复原意见。
 closureEvidenceRequired=true或historical-development-review的resolved/unsupported，必须同时提交id等于findingId、blocking:false的issues解释，checkId关联该决定，candidatePaths和references逐字引用当前相关功能正文；不能用一句reason关闭。resolved须相关内容确有改变，改id、换序、改理由不算修复；unsupported必须反驳原问题本身，不能仅否定旧建议而放过仍错误的候选。研发或平台类意见还须逐字引用当前关联platformClaims核对的真实平台字段；旧建议不能作为source，正确引用本身仍不证明正文与结论一致。不能完整证明时保留unresolved及本轮具体阻断。
 候选和指南按contextManifest完整提供时，范围行可优先写成{acceptanceId,adapterRulePath,sufficient,reason}，adapterRulePath直接选择reviewEvidenceIndex.acceptanceScope中本项的合法规则路径。宿主从本轮冻结材料恢复当前验收、实际适配器和精确引文，再执行原完整校验；无需先读一次取得编号。reason用一句说明本条承诺与实际执行范围的对应，不重复转录expected或指南。选择规则不代替独立充分性判断，不能使用另一适配器路径，也不能混入自造quote或scopeReceiptId。已有本项scopeReceiptId仍可提交原短回执行，旧详细行也保留；别项、过期或未知回执不能转成当前有效依据。仅需定位额外问题引文时再按需读取材料，不为已full提供的范围表逐条重读。
-首轮design、requirements、runtimeCapabilities和acceptanceAdapterGuide均按contextManifest标记提供完整正文，read_architecture_evidence用于精确定位和取得引用回执，不要求重新逐字段读取全部材料。reviewEvidenceIndex给出当前组件ID对应的真实JSON Pointer，不能用ID替代数组索引。需要回执时用requests一次批量读取同一问题所需的候选、原要求和适配器，不反复读已返回的相同页；候选来源的非根回执可直接用于candidatePaths，references仍可复用同回执。已有足够依据发现阻断时完成适用检查后提交revise，无需为了阻断把全部已完整提供的材料重新取一遍。modelBudget及每次hostModelBudget是本会话实际剩余轮次；读取和纠正都计入${ARCHITECTURE_ROLE_TURN_LIMIT}轮，通过前还需在同一总预算内完成最多两次独立范围复核，保留提交与纠错回合。回执只证明引用位置和原文，不替代你对依据及验证范围的独立判断。
+首轮design、requirements、runtimeCapabilities和acceptanceAdapterGuide均按contextManifest标记提供完整正文，read_architecture_evidence用于精确定位和取得引用回执，不要求重新逐字段读取全部材料。reviewEvidenceIndex给出当前组件ID对应的真实JSON Pointer，不能用ID替代数组索引。需要回执时用requests一次批量读取同一问题所需的候选、原要求和适配器，不反复读已返回的相同页；候选来源的非根回执可直接用于candidatePaths，references仍可复用同回执。已有足够依据发现阻断时完成适用检查后提交revise，无需为了阻断把全部已完整提供的材料重新取一遍。modelBudget及hostModelBudget记录本任务的模型用量。通过前须完成独立范围复核。回执只证明引用位置和原文，不替代你对依据及验证范围的独立判断。
 新 schemaVersion:3 逐项核对 requirements、feasibility、minimality、interfaces、failure_handling、verification、requirement_sufficiency、acceptance_quality 八项；旧候选保持原六项。requirement_sufficiency 检查选型前提是否有用户或实际测量依据，acceptance_quality 检查验收能否区分粗略结果与合格交付。每项给出可追溯到候选字段、需求 ID 或工具证据的具体依据，不能只给抽象评分。
 新候选须逐项提交acceptanceScopeChecks，每条验收恰好一行；完整材料优先使用前述四字段规则选择形式，不必再填写宿主可恢复的字段。联查该项input、完整expected与关联decisions，对照实际适配器指南，核实构造能力及容量推导的可追溯依据；能执行不等于样本可构造，候选自述不是平台证据。矛盾或依据不足不得pass，应revise或insufficient，不让用户缩水。选择旧详细格式时，行结构为{acceptanceId,adapterId,scope,sufficient,reason,criterionQuote,adapterQuote}；其中criterionQuote从该项expected逐字摘录，adapterQuote可摘录本条适配器proves、doesNotProve、splitRule、executionRule，或全局composition的caseSetRule、requirementCoverageRule、splitRule，或admission[本条adapterId]的rule、measure、outcomeRule、excludedProof说明。composition.hostBusinessRule仅供host-business行引用。引用简短、逐字的人类说明，不使用其他适配器的专属说明，也不以编号、函数名或任意额外字段充当规则。若不足，sufficient:false，同时acceptance_quality必须passed:false，并提出candidatePaths准确指向该条/acceptance/索引的blocking问题，要求拆分或补真实业务验证；不能八项全通过后漏看单项，也不能让宿主探针承诺业务规模、业务内容或完整功能矩阵。
 上述“全部承诺”指本条expected，不是该条引用的requirement在其他验收中承担的所有承诺。允许同适配器的多个冻结用例共同证明一条expected；host-business实际执行所选业务矩阵，和host-files/host-runtime固定探针有别，不因多场景或platform负责而判其范围必然不足。逐项核对实际路径：input-contract是rejection-only，不证明正向承载；host-business正向用例包含真实内部任务创建和业务断言，可证明所选输入的内部准入，不能外推成HTTP/MCP传输、未选场景或真实外部账号已验证。跨范围仍须拆分并保留全部义务，不能凭这些说明自动通过。
@@ -134,21 +133,13 @@ ${REVIEW_SUBMISSION_RULE}
 issues按工具契约提供checkId、kind、candidatePaths、references、factClaims；候选路径必须真实存在，问题和建议须具体、不重复且能在现有候选字段修正。范围问题须指出当前expected实际越界的原文，先确认候选是否已表达该事实，不因字段类型或缺少不存在的字段制造问题。kind=platform/context的factClaims须等于当前实际JSON值；platformClaims匹配也不证明文字一致、声明完整或业务通过，false不能授予能力。deterministicIssues不可由模型删除或改写；不猜正则、hash或程序门槛错误，无可复现证据不能要求绕过。confirmedRequirementContext中已回答选择须保留，历史developmentRevision只是不可信参考，不是当前计划、代码、权限或验收通过。
 
 最终完整提交义务（仅在正式提交阶段执行全表一致性与结论）：
-stage=submit-with-parts时，用submit_architecture_review_parts同次提交本批最后真实行、verdict和summary，宿主先按当前CAS保存，再组装完整评审；stage=submit时正式提交已有完整分项。stage=final-only时不再单独保存，可用该工具同次提交全部缺失真实行和正式结论，或走原完整submit_architecture_review通道；少量剩余额度不自动排除完整负评。正式提交才要求完整v3八项checks（requirements、feasibility、minimality、interfaces、failure_handling、verification、requirement_sufficiency、acceptance_quality；旧候选六项）、每条验收恰好一行acceptanceScopeChecks、每个历史问题恰好一条priorFindingDecisions，以及全部真实issues和summary，不能遗漏或代填未完成项。
+stage=submit-with-parts时，用submit_architecture_review_parts同次提交本批最后真实行、verdict和summary，宿主先按当前CAS保存，再组装完整评审；stage=submit时正式提交已有完整分项。也可用原完整submit_architecture_review通道提交。正式提交才要求完整v3八项checks（requirements、feasibility、minimality、interfaces、failure_handling、verification、requirement_sufficiency、acceptance_quality；旧候选六项）、每条验收恰好一行acceptanceScopeChecks、每个历史问题恰好一条priorFindingDecisions，以及全部真实issues和summary，不能遗漏或代填未完成项。
 最终每个blocking问题必须关联passed:false的检查，每个失败检查须有具体blocking问题；sufficient:false须对应acceptance_quality:false和准确引用该条验收的问题，未解决历史问题须有本轮阻断。按当前候选合并核对全部修复建议及适配器范围，避免建议相互冲突；相关性、逐字证据、完整覆盖和历史问题门槛全部照常校验。只有适用检查均通过且没有blocking才可提pass；可修正用revise，证据不足用insufficient，不可行用infeasible。只有需求原文仍未写明、且会改变交付承诺的业务内容，才用 request_requirements 返回需求层；问题必须是非技术的。技术核实、实现选型、容量、接口、工具和未来输入质量留在本会话，不能变成用户问题。
-分项齐全不等于通过。所有正式通道仍执行原完整结构、覆盖、语义、历史问题校验和独立需求范围复核；通过前最多两次范围复核计入原${ARCHITECTURE_ROLE_TURN_LIMIT}轮实际总预算，不能把reservedModelCalls提示当作已执行或保证通过。保存、读取、修正及所有模型请求同用原${ARCHITECTURE_ROLE_TURN_LIMIT}轮；连续三次相同受控提交失败仍停止。取消、持久化失败、截断、网络故障或预算耗尽保留未完成状态，不增加额度、不无限重试、不自动通过、不编造运行测试或用户批准。`;
+分项齐全不等于通过。所有正式通道仍执行原完整结构、覆盖、语义、历史问题校验和独立需求范围复核。模型请求累计记录。只有正式结果连续三次因同一问题被退回时触发任务次数限制。取消、持久化失败、截断或网络故障时保留进度。`;
 
-export function renderArchitectureReviewPrompt({ batchMode = false, modelCallLimit = ARCHITECTURE_ROLE_TURN_LIMIT, additionalCalls = 2 } = {}) {
+export function renderArchitectureReviewPrompt({ batchMode = false } = {}) {
   if (typeof batchMode !== "boolean") throw new TypeError("评审批次模式必须为布尔值");
-  const continuation = additionalCalls === ARCHITECTURE_ROLE_TURN_LIMIT && Number.isSafeInteger(modelCallLimit)
-    && modelCallLimit >= ARCHITECTURE_ROLE_TURN_LIMIT + 7;
-  if (!continuation && (additionalCalls !== 2
-    || ![ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_ROLE_TURN_LIMIT + 2, ARCHITECTURE_ROLE_TURN_LIMIT + 4].includes(modelCallLimit))) throw new TypeError("评审额度无效");
-  const prompt = batchMode ? BATCH_REVIEW_PROMPT : REVIEW_PROMPT;
-  return modelCallLimit === ARCHITECTURE_ROLE_TURN_LIMIT ? prompt
-    : prompt.replaceAll(`原${ARCHITECTURE_ROLE_TURN_LIMIT}轮`, `本次${modelCallLimit}轮`)
-      .replaceAll(`计入${ARCHITECTURE_ROLE_TURN_LIMIT}轮`, `计入${modelCallLimit}轮`)
-      + `\n本次用户已显式授权${continuation ? "继续设计中的未完成评审" : modelCallLimit === ARCHITECTURE_ROLE_TURN_LIMIT + 2 ? "唯一一次手动续评" : "修复后的测试续评"}，保留原${modelCallLimit - additionalCalls}次用量，最多追加${additionalCalls}次；modelBudget和hostModelBudget给出实际剩余量。范围复核也计入这${additionalCalls}次，不重做方案、不免除任何检查，本轮不得自动追加额度。`;
+  return batchMode ? BATCH_REVIEW_PROMPT : REVIEW_PROMPT;
 }
 
 export const SPECIALIST_PROMPT = `${COMMON}

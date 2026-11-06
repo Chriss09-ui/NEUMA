@@ -418,7 +418,7 @@ test("独立评审正常取消后只读复用当前完整候选，重新独立�
       assert.equal(record.payload!.revisionSource!.kind, "review-continuation");
       assert.equal(record.payload!.revisionSource!.historicalOnly, true);
       const previousCalls = interrupted!.reviewProgressCheckpoint!.modelCalls; assert.ok(typeof previousCalls === "number");
-      assert.deepEqual(record.payload!.modelBudget, { limit: 5, used: previousCalls + 1, remaining: 4 - previousCalls });
+      assert.deepEqual(record.payload!.modelBudget, { policy: "task_rejections", limit: null, used: previousCalls + 1 });
     }
     return submit(currentReview(record.payload!.candidateHash!, phase === "historical", record.payload!.design, record.payload!.priorFindings));
   } });

@@ -92,7 +92,7 @@ for (const roleName of Object.keys(names)) {
       if (turn === 1) return { kind: "text", text };
       assert.equal(turn, 2);
       const reminder = lastUser(body); assert.equal(reminder.type, "submission_required"); assert.equal(reminder.submitName, names[roleName]);
-      assert.deepEqual(reminder.modelBudget, { limit: 5, used: 1, remaining: 4 });
+      assert.deepEqual(reminder.modelBudget, roleName === "reviewer" ? { policy: "task_rejections", limit: null, used: 1 } : { limit: 5, used: 1, remaining: 4 });
       assert.ok(body.messages.some((entry) => entry.role === "assistant" && messageText(entry.content) === text));
       return { kind: "tool", name: names[roleName]!, args: { answer: "已正式提交" } };
     });

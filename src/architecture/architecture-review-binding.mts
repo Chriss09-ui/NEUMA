@@ -62,8 +62,13 @@ export function architectureReviewRecordBinding(record: unknown) {
   return { source: { agentId, architectureVersion, candidateHash }, bindingHash: hashValue({ ...binding, designHash }) };
 }
 
-/** Storage bounds only; the controller must also verify every authorization against its source version. */
+export function metersReviewRequests(record: unknown) {
+  return reviewCheckpointObject(record) && reviewCheckpointOwn(record, "reviewRequestPolicy") === "task_rejections";
+}
+
+/** Only the representable counter bounds new records. Validate older records with their original grants. */
 export function architectureReviewStoredCallLimit(record: unknown) {
+  if (metersReviewRequests(record)) return Number.MAX_SAFE_INTEGER;
   try {
     const grant = objectFields(copyArchitectureReviewJson(reviewCheckpointOwn(record, "reviewRetryCheckpoint"), { maxDepth: 5, maxNodes: 40, maxBytes: 4096 }));
     const { hash, ...body } = grant, source = objectFields(grant.source);

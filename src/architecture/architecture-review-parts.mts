@@ -103,7 +103,7 @@ export function canonicalArchitectureReviewParts(value: unknown, { schema, candi
 }
 
 export function createArchitectureReviewParts({ schema, toolSchema = schema, candidateHash, context, priorFindings, initial, initialRejected,
-  resolve = (value) => value, signal, onSave, onRejected, remainingModelCalls }: PartOptions & { toolSchema?: ToolSchema; initial?: unknown; initialRejected?: unknown; resolve?: (value: unknown) => unknown; onSave?: ((value: ReviewParts) => unknown | Promise<unknown>) | undefined; onRejected?: ((value: ReviewParts) => unknown | Promise<unknown>) | undefined; remainingModelCalls?: (() => number) | undefined }) {
+  resolve = (value) => value, signal, onSave, onRejected, remainingModelCalls }: PartOptions & { toolSchema?: ToolSchema; initial?: unknown; initialRejected?: unknown; resolve?: (value: unknown) => unknown; onSave?: ((value: ReviewParts) => unknown | Promise<unknown>) | undefined; onRejected?: ((value: ReviewParts) => unknown | Promise<unknown>) | undefined; remainingModelCalls?: (() => number | null) | undefined }) {
   const nonce = randomUUID(), options = { schema, candidateHash, context, priorFindings, signal };
   let parts = canonicalArchitectureReviewParts(initial ?? empty(candidateHash), options);
   let rejectedParts = initialRejected == null ? null : canonicalArchitectureReviewPartsDraft(initialRejected, options), persistenceError: unknown;
@@ -141,13 +141,14 @@ export function createArchitectureReviewParts({ schema, toolSchema = schema, can
     if (typeof remainingModelCalls !== "function") return undefined;
     const queue = (["acceptanceScopeChecks", "priorFindingDecisions", "checks"] as const)
       .flatMap((key) => gaps[key].map((id) => ({ key, id }))), remaining = remainingModelCalls();
-    const reservedModelCalls = 2, slots = Math.max(1, remaining - reservedModelCalls);
-    const count = Math.max(Math.min(6, queue.length), Math.ceil(queue.length / slots));
+    const reservedModelCalls = 2;
+    const count = remaining === null ? Math.min(6, queue.length)
+      : Math.max(Math.min(6, queue.length), Math.ceil(queue.length / Math.max(1, remaining - reservedModelCalls)));
     const ids: Record<"checks" | "acceptanceScopeChecks" | "priorFindingDecisions", string[]> = { acceptanceScopeChecks: [], priorFindingDecisions: [], checks: [] };
     for (const { key, id } of queue.slice(0, count)) ids[key].push(id);
-    return { stage: remaining <= reservedModelCalls ? "final-only" : !queue.length ? "submit"
+    return { stage: remaining !== null && remaining <= reservedModelCalls ? "final-only" : !queue.length ? "submit"
       : count === queue.length ? "submit-with-parts" : "save",
-      ...ids, remainingModelCalls: remaining, reservedModelCalls };
+      ...ids, ...(remaining !== null ? { remainingModelCalls: remaining, reservedModelCalls } : {}) };
   };
   const reference = () => {
     const pending = closureIssues(), gaps = missing(pending);

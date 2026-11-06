@@ -34,7 +34,7 @@ function material() {
 type Parts = ReturnType<typeof createArchitectureReviewParts>;
 const input = (parts: Pick<Parts, "reference">, rows = {}) => ({ candidateHash: parts.reference().candidateHash, progressHash: parts.reference().progressHash, ...rows });
 const savedRows = (f: ReturnType<typeof material>, overrides = {}) => ({ candidateHash: f.candidateHash, checks: structuredClone(f.review.checks), issues: [], acceptanceScopeChecks: structuredClone(f.review.acceptanceScopeChecks), priorFindingDecisions: structuredClone(f.review.priorFindingDecisions), ...overrides });
-const rowCount = (batch: { remainingModelCalls: number; reservedModelCalls: number; checks: string[]; acceptanceScopeChecks: string[]; priorFindingDecisions: string[]; stage: string; }|undefined) => batch!.acceptanceScopeChecks!.length + batch!.priorFindingDecisions!.length + batch!.checks!.length;
+const rowCount = (batch: ReturnType<Parts["reference"]>["batch"]) => batch!.acceptanceScopeChecks!.length + batch!.priorFindingDecisions!.length + batch!.checks!.length;
 const issueReason = (reason: string) => (error: { validationIssue: { reason: string; }; }) => error.validationIssue?.reason === reason;
 const deferred = fixtureDeferred;
 

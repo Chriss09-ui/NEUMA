@@ -1,3 +1,5 @@
+import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
+import { readArchitectureRejectedFidelityReference } from "../../src/architecture/architecture-fidelity-rejected-reference.mjs";
 import { callFixture, recordArray, fixtureToolAt } from "../helpers/m7-test-boundaries.mjs";
 import { fixtureString } from "../helpers/http-model.mjs";
 import type { SessionMessage } from "../../src/runtime/pi-port.mjs";
@@ -142,30 +144,55 @@ async function fixture(t: test.TestContext) {
     run: () => designer.design(definition, { signal: state.controller?.signal }) };
 }
 
-test("第5次真实范围提交被拒后只作为未接受技术参考返设计，相同候选不获新评审额度", async (t) => {
-  const f = await fixture(t); f.state.mainCalls = 4; f.state.fidelity = "rejected-native";
+async function archivedFailure(f: Awaited<ReturnType<typeof fixture>>) {
   await assert.rejects(f.run());
-  const source = await f.designer.get(f.definition.id), sourceHash = designHash(source);
-  assert.deepEqual(f.stageCalls.map(({ role }) => role), ["blueprint", "module", "integration"]);
-  assert.equal(source!.designProgressCheckpoint!.modelCalls, 3);
-  assert.equal(source!.mainReviewCheckpoint!.modelCalls, 5); assert.equal(source!.mainReviewCheckpoint!.fidelityStatus, "pending");
-  assert.equal(objectFields(source!.requirementFidelityProgress!.state).calls, 1);
-  assert.equal(source!.review, null); assert.deepEqual<NonNullable<NonNullable<typeof source>>["attempts"]>(source!.attempts, []);
-  await f.reload(); const start = f.calls.length, stageStart = f.stageCalls.length;
-  await assert.rejects(f.run(), (error) => failureFields(error).diagnostic!.reason === "turn_limit");
-  assert.deepEqual(f.calls.slice(start).map(({ role }) => role), [], "同候选不能重新独立评审或复核");
-  assert.deepEqual(f.stageCalls.slice(stageStart).map(({ role }) => role), ["integration"]);
-  const payload = f.stageCalls[stageStart]!.payload, feedback = payload.rejectedRequirementFidelitySubmission;
-  assert.equal(feedback!.trust, "untrusted-technical-reference"); assert.equal(feedback!.modelCalls, 5);
-  assert.equal(feedback!.submission.restrictions[0]!.candidatePath, "acceptance[unknown].expected");
-  assert.equal(feedback!.diagnostic.valid, false); assert.equal(objectFields(payload.revisionSource!.reviewRepair).reason, "rejected_fidelity_submission");
-  assert.equal((await f.designer.get(f.definition.id))!.reviewProgressCheckpoint!.modelCalls, 5);
-  assert.equal(designHash(await f.designer.getVersion(f.definition.id, source!.version)), sourceHash);
+  const record = (await f.designer.get(f.definition.id))!;
+  delete record.reviewRequestPolicy;
+  await f.designer.save(record);
+  return record;
+}
+
+async function archivedRepair(f: Awaited<ReturnType<typeof fixture>>) {
+  const record = await archivedFailure(f);
+  const context = architectureReviewEvidenceContext({ design: record.design, requirements: record.requirements,
+    runtimeCapabilities: record.runtimeCapabilities, evidence: record.evidence,
+    confirmedRequirementContext: record.confirmedRequirementContext ?? null, deferredVerifications: record.deferredVerifications ?? null,
+    acceptanceAdapterGuide: objectFields(record.reviewEvidence!.snapshot).acceptanceAdapterGuide });
+  const feedback = await readArchitectureRejectedFidelityReference(record, context, { cwd: f.designer.cwd,
+    directory: await f.designer.storage.directory(record.agentId, "architecture/fidelity") });
+  assert.ok(feedback);
+  const interrupted = { ...record, contractVersion: 1, version: record.version + 1, design: null, candidateHash: null, attempts: [],
+    revisionSource: { kind: "requirement-fidelity-submission-revision", version: record.version, candidateHash: record.candidateHash,
+      rejectedFidelitySource: feedback.source, reviewRepair: { candidateHash: record.candidateHash, modelCalls: feedback.modelCalls, reason: "rejected_fidelity_submission" } },
+    diagnostic: { stage: "architecture", role: "designer", phase: "designing", reason: "process_interrupted" } };
+  // This historical repair had invalidated integration, retaining its earlier real call count.
+  const { hash: _hash, ...checkpoint } = record.designProgressCheckpoint!;
+  const integration = objectFields(checkpoint.integration);
+  const pending = { ...checkpoint, revisionHash: designHash({ candidate: record.design, issues: record.issues }),
+    integration: { ...integration, generation: Number(integration.generation) + 1, sessionStartCalls: integration.modelCalls,
+      sessionRef: null, result: null, resultHash: null } };
+  interrupted.designProgressCheckpoint = { ...pending, hash: designHash(pending) };
+  delete interrupted.reviewContext; delete interrupted.reviewEvidence;
+  delete interrupted.mainReviewCheckpoint; delete interrupted.reviewProgressCheckpoint; delete interrupted.requirementFidelityProgress;
+  await f.designer.save(interrupted);
+  return record;
+}
+
+test("旧记录第五次请求只有一次正式退回时，在原会话继续范围复核", async t => {
+  const f = await fixture(t); f.state.mainCalls = 4; f.state.fidelity = "rejected-native";
+  const source = await archivedFailure(f), start = f.calls.length, stages = f.stageCalls.length;
+  f.state.fidelity = "pass"; await f.reload();
+  const result = await f.run();
+  assert.deepEqual(f.calls.slice(start).map(row => row.role), ["fidelity"]);
+  assert.equal(f.stageCalls.length, stages); assert.equal(result.status, "passed");
+  assert.equal(result.mainReviewCheckpoint!.modelCalls, 6);
+  assert.equal(result.candidateHash, source.candidateHash);
+  assert.equal(objectFields(result.requirementFidelityProgress!.state).sessionFile, objectFields(source.requirementFidelityProgress!.state).sessionFile);
 });
 
-test("真实被拒复核可驱动新候选，但必须重新独立评审与范围复核", async (t) => {
+test("已经开始的历史修订可恢复，新候选须重新独立评审与范围复核", async (t) => {
   const f = await fixture(t); f.state.mainCalls = 4; f.state.fidelity = "rejected-native";
-  await assert.rejects(f.run()); const original = await f.designer.get(f.definition.id);
+  const original = await archivedRepair(f);
   await f.reload(); const start = f.calls.length, stageStart = f.stageCalls.length;
   f.state.mainCalls = 1; f.state.fidelity = "pass"; f.state.designSuffix = "；修正实际技术说明，完整要求保持";
   const result = await f.run();
@@ -177,12 +204,12 @@ test("真实被拒复核可驱动新候选，但必须重新独立评审与范�
 
 test("被拒复核触发设计中断后沿原生来源续接，不丢5轮且不退回其他候选", async (t) => {
   const f = await fixture(t); f.state.mainCalls = 4; f.state.fidelity = "rejected-native";
-  await assert.rejects(f.run()); const original = await f.designer.get(f.definition.id);
+  const original = await archivedRepair(f);
   await f.reload(); f.state.interruptDesigner = true;
   await assert.rejects(f.run()); const interrupted = await f.designer.get(f.definition.id);
   assert.equal(interrupted!.candidateHash, null); assert.equal(interrupted!.revisionSource!.version, original!.version);
   await f.reload(); f.state.interruptDesigner = false; const start = f.calls.length, stageStart = f.stageCalls.length;
-  await assert.rejects(f.run(), (error) => failureFields(error).diagnostic!.reason === "turn_limit");
+  await assert.rejects(f.run(), (error) => failureFields(error).diagnostic!.reason === "review_revision_unchanged");
   assert.deepEqual(f.calls.slice(start).map(({ role }) => role), [], "同候选修订中断不能刷新原评审额度");
   assert.deepEqual(f.stageCalls.slice(stageStart).map(({ role }) => role), ["integration"]);
   assert.equal(f.stageCalls[stageStart]!.payload.rejectedRequirementFidelitySubmission!.source.architectureVersion, original!.version);
@@ -198,7 +225,7 @@ test("被拒复核修订已标记时，坏repair不能降级为普通设计刷�
 (    record: { revisionSource: { rejectedFidelitySource: { sessionHash: string; }; }; }) => { record.revisionSource.rejectedFidelitySource.sessionHash = "c".repeat(64); }];
   for (const change of changes) await t.test(change.toString(), async (t) => {
     const f = await fixture(t); f.state.mainCalls = 4; f.state.fidelity = "rejected-native";
-    await assert.rejects(f.run()); f.state.interruptDesigner = true;
+    await archivedRepair(f); f.state.interruptDesigner = true;
     await assert.rejects(f.run()); const interrupted = await f.designer.get(f.definition.id);
     callFixture(change, undefined, [interrupted]); await f.designer.save(interrupted!); await f.reload(); const start = f.calls.length, stageStart = f.stageCalls.length;
     f.state.interruptDesigner = false;
@@ -265,12 +292,13 @@ test("检查点篡改或未知中断原因不得跳过新的主评审", async (t
   });
 });
 
-test("检查点已用5轮时恢复不新建主评审或发出额外复核请求", async (t) => {
+test("检查点已用五次时恢复只续范围复核", async (t) => {
   const f = await fixture(t); f.state.mainCalls = 3; f.state.fidelity = "text";
   await assert.rejects(f.run()); assert.equal((await f.designer.get(f.definition.id))!.mainReviewCheckpoint!.modelCalls, 5);
   f.state.fidelity = "pass"; const count = f.calls.length, stageCount = f.stageCalls.length;
-  await assert.rejects(f.run(), (error) => failureFields(error).diagnostic!.reason === "turn_limit" && failureFields(error).diagnostic!.modelCalls === 5);
-  assert.equal(f.calls.length, count); assert.equal((await f.designer.get(f.definition.id))!.mainReviewCheckpoint!.modelCalls, 5);
+  const result = await f.run();
+  assert.equal(result.status, "passed"); assert.equal(result.mainReviewCheckpoint!.modelCalls, 6);
+  assert.deepEqual(f.calls.slice(count).map(row => row.role), ["fidelity"]);
   assert.equal(f.stageCalls.length, stageCount);
 });
 
@@ -332,13 +360,15 @@ test("否定后的设计修订中断可沿原来源继续，坏来源不能回�
   assert.equal(next.revisionSource!.version, original!.version);
 });
 
-test("范围复核已用两次的原会话不能因重启补充第三次调用", async (t) => {
+test("范围复核中断后可在原会话发出第三次请求", async (t) => {
   const f = await fixture(t); f.state.fidelity = "text";
   await assert.rejects(f.run()); const before = await f.designer.get(f.definition.id);
   assert.equal(objectFields(before!.requirementFidelityProgress!.state).calls, 2); assert.equal(before!.mainReviewCheckpoint!.modelCalls, 3);
   await f.reload(); f.state.fidelity = "pass"; const count = f.calls.length, stageCount = f.stageCalls.length;
-  await assert.rejects(f.run(), (error) => failureFields(error).diagnostic!.reason === "scope_evaluation_incomplete");
-  assert.equal(f.calls.length, count); assert.equal((await f.designer.get(f.definition.id))!.mainReviewCheckpoint!.modelCalls, 3);
+  const result = await f.run();
+  assert.equal(result.status, "passed"); assert.equal(result.mainReviewCheckpoint!.modelCalls, 4);
+  assert.deepEqual(f.calls.slice(count).map(row => row.role), ["fidelity"]);
+  assert.equal(objectFields(result.requirementFidelityProgress!.state).sessionFile, objectFields(before!.requirementFidelityProgress!.state).sessionFile);
   assert.equal(f.stageCalls.length, stageCount);
 });
 
@@ -355,7 +385,7 @@ test("主预算4与子预算1的真实持久引用重启后只完成原第5次�
   assert.equal(result.status, "passed"); assert.equal(result.mainReviewCheckpoint!.modelCalls, 5);
   assert.equal(result.requirementFidelityProgress!.parentModelCalls, 5); assert.equal(objectFields(result.requirementFidelityProgress!.state).calls, 2);
   assert.equal(objectFields(result.requirementFidelityProgress!.state).sessionFile, file);
-  assert.equal(f.calls.at(-1)!.payload.remainingModelCalls, 1); assert.equal(f.calls.at(-1)!.payload.requirements, undefined);
+  assert.equal(f.calls.at(-1)!.payload.remainingModelCalls, undefined); assert.equal(f.calls.at(-1)!.payload.requirements, undefined);
 });
 
 test("损坏的范围复核引用不能回退为新的主评审或替代会话", async (t) => {

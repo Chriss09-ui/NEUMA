@@ -71,20 +71,20 @@ for (const [name, controller] of Object.entries(controllers)) {
     }
   });
 
-  test(`${name}合法结构的语义错与重复编号仍反馈并只允许原第二轮纠正`, async () => {
+  test(`${name}合法结构的语义错可按反馈纠正，重复退回时停止`, async () => {
     for (const corrupt of [controller.corrupt, controller.duplicate]) {
       const f = fixture(controller, ({ payload, turn, value }) => {
         if (turn === 1) callFixture(corrupt, undefined, [value]);
         else {
-          assert.equal(payload.remainingModelCalls, 1); assert.ok(payload.lastSubmission);
+          assert.equal(payload.remainingModelCalls, name === "fidelity" ? undefined : 1); assert.ok(payload.lastSubmission);
           assert.doesNotMatch(JSON.stringify(payload.lastSubmission), /PRIVATE_/u);
         }
         return response(value);
       });
       const result = await f.run(); assert.equal(result.modelCalls, 2); assert.equal(f.state.charges, 2); assert.equal(f.state.executions, 2);
       const bad = fixture(controller, ({ value }) => { callFixture(corrupt, undefined, [value]); return response(value); });
-      await assert.rejects(bad.run(), (error) => failureFields(error).reason === controller.reason && failureFields(error).modelCalls === 2);
-      assert.equal(bad.state.charges, 2); assert.equal(bad.state.executions, 2);
+      await assert.rejects(bad.run(), (error) => failureFields(error).reason === controller.reason && failureFields(error).modelCalls === (name === "fidelity" ? 3 : 2));
+      assert.equal(bad.state.charges, name === "fidelity" ? 3 : 2); assert.equal(bad.state.executions, name === "fidelity" ? 3 : 2);
     }
   });
 

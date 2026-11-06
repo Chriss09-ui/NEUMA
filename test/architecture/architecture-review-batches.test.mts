@@ -130,7 +130,7 @@ async function fixture(t: test.TestContext, { count = 22, initialModelCalls = 0,
   t.after(async () => { if (server) { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
     await designer.persistence; await rm(root, { recursive: true, force: true }); });
   await designer.ready;
-  const run = () => designer.role({ role: "reviewer", systemPrompt: renderArchitectureReviewPrompt({ batchMode: true }), submitName: "submit_architecture_review", parameters: f.schema,
+  const run = () => designer.role({ role: "reviewer", modelCallLimit: 5, systemPrompt: renderArchitectureReviewPrompt({ batchMode: true }), submitName: "submit_architecture_review", parameters: f.schema,
     payload: { candidateHash: f.candidateHash, design: f.design, requirements: f.requirements, priorFindings: f.priorFindings,
       runtimeCapabilities: {}, acceptanceAdapterGuide: f.context.acceptanceAdapterGuide, ...f.platformContext, requireAcceptanceVerification },
     reviewEvidenceContext: f.context, initialModelCalls, signal: controller.signal, onProgress() {},

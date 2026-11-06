@@ -1,3 +1,4 @@
+import { architectureReviewStoredCallLimit } from "./architecture-review-binding.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ArchitectureDesign, ArchitectureReview, ArchitectureIssue, RequirementItem, ArchitectureEvidenceContext, EvidenceItem } from "../contracts/architecture.mjs";
@@ -6,7 +7,7 @@ import type { AgentStoragePort } from "../runtime/storage-port.mjs";
 import { objectFields, isArray, isInteger } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
-import { ARCHITECTURE_VERSION, ARCHITECTURE_STORED_TURN_LIMIT, architectureTurnBudgetSpent,
+import { ARCHITECTURE_VERSION, architectureTurnBudgetSpent,
   validateDesign, validateReview, checkDesign, designHash, requiresDevelopment } from "./architecture-contract.mjs";
 import { platformEvidence, platformCapabilityCatalog, validatePlatformMetadata } from "./platform-contract.mjs";
 import type { createPlatformSnapshot } from "./platform-contract.mjs";
@@ -219,28 +220,18 @@ export async function rejectedFidelityArchitectureRevisionSeed(previous: StoredA
   const continued = repair?.reason === "rejected_fidelity_submission"
     && interrupted
     && (previous.candidateHash === null || previous.candidateHash === repair.candidateHash);
-  const original = continued ? [...records].find((record) => record.agentId === definition.id && record.version === reference.version) : previous;
-  if (continued && !architectureRevisionBindingsMatch(previous, definition, context, { allowUnsubmitted: true }))
+  // Only resume an already recorded historical design repair. A rejected scope submission belongs to the same review task.
+  if (!continued) return null;
+  const original = records.find(record => record.agentId === definition.id && record.version === reference.version);
+  if (!architectureRevisionBindingsMatch(previous, definition, context, { allowUnsubmitted: true }))
     throw new InputError("被拒复核的修订来源已变化，不能建立替代评审");
   const materials = architectureMaterialSeed(original, definition, context);
-  if (!materials) {
-    if (continued) throw new InputError("被拒复核的原始材料不可恢复，不能建立替代评审");
-    return null;
-  }
-  let feedback;
-  if (original?.mainReviewCheckpoint?.fidelityStatus === "pending" && architectureTurnBudgetSpent(objectFields(original.mainReviewCheckpoint).modelCalls)) {
-    try {
-      feedback = await readArchitectureRejectedFidelityReference(original, materials.evidenceContext, {
-        cwd, directory: await storage.directory(definition.id, "architecture/fidelity"), signal });
-    } catch { signal?.throwIfAborted(); }
-  }
-  if (!feedback) {
-    if (continued) throw new InputError("被拒复核的真实会话不可核对，不能建立替代评审");
-    return null;
-  }
-  if (continued && (designHash(reference.rejectedFidelitySource) !== designHash(feedback.source)
-    || repair.candidateHash !== original!.candidateHash || repair.modelCalls !== feedback.modelCalls))
-    throw new InputError("被拒复核的会话或已用额度已变化，不能建立替代评审");
+  if (!original || !materials) throw new InputError("被拒复核的原始材料不可恢复，不能建立替代评审");
+  const feedback = await readArchitectureRejectedFidelityReference(original, materials.evidenceContext, {
+    cwd, directory: await storage.directory(definition.id, "architecture/fidelity"), signal });
+  if (!feedback || designHash(reference.rejectedFidelitySource) !== designHash(feedback.source)
+    || repair.candidateHash !== original.candidateHash || repair.modelCalls !== feedback.modelCalls)
+    throw new InputError("被拒复核的会话或已用记录无法核验，不能建立替代评审");
   const { evidenceContext, ...seed } = materials;
   return { ...seed, issues: structuredClone(original!.issues), rejectedFidelityReference: feedback,
     source: { ...materials.source, kind: "requirement-fidelity-submission-revision", rejectedFidelitySource: feedback.source,
@@ -314,7 +305,7 @@ export function interruptedArchitectureRevisionSeed(previous: StoredArchitecture
   const saved = [...records], reference = objectFields(previous.revisionSource), repair = objectFields(reference.reviewRepair);
   if (diagnostic.role === "designer" && previous.design === null && previous.candidateHash === null
     && isInteger(reference.version) && reference.version < previous.version
-    && architectureTurnBudgetSpent(repair.modelCalls) && repair.reason === "native_planning_rejection" && repair.candidateHash === reference.candidateHash) {
+    && isInteger(repair.modelCalls) && repair.modelCalls >= 0 && repair.reason === "native_planning_rejection" && repair.candidateHash === reference.candidateHash) {
     const original = saved.find((record) => record.agentId === definition.id && record.version === reference.version);
     const materials = original && ["failed", "cancelled"].includes(original.status) && original.review === null
       && original!.candidateHash === reference.candidateHash ? architectureMaterialSeed(original, definition, context) : null;
@@ -421,7 +412,7 @@ export function feedbackRepairSeed(previous: StoredArchitectureRecord | null | u
   if (!repair || Object.keys(repair).sort().join(",") !== "bindingHash,candidateHash,modelCalls,version"
     || !isInteger(repair.version) || repair.version < 1 || repair.version >= previous.version
     || (typeof repair.candidateHash !== "string" || !/^[a-f0-9]{64}$/u.test(repair.candidateHash)) || (typeof repair.bindingHash !== "string" || !/^[a-f0-9]{64}$/u.test(repair.bindingHash))
-    || !isInteger(repair.modelCalls) || repair.modelCalls < 0 || repair.modelCalls > ARCHITECTURE_STORED_TURN_LIMIT
+    || !isInteger(repair.modelCalls) || repair.modelCalls < 0 || repair.modelCalls > architectureReviewStoredCallLimit(previous)
     || !architectureRevisionBindingsMatch(previous, definition, context, { allowUnsubmitted: true }))
     throw feedbackRepairError("原版本、候选、完整业务绑定或已用次数不一致。");
   const original = [...records].find((record) => record.agentId === definition.id && record.version === repair.version);

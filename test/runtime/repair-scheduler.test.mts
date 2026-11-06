@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRepairCheckpoint, runRepairSchedule, readRepairCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
+import { createRepairCheckpoint, runRepairSchedule, readReviewTaskCheckpoint, runReviewTaskSchedule, readRepairCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
 import type { RepairIssue, RepairWorker } from "../../src/runtime/repair-scheduler.mjs";
 
 const issue = (id: string, path: string, owner = id): RepairIssue => ({ id, paths: [path], owner, description: `修复${id}`, remedy: "保留原要求" });
@@ -141,4 +141,29 @@ test("旧已提交坏补丁退回原组，消费旧基底的下游保留历史�
   assert.deepEqual(resumed, ["a", "b"]); assert.deepEqual(result, { a: "verified-a", b: "verified-b" });
   assert.equal(checkpoint.calls, 4); assert.deepEqual(checkpoint.groups[0]!.history![0]!.result, previous.groups[0]!.result);
   assert.deepEqual(readRepairCheckpoint(checkpoint), checkpoint);
+});
+
+
+test("已用三次的旧分组经原校验迁移并在原会话续做，其他修复调度拒绝该策略", async () => {
+  const base = { field: "pending" }, issues = [issue("inspect", "/field")];
+  let previous = createRepairCheckpoint("review", base, issues, 3);
+  await assert.rejects(runRepairSchedule({ checkpoint: previous, binding: "review", base, save: async state => { previous = state; },
+    run: async worker => {
+      await worker.onSession("review.jsonl");
+      for (let i = 0; i < 3; i++) await worker.onCall();
+      throw new Error("connection interrupted");
+    } }), /connection interrupted/);
+  const original = structuredClone(previous);
+  assert.throws(() => readReviewTaskCheckpoint({ ...previous, calls: 0 }));
+  let migrated = readReviewTaskCheckpoint(previous);
+  assert.throws(() => readRepairCheckpoint(migrated));
+  const merged = await runReviewTaskSchedule({ checkpoint: migrated, binding: "review", base, save: async state => { migrated = state; },
+    run: async worker => {
+      assert.equal(worker.group.sessionFile, "review.jsonl");
+      assert.equal(worker.group.calls, 3); assert.equal(worker.group.rejection, undefined);
+      await worker.onCall(); await worker.onCall(1);
+      await worker.submit({ baseHash: worker.baseHash, issueIds: ["inspect"], summary: "核对完成", updates: [{ path: "/field", value: "done" }] });
+    } });
+  assert.deepEqual(merged, { field: "done" }); assert.equal(migrated.calls, 4);
+  assert.deepEqual(previous, original);
 });

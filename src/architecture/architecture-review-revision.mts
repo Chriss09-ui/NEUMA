@@ -1,3 +1,4 @@
+import { metersReviewRequests } from "./architecture-review-binding.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { ArchitectureDesign, ArchitectureIssue, ReviewDiagnosticIssue } from "../contracts/architecture.mjs";
@@ -203,7 +204,7 @@ export function readArchitectureReviewRetry(input: unknown): ReviewRetryCheckpoi
       || checkpoint.source.candidateHash !== record.candidateHash
       || !continuation && checkpoint.source.modelCalls !== (testRetry ? ARCHITECTURE_REVIEW_RETRY_CALL_LIMIT : ARCHITECTURE_ROLE_TURN_LIMIT)
       || !/^[a-f0-9]{64}$/u.test(checkpoint.source.progressHash) || !progress
-      || progress.modelCalls < checkpoint.source.modelCalls || progress.modelCalls > architectureReviewRetryCallLimit(checkpoint))
+      || progress.modelCalls < checkpoint.source.modelCalls || !metersReviewRequests(record) && progress.modelCalls > architectureReviewRetryCallLimit(checkpoint))
       throw new Error();
     return checkpoint;
   } catch { throw new InputError("手动续评授权或检查点无法核验；不能重新领取额度，请保留原材料。"); }
@@ -243,7 +244,7 @@ function reviewRetryRecovery(input: unknown) {
     request: { kind: "review_retry", version: record.version, candidateHash: record.candidateHash, checkpointHash: checkpoint.hash } };
 }
 
-export function architectureReviewRevisionRecovery(input: unknown) {
+export function architectureReviewRevisionRecovery(input: unknown, currentPolicy = metersReviewRequests(input)) {
   const record = objectFields(input);
   if (!record || ["designing", "evaluating", "passed"].some(status => status === record.status)) return null;
   if (!["failed", "cancelled", "needs_changes"].some(status => status === record.status))
@@ -255,6 +256,16 @@ export function architectureReviewRevisionRecovery(input: unknown) {
     try {
       const checkpoint = readArchitectureReviewRevision(record);
       const reviewed = checkpoint!.result && record.candidateHash === checkpoint!.resultHash && record.review;
+      if (currentPolicy && checkpoint!.result && !reviewed) {
+        const hasGrant = Object.hasOwn(record, "reviewRetryCheckpoint");
+        if (hasGrant) readArchitectureReviewRetry(record);
+        const progress = readReviewProgressCheckpoint(record);
+        if (Object.hasOwn(record, "reviewProgressCheckpoint") && !progress) throw new InputError("独立评审进度无法核验。");
+        const stalled = architectureReviewFailureStalled(progress?.diagnostic);
+        return { kind: hasGrant ? "review_retry" : "review_revision", status: stalled ? "blocked" : "continuing", stage: "evaluating",
+          actionLabel: stalled ? "查看评审阻断" : "继续独立评审", modelCalls: progress?.modelCalls ?? 0,
+          message: stalled ? "正式评审结果连续三次因同一问题被退回，已保留进度。" : "修订候选已保存，继续同一份独立评审并累计用量。" };
+      }
       if (checkpoint!.result && !reviewed) {
         const retry = reviewRetryRecovery(record);
         if (retry) return retry;

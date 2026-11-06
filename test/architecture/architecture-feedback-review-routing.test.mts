@@ -102,11 +102,11 @@ test("旧待评候选新增研发反馈时先修订，同候选评审沿用已�
   assert.equal(designHash(await f.designer.getVersion(f.definition.id, f.source!.version)), before);
 });
 
-test("同候选原12轮已耗尽时只交设计者，原样提交不再启动评审", async (t) => {
+test("反馈修订返回同一候选后，十二次旧请求仍随原候选累计", async (t) => {
   const f = await fixture(t, { used: 12 }), start = f.calls.length;
-  await assert.rejects(f.runDesign(), (error: TestFailure) => error.diagnostic!.reason === "turn_limit" && error.diagnostic!.modelCalls === 12);
-  assert.deepEqual(f.calls.slice(start).map((row) => row.role), ["designer"]);
-  assert.equal((await f.designer.get(f.definition.id))!.reviewProgressCheckpoint!.modelCalls, 12);
+  await assert.rejects(f.runDesign(), (error: TestFailure) => error.diagnostic!.reason === "api_connection" && error.diagnostic!.modelCalls === 13);
+  assert.deepEqual(f.calls.slice(start).map((row) => row.role), ["designer", "reviewer"]);
+  assert.equal((await f.designer.get(f.definition.id))!.reviewProgressCheckpoint!.modelCalls, 13);
 });
 
 test("相关新候选独立评审，完整审结清除中断标记且不冻结用户后续新需求", async (t) => {

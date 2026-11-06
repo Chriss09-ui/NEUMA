@@ -56,17 +56,7 @@ test("完整评审路径原文兼容，分批模式不再同时要求先修整�
   assert.doesNotMatch(batch, /存在reviewDraft时，先继续这份尚未接受的完整评审/);
   assert.doesNotMatch(batch, /必须在decisions\.choice、steps和unknowns消除/);
   assert.throws(() => callFixture(renderArchitectureReviewPrompt, undefined, [{ batchMode: "true" }]), TypeError);
-  const retried = renderArchitectureReviewPrompt({ batchMode: true, modelCallLimit: 7 });
-  assert.match(retried, /保留原5次用量，最多追加2次/u);
-  assert.match(retried, /范围复核计入本次7轮/u);
-  assert.doesNotMatch(retried, /原5轮/u);
-  const testRetry = renderArchitectureReviewPrompt({ batchMode: true, modelCallLimit: 9 });
-  assert.match(testRetry, /修复后的测试续评，保留原7次用量，最多追加2次/u);
-  assert.match(testRetry, /范围复核计入本次9轮/u);
-  const continuation = renderArchitectureReviewPrompt({ batchMode: true, modelCallLimit: 14, additionalCalls: 5 });
-  assert.match(continuation, /保留原9次用量，最多追加5次/u);
-  assert.match(continuation, /范围复核计入本次14轮/u);
-  assert.throws(() => renderArchitectureReviewPrompt({ modelCallLimit: 8 }), TypeError);
+  assert.doesNotMatch(batch, /最多两次范围复核|原5轮|实际剩余额度/);
 });
 
 test("完整与分批评审要求逐条关闭依据，并支持用未通过草稿只修错误行", () => {
@@ -76,7 +66,7 @@ test("完整与分批评审要求逐条关闭依据，并支持用未通过草�
     assert.match(prompt, /rejectedDraft是尚未通过的规范化分项草稿，与saved分开/u);
     assert.match(prompt, /仅重交需要修正的行/u);
     assert.match(prompt, /未重交的草稿行会一起重验/u);
-    assert.match(prompt, /保存失败或额度耗尽不增加调用/u);
+    assert.match(prompt, /进度保存失败时停止并保留原稿/u);
     assert.match(prompt, /引用优先只提交\{source,path\}/u);
     assert.match(prompt, /以findingRef代替findingId/u);
     assert.match(prompt, /blocking:true只能关联passed:false/u);
@@ -111,15 +101,13 @@ test("最终阶段保留完整覆盖、负评通道及原独立复核和预算",
   assert.match(batch, /仅在正式提交阶段执行全表一致性与结论/);
   assert.match(batch, /stage=submit-with-parts时[\s\S]*先按当前CAS保存，再组装完整评审/);
   assert.match(batch, /stage=submit时正式提交已有完整分项/);
-  assert.match(batch, /stage=final-only时不再单独保存/);
-  assert.match(batch, /少量剩余额度不自动排除完整负评/);
+  assert.match(batch, /也可用原完整submit_architecture_review通道提交/);
   assert.match(batch, /每条验收恰好一行acceptanceScopeChecks、每个历史问题恰好一条priorFindingDecisions/);
   assert.match(batch, /每个blocking问题必须关联passed:false的检查/);
   assert.match(batch, /sufficient:false须对应acceptance_quality:false/);
   assert.match(batch, /原完整结构、覆盖、语义、历史问题校验和独立需求范围复核/);
-  assert.match(batch, /最多两次范围复核计入原5轮实际总预算/);
-  assert.match(batch, /连续三次相同受控提交失败仍停止/);
-  assert.match(batch, /取消、持久化失败、截断、网络故障或预算耗尽保留未完成状态/);
+  assert.match(batch, /正式结果连续三次因同一问题被退回/);
+  assert.match(batch, /取消、持久化失败、截断或网络故障时保留进度/);
 });
 
 test("聚焦当前批仍保留真实依据、适配器范围和原需求边界", () => {

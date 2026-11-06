@@ -137,7 +137,8 @@ function projectUserMessages(messages: ContextEvent["messages"], project: (value
 export function projectArchitectureMessages(messages: ContextEvent["messages"], { role, roleGuide }: { role: string; roleGuide: string }) {
   return projectUserMessages(messages, input => {
     const value = objectFields(input);
-    if (!input || !Number.isSafeInteger(objectFields(value.modelBudget).limit) || value.contextIndex) return null;
+    const budget = objectFields(value.modelBudget);
+    if (!input || !(Number.isSafeInteger(budget.limit) || budget.policy === "task_rejections" && budget.limit === null) || value.contextIndex) return null;
     const continuation = ["resume_architecture_stage", "review_batch", "submission_required"].some(type => type === value.type);
     return architectureModelContext({ ...value, roleGuide }, { role, continuation });
   });
@@ -161,10 +162,10 @@ export function architectureNodePrompt({ role, pipelineStage, submitName, bluepr
               : "依据已确认需求设计最简且充分的完整方案；修订时只改相关内容，保留有效设计与编号。";
   return `你是NEUMA的${role}。${task}
 ${MODEL_CONTEXT_INSTRUCTIONS}
-按实际公开工具schema提交${submitName}；不要复制schema或编造字段。工具及本轮modelBudget是额度依据，提交后停止。roleGuide保留本角色详细规程，遇到具体协议疑问再读取。
+按实际公开工具schema提交${submitName}；不要复制schema或编造字段。modelBudget记录请求用量，policy为task_rejections时依同一任务正式退回次数停止，提交后停止。roleGuide保留本角色详细规程，遇到具体协议疑问再读取。
 ${textHandoffs && pipelineStage === "blueprint" ? "给模块或专项顾问派单时，只把主责、上游输入、交付要求和例外写成一个handoffText，自然分段。编号、主题和依赖按工具单独提交。已确认的专属操作由宿主绑定，工具标明可省略时不用复写开关。" : ""}
 ${textHandoffs && pipelineStage === "consultation" ? "直接回答assignment.handoffText。在一个handoffText中写出判断、建议和仍待验证的事项，references只指向本组实际材料。" : ""}
-${pipelineStage ? "已有本节点主要资料时直接设计；只读取影响当前决定的缺项，不先通读详细规程。尽早提交完整候选，尽量预留两轮纠错；资料不足仍如实说明，不能为省轮次编造依据。" : ""}
+${pipelineStage === "review_slice" ? "只评所分配编号，按需查证、翻页，完成后提交本组结论。连续三次因同一问题退回正式结果时停止。" : pipelineStage ? "已有本节点主要资料时直接设计；只读取影响当前决定的缺项，不先通读详细规程。尽早提交完整候选，尽量预留两轮纠错；资料不足仍如实说明，不能为省轮次编造依据。" : ""}
 ${pipelineStage ? "本阶段提交契约已完整提供在提交工具参数中；stageSchema为同源只读参照，有具体字段疑问时按pointer定位，不先通读最终candidateSchema。" : ""}
 ${pipelineStage === "blueprint" && flatHandoffs ? "优先直接提交顶层全局字段、modules和handoffText（设计依据）。程序组装global对象。旧global对象形式也可单独使用。" : ""}
 ${pipelineStage === "blueprint" && !flatHandoffs ? "蓝图提交的global是对象、modules是数组，不能编码成字符串；selectionBasis直接放在global内。仅负责全局选择、职责划分与冲突裁决；模块细节留给模块设计者。存在多个独立技术难点且提供consult_architecture时，按问题及责任需求分组委派专项分析；简单任务直接提交。子分析是建议，不能替代原始需求、平台事实或正式验收。" : ""}

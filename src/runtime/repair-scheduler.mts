@@ -7,13 +7,14 @@ export interface RepairUpdate { path: string; value: unknown }
 export interface RepairResult { baseHash: string; issueIds: string[]; summary: string; updates: RepairUpdate[] }
 interface RepairHistory { wave: number; calls: number; sessionFile: string | null; inputHash: string | null;
   result: RepairResult | null; reason: string }
+export interface TaskRejection { fingerprint: string; modelContractHash: string; protocolVersion?: number; count: number }
 export interface RepairGroup { id: string; issueIds: string[]; paths: string[]; wave: number; calls: number;
-  dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null; history?: RepairHistory[] }
-export interface RepairCheckpoint { version: 1 | 2; bindingHash: string; baseHash: string; issues: RepairIssue[];
-  calls: number; callLimit: number; groupCallLimit: number; concurrency: number; groups: RepairGroup[]; hash: string }
-export interface RepairWorker { group: RepairGroup; issues: RepairIssue[]; base: unknown; baseHash: string;
-  callLimit: number; onSession(file: string): Promise<void>; onCall(retryAttempt?: number): Promise<void>;
-  submit(value: unknown): Promise<RepairResult> }
+  dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null; history?: RepairHistory[]; rejection?: TaskRejection }
+export interface RepairCheckpoint<Limit extends number | null = number> { version: 1 | 2 | 3; bindingHash: string; baseHash: string; issues: RepairIssue[];
+  calls: number; callLimit: Limit; groupCallLimit: Limit; concurrency: number; groups: RepairGroup[]; hash: string }
+export interface RepairWorker<Limit extends number | null = number> { group: RepairGroup; issues: RepairIssue[]; base: unknown; baseHash: string;
+  callLimit: Limit; onSession(file: string): Promise<void>; onCall(retryAttempt?: number): Promise<void>;
+  onRejection?(value: TaskRejection): Promise<void>; submit(value: unknown): Promise<RepairResult> }
 export const repairHash = (value: unknown) => {
   const canonical = (item: unknown): string => {
     if (item === null || typeof item === "string" || typeof item === "boolean" || typeof item === "number" && Number.isFinite(item)) return JSON.stringify(item);
@@ -26,7 +27,7 @@ export const repairHash = (value: unknown) => {
 export const repairPointer = (value: string) => value.replaceAll("~", "~0").replaceAll("/", "~1");
 const clone = <T,>(value: T): T => structuredClone(value);
 const fail = (message = "修复调度进度与原材料不一致，不能重新分派刷新额度。"): never => { throw new InputError(message); };
-const seal = (input: RepairCheckpoint): RepairCheckpoint => {
+const seal = <L extends number | null,>(input: RepairCheckpoint<L>): RepairCheckpoint<L> => {
   const { hash: _hash, ...body } = input;
   if (Buffer.byteLength(JSON.stringify(body)) > 24 * 1024 * 1024) fail("修复进度超过保存容量，已完成成果保留。");
   return { ...body, hash: repairHash(body) };
@@ -78,9 +79,18 @@ const callLimitFor = (version: number, groups: number, perGroup: number) => Math
   version === 2 ? 1200 : 120);
 
 export function createRepairCheckpoint(binding: unknown, base: unknown, issues: RepairIssue[], groupCallLimit: number, version: 1 | 2 = 1): RepairCheckpoint {
-  if (![1, 2].includes(version) || !issues.length || issues.length > (version === 2 ? 400 : 160) || new Set(issues.map(issue => issue.id)).size !== issues.length
-    || issues.some(issue => !issue.id || !issue.paths.length || !issue.owner || !issue.description)
-    || !Number.isSafeInteger(groupCallLimit) || groupCallLimit < 1 || groupCallLimit > 12) fail("修复问题或额度无效。");
+  if (![1, 2].includes(version) || !Number.isSafeInteger(groupCallLimit) || groupCallLimit < 1 || groupCallLimit > 12) fail("修复问题或额度无效。");
+  return newCheckpoint(binding, base, issues, groupCallLimit, version);
+}
+
+export function createReviewTaskCheckpoint(binding: unknown, base: unknown, issues: RepairIssue[]) {
+  return newCheckpoint(binding, base, issues, null, 3);
+}
+
+function newCheckpoint<L extends number | null>(binding: unknown, base: unknown, issues: RepairIssue[], groupCallLimit: L,
+  version: 1 | 2 | 3): RepairCheckpoint<L> {
+  if (!issues.length || issues.length > (version === 2 ? 400 : 160) || new Set(issues.map(issue => issue.id)).size !== issues.length
+    || issues.some(issue => !issue.id || !issue.paths.length || !issue.owner || !issue.description)) fail("修复问题或额度无效。");
   for (const issue of issues) for (const path of issue.paths) keys(path);
   const buckets = new Map<string, RepairIssue[][]>();
   for (const issue of issues) {
@@ -98,25 +108,44 @@ export function createRepairCheckpoint(binding: unknown, base: unknown, issues: 
     group.dependsOn = groups.filter(other => other.id !== group.id && issues.some(issue => other.issueIds.includes(issue.id) && after.has(issue.owner))).map(other => other.id);
   }
   return seal({ version, bindingHash: repairHash(binding), baseHash: repairHash(base), issues: clone(issues),
-    calls: 0, callLimit: callLimitFor(version, groups.length, groupCallLimit), groupCallLimit, concurrency: 3, groups, hash: "" });
+    calls: 0, callLimit: (groupCallLimit === null ? null : callLimitFor(version, groups.length, groupCallLimit)) as L, groupCallLimit, concurrency: 3, groups, hash: "" });
+}
+
+// Version 3 is used only by independent review. Validate the original seal and quotas before upgrading a copy.
+export function readReviewTaskCheckpoint(input: unknown): RepairCheckpoint<null> {
+  const value = objectFields(input);
+  if (value.version === 3) return readCheckpoint(input, true) as RepairCheckpoint<null>;
+  const previous = readRepairCheckpoint(input);
+  if (previous.version !== 1 || previous.groupCallLimit !== 3) fail();
+  return seal({ ...previous, version: 3, callLimit: null, groupCallLimit: null });
 }
 
 export function readRepairCheckpoint(input: unknown): RepairCheckpoint {
+  return readCheckpoint(input, false) as RepairCheckpoint;
+}
+
+function readCheckpoint(input: unknown, review: boolean): RepairCheckpoint<number | null> {
   const value = objectFields(input);
-  if (value.version !== 1 && value.version !== 2 || !Array.isArray(value.issues) || !Array.isArray(value.groups)
-    || !Number.isSafeInteger(value.calls) || !Number.isSafeInteger(value.callLimit)
-    || !Number.isSafeInteger(value.groupCallLimit) || typeof value.bindingHash !== "string" || typeof value.baseHash !== "string") fail();
-  const state = clone(input) as RepairCheckpoint;
-  if (seal(state).hash !== state.hash || state.concurrency !== 3 || state.groupCallLimit < 1 || state.groupCallLimit > 12
+  if ((review ? value.version !== 3 : value.version !== 1 && value.version !== 2) || !Array.isArray(value.issues) || !Array.isArray(value.groups)
+    || !Number.isSafeInteger(value.calls) || (review ? value.groupCallLimit !== null || value.callLimit !== null
+      : !Number.isSafeInteger(value.callLimit) || !Number.isSafeInteger(value.groupCallLimit)) || typeof value.bindingHash !== "string" || typeof value.baseHash !== "string") fail();
+  const state = clone(input) as RepairCheckpoint<number | null>;
+  if (seal(state).hash !== state.hash || state.concurrency !== 3 || state.groupCallLimit !== null && (state.groupCallLimit < 1 || state.groupCallLimit > 12)
     || state.groups.length < 1 || state.groups.length > (state.version === 2 ? 400 : 160)
     || state.issues.length > (state.version === 2 ? 400 : 160)
-    || state.callLimit !== callLimitFor(state.version, state.groups.length, state.groupCallLimit)
-    || state.calls < 0 || state.calls > state.callLimit || state.calls !== state.groups.reduce((sum, group) => sum + group.calls, 0)
+    || state.groupCallLimit !== null && state.callLimit !== callLimitFor(state.version, state.groups.length, state.groupCallLimit)
+    || state.calls < 0 || state.callLimit !== null && state.calls > state.callLimit || state.calls !== state.groups.reduce((sum, group) => sum + group.calls, 0)
     || new Set(state.groups.map(group => group.id)).size !== state.groups.length) fail();
   const ids = state.groups.flatMap(group => group.issueIds);
   if (ids.length !== state.issues.length || new Set(ids).size !== ids.length
     || state.issues.some(issue => !ids.includes(issue.id))) fail();
   for (const group of state.groups) {
+    if (group.rejection !== undefined) {
+      const rejection = group.rejection;
+      if (!review || !rejection || !group.calls || !Number.isSafeInteger(rejection.count) || rejection.count < 1 || rejection.count > 3
+        || ![rejection.modelContractHash, rejection.fingerprint].every(hash => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash))
+        || rejection.protocolVersion !== undefined && (!Number.isSafeInteger(rejection.protocolVersion) || rejection.protocolVersion < 1)) fail();
+    }
     const owned = state.issues.filter(issue => group.issueIds.includes(issue.id));
     const history = group.history ?? [];
     if (!Array.isArray(history) || history.length > 12 || history.some((entry, index) => !Number.isSafeInteger(entry.calls)
@@ -130,7 +159,7 @@ export function readRepairCheckpoint(input: unknown): RepairCheckpoint {
     if (group.issueIds.length > 3 || repairHash([...new Set(owned.flatMap(issue => issue.paths))].sort()) !== repairHash(group.paths)
       || !Array.isArray(group.dependsOn) || group.dependsOn.some(id => id === group.id || !state.groups.some(other => other.id === id))
       || !Array.isArray(group.paths) || !group.paths.length || !Number.isSafeInteger(group.wave) || group.wave < 0
-      || !Number.isSafeInteger(group.calls) || group.calls < 0 || group.calls > state.groupCallLimit
+      || !Number.isSafeInteger(group.calls) || group.calls < 0 || state.groupCallLimit !== null && group.calls > state.groupCallLimit
       || group.calls > 0 && !group.sessionFile && !rebased || group.sessionFile !== null && !/^[\w.-]+\.jsonl$/u.test(group.sessionFile)
       || group.wave === 0 && (group.calls && !rebased || group.result || group.inputHash)
       || group.wave > 0 && typeof group.inputHash !== "string" || group.result && !group.calls) fail();
@@ -139,15 +168,25 @@ export function readRepairCheckpoint(input: unknown): RepairCheckpoint {
   return state;
 }
 
-/** Workers only propose patches. A persisted wave is replayed before any new work is scheduled. */
-export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint; binding: unknown; base: unknown;
-  save(state: RepairCheckpoint): Promise<void>; run(worker: RepairWorker): Promise<unknown>; signal?: AbortSignal | undefined;
+interface ScheduleOptions<L extends number | null> { checkpoint: RepairCheckpoint<L>; binding: unknown; base: unknown;
+  save(state: RepairCheckpoint<L>): Promise<void>; run(worker: RepairWorker<L>): Promise<unknown>; signal?: AbortSignal | undefined;
   retryInvalidMerge?: boolean;
-  validateCandidate?: ((candidate: unknown, final: boolean) => unknown | Promise<unknown>) | undefined }): Promise<unknown> {
-  let state = readRepairCheckpoint(options.checkpoint), writes = Promise.resolve(), persistenceError: unknown;
+  validateCandidate?: ((candidate: unknown, final: boolean) => unknown | Promise<unknown>) | undefined }
+
+/** Workers only propose patches. A persisted wave is replayed before any new work is scheduled. */
+export function runRepairSchedule(options: ScheduleOptions<number>) {
+  return runSchedule(options, readRepairCheckpoint(options.checkpoint), (quota, state) => quota ?? state.groupCallLimit);
+}
+export function runReviewTaskSchedule(options: ScheduleOptions<null>) {
+  return runSchedule(options, readReviewTaskCheckpoint(options.checkpoint), () => null);
+}
+
+async function runSchedule<L extends number | null>(options: ScheduleOptions<L>, state: RepairCheckpoint<L>,
+  workerLimit: (quota: number | undefined, state: RepairCheckpoint<L>) => L): Promise<unknown> {
+  let writes = Promise.resolve(), persistenceError: unknown;
   if (state.bindingHash !== repairHash(options.binding) || state.baseHash !== repairHash(options.base)) fail();
   const active = () => { options.signal?.throwIfAborted(); if (persistenceError) throw persistenceError; };
-  const update = (change: (next: RepairCheckpoint) => void) => {
+  const update = (change: (next: RepairCheckpoint<L>) => void) => {
     const pending = writes.then(async () => {
       active(); const next = clone(state); change(next); const saved = seal(next);
       try { await options.save(clone(saved)); } catch (error) { persistenceError ??= error; throw error; }
@@ -196,21 +235,25 @@ export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint;
     }
     groups = state.groups.filter(group => group.wave === wave);
     const pending = groups.filter(group => !group.result), quotas = new Map(pending.map(group => [group.id, group.calls]));
-    const reserve = state.version === 2 ? Math.min(2, state.groupCallLimit) : 1;
-    let available = state.callLimit - state.calls - state.groups.filter(group => !group.result && group.wave !== wave)
-      .reduce((sum, group) => sum + Math.min(reserve, state.groupCallLimit - group.calls), 0);
-    if (available < pending.length) fail("剩余修复次数不足以让每个未完成组正式提交；已完成结果与累计用量保留。");
-    for (;;) {
-      let assigned = false;
-      for (const group of pending) if (available > 0 && quotas.get(group.id)! < state.groupCallLimit) {
-        quotas.set(group.id, quotas.get(group.id)! + 1); available--; assigned = true;
+    const { callLimit, groupCallLimit } = state;
+    if (callLimit !== null && groupCallLimit !== null) {
+      const reserve = state.version === 2 ? Math.min(2, groupCallLimit) : 1;
+      let available = callLimit - state.calls - state.groups.filter(group => !group.result && group.wave !== wave)
+        .reduce((sum, group) => sum + Math.min(reserve, groupCallLimit - group.calls), 0);
+      if (available < pending.length) fail("剩余修复次数不足以让每个未完成组正式提交；已完成结果与累计用量保留。");
+      for (;;) {
+        let assigned = false;
+        for (const group of pending) if (available > 0 && quotas.get(group.id)! < groupCallLimit) {
+          quotas.set(group.id, quotas.get(group.id)! + 1); available--; assigned = true;
+        }
+        if (!assigned) break;
       }
-      if (!assigned) break;
     }
     const settled = await Promise.allSettled(groups.filter(group => !group.result).map(async original => {
       const current = () => state.groups.find(group => group.id === original.id)!;
-      const limit = quotas.get(original.id)!;
-      if (current().calls >= limit || state.calls >= state.callLimit) fail("修复子任务额度已用完，已完成组保留，不能重新分派刷新额度。");
+      const limit = workerLimit(quotas.get(original.id), state);
+      if (current().rejection?.count === 3) fail("子任务连续三次因同一问题提交失败。");
+      if (limit !== null && current().calls >= limit || state.callLimit !== null && state.calls >= state.callLimit) fail("修复子任务额度已用完，已完成组保留，不能重新分派刷新额度。");
       await options.run({ group: clone(original), base: clone(base), baseHash: repairHash(base),
         issues: clone(state.issues.filter(issue => original.issueIds.includes(issue.id))), callLimit: limit,
         onSession: file => update(next => {
@@ -222,8 +265,13 @@ export async function runRepairSchedule(options: { checkpoint: RepairCheckpoint;
         onCall: (retryAttempt = 0) => update(next => {
           const group = next.groups.find(group => group.id === original.id)!;
           if (retryAttempt > 0) return;
-          if (!group.sessionFile || group.result || group.calls >= limit || next.calls >= next.callLimit) fail("修复调用额度已耗尽。");
+          if (!group.sessionFile || group.result || limit !== null && group.calls >= limit || next.callLimit !== null && next.calls >= next.callLimit) fail("修复调用额度已耗尽。");
           group.calls++; next.calls++;
+        }),
+        onRejection: value => update(next => {
+          const group = next.groups.find(group => group.id === original.id)!;
+          if (next.version !== 3 || !group.sessionFile || !group.calls || group.result) fail();
+          group.rejection = clone(value);
         }),
         submit: async value => {
           active(); const result = validateRepairResult(value, current(), base);

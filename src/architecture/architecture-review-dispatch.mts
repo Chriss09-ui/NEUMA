@@ -3,7 +3,7 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { NeumaTool } from "../runtime/execution-port.mjs";
 import type { RepairCheckpoint, RepairWorker } from "../runtime/repair-scheduler.mjs";
-import { createRepairCheckpoint, readRepairCheckpoint, repairHash, runRepairSchedule } from "../runtime/repair-scheduler.mjs";
+import { createReviewTaskCheckpoint, readReviewTaskCheckpoint, repairHash, runReviewTaskSchedule } from "../runtime/repair-scheduler.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { createArchitectureEvidenceReader } from "./architecture-evidence-reader.mjs";
@@ -12,8 +12,8 @@ import { canonicalArchitectureReviewParts } from "./architecture-review-parts.mj
 type SliceField = "checks" | "acceptanceScopeChecks" | "priorFindingDecisions";
 interface Assignment { id: string; field: SliceField; ids: string[] }
 interface SliceResult { summary: string; parts: ReviewParts }
-export interface ReviewDispatchCheckpoint { version: 1; candidateHash: string; bindingHash: string; dispatch: RepairCheckpoint }
-export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker; parameters: ToolSchema; tools: NeumaTool[];
+export interface ReviewDispatchCheckpoint { version: 1; candidateHash: string; bindingHash: string; dispatch: RepairCheckpoint<null> }
+export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; tools: NeumaTool[];
   payload: UnknownRecord; validate(value: unknown): SliceResult }
 const rowId = { checks: "id", acceptanceScopeChecks: "acceptanceId", priorFindingDecisions: "findingId" } as const;
 const rows = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.map(objectFields) : [];
@@ -44,15 +44,16 @@ export function architectureReviewDispatchRecovery(record: UnknownRecord | null 
   try {
     const checkpoint = objectFields(record.reviewDispatchCheckpoint);
     if (checkpoint.version !== 1 || checkpoint.candidateHash !== record.candidateHash || checkpoint.bindingHash !== record.reviewDispatchSource)
-      return { kind: "review_specialists", status: "blocked", message: "分组评审进度缺失或绑定不符，不能重领额度。" };
-    const dispatch = readRepairCheckpoint(checkpoint.dispatch), pending = dispatch.groups.filter(group => !group.result);
+      return { kind: "review_specialists", status: "blocked", message: "分组评审进度缺失或绑定不符，已停止恢复。" };
+    const dispatch = readReviewTaskCheckpoint(checkpoint.dispatch), pending = dispatch.groups.filter(group => !group.result);
+    if (dispatch.bindingHash !== checkpoint.bindingHash) fail("分组评审绑定不符。");
     if (!pending.length) return null;
-    const blocked = pending.some(group => group.calls >= dispatch.groupCallLimit) || dispatch.callLimit - dispatch.calls < pending.length;
+    const blocked = pending.some(group => group.rejection?.count === 3);
     return { kind: "review_specialists", status: blocked ? "blocked" : "continuing", stage: "evaluating", stageKey: "review_specialists",
-      actionLabel: blocked ? "查看分组评审阻断" : "继续分组评审", modelCalls: dispatch.calls, modelCallLimit: dispatch.callLimit,
-      message: blocked ? "未完成评审组的剩余次数不足；已核对分项、原会话和累计用量保留。"
+      actionLabel: blocked ? "查看分组评审阻断" : "继续分组评审", modelCalls: dispatch.calls,
+      message: blocked ? "评审子组连续三次因同一问题提交失败，已保存分项、原会话和累计用量。"
         : `已保存${dispatch.groups.length - pending.length}/${dispatch.groups.length}组独立评审，只继续未完成组。` };
-  } catch { return { kind: "review_specialists", status: "blocked", message: "分组评审进度不能核验，不能重领额度。" }; }
+  } catch { return { kind: "review_specialists", status: "blocked", message: "分组评审进度无法核验，已停止恢复。" }; }
 }
 
 /** Disjoint review slices share a durable dispatcher; only the main reviewer can submit the final verdict. */
@@ -73,13 +74,13 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
     if (Object.keys(saved).sort().join() !== "bindingHash,candidateHash,dispatch,version" || saved.version !== 1
       || saved.candidateHash !== candidateHash || saved.bindingHash !== bindingHash || record.reviewDispatchSource !== bindingHash)
       fail("分组评审的候选、材料或分派已变化，不能重开子会话刷新额度。");
-    checkpoint = { version: 1, candidateHash, bindingHash, dispatch: readRepairCheckpoint(saved.dispatch) };
+    checkpoint = { version: 1, candidateHash, bindingHash, dispatch: readReviewTaskCheckpoint(saved.dispatch) };
     if (repairHash(checkpoint.dispatch.issues) !== repairHash(issues)) fail("分组评审任务与已保存分派不符。");
   } else {
     if (record.reviewDispatchSource !== undefined) fail("已分派评审的检查点缺失，不能重新领取额度。");
-    checkpoint = { version: 1, candidateHash, bindingHash, dispatch: createRepairCheckpoint(binding, base, issues, 3) };
+    checkpoint = { version: 1, candidateHash, bindingHash, dispatch: createReviewTaskCheckpoint(binding, base, issues) };
   }
-  const save = async (dispatch: RepairCheckpoint) => {
+  const save = async (dispatch: RepairCheckpoint<null>) => {
     signal?.throwIfAborted();
     const next = { version: 1 as const, candidateHash, bindingHash, dispatch };
     await options.save(next); checkpoint = next;
@@ -105,7 +106,7 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
     for (const assignment of plan) if (slices[assignment.id] !== null) checked(slices[assignment.id], assignment);
     return slices;
   };
-  const result = await runRepairSchedule({ checkpoint: checkpoint.dispatch, base, binding, signal, save, validateCandidate: ledger,
+  const result = await runReviewTaskSchedule({ checkpoint: checkpoint.dispatch, base, binding, signal, save, validateCandidate: ledger,
     run: async worker => {
       const assignment = plan.find(item => worker.group.issueIds.includes(item.id));
       if (!assignment) fail("评审责任分组不存在。");
