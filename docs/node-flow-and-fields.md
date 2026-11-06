@@ -229,10 +229,13 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
 | `candidate` | `CandidateDraft` | 被评审候选 | 见 2.4 |
+| `reviewEvidenceIndex.candidateSections` | 名称到 `{source,pointer}` 的目录 | 主评审和分组评审可直接选择设计稿中存在的项目 | `"能力清单": {"source":"candidate","pointer":"/capabilities"}` |
 | `requirements[]` | `{id,text}` | 正式需求清单 | `[{ id:"req-001", … }]` |
 | `evidence[]` | `EvidenceItem` | 证据目录（decisions 引用） | `[{ id:"ev-01", … }]` |
 | `platformSnapshot` | 平台快照 v4 | 能力目录与适配器指南 | `platformHash:"9f86d081…0a08"` |
 | `acceptanceAdapterGuide` | 指南 | 九类适配器能力边界 | — |
+
+证据工具的 `source="candidate"` 对应评审消息里的 `design`。选择这份来源后，`pointer` 可填目录中的名称或相对路径。只多写一次 `/design`、候选没有同名字段且目标存在时，工具读取目标原文，用实际路径签发引用回执。
 
 ### 输出（最全形态）`ArchitectureReview`（schema `architecture-contract.mts:181-201`）
 

@@ -69,7 +69,7 @@ test("超长对象和长文本一次定位全部引用错误，真实子字段�
   const current = reader({ candidateHash, context });
   const submission = { candidateHash, issues: [{ references: [
     { source: "deferredVerifications", path: "/issues/0/resolution" },
-    { source: "candidate", path: "/instructions" },
+    { source: "candidate", path: "/design/instructions" },
     { source: "candidate", path: "/missing" },
   ] }] }, before = structuredClone(submission);
   let issues;
@@ -83,6 +83,7 @@ test("超长对象和长文本一次定位全部引用错误，真实子字段�
   assert.deepEqual(submission, before);
   const hints = current.referenceHints(submission, issues);
   assert.equal(hints[0]!.path, "/issues/0/resolution/reason"); assert.equal(hints[0]!.quote, resolution.reason);
+  assert.equal(hints[1]!.path, "/instructions");
   assert.ok(fixtureNumber(hints[1]!.nextOffset)>0); assert.ok(hints[1]!.quote.length <= 500);
   assert.ok(hints.every(hint => typeof hint.reference.receiptId === "string"));
   const corrected = { candidateHash, issues: [{ references: hints.map(hint => hint.reference) }] };
@@ -389,6 +390,43 @@ test("UTF-16分页不切断代理对，缺失路径只返回有界安全路径�
   assert.equal(result(await current.tool.execute("bad", { source: "candidate", pointer: "/__proto__" })).found, false);
 });
 
+test("能力清单和多写一层 design 的查询均签发实际候选路径的回执", async () => {
+  const capabilities = [{ id: "calculate", status: "available" }], candidateHash = "a".repeat(64);
+  const context = architectureReviewEvidenceContext({ design: { capabilities }, requirements: [], runtimeCapabilities: {} });
+  const current = reader({ context, candidateHash });
+  const read = async (pointer: string) => result(await current.tool.execute("read", { source: "candidate", pointer }));
+  const repeated = await read("/design/capabilities");
+  assert.deepEqual(repeated.reference, { source: "candidate", path: "/capabilities", quote: JSON.stringify(capabilities) });
+  const choices = current.index.candidateSections;
+  assert.deepEqual(choices["能力清单"], { source: "candidate", pointer: "/capabilities" });
+  assert.equal(choices["验收用例"], undefined);
+  const batch = result(await current.tool.execute("batch", { requests: [choices["能力清单"], { source: "candidate", pointer: "能力清单" }] }));
+  assert.ok(repeated.receiptId);
+  assert.deepEqual(batch.results!.map(page => page.receiptId), [repeated.receiptId, repeated.receiptId]);
+  const ref = { receiptId: repeated.receiptId };
+  const review = current.resolveSubmission({ issues: [{ references: [ref], candidatePaths: [ref] }] });
+  assert.deepEqual(review.issues[0]!.references, [repeated.reference]);
+  assert.deepEqual(review.issues[0]!.candidatePaths, ["/capabilities"]);
+  const direct = current.resolveSubmission({ candidateHash, issues: [{ references: [{ source: "candidate", path: "/design/capabilities" }] }] });
+  assert.deepEqual(direct.issues[0]!.references, [repeated.reference]);
+});
+
+test("候选查询优先读取真实 design 分支，缺项或其他来源不能借用候选内容", async () => {
+  const current = reader({ context: { candidate: { capabilities: ["顶层"], design: { capabilities: ["内层"] }, steps: [] },
+    runtimeCapabilities: { capabilities: ["平台"] } } });
+  const read = async (source: string, pointer: string) => result(await current.tool.execute("read", { source, pointer }));
+  assert.deepEqual((await read("candidate", "/design/capabilities")).reference,
+    { source: "candidate", path: "/design/capabilities", quote: '["内层"]' });
+  for (const page of [await read("candidate", "/design/steps"), await read("runtimeCapabilities", "/design/capabilities"),
+    await read("runtimeCapabilities", "能力清单")]) {
+    assert.equal(page.reason, "reference_path_missing"); assert.equal(page.receiptId, undefined);
+  }
+  const plain = reader({ context: { candidate: { capabilities: [] } } });
+  const bad = result(await plain.tool.execute("batch", { requests: ["/design/design/capabilities", "/design/absent", "/design/__proto__"]
+    .map(pointer => ({ source: "candidate", pointer })) }));
+  assert.ok(bad.results!.every(page => page.reason === "reference_path_missing" && !page.receiptId));
+});
+
 test("提交工具副本只扩展显式回执分支，正式schema和混合引用仍严格", () => {
   const current = reader(), official:ToolSchema = reviewSubmissionSchema({ evidenceRequired: true }), before = structuredClone(official);
   const extended = current.submissionSchema(official);
@@ -603,6 +641,7 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
           { source: "candidate", pointer: "/instructions", limit: 3 },
           { source: "candidate", pointer: "/acceptance/999/missing" },
           { source: "candidate", pointer: "/instructions", offset: 999 },
+          payload.reviewEvidenceIndex.candidateSections["能力清单"],
         ] } }];
         else {
           name = "submit_architecture_review"; const review = passingReview(payload.candidateHash,payload.design);args=review;
@@ -611,13 +650,14 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
             const blocks = typeof content === "string" ? [content] : content!.filter((item) => item.type === "text").map((item) => item.text);
             const objects:ReaderFeedback[] = blocks.flatMap((text) => text!.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line)));
             const batch = objects[0];
-            assert.equal(batch!.results.length, 6); assert.ok(batch!.results.slice(0, 4).every((item) => item.found));
+            assert.equal(batch!.results.length, 7); assert.ok(batch!.results.slice(0, 4).every((item) => item.found));
             assert.equal(batch!.results[4]!.reason, "reference_path_missing");
             assert.equal(batch!.results[5]!.reason, "empty_slice");
+            assert.deepEqual(batch!.results[6]!.reference, { source: "candidate", path: "/capabilities", quote: JSON.stringify(payload.design.capabilities) });
             receipts.push(...batch!.results.slice(0, 3).map((item) => item.receiptId!));
             const budget = objects.at(-1)!.hostModelBudget;
             assert.equal(budget.limit, 5); assert.equal(budget.remaining, 5 - budget.used);
-            assert.deepEqual(objects.at(-1)!.reviewReadProgress, { calls: 1, requests: 6, found: 5, missing: 1, empty: 1, more: 3, repeated: 1 });
+            assert.deepEqual(objects.at(-1)!.reviewReadProgress, { calls: 1, requests: 7, found: 6, missing: 1, empty: 1, more: 3, repeated: 1 });
           }
           if ([2, 3, 4].includes(reviewerCalls)) {
             review.verdict = "revise"; review.checks.find((item) => item.id === "verification")!.passed = false;
@@ -664,8 +704,8 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
   assert.equal(value.reviewDiagnostics!.length, 2);
   const reads = value.reviewDiagnostics![0]!.evidenceReads;
   assert.deepEqual(Object.fromEntries(Object.entries(objectFields(reads)).filter(([key]) => key !== "recent")),
-    { calls: 1, requests: 6, found: 5, missing: 1, empty: 1, more: 3, repeated: 1 });
-  assert.equal(recordArray(objectFields(reads).recent).length, 6); assert.ok(recordArray(objectFields(reads).recent).every((item) => /^[a-f0-9]{64}$/u.test(item.pathHash as string)));
+    { calls: 1, requests: 7, found: 6, missing: 1, empty: 1, more: 3, repeated: 1 });
+  assert.equal(recordArray(objectFields(reads).recent).length, 7); assert.ok(recordArray(objectFields(reads).recent).every((item) => /^[a-f0-9]{64}$/u.test(item.pathHash as string)));
   assert.doesNotMatch(JSON.stringify(reads), /receiptId|quote|\/instructions|\/acceptance|当前处理说明/u);
 });
 

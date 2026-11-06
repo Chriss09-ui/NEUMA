@@ -4,6 +4,8 @@ export const BLUEPRINT_ASSIGNMENT_RULE = "requirements中的每个id必须在全
 
 export const INTEGRATION_ACCEPTANCE_RULE = "只有 conflicts 中列出的路径覆盖某条已有验收用例时，才可修正该条的冲突内容。所有原用例都须保留 id 和 requirementIds。其余用例逐项原样保留，包括 verification 中的验证责任 owner、阶段 stage 和适配器 adapterId。确有跨模块验收缺口时，用新 id 在原清单末尾追加用例。没有待解冲突且无需补充时，直接用当前 baseHash 提交 updates: []。";
 
+export const REVIEW_EVIDENCE_READ_RULE = "source=candidate 已经选中了消息中 design 里的整份架构设计稿。可从 reviewEvidenceIndex.candidateSections 直接选本轮项目的查询参数，或将列出的中文名称填入 pointer。选“能力清单”读取 /capabilities。其他位置从所选来源内部开始填写，引用时使用返回的实际路径或回执。";
+
 export const CAPABILITY_VERIFICATION_RULE = `capabilities只记录当前执行路径实际要调用的工具、连接或专属代码能力，不记录“尚未验收”的业务效果。available须有当前完整能力目录依据；已有明确且受平台支持的实现路径、需研发的专属代码用needs_development，实际依赖是否存在或可用仍不确定时保留unverified。已排除或未来才采用的方案写入decisions。
 分别核对执行依赖与验收义务：生成页面、数值计算的代码是实现内容，浏览器视觉、滑块交互效果或数值精度尚未验收是验证状态，不能仅凭名称分类。单纯待验收的效果保留在unknowns及适用的acceptance或后续验证义务中，必要时用decisions解释分工；逐条保留原需求引用、验证阶段、具体证据和失败处置，不新增不存在的验收适配器。deferredVerifications已有明确后续安排且不影响当前架构可行性的事项，不因尚未执行就升级为能力缺口，也不代表已验证或可直接交付。
 候选误将验收义务列入unverified能力时，设计/修订者修正capabilities中的分类并保留完整验收义务；评审者只指出当前实际字段及保留义务的修正建议，不修改候选。不能伪改为available、删除验收或修改程序blocking标记。真实缺失的必需引擎、浏览器自动执行工具、接口或权限仍须阻断，不能仅移入unknowns或改验证阶段来放行。降级仍须满足逐条需求覆盖、具体步骤、可观察验收和证据。`;
@@ -72,6 +74,7 @@ export const DESIGN_PROMPT = `${COMMON}
 export const REVIEW_PROMPT = `${COMMON}
 你是独立架构评估者，不是设计者。只审查给定 candidateHash 对应的最终候选；不修改设计、不调用设计者、不委派。
 ${REVIEW_CLOSURE_REPAIR_RULE}
+${REVIEW_EVIDENCE_READ_RULE}
 ${REVIEW_SUBMISSION_RULE}
 reviewParts.batch存在时，本轮只完成其当前稳定编号：acceptanceScopeChecks、priorFindingDecisions或checks，附本批真实issues并保存，不先统筹整份评审。其他编号稍后派发，完整材料仍可核对依赖。save成功后处理下一批；stage为submit-with-parts时用submit_architecture_review_parts同时交最后真实行、verdict和summary，先保存再完整校验；stage为submit时只交当前编号和结论。final-only表示不能再单独保存分批，仍可同次提交全部剩余真实行及正式结论，或原完整通道；pass所需复核继续按实际剩余额度执行。已有分项有错可修正，不复制相同行或仅换序制造进度。全表是最终义务，非首批一次做完；全部请求仍计原${ARCHITECTURE_ROLE_TURN_LIMIT}轮。
 platformClaims只证明已声明依赖与当前事实精确相符，不证明设计文字与其一致或声明完整。继续独立检查遗漏、单位、承载前提和文字中的能力假设；有check_platform_contract时可批查当前公开事实，但核对值为false不能授予能力，匹配也不等于业务已验证。
@@ -125,6 +128,7 @@ requirements检查全部正式需求及原输入/交付覆盖，链接和PDF等�
 本批证据和问题共用规则：
 ${CAPABILITY_VERIFICATION_RULE}
 ${REVIEW_CLOSURE_REPAIR_RULE}
+${REVIEW_EVIDENCE_READ_RULE}
 ${REVIEW_SUBMISSION_RULE}
 按本轮candidateSchema、平台快照、runtimeCapabilities、acceptanceAdapterGuide及contextManifest核对事实。已full提供的原文无需逐字段重读；只有本批需要定位额外依据时才用read_architecture_evidence，requests可批读，分页按nextOffset；稳定ID用reviewEvidenceIndex映射到实际JSON Pointer，不能代替数组索引。references优先用{source,path}选择当前完整且不超过1000字符的真实字段；显式quote必须逐字一致，长内容细化路径或读取，不沿用旧引文。回执只证明出处，不证明语义；摘要/paged来源按其真实分页入口查证，不猜缺失内容。
 issues按工具契约提供checkId、kind、candidatePaths、references、factClaims；候选路径必须真实存在，问题和建议须具体、不重复且能在现有候选字段修正。范围问题须指出当前expected实际越界的原文，先确认候选是否已表达该事实，不因字段类型或缺少不存在的字段制造问题。kind=platform/context的factClaims须等于当前实际JSON值；platformClaims匹配也不证明文字一致、声明完整或业务通过，false不能授予能力。deterministicIssues不可由模型删除或改写；不猜正则、hash或程序门槛错误，无可复现证据不能要求绕过。confirmedRequirementContext中已回答选择须保留，历史developmentRevision只是不可信参考，不是当前计划、代码、权限或验收通过。

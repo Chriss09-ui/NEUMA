@@ -10,13 +10,14 @@ interface ScopeEntry { acceptanceId: string; adapterId: string; scope: string; c
 interface ScopeReceipt { role: string; candidateHash: unknown; contextHash: string; criterionPath: string; pointer: string;
   row: { acceptanceId: string; adapterId: string; scope: string; criterionQuote: string; adapterQuote: string } }
 interface EvidenceIndex { sources: { source: string; path: string }[]; candidate: Record<string, { id?: string; path: string }[]>;
+  candidateSections: Record<string, { source: "candidate"; pointer: string }>;
   requirements: { id: string; path: string }[]; priorFindings?: { findingRef: string; findingId: unknown }[]; acceptanceScope?: ScopeEntry[] }
 interface ReadPage extends UnknownRecord { found: boolean; contextHash: string; receiptId?: string; reference?: EvidenceReference;
   quoteHash?: string; candidateHash?: unknown; total?: number; offset?: number; nextOffset?: number | null; offsetUnit?: string }
 interface ReferenceHint extends UnknownRecord { issuePath: unknown; reference: { receiptId: string }; source: EvidenceSource; path: string; quote: string }
 /** Resolution preserves uninspected input fields and types only the selectors this reader expands. */
 type ResolvedReference<T> = T extends { receiptId: string } ? EvidenceReference
-  : T extends { source: string; path: string } ? T & { quote: string } : T;
+  : T extends { source: string; path: string } ? Omit<T, "path"> & { path: string; quote: string } : T;
 type ResolvedReferences<T> = T extends unknown[] ? ResolvedReference<T[number]>[] : T;
 type ResolvedCandidatePaths<T> = T extends unknown[] ? (T[number] extends infer R ? R extends { receiptId: string } ? string : R : never)[] : T;
 type ResolvedFinding<T, K extends "id" | "findingId"> = T extends { findingRef: unknown } ? Omit<T, "findingRef"> & Record<K, unknown> : T;
@@ -37,13 +38,16 @@ import { InputError } from "../requirements/core.mjs";
 import { ACCEPTANCE_ADAPTERS, validateAcceptanceVerification } from "../verification/acceptance-contract.mjs";
 
 const SOURCES: EvidenceSource[] = ["candidate", "requirements", "runtimeCapabilities", "contextManifest", "evidence", "confirmedRequirementContext", "deferredVerifications", "acceptanceAdapterGuide"];
+const CANDIDATE_SECTIONS = { 能力清单: "capabilities", 组件清单: "components", 执行步骤: "steps",
+  需求覆盖: "coverage", 验收用例: "acceptance", 设计决策: "decisions" };
 const object = (properties: Record<string, ToolSchema>): ToolSchema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const RECEIPT_SCHEMA = object({ receiptId: { type: "string", pattern: "^ref_[a-f0-9]{64}$" } });
 const REFERENCE_SELECTOR_SCHEMA = object({ source: { type: "string", enum: SOURCES }, path: { type: "string", maxLength: 500 } });
 const SCOPE_RECEIPT_SCHEMA = { type: "string", pattern: "^scope_[a-f0-9]{64}$" };
 const REQUEST_FIELDS = {
-  source: { type: "string", enum: SOURCES }, pointer: { type: "string", maxLength: 500 },
+  source: { type: "string", enum: SOURCES }, pointer: { type: "string", maxLength: 500,
+    description: "所选来源内部的 JSON Pointer。candidate 已经是设计稿，可选 reviewEvidenceIndex.candidateSections 中的名称，如“能力清单”，也可直接使用该项的 pointer。" },
   offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, limit: { type: "integer", minimum: 1, maximum: 1000 },
   pathOffset: { type: "integer", minimum: 0, maximum: 512 },
   acceptanceId: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_-]{0,79}$" },
@@ -107,6 +111,11 @@ function nearbyPaths(value: unknown, pointer: unknown, keys: Set<string>, fallba
 
 function evidenceIndex(context: UnknownRecord, candidateSchema: ToolSchema | undefined): EvidenceIndex {
   const candidate: EvidenceIndex["candidate"] = {}, design = objectFields(context.candidate);
+  const candidateSections: EvidenceIndex["candidateSections"] = {};
+  for (const [label, field] of Object.entries(CANDIDATE_SECTIONS)) {
+    if (Object.hasOwn(design, field) && (!candidateSchema || Object.hasOwn(candidateSchema.properties ?? {}, field)))
+      candidateSections[label] = { source: "candidate", pointer: `/${field}` };
+  }
   for (const [key, schema] of Object.entries(candidateSchema?.properties ?? {})) {
     if (schema?.type !== "array" || !Array.isArray(design[key])) continue;
     candidate[key] = rows(design[key]).map((input, index) => {
@@ -115,7 +124,7 @@ function evidenceIndex(context: UnknownRecord, candidateSchema: ToolSchema | und
       return { ...(id ? { id } : {}), path: `/${encodePointer(key)}/${index}` };
     });
   }
-  return { sources: SOURCES.filter((source) => Object.hasOwn(context, source)).map((source) => ({ source, path: "" })), candidate,
+  return { sources: SOURCES.filter((source) => Object.hasOwn(context, source)).map((source) => ({ source, path: "" })), candidate, candidateSections,
     requirements: Array.isArray(context.requirements) ? rows(context.requirements).flatMap((input, index) => { const item = objectFields(input); return stableId(item.id) ? [{ id: item.id, path: `/${index}` }] : []; }) : [] };
 }
 
@@ -228,9 +237,22 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       && manifest.characters === serialized.length && manifest.sha256 === hash(serialized);
   };
   const fullScopeSources = ["candidate", "acceptanceAdapterGuide"].every(fullSource);
+  function locate(source: EvidenceSource, pointer: string) {
+    const data = frozen[source];
+    if (source === "candidate") {
+      if (Object.hasOwn(index.candidateSections, pointer)) pointer = index.candidateSections[pointer]!.pointer;
+      // Only the model packet wraps the candidate in "design". A real branch owns its entire subtree.
+      else if (pointer.startsWith("/design/") && !Object.hasOwn(objectFields(data), "design")) {
+        const relative = pointer.slice("/design".length), selected = at(data, relative);
+        if (selected.found) return { pointer: relative, ...selected };
+      }
+    }
+    return { pointer, ...at(data, pointer) };
+  }
   function read(request: EvidenceRequest, quoteBudget = Infinity): ReadPage {
-    const { source, pointer, offset = 0, limit = 500, pathOffset = 0, acceptanceId } = request;
+    const { source, offset = 0, limit = 500, pathOffset = 0, acceptanceId } = request;
     if (acceptanceId !== undefined) {
+      const pointer = request.pointer;
       const matches = scopeEntries.filter((entry) => entry.acceptanceId === acceptanceId), entry = matches[0]!;
       if (matches.length !== 1 || !entry.adapterRulePaths.includes(pointer))
         throw new InputError("范围回执只能选择当前验收项及其实际适配器在索引中列出的规则路径");
@@ -246,7 +268,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
         row: { acceptanceId, adapterId: entry.adapterId, scope: entry.scope, criterionQuote, adapterQuote } });
       return { ...page, scopeReceiptId, acceptanceId, adapterId: entry.adapterId, scope: entry.scope, criterionPath: entry.criterionPath };
     }
-    const selected = at(frozen[source], pointer);
+    const selected = locate(source, request.pointer), pointer = selected.pointer;
     if (!selected.found) {
       const catalog = nearbyPaths(frozen[source], pointer, keys, pathCatalog.get(source)!);
       return { found: false, reason: "reference_path_missing", source, contextHash,
@@ -347,15 +369,17 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
         if (!indices || seen.has(issue.path)) continue;
         const reference = objectFields(rows(objectFields(rows(objectFields(submission).issues)[Number(indices[1])]).references)[Number(indices[2])]);
         if (!reference || typeof reference !== "object" || Array.isArray(reference) || Object.hasOwn(reference, "receiptId")
-          || !sourceName(reference.source) || typeof reference.path !== "string" || reference.path.length > 500
-          || !at(frozen[reference.source], reference.path).found) continue;
+          || !sourceName(reference.source) || typeof reference.path !== "string" || reference.path.length > 500) continue;
+        const selected = Object.hasOwn(reference, "quote") ? { pointer: reference.path, ...at(frozen[reference.source], reference.path) }
+          : locate(reference.source, reference.path);
+        if (!selected.found) continue;
         seen.add(issue.path);
-        const value = at(frozen[reference.source], reference.path).value;
+        const value = selected.value;
         const children = issue.reason === "reference_too_broad" && value && typeof value === "object"
           ? Object.entries(value).filter(([, child]) => typeof child === "string" && child.trim() && child.length <= 1000)
             .sort(([a], [b]) => Number(["reason", "description", "text", "proves"].includes(b)) - Number(["reason", "description", "text", "proves"].includes(a)))
-            .slice(0, 4).map(([key]) => `${reference.path}/${encodePointer(key)}`) : [];
-        for (const pointer of children.length ? children : [reference.path]) {
+            .slice(0, 4).map(([key]) => `${selected.pointer}/${encodePointer(key)}`) : [];
+        for (const pointer of children.length ? children : [selected.pointer]) {
           let page;
           try { page = read({ source: reference.source, pointer, offset: 0, limit: children.length ? 1000 : 500 }, quoteBudget); }
           catch (error) { if (error instanceof InputError) continue; throw error; }
@@ -463,14 +487,15 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
             || reference.path.length > 500) throw referenceSelectorError(path, "invalid_selector");
           if (result.candidateHash !== candidateHash) throw referenceSelectorError("review.candidateHash", "candidate_mismatch");
           if (!fullSource(reference.source)) throw referenceSelectorError(path, "context_not_full");
-          const current = at(frozen[reference.source], reference.path);
+          const current = locate(reference.source, reference.path);
           const quote = current.found ? typeof current.value === "string" ? current.value : JSON.stringify(current.value) : undefined;
           if (typeof quote !== "string" || !quote.trim()) throw referenceSelectorError(path, "reference_path_missing");
-          if (quote.length > 1000) throw referenceSelectorError(path, "reference_too_broad", reference, quote.length);
-          const key = JSON.stringify(reference);
+          const selector = { source: reference.source, path: current.pointer };
+          if (quote.length > 1000) throw referenceSelectorError(path, "reference_too_broad", selector, quote.length);
+          const key = JSON.stringify(selector);
           if (!selectedQuotes.has(key)) { selectorBytes += Buffer.byteLength(quote); selectedQuotes.add(key); }
           if (selectorBytes > MAX_BATCH_QUOTE_BYTES) throw referenceSelectorError(path, "batch_quote_limit");
-          return { source: reference.source, path: reference.path, quote };
+          return { ...selector, quote };
         }));
       }
       if (problems.length) {
