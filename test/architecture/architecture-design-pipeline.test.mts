@@ -41,15 +41,16 @@ function candidateResult(value: CandidateDraft | PipelineHandoff) { assert.ok(!(
 
 const moduleFields = ["components", "steps", "capabilities", "failureHandling", "decisions", "coverage", "acceptance", "unknowns", "platformClaims"];
 
-function fixture(count = 2) {
+function fixture(count = 2, historicalVersion?: 4 | 5) {
   const requirements = Array.from({ length: count }, (_, index) => ({ id: `req_${index}`, text: `已确认的功能${index}` }));
   const candidate = validDesign(requirements, { schemaVersion: 3,
     interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "工作记录", results: "摘要", persistentData: "无跨任务状态" },
     connections: [], execution: { language: "none", hosting: "builtin", reason: "复用文本能力" },
     selectionBasis: { capacity: "已确认记录", process: "逐项整理", quality: "保留原文事实", requirementIds: requirements.map(item => item.id), assumptions: [] } });
   const blueprint: ArchitectureBlueprint = { global: globalFields(candidate),
-    modules: requirements.map((item, index) => ({ id: `module_${index}`, purpose: item.text, requirementIds: [item.id],
-      dependsOn: index ? [`module_${index - 1}`] : [], inputs: "已知输入", outputs: "本模块结果" })) };
+    modules: requirements.map((item, index) => ({ id: `module_${index}`, requirementIds: [item.id], dependsOn: index ? [`module_${index - 1}`] : [],
+      ...(historicalVersion ? { purpose: item.text, inputs: "已知输入", outputs: "本模块结果" }
+        : { handoffText: `依据已知输入完成${item.text}，交付本模块结果。\n如无输入，说明缺项。` }) })) };
   const modules: ArchitectureModule[] = blueprint.modules.map((assignment, index) => ({ moduleId: assignment.id, blueprintHash: designHash(blueprint), instructions: `完成模块${index}的原范围。`,
     components: [{ ...candidate.components[0]!, id: `component_${index}` }],
     steps: [{ ...candidate.steps[0]!, id: `step_${index}`, componentId: `component_${index}`, dependsOn: index ? [{ moduleId: `module_${index - 1}`, id: `step_${index - 1}` }] : [] }],
@@ -61,6 +62,14 @@ function fixture(count = 2) {
     draft: { taskSpec: "原始需求只发蓝图，整合使用程序拼装候选" }, runtimeCapabilities: { version: 1 }, evidence: [] };
   const binding = { agentId: "staged_case", requirementHash: "a".repeat(64), platformHash: "b".repeat(64), materialsHash: "c".repeat(64), previousCandidateHash: null };
   const record: { agentId: string; version: number; design: null; review: null; attempts: never[]; status?: string; designProgressCheckpoint?: FixtureCheckpoint } = { agentId: "staged_case", version: 1, design: null, review: null, attempts: [] };
+  if (historicalVersion) {
+    const moduleLimit = historicalVersion === 5 ? 3 : undefined;
+    const empty = (key: string) => ({ key, modelCalls: 0, sessionStartCalls: 0, generation: 0, sessionRef: null, result: null, resultHash: null });
+    const body = { schemaVersion: historicalVersion, ...(moduleLimit ? { moduleLimit } : {}), pipelineId: "00000000-0000-4000-8000-000000000001",
+      bindingHash: designHash(binding), schemaHash: designHash({ candidateSchema: context.candidateSchema, schemas: createArchitectureStageSchemas({ ...context, moduleLimit }) }),
+      assemblyVersion: 2 as const, modelCalls: 0, revisionHash: null, assignmentHash: null, blueprint: empty("blueprint"), modules: [], integration: empty("integration"), consultations: [] };
+    record.designProgressCheckpoint = { ...body, hash: designHash(body) };
+  }
   const saved: DesignCheckpoint[] = [], calls: { stage: string; key: string; modelCalls: number; storage: SessionStorage; payload: FixturePayload }[] = [];
   const onSave = async (checkpoint: DesignCheckpoint) => { saved.push(structuredClone(checkpoint)); };
   const mockRole = (handler?: FixtureHandler) => async (input: DesignStageRole) => {
@@ -69,7 +78,8 @@ function fixture(count = 2) {
     await options.onSessionRef({ file: options.sessionStorage.file ?? `${options.stage}-${options.key}-${objectFields(options.sessionStorage.binding).generation}.jsonl` });
     const send = async (event?: unknown): Promise<void> => { await options.onModelCall(event); };
     const value: FixtureValue = options.stage === "consultation"
-      ? { conclusion: "仅分析责任需求", recommendations: ["按现有平台边界设计"], unknowns: [], references: [{ section: "requirements", pointer: "/0" }] }
+      ? { ...(historicalVersion ? { conclusion: "仅分析责任需求", recommendations: ["按现有平台边界设计"], unknowns: [] }
+        : { handoffText: "仅分析责任需求，建议按现有平台边界设计。" }), references: [{ section: "requirements", pointer: "/0" }] }
       : options.stage === "blueprint" ? structuredClone(blueprint) : options.stage === "module"
       ? { ...structuredClone(modules.find(module => module.moduleId === options.key)!), blueprintHash: options.payload.blueprintHash! }
       : { baseHash: options.payload.baseHash, updates: [] };
@@ -81,7 +91,7 @@ function fixture(count = 2) {
 }
 
 async function oldSemanticFailure(integrationCalls = 3) {
-  const f = fixture(3); await f.run();
+  const f = fixture(3, 4); await f.run();
   const checkpoint = f.record.designProgressCheckpoint!;
   checkpoint.blueprint.result!.global.profile = "workflow";
   checkpoint.blueprint.resultHash = designHash(checkpoint.blueprint.result);
@@ -315,8 +325,6 @@ test("跨模块后续义务标明主责，模块工具与最终校验只允许�
   assert.deepEqual(candidate.coverage.map(row => row.requirementId), ["req_0", "req_1"]);
   assert.ok(candidate.acceptance.some(row => row.requirementIds.includes("req_1")), "整合后的方案仍须验收另一个模块负责的完整义务");
   assert.doesNotThrow(() => validateDesign(candidate, { requirements: f.context.requirements }));
-  assert.equal(f.record.designProgressCheckpoint!.schemaHash, "ee19879933b08ec9f60fdd616e79b2b321661d0e29946d8f70240a172b780a85",
-    "沿用修复前的阶段契约摘要；模块当前提交限制不破坏历史检查点绑定");
   assert.ok(readArchitectureDesignProgress(f.record, f));
 });
 
@@ -332,6 +340,8 @@ test("蓝图按问题动态并行分析，失败保留成功组且恢复沿用�
       assert.equal(options.payload.requirements!.length, 1);
       assert.equal(options.payload.candidateSchema, undefined);
       assert.equal(options.tools, undefined, "专项子Agent不能递归委派");
+      assert.throws(() => options.validate({ ...value, handoffText: "  " }), /提交结构无效/);
+      assert.throws(() => options.validate({ ...value, references: [{ section: "requirements", pointer: "/1/text" }] }), /路径不存在/);
       active++; maximum = Math.max(maximum, active); if (++arrived === 3) release();
       await gate; active--;
       if (objectFields(options.payload.assignment).topic === "verification" && fail) { fail = false; throw new Error("专项中断"); }
@@ -339,7 +349,7 @@ test("蓝图按问题动态并行分析，失败保留成功组且恢复沿用�
     if (options.stage === "blueprint" && !dispatched) {
       dispatched = true;
       await options.tools!.find(tool => tool.name === "consult_architecture")!.execute("dispatch", { assignments:
-        ["platform", "interfaces", "verification"].map((topic, i) => ({ topic, question: `分析本组问题${i}`, requirementIds: [`req_${i}`] })) });
+        ["platform", "interfaces", "verification"].map((topic, i) => ({ topic, handoffText: `分析本组问题${i}`, requirementIds: [`req_${i}`] })) });
     } else if (options.stage === "blueprint") {
       assert.equal((options.payload.consultations as unknown[]).length, 3);
     }
@@ -364,8 +374,45 @@ test("蓝图按问题动态并行分析，失败保留成功组且恢复沿用�
   assert.ok(readArchitectureDesignProgress(f.record, f));
 });
 
+for (const [version, count, schemaHash] of [
+  [4, 2, "ee19879933b08ec9f60fdd616e79b2b321661d0e29946d8f70240a172b780a85"],
+  [5, 25, "9078d863404cc595b26aaa1ab781da3beaede84032396fc26b9e4f1a7f880188"],
+] as const) test(`历史v${version}恢复旧咨询结果，蓝图和模块沿原契约续跑`, async () => {
+  const f = fixture(count, version);
+  assert.equal(f.record.designProgressCheckpoint!.schemaHash, schemaHash);
+  // Two owners suffice even for the 25-requirement v5 fixture.
+  f.blueprint.modules.splice(2); f.modules.splice(2);
+  for (const [index, assignment] of f.blueprint.modules.entries()) {
+    assignment.requirementIds = f.context.requirements.filter((_, i) => i % 2 === index).map(item => item.id);
+    const module = f.modules[index]!;
+    module.coverage = assignment.requirementIds.map(requirementId => ({ requirementId, componentIds: [module.components[0]!.id], verification: "核对原分工" }));
+    for (const row of module.acceptance) row.requirementIds = assignment.requirementIds;
+  }
+  await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    await send();
+    if (options.stage === "blueprint") {
+      await options.tools![0]!.execute("dispatch", { assignments: [{ topic: "interfaces", question: "核对旧接口", requirementIds: ["req_0"] }] });
+      throw new Error("已保存旧咨询后中断");
+    }
+    await options.onResult(value); return value;
+  }) }), /已保存旧咨询后中断/);
+  const before = structuredClone(f.record.designProgressCheckpoint!);
+  assert.equal(before.modelCalls, 2);
+  assert.ok("conclusion" in objectFields(before.consultations![0]!.result));
+  assert.deepEqual(readArchitectureDesignProgress(f.record, f), before);
+  const start = f.calls.length;
+  await f.run();
+  const after = f.record.designProgressCheckpoint!;
+  assert.deepEqual(after.consultations, before.consultations);
+  assert.equal(after.schemaVersion, version); assert.equal(after.schemaHash, schemaHash);
+  assert.equal(after.modelCalls, before.modelCalls + 4);
+  assert.equal(f.calls[start]!.storage.file, before.blueprint.sessionRef!.file);
+  assert.deepEqual(f.calls.slice(start).map(item => item.stage), ["blueprint", "module", "module", "integration"]);
+  assert.ok("purpose" in after.blueprint.result!.modules[0]!);
+});
+
 test("专项分派先保存，保存失败不启动子Agent；旧v3不会新增分派或重置额度", async () => {
-  const f = fixture(1);
+  const f = fixture(1, 4);
   await assert.rejects(f.run({ onSave: async checkpoint => {
     if (checkpoint.consultations?.length) throw new Error("分派落盘失败");
     await f.onSave(checkpoint);
@@ -390,7 +437,7 @@ test("专项额度耗尽及丢失分派记录均不能重领预算或绕过已�
   await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send }) => {
     await send();
     if (options.stage === "consultation") { await send(); await send(); await send(); }
-    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", question: "核实运行能力", requirementIds: ["req_0"] }] });
+    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", handoffText: "核实运行能力", requirementIds: ["req_0"] }] });
   }) }), error => failureFields(error).diagnostic?.reason === "turn_limit");
   const cp = structuredClone(f.record.designProgressCheckpoint!);
   assert.equal(cp.consultations![0]!.modelCalls, 3);
@@ -411,7 +458,7 @@ test("耗尽专项有明确恢复入口，唯一局部修复授权沿原会话�
   await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send }) => {
     await send();
     if (options.stage === "consultation") { await send(); await send(); await send(); }
-    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", question: "核实能力", requirementIds: ["req_0"] }] });
+    return options.tools![0]!.execute("dispatch", { assignments: [{ topic: "platform", handoffText: "核实能力", requirementIds: ["req_0"] }] });
   }) }));
   const recovery = architectureDesignRecovery({ ...f.record, status: "failed" });
   assert.equal(recovery?.status, "available"); assert.equal(recovery?.stage, "consultation");
@@ -431,7 +478,7 @@ test("专项消耗预算后模块得到实际可用次数，受限节点仍有�
     if (options.stage === "blueprint") {
       await send();
       await options.tools![0]!.execute("dispatch", { assignments: ["platform", "interfaces", "verification"].map((topic, i) => ({
-        topic, question: `核对${topic}`, requirementIds: [`req_${i}`] })) });
+        topic, handoffText: `核对${topic}`, requirementIds: [`req_${i}`] })) });
       await send(); await send(); await send();
     } else if (options.stage === "consultation") { await send(); await send(); await send(); }
     else {
@@ -466,7 +513,7 @@ test("新的复杂需求按工作量扩展模块并限制每组职责，最多�
     if (options.stage === "module") active--;
     return value;
   }) });
-  assert.equal(maximum, 3); assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 5);
+  assert.equal(maximum, 3); assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 6);
   assert.equal(f.record.designProgressCheckpoint!.moduleLimit, 4); assert.equal(f.record.designProgressCheckpoint!.modules.length, 4);
   const before = structuredClone(f.record.designProgressCheckpoint);
   await f.run({ runRole: async () => assert.fail("已完成节点不能重新领取额度") });
@@ -582,7 +629,7 @@ test("下游等待上游正式保存并获得新增步骤接口，上游失败�
 
 test("历史v1/v2完整检查点按原协议和摘要读取，不迁移或刷新次数", async () => {
   for (const schemaVersion of [1, 2] as const) {
-    const f = fixture(), candidate = candidateResult(await f.run()), cp = f.record.designProgressCheckpoint!;
+    const f = fixture(2, 4), candidate = candidateResult(await f.run()), cp = f.record.designProgressCheckpoint!;
     const blueprint = cp.blueprint.result;
     for (const [index, assignment] of blueprint!.modules.entries()) {
       assignment.componentIds = cp.modules[index]!.result!.components.map((row) => row.id);
@@ -608,7 +655,7 @@ test("历史v1/v2完整检查点按原协议和摘要读取，不迁移或刷新
 
 test("旧蓝图已冻结41与39个组件时沿原分工恢复，不被新的均分额度拒绝", async () => {
   for (const schemaVersion of [1, 2] as const) {
-    const f = fixture(2);
+    const f = fixture(2, 4);
     await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
       await send(); await options.onResult(value);
       if (options.stage === "blueprint") throw new Error("蓝图已保存后中断");
@@ -743,7 +790,7 @@ test("程序恢复的完整校验失败时不保存完成标记，真实状态�
 });
 
 test("旧已完成整合沿原拼装与摘要恢复，不套新能力合并规则重写候选", async () => {
-  const f = fixture(); f.modules[1]!.capabilities[0]!.reason = "另一份原始说明";
+  const f = fixture(2, 4); f.modules[1]!.capabilities[0]!.reason = "另一份原始说明";
   await f.run();
   const legacy = assembleArchitectureCandidate({ ...f, modules: f.modules, blueprint: f.blueprint, candidateSchema: f.context.candidateSchema,
     requirements: f.context.requirements, mergeCapabilityReasons: false });
@@ -779,7 +826,7 @@ test("全局25轮及每节点5轮并发记账，压缩计费而网络重连沿�
     await send({ purpose: "agent", retryAttempt: 1 });
     await options.onResult(value); return value;
   }) });
-  assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 4);
+  assert.equal(f.record.designProgressCheckpoint!.schemaVersion, 6);
   assert.equal(f.record.designProgressCheckpoint!.modelCalls, 25);
   assert.ok(f.saved.every(checkpoint => checkpoint.modelCalls <= 25));
   for (const entry of [f.record.designProgressCheckpoint!.blueprint, ...f.record.designProgressCheckpoint!.modules, f.record.designProgressCheckpoint!.integration])
@@ -799,7 +846,7 @@ test("节点额度耗尽后恢复不能开新会话或补回次数", async () =>
 
 test("历史三轮检查点仍使用十五轮总账，已授权修复只续接原五轮且用量不清零", async () => {
   for (const repaired of [false, true]) {
-    const f = fixture();
+    const f = fixture(2, 4);
     await assert.rejects(f.run({ runRole: f.mockRole(async ({ send }) => {
       for (let i = 0; i < 3; i++) await send();
       throw new Error("固定历史中断");

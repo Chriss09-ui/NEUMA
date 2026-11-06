@@ -9,7 +9,7 @@ type DesignStage = "blueprint" | "module" | "integration" | "consultation";
 interface DesignStageState { key: string; modelCalls: number; sessionStartCalls: number; generation: number; sessionRef: { file: string } | null;
   result: unknown; resultHash: string | null; completedBy?: "program" }
 interface ConsultationState extends DesignStageState { assignment: BlueprintConsultationAssignment }
-export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5; moduleLimit?: number; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
+export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5 | 6; moduleLimit?: number; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
   revisionHash: string | null; assignmentHash: string | null; assemblyVersion?: 2; blueprint: DesignStageState; modules: DesignStageState[]; integration: DesignStageState; hash: string;
   consultations?: ConsultationState[];
   validationRepair?: { version: 1; sourceVersion: number; source: DesignCheckpoint; targets: string[] };
@@ -47,9 +47,9 @@ import { architectureModuleObligations } from "./architecture-module-obligations
 import { copyArchitectureReviewJson, reviewCheckpointObject } from "./architecture-review-binding.mjs";
 import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule, architectureModuleLayers,
   assembleArchitectureCandidate, applyArchitectureIntegration, readArchitectureBlueprintStructure, readArchitectureModuleStructure,
-  readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureModuleCapacities, architectureModuleSubmissionSchema } from "./architecture-design-stages.mjs";
-import { BLUEPRINT_CONSULTATION_LIMIT, BLUEPRINT_CONSULTATION_CALL_LIMIT, BLUEPRINT_CONSULTATION_ASSIGNMENT_SCHEMA,
-  BLUEPRINT_CONSULTATION_RESULT_SCHEMA, blueprintConsultationContext, validateBlueprintConsultationAssignment,
+  readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureBlueprintWriter, architectureModuleCapacities, architectureModuleSubmissionSchema } from "./architecture-design-stages.mjs";
+import { BLUEPRINT_CONSULTATION_LIMIT, BLUEPRINT_CONSULTATION_CALL_LIMIT, blueprintConsultationSchemas,
+  blueprintConsultationContext, validateBlueprintConsultationAssignment,
   validateBlueprintConsultationResult } from "./architecture-blueprint-consultation.mjs";
 import type { BlueprintConsultationAssignment } from "./architecture-blueprint-consultation.mjs";
 
@@ -71,6 +71,10 @@ const sealed = <T extends object>(checkpoint: T & { hash?: string }): Omit<T, "h
   return copy({ ...body, hash: designHash(body) });
 };
 
+function stageOptions(checkpoint: Pick<DesignCheckpoint, "schemaVersion" | "moduleLimit">) {
+  return { legacyBlueprint: checkpoint.schemaVersion < 3, textHandoffs: checkpoint.schemaVersion === 6, moduleLimit: checkpoint.moduleLimit };
+}
+
 // Limits belong to a persisted attempt; deploying new defaults must not refill old attempts.
 export function architectureDesignCallLimits(input: unknown) {
   const checkpoint = objectFields(input);
@@ -79,8 +83,8 @@ export function architectureDesignCallLimits(input: unknown) {
     || continuation.authorization !== "explicit-user-test-retry")) throw invalid();
   const extra = checkpoint.validationContinuation === undefined ? 0 : 1;
   if (checkpoint?.schemaVersion === 1) return { stage: 3, pipeline: 15 + extra };
-  if (checkpoint.schemaVersion === 5 && (!isInteger(checkpoint.moduleLimit) || checkpoint.moduleLimit < 3 || checkpoint.moduleLimit > 6)) throw invalid();
-  if ([2, 3, 4, 5].some(version => version === checkpoint.schemaVersion)) return { stage: ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, pipeline: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT + extra };
+  if ((checkpoint.schemaVersion === 5 || checkpoint.schemaVersion === 6) && (!isInteger(checkpoint.moduleLimit) || checkpoint.moduleLimit < 3 || checkpoint.moduleLimit > 6)) throw invalid();
+  if ([2, 3, 4, 5, 6].some(version => version === checkpoint.schemaVersion)) return { stage: ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, pipeline: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT + extra };
   throw invalid();
 }
 
@@ -134,22 +138,22 @@ function stageState(value: unknown, limit = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT
 
 function checkpointState(input: unknown): asserts input is DesignCheckpoint {
   const checkpoint = objectFields(input);
-  const keys = [...checkpointKeys, ...([4, 5].includes(Number(checkpoint.schemaVersion)) ? ["consultations"] : []),
-    ...(checkpoint.schemaVersion === 5 ? ["moduleLimit"] : []), ...["repair", "assemblyVersion", "validationRepair", "validationContinuation"].filter(key => Object.hasOwn(checkpoint, key))];
+  const keys = [...checkpointKeys, ...(Number(checkpoint.schemaVersion) >= 4 ? ["consultations"] : []),
+    ...(Number(checkpoint.schemaVersion) >= 5 ? ["moduleLimit"] : []), ...["repair", "assemblyVersion", "validationRepair", "validationContinuation"].filter(key => Object.hasOwn(checkpoint, key))];
   if (!exact(checkpoint, keys) || Object.hasOwn(checkpoint, "assemblyVersion") && checkpoint.assemblyVersion !== 2
-    || ![1, 2, 3, 4, 5].some(version => version === checkpoint.schemaVersion) || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
+    || ![1, 2, 3, 4, 5, 6].some(version => version === checkpoint.schemaVersion) || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
     || !hash(checkpoint.hash) || checkpoint.hash !== sealed(checkpoint).hash
     || checkpoint.revisionHash !== null && !hash(checkpoint.revisionHash)
     || checkpoint.assignmentHash !== null && !hash(checkpoint.assignmentHash)
     || !isInteger(checkpoint.modelCalls) || checkpoint.modelCalls < 0
     || checkpoint.modelCalls > architectureDesignCallLimits(checkpoint).pipeline || !Array.isArray(checkpoint.modules)
-    || checkpoint.modules.length > (checkpoint.schemaVersion === 5 ? Number(checkpoint.moduleLimit) : 3)) throw invalid();
-  const consultations = [4, 5].includes(Number(checkpoint.schemaVersion)) ? checkpoint.consultations : [];
+    || checkpoint.modules.length > Number(checkpoint.moduleLimit ?? 3)) throw invalid();
+  const consultations = Number(checkpoint.schemaVersion) >= 4 ? checkpoint.consultations : [];
   if (!Array.isArray(consultations) || consultations.length > BLUEPRINT_CONSULTATION_LIMIT) throw invalid();
   for (const item of consultations) {
     if (!exact(item, [...stageKeys, "assignment"])) throw invalid();
     const { assignment, ...entry } = item;
-    validateBlueprintConsultationAssignment(assignment);
+    validateBlueprintConsultationAssignment(assignment, undefined, blueprintConsultationSchemas(checkpoint.schemaVersion === 6).assignment);
     stageState(entry, BLUEPRINT_CONSULTATION_CALL_LIMIT + (objectFields(checkpoint.repair).stage === "consultation"
       && objectFields(checkpoint.repair).key === entry.key ? ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT : 0));
     if (entry.key !== `advice_${designHash(assignment).slice(0, 24)}` || entry.generation !== 0 || entry.sessionStartCalls !== 0) throw invalid();
@@ -255,9 +259,8 @@ function validationRecovery(record: Partial<StoredArchitectureRecord>, checkpoin
   }
   if (!record.draft || !record.requirements) return null;
   const plan = architectureStageRepairPlan(checkpoint, { draft: record.draft, requirements: record.requirements,
-    candidateSchema: designSubmissionSchema(record.draft, { requirements: record.requirements }), legacyBlueprint: checkpoint.schemaVersion < 3,
+    candidateSchema: designSubmissionSchema(record.draft, { requirements: record.requirements }), ...stageOptions(checkpoint),
     deferredVerifications: record.deferredVerifications,
-    moduleLimit: checkpoint.moduleLimit,
     capabilities: record.platformSnapshot ? platformCapabilityCatalog(record.platformSnapshot, { runtimeCapabilities: record.runtimeCapabilities }) : CAPABILITIES });
   if (!plan) return null;
   const targets = stages(checkpoint).filter(item => plan.targets.includes(item.entry.key));
@@ -295,7 +298,7 @@ function revisionIssues(value: unknown): RevisionIssue[] {
 }
 
 function programIntegration(checkpoint: DesignCheckpoint, context: DesignPipelineContext) {
-  context = { ...context, legacyBlueprint: checkpoint.schemaVersion < 3, moduleLimit: checkpoint.moduleLimit };
+  context = { ...context, ...stageOptions(checkpoint) };
   if (!complete(checkpoint.blueprint) || !checkpoint.modules.length || !checkpoint.modules.every(complete)
     || complete(checkpoint.integration) || checkpoint.integration.modelCalls < architectureDesignCallLimits(checkpoint).stage) return null;
   const blueprint = validateArchitectureBlueprint(checkpoint.blueprint.result, context), modules = checkedModules(checkpoint, blueprint, context);
@@ -355,18 +358,19 @@ function inputs({ context, binding }: { context: DesignPipelineContext; binding:
   if (!reviewCheckpointObject(context) || !Array.isArray(context.requirements) || !reviewCheckpointObject(context.candidateSchema)
     || !reviewCheckpointObject(binding)) throw invalid();
   const schemas = createArchitectureStageSchemas(context);
-  return { schemas, schemaHash: designHash({ candidateSchema: context.candidateSchema, schemas }), bindingHash: designHash(copy(binding)) };
+  const consultations = blueprintConsultationSchemas(context.textHandoffs === true);
+  return { schemas, consultations, schemaHash: designHash({ candidateSchema: context.candidateSchema, schemas,
+    ...(context.textHandoffs ? { consultations } : {}) }), bindingHash: designHash(copy(binding)) };
 }
 
 /** Existing but invalid progress must fail closed, rather than replenish a node's budget. */
 export function readArchitectureDesignProgress(record: { designProgressCheckpoint?: unknown }, { context, binding }: { context: DesignPipelineContext; binding: unknown }): DesignCheckpoint | null {
   if (!Object.hasOwn(record, "designProgressCheckpoint")) return null;
   try {
-    context = { ...context, legacyBlueprint: Number(objectFields(record.designProgressCheckpoint).schemaVersion) < 3,
-      moduleLimit: objectFields(record.designProgressCheckpoint).schemaVersion === 5 ? Number(objectFields(record.designProgressCheckpoint).moduleLimit) : undefined };
-    const { schemas, schemaHash, bindingHash } = inputs({ context, binding });
     const checkpoint = copy(record.designProgressCheckpoint);
     checkpointState(checkpoint);
+    context = { ...context, ...stageOptions(checkpoint) };
+    const { schemas, consultations, schemaHash, bindingHash } = inputs({ context, binding });
     if (checkpoint.bindingHash !== bindingHash || checkpoint.schemaHash !== schemaHash) throw invalid();
     if (checkpoint.validationRepair) {
       const source = readArchitectureDesignProgress({ designProgressCheckpoint: checkpoint.validationRepair.source }, { context, binding });
@@ -376,8 +380,8 @@ export function readArchitectureDesignProgress(record: { designProgressCheckpoin
     if (checkpoint.validationContinuation)
       readArchitectureDesignProgress({ designProgressCheckpoint: checkpoint.validationContinuation.source }, { context, binding });
     for (const entry of checkpoint.consultations ?? []) {
-      const assignment = validateBlueprintConsultationAssignment(entry.assignment, context.requirements);
-      if (complete(entry)) validateBlueprintConsultationResult(entry.result, blueprintConsultationContext(context, assignment));
+      const assignment = validateBlueprintConsultationAssignment(entry.assignment, context.requirements, consultations.assignment);
+      if (complete(entry)) validateBlueprintConsultationResult(entry.result, blueprintConsultationContext(context, assignment), consultations.result);
       else if (complete(checkpoint.blueprint)) throw invalid();
     }
     if (!complete(checkpoint.blueprint)) {
@@ -466,14 +470,12 @@ function revisionOwners(revision: DesignRevision, blueprint: ArchitectureBluepri
 export async function runArchitectureDesignPipeline({ record, context, binding, runRole, onSave, signal, onProgress, sessionDirectory, revision, repair,
   forceIntegration = false, validateProgramCandidate = value => value, validateAssembledCandidate, validateHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
   if (typeof runRole !== "function" || typeof onSave !== "function" || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) throw invalid();
-  const savedVersion = objectFields(record.designProgressCheckpoint).schemaVersion;
-  const moduleLimit = savedVersion === 5 ? Number(objectFields(record.designProgressCheckpoint).moduleLimit)
-    : savedVersion === undefined && context.requirements.length > 24 ? Math.min(6, Math.max(3, Math.ceil(context.requirements.length / 24))) : undefined;
-  context = { ...context, legacyBlueprint: Number(savedVersion) < 3, moduleLimit };
-  if (moduleLimit === undefined) delete context.moduleLimit;
-  const { schemas, schemaHash, bindingHash } = inputs({ context, binding });
-  let checkpoint: DesignCheckpoint = readArchitectureDesignProgress(record, { context, binding }) ?? sealed({ schemaVersion: moduleLimit === undefined ? 4 as const : 5 as const,
-    ...(moduleLimit === undefined ? {} : { moduleLimit }), pipelineId: randomUUID(),
+  const saved = readArchitectureDesignProgress(record, { context, binding });
+  const fresh = { schemaVersion: 6 as const, moduleLimit: Math.min(6, Math.max(3, Math.ceil(context.requirements.length / 24))) };
+  context = { ...context, ...stageOptions(saved ?? fresh) };
+  if (context.moduleLimit === undefined) delete context.moduleLimit;
+  const { schemas, consultations, schemaHash, bindingHash } = inputs({ context, binding });
+  let checkpoint: DesignCheckpoint = saved ?? sealed({ ...fresh, pipelineId: randomUUID(),
     bindingHash, schemaHash, modelCalls: 0, revisionHash: null, assignmentHash: null, assemblyVersion: 2 as const,
     blueprint: state("blueprint"), modules: [], integration: state("integration"), consultations: [] });
   let writes: Promise<unknown> = Promise.resolve(), persistenceError: unknown, consultationFailure: unknown;
@@ -649,7 +651,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       ? "只分析assignment中的一个专项问题及责任需求，按提供的平台事实给出建议、依据位置和未知。不能编写完整蓝图、改需求、执行外部操作或继续委派；建议不是已验证结论。"
       : (context.legacyBlueprint && (stage !== "integration" && legacyInstructions[stage]) || instructions[stage]).replace("1至3", `1至${checkpoint.moduleLimit ?? 3}`),
       submitName, ...(stage === "blueprint" && checkpoint.schemaVersion >= 4 ? { tools: [consultationTool] } : {}),
-      payload: { ...payload, stageSchema: parameters, stageContract: { submitName, fields: Object.keys(parameters.properties ?? {}), source: "tool_parameters" }, blueprintProtocol: context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
+      payload: { ...payload, stageSchema: parameters, stageContract: { submitName, fields: Object.keys(parameters.properties ?? {}), source: "tool_parameters" }, blueprintProtocol: context.textHandoffs ? "module-handoff-v3" : context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
         remaining: architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls, stageLimit: modelCallLimit },
       ...(checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? { stageRepair: {
         additionalCalls: ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT,
@@ -680,8 +682,8 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     allocate("consultation", entries, integrationReserve(checkpoint) + 1 + Math.max(checkpoint.moduleLimit ?? 3, checkpoint.modules.filter(entry => !complete(entry)).length));
     const settled = await Promise.allSettled(entries.map(entry => {
       const scope = blueprintConsultationContext(context, entry.assignment);
-      return runStage("consultation", entry.key, scope, BLUEPRINT_CONSULTATION_RESULT_SCHEMA,
-        value => validateBlueprintConsultationResult(value, scope));
+      return runStage("consultation", entry.key, scope, consultations.result,
+        value => validateBlueprintConsultationResult(value, scope, consultations.result));
     }));
     const failed = settled.find(item => item.status === "rejected");
     if (failed?.status === "rejected") { consultationFailure = failed.reason; throw failed.reason; }
@@ -692,7 +694,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     name: "consult_architecture", label: "分派蓝图专项分析",
     description: "仅在有独立难点时，按平台能力、接口边界、验收范围分组请求子Agent分析。每项一个局部问题及责任需求；本轮最多3组、每组3次调用，均计原设计总额。已完成的同组结果直接复用，不能递归委派。简单任务直接提交蓝图。",
     parameters: { type: "object", additionalProperties: false, required: ["assignments"], properties: {
-      assignments: { type: "array", minItems: 1, maxItems: BLUEPRINT_CONSULTATION_LIMIT, items: BLUEPRINT_CONSULTATION_ASSIGNMENT_SCHEMA },
+      assignments: { type: "array", minItems: 1, maxItems: BLUEPRINT_CONSULTATION_LIMIT, items: consultations.assignment },
     } }, executionMode: "sequential",
     execute: async (_id, input, toolSignal) => {
       active(); toolSignal?.throwIfAborted();
@@ -700,7 +702,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       if (consulting || checkpoint.schemaVersion < 4 || complete(checkpoint.blueprint)) throw new InputError("当前阶段不能再次分派专项分析。");
       if (Object.keys(value).join(",") !== "assignments" || !Array.isArray(value.assignments)
         || !value.assignments.length || value.assignments.length > BLUEPRINT_CONSULTATION_LIMIT) throw new InputError("请按公开结构分派1至3个专项问题。");
-      const assignments = value.assignments.map(item => validateBlueprintConsultationAssignment(item, context.requirements));
+      const assignments = value.assignments.map(item => validateBlueprintConsultationAssignment(item, context.requirements, consultations.assignment));
       const requests = assignments.map(assignment => ({ key: `advice_${designHash(assignment).slice(0, 24)}`, assignment }));
       if (new Set(requests.map(item => item.key)).size !== requests.length) throw new InputError("同批专项问题重复，请合并相同分派。");
       const fresh = requests.filter(item => !checkpoint.consultations!.some(saved => saved.key === item.key));
@@ -721,7 +723,9 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   };
   // A saved dispatch is an obligation; finish it before asking the coordinator for another decision.
   await runConsultations((checkpoint.consultations ?? []).filter(entry => !complete(entry)));
-  const blueprintResult = await runStage("blueprint", "blueprint", { ...context, ...(checkpoint.schemaVersion >= 4 ? { consultations: analyses() } : {}) }, schemas.blueprint, value => validateArchitectureBlueprint(value, context));
+  const writer = architectureBlueprintWriter(schemas.blueprint, context);
+  const { textHandoffs: _textHandoffs, ...blueprintContext } = context;
+  const blueprintResult = await runStage("blueprint", "blueprint", { ...blueprintContext, ...(checkpoint.schemaVersion >= 4 ? { consultations: analyses() } : {}) }, writer.parameters, writer.validate);
   if (handoff(blueprintResult)) return blueprintResult;
   const blueprint = validateArchitectureBlueprint(blueprintResult, context);
   const local = programIntegration(checkpoint, context);
@@ -738,7 +742,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   const missing = checkpoint.modules.filter(entry => !complete(entry));
   if (architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls < integrationReserve(checkpoint) + missing.length) throw stopped(checkpoint, "module");
   const { draft: _draft, requirement: _requirement, requirements: _requirements, candidateSchema: _candidateSchema,
-    previousDesign: _previousDesign, ...facts } = context;
+    previousDesign: _previousDesign, ...facts } = blueprintContext;
   const dependencyLayers = context.legacyBlueprint ? [blueprint.modules] : architectureModuleLayers(blueprint);
   const layers = dependencyLayers.flatMap(layer => Array.from({ length: Math.ceil(layer.length / 3) }, (_, index) => layer.slice(index * 3, index * 3 + 3)));
   for (const layer of layers) {

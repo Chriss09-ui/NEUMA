@@ -99,7 +99,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         assert.ok(payload, "恢复的原生历史应保留首次完整节点材料");
         if (stage === "blueprint" && consultBeforeBlueprint && !state.consultationIssued) {
           assert.ok(names.includes("consult_architecture")); state.consultationIssued = true;
-          name = "consult_architecture"; args = { assignments: [{ topic: "platform", question: "核对本需求的实现路径", requirementIds: [payload.requirements![0]!.id] }] };
+          name = "consult_architecture"; args = { assignments: [{ topic: "platform", handoffText: "核对本需求的实现路径", requirementIds: [payload.requirements![0]!.id] }] };
         } else if (stage === "blueprint" && state.researchBeforeBlueprint && !state.researchIssued) {
           state.researchIssued = true;
           name = "search_technical_sources"; args = { query: "固定技术依据，无真实检索", topics: ["sdk"] };
@@ -156,7 +156,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         const payload = payloads.find(row => row.pipelineStage === "consultation");
         assert.ok(payload); assert.equal(payload.requirements!.length, 1);
         assert.equal(names.includes("consult_architecture"), false);
-        name = "submit_blueprint_analysis"; args = { conclusion: "固定协议测试的专项建议，不代表真实能力验收", recommendations: ["保留需求并使用已有能力"], unknowns: [], references: [{ section: "requirements", pointer: "/0" }] };
+        assert.equal(objectFields(payload.assignment).handoffText, "核对本需求的实现路径");
+        name = "submit_blueprint_analysis"; args = { handoffText: "建议保留需求并使用已有能力，实际效果仍待验收。", references: [{ section: "requirements", pointer: "/0" }] };
       } else if (kind === "review_slice") {
         const payload = payloads.findLast(row => row.pipelineStage === "review_slice")!;
         const assignment = objectFields(payload.assignment), ids = assignment.ids as string[];
@@ -354,6 +355,14 @@ test("蓝图专项分析使用独立原生会话，截断恢复保留子会话�
   const resumedBlueprint = users(f.requests.filter(row => row.kind === "blueprint").at(-1)!.body).at(-1)!;
   assert.equal(recordArray(resumedBlueprint.consultations).length, 1);
   assert.equal(recordArray(resumedBlueprint.consultations)[0]!.trust, "advisory-not-verified");
+  assert.deepEqual(recordArray(resumedBlueprint.consultations)[0]!.result, {
+    handoffText: "建议保留需求并使用已有能力，实际效果仍待验收。", references: [{ section: "requirements", pointer: "/0" }],
+  });
+  const modulePacket = users(f.requests.find(row => row.kind === "module")!.body).find(row => row.assignment)!;
+  const assignment = objectFields(modulePacket.assignment);
+  assert.deepEqual(Object.keys(assignment).sort(), ["dependsOn", "handoffText", "id", "requirementIds"]);
+  assert.ok(typeof assignment.handoffText === "string" && assignment.handoffText.includes("完整摘要"));
+  assert.equal(JSON.stringify(modulePacket).split(assignment.handoffText).length, 2, "本节点正文只内联一次");
   assert.deepEqual(f.errors, []);
 });
 

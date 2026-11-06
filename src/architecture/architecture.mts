@@ -1055,7 +1055,7 @@ export class ArchitectureDesigner {
           const projected = projectArchitectureMessages([{ role: "user", content: text, timestamp: 0 }], { role, roleGuide: systemPrompt })[0];
           return projected?.role === "user" && typeof projected.content === "string" ? projected.content : text;
         },
-        systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName })
+        systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName, blueprintProtocol: payload.blueprintProtocol })
           + (validationRepair ? "\n这是历史阶段局部修复。repairPreparation提供宿主核验的平台事实，validationRepair.previousResult是待修原稿。保留有效内容，优先用editableSubmission的submissionHash调用局部修订工具；仍须完整校验。最后一次调用只开放正式提交与可用局部修订，旧历史中的读取工具本轮不可用，不再请求重复核对。确有不能解决的问题须在结果中如实保留，不能声称已通过。" : "")
           + (platformContractTool && role === "designer" ? "\n" + PLATFORM_CLAIMS_PROMPT : "") + "\n" + renderPiSubmissionContract({ role, submitName, tools: roleTools,
           alternativeTools: [submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), ...(submitReviewParts ? [submitReviewParts] : []), ...(allowHandoff ? [requestRequirements] : [])]
@@ -1124,6 +1124,7 @@ export class ArchitectureDesigner {
       }) ?? (() => {});
       let prompt = resumeStage ? modelPrompt({ type: "resume_architecture_stage", pipelineStage: payload.pipelineStage,
         submitName, modelBudget: modelBudget(),
+        ...(payload.blueprintProtocol === "module-handoff-v3" && payload.assignment ? { blueprintProtocol: payload.blueprintProtocol, assignment: payload.assignment } : {}),
         ...(payload.stageContract ? { stageContract: payload.stageContract, stageSchema: payload.stageSchema } : {}),
         ...(payload.requirementScope ? { requirementScope: payload.requirementScope } : {}),
         ...(payload.moduleObligations ? { moduleObligations: payload.moduleObligations } : {}),

@@ -2,7 +2,10 @@ import type { ArchitectureBase, ArchitectureDesign, ArchitectureComponent, Archi
 import type { ConnectionDefinition } from "./connection.mjs";
 import type { ToolSchema } from "./tools.mjs";
 export type StageReference = string | { moduleId: string; id: string };
-export interface BlueprintAssignment { id: string; purpose: string; requirementIds: string[]; componentIds?: string[]; stepIds?: string[]; dependsOn: string[]; inputs: string; outputs: string }
+export type BlueprintAssignment = { id: string; requirementIds: string[]; dependsOn: string[] } & (
+  { handoffText: string; componentIds?: never; stepIds?: never } |
+  { purpose: string; inputs: string; outputs: string; componentIds?: string[]; stepIds?: string[] }
+);
 export interface CandidateDraft extends ArchitectureBase { schemaVersion?: 2 | 3; interaction?: ArchitectureInteraction; connections?: ConnectionDefinition[]; execution?: { language: "none" | "javascript" | "python"; hosting: "builtin" | "managed" | "docker"; reason: string }; selectionBasis?: { capacity: string; process: string; quality: string; requirementIds: string[]; assumptions: string[] }; platformClaims?: PlatformClaim[] }
 export type ArchitectureGlobal = Omit<CandidateDraft, "components" | "steps" | "capabilities" | "failureHandling" | "decisions" | "coverage" | "acceptance" | "unknowns" | "platformClaims">;
 export interface ArchitectureBlueprint { global: ArchitectureGlobal; modules: BlueprintAssignment[] }
@@ -10,7 +13,7 @@ export interface ArchitectureModule { moduleId: string; blueprintHash: string; i
 export interface ResolvedArchitectureModule extends Omit<ArchitectureModule, "steps" | "coverage"> { steps: ArchitectureBase["steps"]; coverage: ArchitectureBase["coverage"] }
 export interface ArchitectureConflict { path: string; reason: string; relatedPaths: string[]; moduleIds: string[] }
 export interface StageSchema extends ToolSchema { properties?: Record<string, StageSchema>; items?: StageSchema; anyOf?: StageSchema[]; maxItems?: number; minItems?: number; maxLength?: number }
-export interface StageSchemaOptions { candidateSchema: StageSchema; requirements?: RequirementItem[]; legacyBlueprint?: boolean; moduleLimit?: number | undefined; draft?: unknown; capabilities?: readonly import("./architecture.mjs").Capability[] | undefined; deferredVerifications?: unknown }
+export interface StageSchemaOptions { candidateSchema: StageSchema; requirements?: RequirementItem[]; legacyBlueprint?: boolean; textHandoffs?: boolean; moduleLimit?: number | undefined; draft?: unknown; capabilities?: readonly import("./architecture.mjs").Capability[] | undefined; deferredVerifications?: unknown }
 export interface ArchitectureModuleObligations { moduleId: string; acceptanceKinds: ArchitectureAcceptance["kind"][];
   conditionalAcceptanceKinds: ArchitectureAcceptance["kind"][];
   minimumItems: Partial<Record<"capabilities" | "decisions" | "failureHandling", number>>;

@@ -51,9 +51,15 @@ function reviewIndex(value: unknown) {
 export function architectureModelContext(source: UnknownRecord, { role, continuation = false }: { role?: string | undefined; continuation?: boolean } = {}) {
   const fields = [...metadata];
   const derived: UnknownRecord = {};
+  if (continuation && source.blueprintProtocol === "module-handoff-v3") fields.push("assignment");
   if (!continuation) {
-    fields.push("requirements", "confirmedRequirementContext", "assignment", "blueprint", "dependencyInterfaces", "blueprintBoundary", "baseCandidate", "previousDesign",
+    fields.push("requirements", "confirmedRequirementContext", "assignment", "dependencyInterfaces", "blueprintBoundary", "baseCandidate", "previousDesign",
       "design", "issues", "conflicts", "deterministicIssues", "researchGaps", "reviewRetry", "developmentRevision", "requirementFidelityFeedback", "rejectedRequirementFidelitySubmission", "validationRepair", "repairPreparation", "distributedReview");
+    if (source.pipelineStage === "module" && source.blueprintProtocol === "module-handoff-v3" && source.blueprint) {
+      const blueprint = objectFields(source.blueprint);
+      // This module already has its full assignment. Other modules' briefs remain readable by pointer.
+      derived.blueprint = { global: blueprint.global, modules: array(blueprint.modules).map(item => pick(item, ["id", "dependsOn"])) };
+    } else fields.push("blueprint");
     if (objectFields(source.repairPreparation).ready === true) fields.push("roleGuide", "evidence");
     // Before a candidate exists, the designer still needs confirmed interaction and source choices.
     if (!source.baseCandidate && !source.design && !source.previousDesign) fields.push("draft");
@@ -141,9 +147,11 @@ export function projectVerificationMessages(messages: ContextEvent["messages"], 
     && !value.inputContextVersion ? verificationModelContext(value) : null; });
 }
 
-export function architectureNodePrompt({ role, pipelineStage, submitName }: { role: string; pipelineStage?: string | undefined; submitName: string }) {
+export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown }) {
+  const textHandoffs = blueprintProtocol === "module-handoff-v3";
   const task = pipelineStage === "review_slice" ? "你是独立评审者，只核对assignment指定的检查、验收范围或历史问题；完整提交本组编号，其他分项数组填空。核对真实证据及反证，不修改设计，不代替主评审作整体通过决定。"
     : pipelineStage === "blueprint" ? "按本轮工具的模块数量与每模块需求条数上限，设计全局蓝图及模块职责、依赖和需求分工；不提前展开各模块实现。"
+    : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
     : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"
       : pipelineStage === "integration" ? "核对已组装方案的接口和conflicts，只按integrationPolicy提交baseHash及必要updates，保留冻结组件和步骤。"
         : pipelineStage === "review_revision" ? "依据当前阻断核实并修订baseCandidate，只提交baseHash和最多24个updates；遵守allowedRoots，保留有效内容和编号。"
@@ -153,6 +161,8 @@ export function architectureNodePrompt({ role, pipelineStage, submitName }: { ro
   return `你是NEUMA的${role}。${task}
 ${MODEL_CONTEXT_INSTRUCTIONS}
 按实际公开工具schema提交${submitName}；不要复制schema或编造字段。工具及本轮modelBudget是额度依据，提交后停止。roleGuide保留本角色详细规程，遇到具体协议疑问再读取。
+${textHandoffs && pipelineStage === "blueprint" ? "给模块或专项顾问派单时，只把主责、上游输入、交付要求和例外写成一个handoffText，自然分段。编号、主题和依赖按工具单独提交。已确认的专属操作由宿主绑定，工具标明可省略时不用复写开关。" : ""}
+${textHandoffs && pipelineStage === "consultation" ? "直接回答assignment.handoffText。在一个handoffText中写出判断、建议和仍待验证的事项，references只指向本组实际材料。" : ""}
 ${pipelineStage ? "已有本节点主要资料时直接设计；只读取影响当前决定的缺项，不先通读详细规程。尽早提交完整候选，尽量预留两轮纠错；资料不足仍如实说明，不能为省轮次编造依据。" : ""}
 ${pipelineStage ? "本阶段提交契约已完整提供在提交工具参数中；stageSchema为同源只读参照，有具体字段疑问时按pointer定位，不先通读最终candidateSchema。" : ""}
 ${pipelineStage === "blueprint" ? "蓝图提交的global是对象、modules是数组，不能编码成字符串；selectionBasis直接放在global内。仅负责全局选择、职责划分与冲突裁决；模块细节留给模块设计者。存在多个独立技术难点且提供consult_architecture时，按问题及责任需求分组委派专项分析；简单任务直接提交。子分析是建议，不能替代原始需求、平台事实或正式验收。" : ""}

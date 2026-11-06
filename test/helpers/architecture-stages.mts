@@ -37,10 +37,14 @@ export function architectureStageSubmission<T extends { name?: string }>({ tools
       "长指令夹具须明确提供有界蓝图指令，完整原文在整合阶段保留");
     const global = Object.fromEntries(Object.entries(expected).filter(([key]) => !moduleFields.some(field => field === key)));
     global.instructions = blueprintInstructions;
-    args = { global, modules: [{ id: moduleId, purpose: expected.rationale,
-      requirementIds: payload.requirements.map((item) => item.id),
-      ...(payload.blueprintProtocol === "frozen-ids-v1" ? { componentIds: expected.components.map((item) => item.id), stepIds: expected.steps.map((item) => item.id) } : {}), dependsOn: [],
-      inputs: expected.interaction!.inputs, outputs: expected.interaction!.results }] };
+    const textHandoffs = payload.blueprintProtocol === "module-handoff-v3";
+    const confirmedActions = objectFields(objectFields(payload.draft).interaction).operations;
+    if (textHandoffs && Array.isArray(confirmedActions) && confirmedActions.length && objectFields(global.interaction).operations === true)
+      delete objectFields(global.interaction).operations;
+    args = { global, modules: [{ id: moduleId, requirementIds: payload.requirements.map((item) => item.id), dependsOn: [],
+      ...(textHandoffs ? { handoffText: `${expected.rationale}。接收${expected.interaction!.inputs}，交付${expected.interaction!.results}。` }
+        : { purpose: expected.rationale, inputs: expected.interaction!.inputs, outputs: expected.interaction!.results }),
+      ...(payload.blueprintProtocol === "frozen-ids-v1" ? { componentIds: expected.components.map((item) => item.id), stepIds: expected.steps.map((item) => item.id) } : {}) }] };
   } else if (name === "submit_architecture_module") {
     assert.equal((objectFields(payload.blueprint).modules as unknown[]).length, 1, "多模块回归须显式提供各模块独立成果");
     assert.equal(objectFields(payload.assignment).id, moduleId, "模块夹具必须绑定实际派发的稳定编号");

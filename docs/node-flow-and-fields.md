@@ -1,12 +1,13 @@
 # NEUMA 节点流程与字段说明
 
 - 核对日期：2026-10-25；源码基线：主仓库 `6570f2b`。本文按当前源码契约整理：**每个节点收到什么、输出什么（最全形态），每个字段后附一个具体示例值**。
+- 2026-11-06 更新第 2 节蓝图派单、专项咨询和模块接收字段，按 v6 设计检查点及历史读取协议核对。
 - 全文示例统一使用同一个贯穿场景——**客户合同审查助手**（custom 路径，3 个模块、托管服务 + 页面 + 动作），这样各节点的示例值前后衔接，可以当一条完整数据流读下来。
 - 字段名与源码逐字一致（括注定义位置）；示例值仅为示意，哈希统一用 `9f86d081…0a08`（64 位 sha256），时间统一用 `2026-10-25T09:30:00.000Z`。行为规范以 [ARCHITECTURE.md](../ARCHITECTURE.md) 与源码为准。
 
 ## 一、总览：节点数量与主流程
 
-主链路共 **6 个主节点**；"架构设计"内部含 4 个子节点（蓝图、模块×最多 3、整合、程序组装），"研发"内部含 5 个阶段节点，细分共 **13 类节点**。
+主链路共 **6 个主节点**。“架构设计”内部有蓝图、模块、程序组装及整合，模块最多同时运行 3 个。蓝图可按需咨询专项顾问。“研发”内部含 5 个阶段节点。
 
 ```
 用户消息
@@ -95,7 +96,7 @@
 
 ## 三、节点 2：架构设计（v3 阶段化管线，`src/architecture/`）
 
-> 收：确认后的需求 + 平台快照 → 出：完整候选 `CandidateDraft`。持久化：`architecture.json` 的 `designProgressCheckpoint`。管线级状态 `DesignCheckpoint` 字段：`schemaVersion`（新建为 `3`）、`pipelineId`（UUID）、`bindingHash`/`schemaHash`（冻结输入与契约哈希，不符即作废）、`modelCalls`（≤25）、`revisionHash`、`assignmentHash`、`blueprint`/`modules[]`/`integration`（各节点状态）、`hash`（封印）、`repair?`（用户授权的 2 轮局部修复）。每节点状态 `DesignStageState`：`key`、`modelCalls`（≤5）、`sessionStartCalls`、`generation`、`sessionRef:{file}`、`result`、`resultHash`、`completedBy?`。
+> 接收确认后的需求与平台快照，交付 schema 3 候选。进度保存在 `architecture.json` 的 `designProgressCheckpoint`。新建检查点的 `schemaVersion` 为 6，`moduleLimit` 为 3–6，另存 `pipelineId`、`bindingHash/schemaHash`、累计 `modelCalls`、`revisionHash/assignmentHash`、`blueprint/modules/integration/consultations` 和检查点 `hash`。各节点按已保存的会话、成果、摘要与累计轮次恢复。授权和修复规则见[架构基线第 4 节](../ARCHITECTURE.md)。
 
 ### 2.1 子节点：蓝图（blueprint）
 
@@ -107,9 +108,9 @@
 | `draft.taskSpec` | `TaskSpecV1` | 任务规格 | 见节点 1 |
 | `platformSnapshot` | 平台快照 v4 | 公共工具、能力目录、验收适配器指南 | `platformHash:"9f86d081…0a08"` |
 | `designModelBudget` | `{limit,used,remaining,stageLimit}` | 预算事实提示 | `{ limit:25, used:0, remaining:25, stageLimit:5 }` |
-| `blueprintProtocol` / `pipelineStage` | 标识 | 协议与阶段标识 | `"module-boundaries-v2"` / `"blueprint"` |
+| `blueprintProtocol` / `pipelineStage` | 标识 | 协议与阶段标识 | `"module-handoff-v3"` / `"blueprint"` |
 
-**输出（最全形态）** `ArchitectureBlueprint`（`src/contracts/architecture-stages.d.mts:8`）：
+**输出**见 `src/contracts/architecture-stages.d.mts` 中的 `ArchitectureBlueprint`。
 
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
@@ -123,26 +124,27 @@
 | `global.selectionBasis` | 对象 | 选型依据 | `{ capacity:"单文件 20 MiB", process:"解析→分析→组装", quality:"条款分级输出", requirementIds:["req-001"], assumptions:["PDF 为文本型"] }` |
 | `global.connections[]` | `ConnectionDefinition` | 连接定义（本例无） | `[]` |
 | `modules[].id` | string | 模块编号 | `"contract-ingest"` |
-| `modules[].purpose` | string ≤2000 | 模块职责 | `"读取并解析合同 PDF，输出结构化条款文本"` |
+| `modules[].handoffText` | 非空白正文 ≤6000 码点 | 职责、输入、交付和例外 | `"按材料编号读取合同 PDF，逐份交付带来源的条款文本。遇到不可读页时标出页码并保留其他页的结果。"` |
 | `modules[].requirementIds[]` | string[] | 主责需求（全模块合计与需求清单不重不漏） | `["req-001","req-002"]` |
 | `modules[].dependsOn[]` | string[] | 依赖模块 | `[]`（clause-analysis 例：`["contract-ingest"]`） |
-| `modules[].inputs` / `outputs` | string ≤2000 | 输入/输出边界 | `"已上传的材料 ID 列表"` / `"逐份合同的条款文本 JSON"` |
 
 本例三个模块：`contract-ingest`（解析）、`clause-analysis`（风险分析，依赖 ingest）、`report-compose`（报告组装，依赖两者）。
 
-### 2.2 子节点：模块设计（module，×1–3）
+需求已确认专属操作时，蓝图可省略 `global.interaction.operations`，宿主绑定为 `true`。新专项派单为 `{topic,requirementIds,handoffText}`，顾问回复 `{handoffText,references}`。例如顾问建议“给每条风险附上页码，扫描件识别准确度留待验证”，再引用本组实际收到的需求或平台材料。v4/v5 咨询按原格式恢复，旧模块分工仍读取 `purpose/inputs/outputs`。
 
-**输入（最全形态）**（payload，`architecture-design-pipeline.mts:479-487`）：
+### 2.2 子节点：模块设计（module）
+
+**输入**由 `architecture-design-pipeline.mts` 按模块分工生成。
 
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
 | `assignment` | `BlueprintAssignment` | 本模块分工 | `clause-analysis` 分工行 |
-| `blueprint` / `blueprintHash` | 蓝图及其哈希 | 冻结蓝图 | `blueprintHash:"9f86d081…0a08"` |
+| `blueprint` / `blueprintHash` | 蓝图及其摘要 | v6 首包内联全局选择和各模块的编号、依赖，完整派单按路径读取 | `blueprintHash:"9f86d081…0a08"` |
 | `dependencyInterfaces[]` | `{moduleId,components,steps}` | 仅直接依赖模块的接口摘要 | `[{ moduleId:"contract-ingest", components:[…], steps:[{id,componentId,input,output,completion}] }]` |
 | `requirements[]` | `{id,text}` | 过滤后的正式需求 | 本模块主责两条 |
-| `designModelBudget` / `pipelineStage` | 共享字段 | 预算与阶段 | `stageLimit:5` / `"module:clause-analysis"` |
+| `designModelBudget` / `pipelineStage` | 共享字段 | 预算与阶段，模块编号由 `assignment.id` 提供 | `stageLimit:5` / `"module"` |
 
-**输出（最全形态）** `ArchitectureModule`（`architecture-stages.d.mts:9`）：
+**输出**见 [ArchitectureModule 类型](../src/contracts/architecture-stages.d.mts)。
 
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
@@ -185,7 +187,7 @@
 
 **输入**：`blueprint` + 全部已校验 `modules[]`（跨模块重名编号分配稳定全局编号）。
 
-**输出（最全形态）** `CandidateDraft`（`architecture-stages.d.mts:6`）：
+**输出**见 [CandidateDraft 类型](../src/contracts/architecture-stages.d.mts)。
 
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
@@ -402,7 +404,7 @@
 | --- | --- | --- | --- |
 | 1 需求澄清与确认 | 用户消息 + 材料 + 评估 | `RequirementDraft` + `TaskSpecV1` + `RequirementReceipt` | `requirements.json` |
 | 2.1 蓝图 | requirements + taskSpec + 平台快照 + 预算 | `ArchitectureBlueprint` | `architecture.json`→checkpoint.blueprint |
-| 2.2 模块 ×1–3 | assignment + blueprint + dependencyInterfaces + requirements | `ArchitectureModule` | →checkpoint.modules[] |
+| 2.2 模块（最多同时 3 个） | assignment + blueprint + dependencyInterfaces + requirements | `ArchitectureModule` | →checkpoint.modules[] |
 | 2.3 整合 | baseCandidate + baseHash + conflicts + policy | `{baseHash, updates[]}` | →checkpoint.integration |
 | 2.4 程序组装 | blueprint + modules | `CandidateDraft` | architecture.json 候选 |
 | 3 独立评审 | CandidateDraft + requirements + evidence + 平台 | `ArchitectureReview`（verdict） | →review/attempts |

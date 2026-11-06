@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
 import { designSubmissionSchema, designHash, validateDesign } from "../../src/architecture/architecture-contract.mjs";
-import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule,
+import { createArchitectureStageSchemas, architectureBlueprintWriter, readArchitectureBlueprintStructure, validateArchitectureBlueprint, validateArchitectureModule,
   assembleArchitectureCandidate, applyArchitectureIntegration, diagnoseBlueprintAssignments } from "../../src/architecture/architecture-design-stages.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { validDesign, validDraft } from "../helpers/architecture.mjs";
@@ -86,6 +86,22 @@ function obligationFixture() {
   return { ...context, moduleOptions: (index: number) => ({ ...context, blueprint: f.blueprint,
     assignment: f.blueprint.modules[index]!, dependencyModules: f.modules.slice(0, index) }) };
 }
+
+test("新蓝图省略已确认的操作开关时宿主绑定真值，冲突声明和缺字段的存档仍拒绝", () => {
+  const f = obligationFixture(), context = { ...f, textHandoffs: true };
+  const blueprint = structuredClone(f.blueprint);
+  blueprint.modules = blueprint.modules.map(({ id, dependsOn, requirementIds }) => ({ id, dependsOn, requirementIds, handoffText: "逐项核对已确认输入，交付统计结果。" }));
+  const schema = createArchitectureStageSchemas(context).blueprint;
+  const writer = architectureBlueprintWriter(schema, context);
+  const omitted = structuredClone(blueprint); Reflect.deleteProperty(omitted.global.interaction!, "operations");
+  assert.ok(!writer.parameters.properties!.global!.properties!.interaction!.required!.includes("operations"));
+  assert.deepEqual(writer.validate(omitted), blueprint);
+  rejected(() => readArchitectureBlueprintStructure(omitted, context), "interaction.operations");
+  rejected(() => writer.validate(changed(blueprint, copy => { copy.global.interaction!.operations = false; })), "interaction.operations");
+  const undecided = architectureBlueprintWriter(schema, { ...context, draft: { interaction: { operations: [] } } });
+  rejected(() => undecided.validate(omitted), "interaction.operations");
+  assert.deepEqual(undecided.validate(blueprint), blueprint);
+});
 
 test("模块提交前拒绝自己负责的验收类型、真实动作、原阶段及必填清单缺项", async t => {
   const cases: { name: string; index: number; path: string; change(module: ArchitectureModule): void }[] = [

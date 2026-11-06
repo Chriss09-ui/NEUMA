@@ -190,7 +190,7 @@ export function architectureModuleSubmissionSchema(schema: StageSchema, assignme
 }
 
 /** Each wire schema derives its business fields from this build's actual final contract. */
-export function createArchitectureStageSchemas({ candidateSchema, requirements = [], legacyBlueprint = false, moduleLimit }: StageSchemaOptions) {
+export function createArchitectureStageSchemas({ candidateSchema, requirements = [], legacyBlueprint = false, textHandoffs = false, moduleLimit }: StageSchemaOptions) {
   const source = copy(candidateSchema, "candidateSchema", 2 * 1024 * 1024);
   if (!source.properties || !Array.isArray(source.required)) throw new TypeError("架构阶段需要完整候选提交契约");
   const properties: Record<string, StageSchema> = Object.fromEntries(Object.entries(source.properties).filter(([key]) => !PART_FIELDS.some(field => field === key)));
@@ -202,10 +202,12 @@ export function createArchitectureStageSchemas({ candidateSchema, requirements =
   if (!Number.isSafeInteger(modulesMaximum) || modulesMaximum < 1 || modulesMaximum > 6) throw new TypeError("模块分派上限无效");
   const responsibilityLimit = moduleLimit === undefined ? maximum : Math.min(maximum, Math.max(24, Math.ceil(ids.length / modulesMaximum)));
   const blueprint = object({ global: object(properties, source.required.filter((key) => !PART_FIELDS.some(field => field === key))), modules: list(object({
-    id: identifier, purpose: text(2000), requirementIds: list(requirementId, 1, responsibilityLimit),
+    id: identifier, ...(textHandoffs ? {} : { purpose: text(2000) }), requirementIds: list(requirementId, 1, responsibilityLimit),
     ...(legacyBlueprint ? { componentIds: list(identifier, 1, source.properties!.components!.maxItems ?? 80),
       stepIds: list(identifier, 1, source.properties!.steps!.maxItems ?? 80) } : {}),
-    dependsOn: list(identifier, 0, modulesMaximum - 1), inputs: text(2000), outputs: text(2000),
+    dependsOn: list(identifier, 0, modulesMaximum - 1),
+    ...(textHandoffs ? { handoffText: { ...text(6000), pattern: "\\S", description: "用一段自然语言向本模块交接职责、上游输入、预期交付、例外及完成条件。" } }
+      : { inputs: text(2000), outputs: text(2000) }),
   }), 1, modulesMaximum) });
   const partProperties: Record<string, StageSchema> = Object.fromEntries(PART_FIELDS.filter((key) => source.properties![key]).map((key) =>
     [key, { ...source.properties![key], minItems: 0 }]));
@@ -224,10 +226,11 @@ export function createArchitectureStageSchemas({ candidateSchema, requirements =
 }
 
 /** Read persisted structural evidence without pretending it passed today's semantic checks. */
-export function readArchitectureBlueprintStructure(value: unknown, { candidateSchema, requirements = [], legacyBlueprint = false, moduleLimit }: StageSchemaOptions): ArchitectureBlueprint {
+export function readArchitectureBlueprintStructure(value: unknown, context: StageSchemaOptions): ArchitectureBlueprint {
+  const { candidateSchema, requirements = [], legacyBlueprint = false, moduleLimit } = context;
   const allocation = diagnoseBlueprintAssignments(value, requirements, moduleLimit);
   let blueprint: ArchitectureBlueprint;
-  try { blueprint = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements, legacyBlueprint, moduleLimit }).blueprint, "blueprint") as ArchitectureBlueprint; }
+  try { blueprint = checked(value, createArchitectureStageSchemas(context).blueprint, "blueprint") as ArchitectureBlueprint; }
   catch (error) {
     if (error instanceof InputError && allocation) Object.assign(error, { blueprintAllocation: allocation });
     throw error;
@@ -255,6 +258,23 @@ export function validateArchitectureBlueprint(value: unknown, context: StageSche
   return blueprint;
 }
 
+/** Bind confirmed actions on submission only. Stored blueprints always require their full original shape. */
+export function architectureBlueprintWriter(schema: StageSchema, context: StageSchemaOptions) {
+  const operations = objectFields(objectFields(context.draft).interaction).operations;
+  if (!context.textHandoffs || !Array.isArray(operations) || !operations.length)
+    return { parameters: schema, validate: (value: unknown) => validateArchitectureBlueprint(value, context) };
+  const parameters = structuredClone(schema);
+  const interaction = parameters.properties!.global!.properties!.interaction!;
+  interaction.required = interaction.required!.filter(key => key !== "operations");
+  interaction.properties!.operations = { type: "boolean", const: true, description: "已确认专属操作，宿主自动绑定为 true，可省略。" };
+  return { parameters, validate(value: unknown) {
+    const input = copy(value, "blueprint");
+    const settings = objectFields(objectFields(objectFields(input).global).interaction);
+    if (!Object.hasOwn(settings, "operations")) settings.operations = true;
+    return validateArchitectureBlueprint(input, context);
+  } };
+}
+
 function moduleOptions(blueprint: ArchitectureBlueprint, assignment: BlueprintAssignment, dependencyModules: ArchitectureModule[], legacyBlueprint: boolean) {
   const frozen = blueprint.modules.find((entry) => entry.id === assignment?.id);
   if (!frozen || !isDeepStrictEqual(frozen, assignment)) fail("module.assignment", "invalid_reference", "模块分工必须逐字匹配当前冻结蓝图。");
@@ -275,10 +295,10 @@ function moduleOptions(blueprint: ArchitectureBlueprint, assignment: BlueprintAs
 type ModuleContext = StageSchemaOptions & { blueprint: ArchitectureBlueprint; assignment: BlueprintAssignment; dependencyModules?: ArchitectureModule[] };
 export function readArchitectureModuleStructure(value: unknown, context: ModuleContext): ArchitectureModule { return readModule(value, context, false); }
 function readModule(value: unknown, context: ModuleContext, semantic: boolean): ArchitectureModule {
-  const { blueprint, assignment, candidateSchema, requirements = [], legacyBlueprint = false, dependencyModules = [], capabilities, moduleLimit } = context;
-  const frozenBlueprint = readArchitectureBlueprintStructure(blueprint, { candidateSchema, requirements, legacyBlueprint, moduleLimit });
+  const { blueprint, assignment, legacyBlueprint = false, dependencyModules = [], capabilities } = context;
+  const frozenBlueprint = readArchitectureBlueprintStructure(blueprint, context);
   const { frozen, componentIds, stepIds, dependencies } = moduleOptions(frozenBlueprint, assignment, dependencyModules, legacyBlueprint);
-  const module = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements, legacyBlueprint }).module, "module") as ArchitectureModule;
+  const module = checked(value, createArchitectureStageSchemas(context).module, "module") as ArchitectureModule;
   const issues: (StageSemanticIssue & { missingReferences?: string[] })[] = [];
   let total = 0;
   const add = (issue: StageSemanticIssue & { missingReferences?: string[] }) => { total++; if (issues.length < 64) issues.push(issue); };
@@ -353,22 +373,22 @@ export function validateArchitectureModule(value: unknown, context: StageSchemaO
 /** Merge verified partial results without asking another model to retype a complete design. */
 export function assembleArchitectureCandidate(options: StageAssemblyOptions) { return assembleCandidate(options, true); }
 export function readArchitectureAssemblyStructure(options: StageAssemblyOptions) { return assembleCandidate(options, false); }
-function assembleCandidate({ blueprint, modules, candidateSchema, requirements = [], mergeCapabilityReasons = true,
-  evidence = [], confirmedRequirementContext, deferredVerifications, legacyBlueprint = false, draft, capabilities, moduleLimit }: StageAssemblyOptions, semantic: boolean) {
+function assembleCandidate(options: StageAssemblyOptions, semantic: boolean) {
+  const { blueprint, modules, candidateSchema, requirements = [], mergeCapabilityReasons = true,
+    evidence = [], confirmedRequirementContext, deferredVerifications, legacyBlueprint = false } = options;
   const checkBlueprint = semantic ? validateArchitectureBlueprint : readArchitectureBlueprintStructure;
   const checkModule = semantic ? validateArchitectureModule : readArchitectureModuleStructure;
-  const frozen = checkBlueprint(blueprint, { candidateSchema, requirements, legacyBlueprint, draft, capabilities, moduleLimit });
+  const frozen = checkBlueprint(blueprint, options);
   const source = copy(modules, "modules", 2 * 1024 * 1024);
   equalIds(unique(source, "modules", "moduleId"), frozen.modules.map((entry) => entry.id), "modules");
   const verified: ArchitectureModule[] = [];
   // Validate upstream results before using their actual interfaces for downstream references.
   for (const layer of architectureModuleLayers(frozen)) for (const assignment of layer)
     verified.push(checkModule(source.find(entry => entry.moduleId === assignment.id), {
-      blueprint: frozen, assignment, candidateSchema, requirements, legacyBlueprint, dependencyModules: verified, draft, capabilities, moduleLimit,
+      ...options, blueprint: frozen, assignment, dependencyModules: verified,
     }));
   const ordered = scopeLocalIds(frozen.modules.map(assignment => verified.find(module => module.moduleId === assignment.id)!), legacyBlueprint);
-  if (semantic) assertStageSemantics(verified.flatMap(module => architectureModuleObligationIssues(module, frozen,
-    { candidateSchema, requirements, legacyBlueprint, draft, capabilities, moduleLimit, deferredVerifications }, verified)));
+  if (semantic) assertStageSemantics(verified.flatMap(module => architectureModuleObligationIssues(module, frozen, options, verified)));
   if (mergeCapabilityReasons) for (const module of ordered)
     module.decisions = normalizeArchitectureDecisionReferences(module.decisions, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const candidate: Partial<CandidateDraft> = copy(frozen.global), conflicts: ArchitectureConflict[] = [];
@@ -436,14 +456,13 @@ function target(candidate: unknown, path: string) {
 type IntegrationContext = StageAssemblyOptions & { candidate: CandidateDraft; conflicts?: ArchitectureConflict[] };
 export function applyArchitectureIntegration(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, true); }
 export function readArchitectureIntegrationStructure(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, false); }
-function applyIntegration(value: unknown, { candidate, conflicts = [], candidateSchema, requirements = [], blueprint, modules, mergeCapabilityReasons = true,
-  evidence = [], confirmedRequirementContext, deferredVerifications, legacyBlueprint = false, draft, capabilities, moduleLimit }: IntegrationContext, semantic: boolean) {
-  const input = checked(value, createArchitectureStageSchemas({ candidateSchema, requirements }).integration, "integration") as { baseHash: string; updates: { path: string; value: unknown }[] };
+function applyIntegration(value: unknown, context: IntegrationContext, semantic: boolean) {
+  const { candidate, conflicts = [], candidateSchema, requirements = [], blueprint, modules, legacyBlueprint = false } = context;
+  const input = checked(value, createArchitectureStageSchemas(context).integration, "integration") as { baseHash: string; updates: { path: string; value: unknown }[] };
   const original = copy(candidate), result = copy(candidate);
   if (input.baseHash !== designHash(original)) fail("integration.baseHash", "invalid_reference", "整合结果不属于当前已拼装候选。");
   // Reconstruct the base from its checked owners, rather than trusting a caller-supplied candidate.
-  const assembled = assembleCandidate({ blueprint, modules, candidateSchema, requirements, mergeCapabilityReasons,
-    evidence, confirmedRequirementContext, deferredVerifications, legacyBlueprint, draft, capabilities, moduleLimit }, semantic);
+  const assembled = assembleCandidate(context, semantic);
   if (!isDeepStrictEqual(original, assembled.candidate) || !isDeepStrictEqual(conflicts, assembled.conflicts))
     fail("integration.baseHash", "invalid_reference", "整合基底或冲突清单与当前模块成果不一致。");
   const permitted = new Set(conflicts.map((entry) => entry.path)), changed: string[] = [];

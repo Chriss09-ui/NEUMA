@@ -120,9 +120,9 @@ function modelFactory(state:ModelFixtureState) {
             assert.ok(largeCandidate.schemaVersion === 3);
             const { components, steps, capabilities, failureHandling, decisions, coverage, acceptance, unknowns, platformClaims, ...global } = largeCandidate;
             const specs = requirements.filter(row => row.id.startsWith("spec_")), core = requirements.filter(row => !row.id.startsWith("spec_"));
-            largeBlueprint = { global, modules: [{ id: "core", purpose: "实现转换与宿主交付", requirementIds: core.map(row => row.id), dependsOn: [], inputs: "文字", outputs: "转换结果与产物" },
-              ...Array.from({ length: 5 }, (_, i) => ({ id: `capacity_${i}`, purpose: `逐项核对容量要求组${i}`, requirementIds: specs.slice(i * 24, i * 24 + 24).map(row => row.id),
-                dependsOn: ["core"], inputs: "已转换结果", outputs: "本组要求的核对结果" }))] };
+            largeBlueprint = { global, modules: [{ id: "core", handoffText: "接收文字，交付转换结果与产物。", requirementIds: core.map(row => row.id), dependsOn: [] },
+              ...Array.from({ length: 5 }, (_, i) => ({ id: `capacity_${i}`, handoffText: `接收已转换结果，逐项核对第${i}组的容量要求并交付核对结果。`,
+                requirementIds: specs.slice(i * 24, i * 24 + 24).map(row => row.id), dependsOn: ["core"] }))] };
             await tools.submit_architecture_blueprint!.execute("blueprint", largeBlueprint);
           } else if (stage === "module") {
             assert.ok(largeCandidate && largeBlueprint);
