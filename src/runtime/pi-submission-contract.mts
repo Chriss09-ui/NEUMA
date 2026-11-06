@@ -1,6 +1,7 @@
 import { Ajv } from "ajv";
 import type { ValidateFunction } from "ajv";
 import type { ToolSchema } from "../contracts/tools.mjs";
+import { modelSubmissionArguments } from "./model-submission-arguments.mjs";
 import { objectFields, isArray, isRecord } from "./type-boundary.mjs";
 interface SubmissionTool { name: string; parameters: object }
 
@@ -49,12 +50,16 @@ export function readPiStructuredSubmission<T extends SubmissionTool>(raw: unknow
     && (Object.hasOwn(value, "name") || Object.hasOwn(value, "tool"))) {
     named = { name: value.name ?? value.tool, arguments: value.arguments };
   }
+  const match = (tool: T, input: unknown) => {
+    const args = modelSubmissionArguments(input, tool.parameters as ToolSchema);
+    return validate(args, tool.parameters) ? { tool, args } : null;
+  };
   if (named) {
     if (!named || isArray(named) || Object.keys(objectFields(named)).length !== 2 || !Object.hasOwn(named, "name")
       || !Object.hasOwn(named, "arguments")) return null;
     const tool = tools.find((item) => item.name === objectFields(named).name);
-    return tool && validate(objectFields(named).arguments, tool.parameters) ? { tool, args: objectFields(named).arguments } : null;
+    return tool ? match(tool, objectFields(named).arguments) : null;
   }
-  const matches = tools.filter((tool) => validate(value, tool.parameters));
-  return matches.length === 1 ? { tool: matches[0]!, args: value } : null;
+  const matches = tools.map(tool => match(tool, value)).filter(result => result !== null);
+  return matches.length === 1 ? matches[0]! : null;
 }

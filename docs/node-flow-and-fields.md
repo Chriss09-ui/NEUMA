@@ -96,7 +96,7 @@
 
 ## 三、节点 2：架构设计（v3 阶段化管线，`src/architecture/`）
 
-> 接收确认后的需求与平台快照，交付 schema 3 候选。进度保存在 `architecture.json` 的 `designProgressCheckpoint`。新建检查点的 `schemaVersion` 为 6，`moduleLimit` 为 3–6，另存 `pipelineId`、`bindingHash/schemaHash`、累计 `modelCalls`、`revisionHash/assignmentHash`、`blueprint/modules/integration/consultations` 和检查点 `hash`。各节点按已保存的会话、成果、摘要与累计轮次恢复。授权和修复规则见[架构基线第 4 节](../ARCHITECTURE.md)。
+> 接收确认后的需求与平台快照，交付 schema 3 候选。进度保存在 `architecture.json` 的 `designProgressCheckpoint`。新建检查点的 `schemaVersion` 为 7，`moduleLimit` 为 3–6，另存 `pipelineId`、`bindingHash/schemaHash`、累计 `modelCalls`、`revisionHash/assignmentHash`、`blueprint/modules/integration/consultations` 和检查点 `hash`。各节点按已保存的会话、成果、摘要与累计轮次恢复。授权和修复规则见[架构基线第 4 节](../ARCHITECTURE.md)。
 
 ### 2.1 子节点：蓝图（blueprint）
 
@@ -128,6 +128,8 @@
 | `modules[].requirementIds[]` | string[] | 主责需求（全模块合计与需求清单不重不漏） | `["req-001","req-002"]` |
 | `modules[].dependsOn[]` | string[] | 依赖模块 | `[]`（clause-analysis 例：`["contract-ingest"]`） |
 
+v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `global.rationale`。下表所列 `global.*` 是程序持久化后的路径，完整 `global` 输入也可使用。
+
 本例三个模块：`contract-ingest`（解析）、`clause-analysis`（风险分析，依赖 ingest）、`report-compose`（报告组装，依赖两者）。
 
 需求已确认专属操作时，蓝图可省略 `global.interaction.operations`，宿主绑定为 `true`。新专项派单为 `{topic,requirementIds,handoffText}`，顾问回复 `{handoffText,references}`。例如顾问建议“给每条风险附上页码，扫描件识别准确度留待验证”，再引用本组实际收到的需求或平台材料。v4/v5 咨询按原格式恢复，旧模块分工仍读取 `purpose/inputs/outputs`。
@@ -139,8 +141,8 @@
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
 | `assignment` | `BlueprintAssignment` | 本模块分工 | `clause-analysis` 分工行 |
-| `blueprint` / `blueprintHash` | 蓝图及其摘要 | v6 首包内联全局选择和各模块的编号、依赖，完整派单按路径读取 | `blueprintHash:"9f86d081…0a08"` |
-| `dependencyInterfaces[]` | `{moduleId,components,steps}` | 仅直接依赖模块的接口摘要 | `[{ moduleId:"contract-ingest", components:[…], steps:[{id,componentId,input,output,completion}] }]` |
+| `blueprint` / `blueprintHash` | 蓝图及其摘要 | v6 及以后首包内联全局选择和各模块的编号、依赖，完整派单按路径读取 | `blueprintHash:"9f86d081…0a08"` |
+| `dependencyInterfaces[]` | `{moduleId,components,steps,handoffText?}` | 直接上游的接口和交接正文 | `[{ moduleId:"contract-ingest", components:[…], steps:[{id,componentId,input,output,completion}] }]` |
 | `requirements[]` | `{id,text}` | 过滤后的正式需求 | 本模块主责两条 |
 | `designModelBudget` / `pipelineStage` | 共享字段 | 预算与阶段，模块编号由 `assignment.id` 提供 | `stageLimit:5` / `"module"` |
 
@@ -151,6 +153,9 @@
 | `moduleId` | string | 等于分工 id | `"clause-analysis"` |
 | `blueprintHash` | sha256 | 绑定蓝图 | `"9f86d081…0a08"` |
 | `instructions` | string ≤3000 | 模块补充指令 | `"按违约/赔偿/保密三类输出 {clause,risk,level}"` |
+| `handoffText` | 非空白正文 ≤6000 码点 | 给下游和整合节点的设计说明 | `"扫描件缺页时保留可读页，列出缺页页码。"` |
+| `components[].requirementIds[]` | 需求编号 | 声明本组件负责的需求，宿主据此生成覆盖清单 | `["req-003"]` |
+| `dependencyCoverage[]` | 上游组件引用 | 仅用于主责需求引用直接上游组件 | `[{moduleId:"contract-ingest",id:"parser",requirementIds:["req-003"]}]` |
 | `components[].id/purpose/necessity/inputs/outputs` | 组件 | 内部组件 | `{ id:"risk-classifier", purpose:"条款风险分级", necessity:"分级是交付标准", inputs:"条款文本", outputs:"{level:'高|中|低'}" }` |
 | `steps[].id` | string | 步骤编号（局部唯一） | `"step-score"` |
 | `steps[].componentId` | `StageReference` | 所属组件（跨模块用 `{moduleId,id}`） | `"risk-classifier"` 或 `{ moduleId:"contract-ingest", id:"step-parse" }` |
@@ -159,7 +164,7 @@
 | `capabilities[].id/status/reason` | 能力声明 | status：`available`/`needs_connection`/`needs_development`/`unverified` | `{ id:"pdf-render", status:"available", reason:"平台公共材料工具已具备" }` |
 | `failureHandling[].scenario/response` | 失败处理 | `{ scenario:"扫描件无文本层", response:"标记需 OCR，不入风险统计" }` | — |
 | `decisions[].*` | 决策 | `{ id:"dec-01", problem:"分级规则", choice:"三级", alternatives:[{option:"五级",reason:"过细"}], reason:"用户只要高/中/低", evidenceIds:["ev-01"], uncertainties:[] }` | — |
-| `coverage[].requirementId/componentIds/verification` | 需求覆盖 | 与分工 requirementIds 相等 | `{ requirementId:"req-003", componentIds:["risk-classifier"], verification:"对照冻结用例核对分级输出" }` |
+| `coverage[].requirementId/componentIds/verification` | 规范覆盖或旧格式输入 | 新格式由明确组件关联生成，与主责编号相等，每条另有验收 | `{ requirementId:"req-003", componentIds:["risk-classifier"], verification:"对照冻结用例核对分级输出" }` |
 | `acceptance[].*` | 验收场景 | `{ id:"acc-01", kind:"success", requirementIds:["req-003"], input:"含违约条款的样例合同", expected:"输出 level=高 的风险项", verification:{ stage:"development", owner:"generated-code", adapterId:"action" } }`；kind 另有 `missing_input`/`boundary`/`tool_failure` | — |
 | `unknowns[].question/blocking/resolution` | 未知项 | `{ question:"扫描件占比未知", blocking:false, resolution:"运行期统计" }` | — |
 | `platformClaims[]` | 平台声明 | 关联平台事实字段 | `[{ id:"claim-01", source:"runtimeCapabilities", path:"/tools/pdfRender", expected:true, decisionIds:["dec-01"], acceptanceIds:["acc-01"] }]` |
@@ -180,6 +185,7 @@
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
 | `baseHash` | sha256 | 必须与当前组装候选一致 | `"9f86d081…0a08"` |
+| `path` / `value` | 单处替换 | 与当前 `baseHash` 一起提交，和批量格式互斥 | `"/instructions"` |
 | `updates[].path` | JSON Pointer（0–24 项） | 只能指向已存在字段，根字段限于派生字段或冲突许可路径 | `"/instructions"` |
 | `updates[].value` | 任意 JSON | 替换值 | `"合并后的总指令：解析→分级→组装报告"` |
 
@@ -235,6 +241,7 @@
 | `checks[].id` | 六/八项 | 基础六项 `requirements`、`feasibility`、`minimality`、`interfaces`、`failure_handling`、`verification`；v3 另加 `requirement_sufficiency`、`acceptance_quality` | `"requirements"` |
 | `checks[].passed` | boolean | 该项是否通过 | `true` |
 | `checks[].evidence` | string ≤4000 | 判断依据 | `"req-001~006 均有 coverage 行"` |
+| `issue` | 单项问题 | 多项用 `issues`，明确 `pass` 可省略问题清单 | 证据规则同下行 |
 | `issues[].id/blocking/description/remedy` | 问题 | `{ id:"iss-01", blocking:false, description:"unknowns 未给占比来源", remedy:"运行期统计即可" }` | — |
 | `issues[].checkId/kind/candidatePaths/references/factClaims` | 证据属性 | kind：`design`/`platform`/`context`；candidatePaths 为 JSON Pointer | `candidatePaths:["/unknowns/0"]` |
 | `summary` | string ≤4000 | 结论摘要 | `"方案可行、最小，验收可区分质量"` |

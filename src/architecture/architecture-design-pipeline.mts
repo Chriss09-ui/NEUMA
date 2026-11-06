@@ -9,7 +9,7 @@ type DesignStage = "blueprint" | "module" | "integration" | "consultation";
 interface DesignStageState { key: string; modelCalls: number; sessionStartCalls: number; generation: number; sessionRef: { file: string } | null;
   result: unknown; resultHash: string | null; completedBy?: "program" }
 interface ConsultationState extends DesignStageState { assignment: BlueprintConsultationAssignment }
-export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5 | 6; moduleLimit?: number; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
+export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7; moduleLimit?: number; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
   revisionHash: string | null; assignmentHash: string | null; assemblyVersion?: 2; blueprint: DesignStageState; modules: DesignStageState[]; integration: DesignStageState; hash: string;
   consultations?: ConsultationState[];
   validationRepair?: { version: 1; sourceVersion: number; source: DesignCheckpoint; targets: string[] };
@@ -36,6 +36,7 @@ interface PipelineOptions { record: Pick<StoredArchitectureRecord, "version"> & 
   validateHistory?: (storage: SessionStorage) => unknown | Promise<unknown> }
 const rows = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
+import { modelUpdateBatch, singleUpdateSchema } from "../runtime/model-submission-arguments.mjs";
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
@@ -47,7 +48,7 @@ import { architectureModuleObligations } from "./architecture-module-obligations
 import { copyArchitectureReviewJson, reviewCheckpointObject } from "./architecture-review-binding.mjs";
 import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule, architectureModuleLayers,
   assembleArchitectureCandidate, applyArchitectureIntegration, readArchitectureBlueprintStructure, readArchitectureModuleStructure,
-  readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureBlueprintWriter, architectureModuleCapacities, architectureModuleSubmissionSchema } from "./architecture-design-stages.mjs";
+  readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureBlueprintWriter, architectureModuleCapacities, architectureModuleSubmissionSchema, materializeModuleCoverage } from "./architecture-design-stages.mjs";
 import { BLUEPRINT_CONSULTATION_LIMIT, BLUEPRINT_CONSULTATION_CALL_LIMIT, blueprintConsultationSchemas,
   blueprintConsultationContext, validateBlueprintConsultationAssignment,
   validateBlueprintConsultationResult } from "./architecture-blueprint-consultation.mjs";
@@ -72,7 +73,7 @@ const sealed = <T extends object>(checkpoint: T & { hash?: string }): Omit<T, "h
 };
 
 function stageOptions(checkpoint: Pick<DesignCheckpoint, "schemaVersion" | "moduleLimit">) {
-  return { legacyBlueprint: checkpoint.schemaVersion < 3, textHandoffs: checkpoint.schemaVersion === 6, moduleLimit: checkpoint.moduleLimit };
+  return { legacyBlueprint: checkpoint.schemaVersion < 3, textHandoffs: checkpoint.schemaVersion >= 6, compactSubmissions: checkpoint.schemaVersion >= 7, moduleLimit: checkpoint.moduleLimit };
 }
 
 // Limits belong to a persisted attempt; deploying new defaults must not refill old attempts.
@@ -83,8 +84,8 @@ export function architectureDesignCallLimits(input: unknown) {
     || continuation.authorization !== "explicit-user-test-retry")) throw invalid();
   const extra = checkpoint.validationContinuation === undefined ? 0 : 1;
   if (checkpoint?.schemaVersion === 1) return { stage: 3, pipeline: 15 + extra };
-  if ((checkpoint.schemaVersion === 5 || checkpoint.schemaVersion === 6) && (!isInteger(checkpoint.moduleLimit) || checkpoint.moduleLimit < 3 || checkpoint.moduleLimit > 6)) throw invalid();
-  if ([2, 3, 4, 5, 6].some(version => version === checkpoint.schemaVersion)) return { stage: ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, pipeline: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT + extra };
+  if (Number(checkpoint.schemaVersion) >= 5 && (!isInteger(checkpoint.moduleLimit) || checkpoint.moduleLimit < 3 || checkpoint.moduleLimit > 6)) throw invalid();
+  if ([2, 3, 4, 5, 6, 7].some(version => version === checkpoint.schemaVersion)) return { stage: ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, pipeline: ARCHITECTURE_DESIGN_PIPELINE_CALL_LIMIT + extra };
   throw invalid();
 }
 
@@ -141,7 +142,7 @@ function checkpointState(input: unknown): asserts input is DesignCheckpoint {
   const keys = [...checkpointKeys, ...(Number(checkpoint.schemaVersion) >= 4 ? ["consultations"] : []),
     ...(Number(checkpoint.schemaVersion) >= 5 ? ["moduleLimit"] : []), ...["repair", "assemblyVersion", "validationRepair", "validationContinuation"].filter(key => Object.hasOwn(checkpoint, key))];
   if (!exact(checkpoint, keys) || Object.hasOwn(checkpoint, "assemblyVersion") && checkpoint.assemblyVersion !== 2
-    || ![1, 2, 3, 4, 5, 6].some(version => version === checkpoint.schemaVersion) || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
+    || ![1, 2, 3, 4, 5, 6, 7].some(version => version === checkpoint.schemaVersion) || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
     || !hash(checkpoint.hash) || checkpoint.hash !== sealed(checkpoint).hash
     || checkpoint.revisionHash !== null && !hash(checkpoint.revisionHash)
     || checkpoint.assignmentHash !== null && !hash(checkpoint.assignmentHash)
@@ -153,7 +154,7 @@ function checkpointState(input: unknown): asserts input is DesignCheckpoint {
   for (const item of consultations) {
     if (!exact(item, [...stageKeys, "assignment"])) throw invalid();
     const { assignment, ...entry } = item;
-    validateBlueprintConsultationAssignment(assignment, undefined, blueprintConsultationSchemas(checkpoint.schemaVersion === 6).assignment);
+    validateBlueprintConsultationAssignment(assignment, undefined, blueprintConsultationSchemas(Number(checkpoint.schemaVersion) >= 6).assignment);
     stageState(entry, BLUEPRINT_CONSULTATION_CALL_LIMIT + (objectFields(checkpoint.repair).stage === "consultation"
       && objectFields(checkpoint.repair).key === entry.key ? ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT : 0));
     if (entry.key !== `advice_${designHash(assignment).slice(0, 24)}` || entry.generation !== 0 || entry.sessionStartCalls !== 0) throw invalid();
@@ -360,7 +361,8 @@ function inputs({ context, binding }: { context: DesignPipelineContext; binding:
   const schemas = createArchitectureStageSchemas(context);
   const consultations = blueprintConsultationSchemas(context.textHandoffs === true);
   return { schemas, consultations, schemaHash: designHash({ candidateSchema: context.candidateSchema, schemas,
-    ...(context.textHandoffs ? { consultations } : {}) }), bindingHash: designHash(copy(binding)) };
+    ...(context.textHandoffs ? { consultations } : {}),
+    ...(context.compactSubmissions ? { blueprintSubmission: architectureBlueprintWriter(schemas.blueprint, context).parameters, integrationSubmission: singleUpdateSchema(schemas.integration) } : {}) }), bindingHash: designHash(copy(binding)) };
 }
 
 /** Existing but invalid progress must fail closed, rather than replenish a node's budget. */
@@ -471,7 +473,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   forceIntegration = false, validateProgramCandidate = value => value, validateAssembledCandidate, validateHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
   if (typeof runRole !== "function" || typeof onSave !== "function" || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) throw invalid();
   const saved = readArchitectureDesignProgress(record, { context, binding });
-  const fresh = { schemaVersion: 6 as const, moduleLimit: Math.min(6, Math.max(3, Math.ceil(context.requirements.length / 24))) };
+  const fresh = { schemaVersion: 7 as const, moduleLimit: Math.min(6, Math.max(3, Math.ceil(context.requirements.length / 24))) };
   context = { ...context, ...stageOptions(saved ?? fresh) };
   if (context.moduleLimit === undefined) delete context.moduleLimit;
   const { schemas, consultations, schemaHash, bindingHash } = inputs({ context, binding });
@@ -724,7 +726,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   // A saved dispatch is an obligation; finish it before asking the coordinator for another decision.
   await runConsultations((checkpoint.consultations ?? []).filter(entry => !complete(entry)));
   const writer = architectureBlueprintWriter(schemas.blueprint, context);
-  const { textHandoffs: _textHandoffs, ...blueprintContext } = context;
+  const { textHandoffs: _textHandoffs, compactSubmissions: _compactSubmissions, ...blueprintContext } = context;
   const blueprintResult = await runStage("blueprint", "blueprint", { ...blueprintContext, ...(checkpoint.schemaVersion >= 4 ? { consultations: analyses() } : {}) }, writer.parameters, writer.validate);
   if (handoff(blueprintResult)) return blueprintResult;
   const blueprint = validateArchitectureBlueprint(blueprintResult, context);
@@ -754,21 +756,23 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     const settled = await Promise.allSettled(layer.map(assignment => {
       const dependencyModules = checkedModules(checkpoint, blueprint, context).filter(module => assignment.dependsOn.includes(module.moduleId));
       const dependencyInterfaces = dependencyModules.map(module => ({ moduleId: module.moduleId,
-        components: module.components, steps: module.steps.map(({ id, componentId, input, output, completion }) => ({ id, componentId, input, output, completion })) }));
-      const parameters = architectureModuleSubmissionSchema(schemas.module, assignment, capacities[assignment.id]!);
+        ...(module.handoffText ? { handoffText: module.handoffText } : {}), components: module.components, steps: module.steps.map(({ id, componentId, input, output, completion }) => ({ id, componentId, input, output, completion })) }));
+      const parameters = architectureModuleSubmissionSchema(schemas.moduleSubmission ?? schemas.module, assignment, capacities[assignment.id]!);
       return runStage("module", assignment.id,
-        { ...facts, assignment, blueprint, blueprintHash: designHash(blueprint), moduleCapacity: capacities[assignment.id],
+        { ...facts, assignment, blueprint, blueprintHash: designHash(blueprint),
+          ...(context.compactSubmissions ? { moduleReturnInstruction: "写一段handoffText；在负责的components上标requirementIds，直接上游组件才用dependencyCoverage。省略coverage，宿主按这些编号生成；acceptance明确引用每条主责需求。" } : {}), moduleCapacity: capacities[assignment.id],
           moduleObligations: obligations[assignment.id],
           requirementScope: { moduleId: assignment.id, ownedRequirementIds: [...assignment.requirementIds],
             referenceOnly: blueprint.modules.filter(owner => owner.id !== assignment.id).map(owner => ({ moduleId: owner.id, requirementIds: [...owner.requirementIds] })),
-            instruction: "coverage与acceptance[*].requirementIds只能登记ownedRequirementIds；referenceOnly列出其他模块主责，供理解接口、配合实现或测试，不能在本模块登记覆盖或验收。后续义务的主责按其单独的requirementId查本表；requirementIds只是关联的原始需求，不转移主责。跨模块验证由主责模块保留完整检查，本模块仍须提交自己负责要求的具体测试。" },
+            instruction: (context.compactSubmissions ? "组件关联与验收只能登记ownedRequirementIds；" : "coverage与acceptance[*].requirementIds只能登记ownedRequirementIds；") + "referenceOnly列出其他模块主责，供理解接口、配合实现或测试，不能在本模块登记覆盖或验收。后续义务的主责按其单独的requirementId查本表；requirementIds只是关联的原始需求，不转移主责。跨模块验证由主责模块保留完整检查，本模块仍须提交自己负责要求的具体测试。" },
           ...(!context.legacyBlueprint ? { dependencyInterfaces } : {}),
           requirements: context.requirements.filter(item => assignment.requirementIds.includes(item.id)) },
         parameters, value => {
           const feedback = architectureToolValidation(value, parameters, { root: "module" });
           if (!feedback.valid) throw Object.assign(new InputError("模块超出已分配的结构或容量范围：" + JSON.stringify(feedback)), {
             validationIssue: feedback.issues[0], validationIssues: feedback.issues });
-          return validateArchitectureModule(value, { ...context, blueprint, assignment, dependencyModules });
+          const canonical = context.compactSubmissions ? materializeModuleCoverage(value, assignment, parameters) : value;
+          return validateArchitectureModule(canonical, { ...context, blueprint, assignment, dependencyModules });
         });
     }));
     active();
@@ -787,14 +791,18 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     }
   }
   const integrationContext = { ...context, ...assembled, blueprint, modules, mergeCapabilityReasons };
+  const moduleHandoffs = modules.flatMap(item => item.handoffText ? [{ moduleId: item.moduleId, handoffText: item.handoffText }] : []);
+  const integrationParameters = context.compactSubmissions ? singleUpdateSchema(schemas.integration) : schemas.integration;
   const integration = await runStage("integration", "integration", { ...facts, requirements: context.requirements,
-    blueprintBoundary: { globalFields: Object.keys(blueprint.global).filter(key => key !== "instructions"), modules: blueprint.modules },
+    blueprintBoundary: { ...(moduleHandoffs.length ? { moduleHandoffs } : {}), globalFields: Object.keys(blueprint.global).filter(key => key !== "instructions"), modules: blueprint.modules },
     baseCandidate: assembled.candidate, baseHash: designHash(assembled.candidate), conflicts: assembled.conflicts,
     integrationPolicy: { allowedRoots: [...new Set(["instructions", "failureHandling", "coverage", "acceptance", "unknowns",
       ...assembled.conflicts.map(entry => entry.path.split("/")[1])])], frozenRoots: ["components", "steps"],
-      instruction: "updates的path只指向baseCandidate。不得修改冻结的组件、步骤或编号。修正整合提交时重新调用submit_architecture_integration并提交完整baseHash、updates；没有修改则updates为空数组。" } }, schemas.integration, value => {
-    applyArchitectureIntegration(value, integrationContext);
-    return copy(value);
+      instruction: "updates的path只指向baseCandidate。不得修改冻结的组件、步骤或编号。单项可按声明直接交path、value；批量交updates；没有修改则updates为空数组。始终绑定当前baseHash。" } }, integrationParameters, value => {
+    if (!architectureToolValidation(value, integrationParameters, { root: "integration" }).valid) throw new InputError("整合补丁必须选择单项path/value或完整updates。");
+    const batch = context.compactSubmissions ? modelUpdateBatch(value) : value;
+    applyArchitectureIntegration(batch, integrationContext);
+    return copy(batch);
   }, integrationContext);
   active();
   return applyArchitectureIntegration(integration, integrationContext);

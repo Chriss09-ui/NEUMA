@@ -140,17 +140,10 @@ async function sdkFixture(t: test.TestContext, { invalidPlan = false, sdkInvalid
         const allWrites = body.messages.filter((message) => message.role === "assistant").flatMap((message) => message.tool_calls ?? [])
           .filter((call) => call.function.name === writer || call.function.name === "save_plan_cases").map((call) => JSON.parse(String(call.function.arguments)));
         const writes = structuredPlan ? allWrites.filter((item: Record<string, unknown>) => {
-          if (Object.hasOwn(item, "cases")) return Array.isArray(item.cases);
+          if (Object.hasOwn(item, "cases")) return Array.isArray(item.cases) || dedicatedStringCases && typeof item.cases === "string";
           try { const value = typeof item.value === "string" ? JSON.parse(String(item.value)) : item.value; return value && typeof value === "object"; }
           catch { return false; }
         }) : allWrites;
-        if (dedicatedStringCases && allWrites.some((item: { path: string; cases: unknown; }) => item.path === "cases.json" && typeof item.cases === "string")
-          && !writes.some((item: { path: string; }) => item.path === "cases.json")) {
-          const ctx = controller.active.get(architecture.agentId);
-          const directory = await controller.artifacts.directory(architecture.agentId, ctx!.record!.id, { create: false });
-          await assert.rejects(readFile(join(directory, "cases.json")), { code: "ENOENT" });
-          rejectedWriteChecks.push("cases-json-string");
-        }
         if (structuredRejectedValues.length && allWrites.length > 0 && allWrites.length <= structuredRejectedValues.length && !writes.length) {
           const ctx = controller.active.get(architecture.agentId);
           const directory = await controller.artifacts.directory(architecture.agentId, ctx!.record!.id, { create: false });
@@ -463,18 +456,15 @@ test("真实SDK与隔离动作区分平台结构拒绝和带位置的业务拒�
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 1, accepted: 1, rejected: 0 });
 });
 
-test("真实Pi专用用例数组拒绝外层字符串，保留夹具后正式提交并真实隔离执行验收", { timeout: 20_000 }, async (t) => {
+test("真实Pi专用用例接受完整数组文本，保留夹具并实际执行隔离验收", { timeout: 20_000 }, async (t) => {
   const availability = await new DevelopmentExecutor().probe();
   if (!availability.available) { if (process.env.NEUMA_REQUIRE_ISOLATION === "1") assert.fail(availability.reason); return t.skip(availability.reason); }
   const fixture = await sdkFixture(t, { structuredPlan: true, dedicatedCases: true, dedicatedStringCases: true, readPlanSchema: true });
   const result = await fixture.run();
   assert.deepEqual(fixture.errors, []); assert.equal(result.status, "completed", result.summary);
-  assert.deepEqual(fixture.rejectedWriteChecks, ["cases-json-string"]);
+  assert.deepEqual(fixture.rejectedWriteChecks, []);
   const planner = fixture.sessions[0], replies = planner!.messages!.filter((message): message is Extract<NeumaPiSession["messages"][number], { role: "toolResult" }> => message.role === "toolResult" && message.toolName === "save_plan_cases");
-  assert.equal(replies.length, 2); assert.equal(replies[0]!.isError, true); assert.equal(replies[1]!.isError, false);
-  assert.match(textOf(replies[0]!.content), /save_plan_cases\.cases.*cases须直接传非空JSON数组/);
-  assert.match(textOf(replies[0]!.content), /"receivedType":"string"/);
-  assert.doesNotMatch(textOf(replies[0]!.content), /研发协议验证|Received arguments/);
+  assert.equal(replies.length, 1); assert.equal(replies[0]!.isError, false);
   const first = fixture.requests.find((entry) => entry.key === "planner");
   const schema = objectFields(objectFields(objectFields(recordArray(objectFields(first!.body).tools).find((item) => objectFields(item.function).name === "save_plan_cases")!.function).parameters).properties).cases;
   assert.equal(objectFields(first!.payload).valueSchemaGuide, undefined);
@@ -489,7 +479,7 @@ test("真实Pi专用用例数组拒绝外层字符串，保留夹具后正式提
   assert.deepEqual(report!.results!.find((item) => item.caseId === "echo_text")!.actual, { input: "研发协议验证" });
   assert.deepEqual(report!.results!.find((item) => item.caseId === "empty_text")!.actual, { error: "missing_input" });
   assert.deepEqual(result.reviews.map((item) => item.mode), ["plan", "task", "integration"]);
-  assert.equal(result.planning.turns, 4 + fixture.planSchemaPages.length); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, 12);
+  assert.equal(result.planning.turns, 3 + fixture.planSchemaPages.length); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, 12);
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 1, accepted: 1, rejected: 0 });
 });
 

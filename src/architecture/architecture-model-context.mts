@@ -8,7 +8,7 @@ import { MODULE_OBLIGATION_RULE } from "./architecture-module-obligations.mjs";
 
 const pick = (value: unknown, fields: string[]) => { const record = objectFields(value); return Object.fromEntries(fields.filter(key => record[key] !== undefined).map(key => [key, record[key]])); };
 const metadata = ["type", "pipelineStage", "blueprintProtocol", "submitName", "candidateHash", "baseHash", "blueprintHash", "allowedRoots", "integrationPolicy", "revisionSource",
-  "stageContract", "consultations", "moduleCapacity", "moduleLimit", "requirementScope", "moduleObligations",
+  "stageContract", "moduleReturnInstruction", "consultations", "moduleCapacity", "moduleLimit", "requirementScope", "moduleObligations",
   "modelBudget", "designModelBudget", "remaining", "stageRepair", "editableSubmission", "rejectedSubmission", "lastSubmissionIssue",
   "unsubmittedDraft", "unsubmittedDraftDiagnostic", "structuredSubmissionFeedback", "repairInstruction", "instruction"];
 
@@ -147,14 +147,14 @@ export function projectVerificationMessages(messages: ContextEvent["messages"], 
     && !value.inputContextVersion ? verificationModelContext(value) : null; });
 }
 
-export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown }) {
+export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol, flatHandoffs = false }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown; flatHandoffs?: boolean }) {
   const textHandoffs = blueprintProtocol === "module-handoff-v3";
   const task = pipelineStage === "review_slice" ? "你是独立评审者，只核对assignment指定的检查、验收范围或历史问题；完整提交本组编号，其他分项数组填空。核对真实证据及反证，不修改设计，不代替主评审作整体通过决定。"
     : pipelineStage === "blueprint" ? "按本轮工具的模块数量与每模块需求条数上限，设计全局蓝图及模块职责、依赖和需求分工；不提前展开各模块实现。"
     : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
     : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"
       : pipelineStage === "integration" ? "核对已组装方案的接口和conflicts，只按integrationPolicy提交baseHash及必要updates，保留冻结组件和步骤。"
-        : pipelineStage === "review_revision" ? "依据当前阻断核实并修订baseCandidate，只提交baseHash和最多24个updates；遵守allowedRoots，保留有效内容和编号。"
+        : pipelineStage === "review_revision" ? "依据当前阻断核实并修订baseCandidate，单项提交baseHash、path和value，多项提交updates；遵守allowedRoots，保留有效内容和编号。"
           : role === "reviewer" ? "独立评审当前design的需求覆盖、可行性、最简性、接口、失败处理、验收与范围。不修改候选；完整检查后提交真实结论。"
             : role === "specialist" ? "仅回答assignment中的局部设计问题，说明接口、取舍、证据和未知，不递归委派。"
               : "依据已确认需求设计最简且充分的完整方案；修订时只改相关内容，保留有效设计与编号。";
@@ -165,13 +165,16 @@ ${textHandoffs && pipelineStage === "blueprint" ? "给模块或专项顾问派�
 ${textHandoffs && pipelineStage === "consultation" ? "直接回答assignment.handoffText。在一个handoffText中写出判断、建议和仍待验证的事项，references只指向本组实际材料。" : ""}
 ${pipelineStage ? "已有本节点主要资料时直接设计；只读取影响当前决定的缺项，不先通读详细规程。尽早提交完整候选，尽量预留两轮纠错；资料不足仍如实说明，不能为省轮次编造依据。" : ""}
 ${pipelineStage ? "本阶段提交契约已完整提供在提交工具参数中；stageSchema为同源只读参照，有具体字段疑问时按pointer定位，不先通读最终candidateSchema。" : ""}
-${pipelineStage === "blueprint" ? "蓝图提交的global是对象、modules是数组，不能编码成字符串；selectionBasis直接放在global内。仅负责全局选择、职责划分与冲突裁决；模块细节留给模块设计者。存在多个独立技术难点且提供consult_architecture时，按问题及责任需求分组委派专项分析；简单任务直接提交。子分析是建议，不能替代原始需求、平台事实或正式验收。" : ""}
+${pipelineStage === "blueprint" && flatHandoffs ? "优先直接提交顶层全局字段、modules和handoffText（设计依据）。程序组装global对象。旧global对象形式也可单独使用。" : ""}
+${pipelineStage === "blueprint" && !flatHandoffs ? "蓝图提交的global是对象、modules是数组，不能编码成字符串；selectionBasis直接放在global内。仅负责全局选择、职责划分与冲突裁决；模块细节留给模块设计者。存在多个独立技术难点且提供consult_architecture时，按问题及责任需求分组委派专项分析；简单任务直接提交。子分析是建议，不能替代原始需求、平台事实或正式验收。" : ""}
 ${pipelineStage === "blueprint" ? BLUEPRINT_ASSIGNMENT_RULE : ""}
 ${pipelineStage === "blueprint" ? "需求分工还决定系统验收责任：task主责承担成功及业务动作验收，inputSource主责承担缺少输入与边界验收，deliverable主责承担代码或业务连接的失败验收及整体失败处理。纯工具方案中选用新能力的模块承担其失败验收。没有对应标准需求时按模块顺序分配，宿主会生成明确moduleObligations；不为这些义务新增业务模块。" : ""}
 ${pipelineStage === "blueprint" ? "interaction.assistant仅指托管页面的浮窗助手，不是普通对话入口；未确认启用则不得添加，启用必须page=true且保留用途。profile=workflow表示需要持久检查点的流程，不能配builtin；单次专属代码动作按实际需求选择custom。Python不能配builtin；无代码必须none/builtin。保持已确认的默认入口、页面和操作交付。" : ""}
 ${pipelineStage === "module" ? "capabilities中status=available的id必须逐字来自本轮能力目录，不能为已有能力另起别名；平台交付机制不等于新工具编号。专属待开发代码单独标needs_development，不把目录已可用的运行器改标为待开发。" : ""}
 ${pipelineStage === "module" ? "moduleId和blueprintHash由宿主在正式提交时绑定本次assignment，无需复制历史摘要。遵守moduleCapacity的本模块条数额度，保留完整业务义务，合并重复表达而不截断内容。" : ""}
-${pipelineStage === "module" ? "requirementScope明确本模块主责与其他模块的参考要求。coverage和acceptance[*].requirementIds仅使用ownedRequirementIds；参考内容可用于接口配合和本模块测试，但不能认领其中其他模块负责的正式编号。后续义务的单独requirementId决定主责，其requirementIds仅表示关联原始要求。" : ""}
+${pipelineStage === "module" && flatHandoffs ? "用handoffText向下游交接；在components填负责的requirementIds，直接上游引用填dependencyCoverage，并让每条主责需求有实际验收用例。宿主生成coverage，优先省略该字段。" : ""}
+${role === "reviewer" ? "完整评审通过可省略issues；一项问题使用issue，多项使用issues。仍须逐项检查验收和证据。" : ""}
+${pipelineStage === "module" && !flatHandoffs ? "requirementScope明确本模块主责与其他模块的参考要求。coverage和acceptance[*].requirementIds仅使用ownedRequirementIds；参考内容可用于接口配合和本模块测试，但不能认领其中其他模块负责的正式编号。后续义务的单独requirementId决定主责，其requirementIds仅表示关联原始要求。" : ""}
 ${pipelineStage === "module" ? MODULE_OBLIGATION_RULE : ""}
 ${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内联，可直接核对；最后一次请求仅用于正式提交，不能再次读取或只保存草稿。" : ""}
 已确认需求、用户选择、原验证阶段和全部验收义务不能缩水。技术问题由系统核实；只有需求本身仍不清楚且改变业务承诺才允许返需。历史评语和拒稿均可有误，须用当前原文核对，不能当作新需求或通过证据。需求操作清单为空不等于禁止必要专属代码。平台可用、环境准备、业务实现及实际验收分别判断，不伪造测量或通过。

@@ -5,6 +5,7 @@ interface DraftDiagnostic { status: string; reason: string; issues?: { path: str
 import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 import { InputError } from "../requirements/core.mjs";
+import { singleUpdateSchema, modelUpdateBatch, modelSubmissionArguments } from "../runtime/model-submission-arguments.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 
 const LIMITS = Object.freeze({ bytes: 256 * 1024, depth: 32, nodes: 100_000, updates: 24 });
@@ -88,7 +89,7 @@ function target(value: JsonValue, schema: ToolSchema, pointer: unknown, index: n
       fail(field, "invalid_reference", "路径不在当前完整稿和工具声明字段中；请替换已有的上级声明字段。");
     parent = current; key = part; current = descriptor.value; schemas = next;
   }
-  return { parent: parent!, key: key!, parts, path: `/${parts.map(encodePointer).join("/")}` };
+  return { parent: parent!, key: key!, parts, schemas, path: `/${parts.map(encodePointer).join("/")}` };
 }
 
 export function createArchitectureSubmissionRepair({ schema }: { schema: ToolSchema }) {
@@ -99,19 +100,21 @@ export function createArchitectureSubmissionRepair({ schema }: { schema: ToolSch
     submissionHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
     updates: { type: "array", minItems: 1, maxItems: LIMITS.updates, items: { type: "object", additionalProperties: false,
       required: ["path", "value"], properties: { path: { type: "string", minLength: 1, maxLength: 500 }, value: {} } } },
-  }, description: "仅局部修订本轮宿主明确提供的可编辑基底或正式语义检查拒绝的完整草稿。提供当前submissionHash与最多24个已有声明字段的JSON Pointer替换；不增删字段，不替换根，允许替换整个已有数组。完整JSON及更新材料各限256KiB、32层、100000节点；仍须完整通过原结构、语义和独立评审。" };
-  return { parameters, reference,
-    capture(value: unknown, { signal }: { signal?: AbortSignal | undefined } = {}) {
+  }, description: "仅局部修订本轮宿主明确提供的可编辑基底或正式语义检查拒绝的完整草稿。只改一项时提供submissionHash、path、value；多项仍可提交最多24个updates；不增删字段，不替换根，允许替换整个已有数组。完整JSON及更新材料各限256KiB、32层、100000节点；仍须完整通过原结构、语义和独立评审。" };
+  return { parameters: singleUpdateSchema(parameters), reference,
+    capture(value: unknown, { signal, allowContainerText = false }: { signal?: AbortSignal | undefined; allowContainerText?: boolean } = {}) {
       const candidate = cloneJson(value, { signal });
       const checked = architectureToolValidation(candidate, frozenSchema, { root: "submission" });
-      if (!checked.valid) fail(checked.issues[0]!.path, checked.issues[0]!.reason, "只有通过原提交工具完整结构校验的草稿才能局部修订，请先纠正完整提交结构。");
+      if (!checked.valid && !(allowContainerText && !checked.truncated && checked.issues.length && checked.issues.every(issue =>
+        issue.reason === "invalid_type" && issue.receivedType === "string" && ["array", "object"].includes(issue.expectedType ?? ""))))
+        fail(checked.issues[0]!.path, checked.issues[0]!.reason, "请先纠正完整提交结构；只有完整有效稿或仅有已声明容器类型错误的稿件能局部修订。");
       signal?.throwIfAborted();
       draft = candidate; submissionHash = hash(nonce, draft); return reference();
     },
     apply(value: unknown, { signal }: { signal?: AbortSignal | undefined } = {}) {
       signal?.throwIfAborted();
       if (!draft) fail("revise_architecture_submission", "required_field", "本会话尚无可修订的宿主基底或已拒绝完整稿，请先按原工具提交完整结果。");
-      const params = objectFields(cloneJson(value, { signal, root: "revise_architecture_submission" }));
+      const params = objectFields(modelUpdateBatch(cloneJson(value, { signal, root: "revise_architecture_submission" })));
       if (!params || Array.isArray(params) || Object.keys(params).some((key) => !["submissionHash", "updates"].includes(key))
         || Object.keys(params).length !== 2 || params.submissionHash !== submissionHash)
         fail("revise_architecture_submission.submissionHash", "invalid_reference", "草稿版本已变化或修订参数无效，请使用当前submissionHash。");
@@ -127,7 +130,8 @@ export function createArchitectureSubmissionRepair({ schema }: { schema: ToolSch
         if (changes.some((previous) => previous.parts.every((part, depth) => change.parts[depth] === part)
           || change.parts.every((part, depth) => previous.parts[depth] === part)))
           fail(`revise_architecture_submission.updates[${index}].path`, "invalid_reference", "修订路径不能重复或存在父子重叠，请只替换必要的单一层级。");
-        changes.push({ ...change, value: update.value as JsonValue });
+        const replacement = change.schemas.length === 1 ? modelSubmissionArguments(update.value, change.schemas[0]!) : update.value;
+        changes.push({ ...change, value: replacement as JsonValue });
       }
       for (const change of changes) { signal?.throwIfAborted(); Reflect.set(change.parent, change.key, change.value); }
       return cloneJson(candidate, { signal });

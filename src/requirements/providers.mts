@@ -19,6 +19,7 @@ import { readModelProfile } from "../runtime/model-profile.mjs";
 import { modelIdleTimeoutMs, withModelIdleTimeout } from "../runtime/model-idle-timeout.mjs";
 import { createPlatformSnapshot } from "../architecture/platform-contract.mjs";
 import { contentHash, normalizeTaskSpec, taskSpecDiagnostic, taskSpecSchema, TASK_DIMENSIONS, validateTaskEvidence } from "./task-spec.mjs";
+import { modelSubmissionArguments } from "../runtime/model-submission-arguments.mjs";
 import { mergeConsultationIssues, PREFLIGHT_DIMENSION_STATUSES, preflightRequirementIds, preflightSchema, validateIssueDecisions, validatePreflight } from "./consultation.mjs";
 import { SYSTEM_REQUIREMENT_CHECKS } from "../agents/requirement-verification.mjs";
 import { CALCULATION_FEEDBACK, calculateRequirementDerivation, calculationRequestSchema, replayRequirementDerivation, selectRequirementDerivations } from "./requirement-calculations.mjs";
@@ -1031,7 +1032,7 @@ export function makeProviders(config: Partial<ProviderConfig> = getProviderConfi
         continue;
       }
       let candidate;
-      try { candidate = validatePreflight(result, draft); }
+      try { candidate = validatePreflight(modelSubmissionArguments(result, preflightSchema(draft)), draft); }
       catch (error) { const rejection = preflightRejection(error); note("assessment", rejection.reason, rejection.paths);
         messages.push({ role: "user", content: `程序检查未通过：${String(errorField(error, "message"))}。${preflightFormatRepair(rejection.reason, { draft })}` }); continue; }
       for (const issue of candidate.issues.filter((issue) => issue.owner === "system")) {
@@ -1057,8 +1058,9 @@ export function makeProviders(config: Partial<ProviderConfig> = getProviderConfi
         const bases = pending.filter((issue) => issue.owner === "system").map((issue) => systemAssessmentBasis(issue, { draft, platform, systemChecks, derivations }));
         const progressRequired = pending.filter((issue) => priorDerivations.some((item) => item.issueId === issue.id)
           || trustedFacts().some((fact) => fact.issueId === issue.id)).map((issue) => issue.id);
+        const decisionSchema = issueReviewSchema(pending, evidenceMessages, derivations, bases, progressRequired, trustedFacts(), proofScope());
         const reviewMessages = [{ role: "system", content: ISSUE_REVIEW_PROMPT + requirementDeliveryFacts(platform) }, { role: "user", content: JSON.stringify({
-          knownIssues: pending.map(({ resolution, ...issue }) => issue), decisionSchema: issueReviewSchema(pending, evidenceMessages, derivations, bases, progressRequired, trustedFacts(), proofScope()),
+          knownIssues: pending.map(({ resolution, ...issue }) => issue), decisionSchema,
           previousDecisions: previousIssues.filter((issue) => issue.status === "resolved"), historicalDecisions, systemBases: bases,
           trustedFacts: trustedFacts(), proofScope: proofScope(), hostExecution: hostExecution(),
           ...(priorDerivations.length ? { historicalDerivations: priorDerivations, proofContinuation } : {}),
@@ -1067,7 +1069,7 @@ export function makeProviders(config: Partial<ProviderConfig> = getProviderConfi
         let checked;
         while (modelCalls < 6) {
           let review;
-          try { review = await model(reviewMessages); }
+          try { review = objectFields(modelSubmissionArguments(await model(reviewMessages), decisionSchema)); }
           catch (error) {
             if (error instanceof ProviderError && ["invalid_json", "invalid_model_json"].includes(String(objectFields(errorField(error, "diagnostic")).reason))) {
               reviewMessages.push({ role: "user", content: "复核返回不是有效 JSON，请在同一剩余预算内修复。" }); continue;

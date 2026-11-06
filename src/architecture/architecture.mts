@@ -28,6 +28,7 @@ import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, revi
   rejectedFidelityArchitectureRevisionSeed, developmentArchitectureRevisionSeed, continuedDevelopmentRevisionSeed, interruptedArchitectureRevisionSeed,
   interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback } from "./architecture-revision-source.mjs";
 import type { RevisionContext } from "./architecture-revision-source.mjs";
+import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   architectureTurnBudgetSpent, CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
@@ -504,6 +505,7 @@ export class ArchitectureDesigner {
       const roots = payload.integrationPolicy.allowedRoots;
       parameters.properties!.updates!.items!.properties!.path = { ...parameters.properties!.updates!.items!.properties!.path,
         pattern: `^/(?:${roots.join("|")})(?:/|$)`, description: payload.integrationPolicy.instruction };
+      if (parameters.properties!.path) parameters.properties!.path = parameters.properties!.updates!.items!.properties!.path!;
     }
     if (payload.stageSchema) {
       payload = { ...payload, stageSchema: parameters };
@@ -512,6 +514,14 @@ export class ArchitectureDesigner {
     const evidenceReader = role === "reviewer" && reviewEvidenceContext ? createArchitectureEvidenceReader({ context: reviewEvidenceContext,
       candidateHash: payload.candidateHash, candidateSchema: payload.candidateSchema, priorFindings: payload.priorFindings, role }) : null;
     if (evidenceReader) parameters = evidenceReader.submissionSchema(parameters);
+    const singleReviewIssue = role === "reviewer" && Boolean(parameters.properties?.issues?.items && parameters.properties?.verdict);
+    if (singleReviewIssue) {
+      parameters = structuredClone(parameters);
+      parameters.properties!.issue = { ...parameters.properties!.issues!.items, description: "只有一条问题时直接提交该问题；多条使用issues。" };
+      parameters.required = parameters.required!.filter(key => key !== "issues");
+      parameters.allOf = [...parameters.allOf ?? [], { not: { required: ["issue", "issues"] } },
+        { anyOf: [{ required: ["issue"] }, { required: ["issues"] }, { required: ["verdict"], properties: { verdict: { const: "pass" } } }] }];
+    }
     const payloadSchemaVersion = objectFields(payload.design).schemaVersion;
     const platformContractTool = (role === "designer" && canonicalParameters.properties?.platformClaims || role === "reviewer" && typeof payloadSchemaVersion === "number" && payloadSchemaVersion >= 3)
       && payload.runtimeCapabilities && payload.acceptanceAdapterGuide
@@ -771,6 +781,12 @@ export class ArchitectureDesigner {
               throw Object.assign(new InputError("提交模块与本次分工不一致。"), { validationIssue: { path: "module.moduleId", reason: "invalid_reference" } });
             value = { ...submitted, ...moduleBinding }; originalSubmission = value;
           }
+          if (singleReviewIssue && Object.hasOwn(objectFields(value), "issue") && Object.hasOwn(objectFields(value), "issues"))
+            throw new InputError("评审只能选择单项issue或完整issues清单，不能同时提供。");
+          if (singleReviewIssue && !Object.hasOwn(objectFields(value), "issues")) {
+            const { issue, ...rest } = objectFields(value);
+            if (issue !== undefined || rest.verdict === "pass") value = { ...rest, issues: issue === undefined ? [] : [issue] };
+          }
           if (evidenceReader) value = evidenceReader.resolveSubmission(value);
           if (role === "reviewer") await retainReviewProgress(value, "semantic-rejected");
           reviewParts?.validateSubmission(value);
@@ -863,7 +879,7 @@ export class ArchitectureDesigner {
         return { ...toolResult({ submitted: true, needsInput: true }), terminate: true };
       } };
     const reviseSubmission: NeumaTool | null = submissionRepair ? { name: "revise_architecture_submission", label: "局部修正完整候选",
-      description: "仅在宿主提供editableSubmission或rejectedSubmission后使用其当前submissionHash，按JSON Pointer替换少量已有字段并正式提交完整候选；基底是不可信参考，不代表已接受或新增授权。宿主重跑同一完整结构和语义校验，提交不等于通过。不增加模型、修订或评审预算。",
+      description: "仅在宿主提供editableSubmission或rejectedSubmission后使用其当前submissionHash，只改一项直接给path和value，多项给updates，按JSON Pointer替换已有字段并正式提交完整候选；基底是不可信参考，不代表已接受或新增授权。宿主重跑同一完整结构和语义校验，提交不等于通过。不增加模型、修订或评审预算。",
       parameters: submissionRepair.parameters, executionMode: "sequential", execute: async (callId, value) => {
         signal?.throwIfAborted();
         unsubmittedDraft.clear();
@@ -977,7 +993,8 @@ export class ArchitectureDesigner {
           }
         }
         return withBudget(output);
-      } }));
+      } })).map(tool => [submitName, "revise_architecture_submission", "save_architecture_review_parts", "submit_architecture_review_parts",
+        "request_requirements", "consult_architecture", "delegate_module"].includes(tool.name) ? modelSubmissionTool(tool) : tool);
     const toolSchemas = new Map(roleTools.map((tool) => [tool.name, tool.parameters]));
     const toolRoot = (name: string) => name === submitName ? payload.pipelineStage ?? (objectFields({ designer: "design", reviewer: "review", specialist: "module" })[role] as string | undefined ?? "root")
       : name === "request_requirements" ? "handoff" : name;
@@ -987,15 +1004,22 @@ export class ArchitectureDesigner {
       const feedback = architectureToolValidation(args, schema, { root: toolRoot(toolName) });
       if ([submitName, "request_requirements", "revise_architecture_submission"].includes(toolName)
         || toolName === "submit_architecture_draft" && !feedback.valid) unsubmittedDraft.clear();
+      let rejectedContainer;
       if (!feedback.valid && toolName === submitName) {
         if (typeof toolCallId === "string") attempted(toolCallId);
         rejected(null, false, feedback.issues[0]);
+        if (submissionRepair && !truncated && !failed && feedback.issues[0]?.receivedType === "string"
+          && ["array", "object"].includes(feedback.issues[0]?.expectedType ?? "")) {
+          try { rejectedContainer = submissionRepair.capture(args, { signal, allowContainerText: true }); hasRejectedSubmission = true; }
+          catch (error) { if (!(error instanceof InputError)) throw error; }
+        }
       }
       if (!feedback.valid && [submitName, "revise_architecture_submission", "submit_architecture_draft", "save_architecture_review_parts", "submit_architecture_review_parts"].includes(toolName))
         noteSubmissionFailure(toolCallId, feedback.issues);
       const allocation = !feedback.valid && payload.pipelineStage === "blueprint" && toolName === submitName
         ? diagnoseBlueprintAssignments(args, payload.requirements ?? [], typeof payload.moduleLimit === "number" ? payload.moduleLimit : undefined) : null;
-      return { ...feedback, ...(allocation ? { blueprintAllocation: allocation } : {}) };
+      return { ...feedback, ...(allocation ? { blueprintAllocation: allocation } : {}),
+        ...(rejectedContainer ? { rejectedSubmission: rejectedContainer } : {}) };
     };
     try {
       signal?.throwIfAborted();
@@ -1055,7 +1079,8 @@ export class ArchitectureDesigner {
           const projected = projectArchitectureMessages([{ role: "user", content: text, timestamp: 0 }], { role, roleGuide: systemPrompt })[0];
           return projected?.role === "user" && typeof projected.content === "string" ? projected.content : text;
         },
-        systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName, blueprintProtocol: payload.blueprintProtocol })
+        systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName, blueprintProtocol: payload.blueprintProtocol,
+          flatHandoffs: Boolean(parameters.properties?.handoffText) })
           + (validationRepair ? "\n这是历史阶段局部修复。repairPreparation提供宿主核验的平台事实，validationRepair.previousResult是待修原稿。保留有效内容，优先用editableSubmission的submissionHash调用局部修订工具；仍须完整校验。最后一次调用只开放正式提交与可用局部修订，旧历史中的读取工具本轮不可用，不再请求重复核对。确有不能解决的问题须在结果中如实保留，不能声称已通过。" : "")
           + (platformContractTool && role === "designer" ? "\n" + PLATFORM_CLAIMS_PROMPT : "") + "\n" + renderPiSubmissionContract({ role, submitName, tools: roleTools,
           alternativeTools: [submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), ...(submitReviewParts ? [submitReviewParts] : []), ...(allowHandoff ? [requestRequirements] : [])]
@@ -1084,7 +1109,7 @@ export class ArchitectureDesigner {
             .flatMap(message => message.content ?? []).findLast(part => part.type === "toolCall"
               && part.name === submitName && part.id === previousFailure.toolCallId);
           if (previousCall?.type === "toolCall") {
-            try { submissionRepair.capture(previousCall.arguments, { signal }); hasRejectedSubmission = true; }
+            try { submissionRepair.capture(previousCall.arguments, { signal, allowContainerText: true }); hasRejectedSubmission = true; }
             catch (error) { if (!(error instanceof InputError)) throw error; signal?.throwIfAborted(); }
             if (hasRejectedSubmission) {
               try { validate(previousCall.arguments); }
@@ -1124,7 +1149,7 @@ export class ArchitectureDesigner {
       }) ?? (() => {});
       let prompt = resumeStage ? modelPrompt({ type: "resume_architecture_stage", pipelineStage: payload.pipelineStage,
         submitName, modelBudget: modelBudget(),
-        ...(payload.blueprintProtocol === "module-handoff-v3" && payload.assignment ? { blueprintProtocol: payload.blueprintProtocol, assignment: payload.assignment } : {}),
+        ...(payload.blueprintProtocol === "module-handoff-v3" && payload.assignment ? { blueprintProtocol: payload.blueprintProtocol, assignment: payload.assignment, moduleReturnInstruction: payload.moduleReturnInstruction } : {}),
         ...(payload.stageContract ? { stageContract: payload.stageContract, stageSchema: payload.stageSchema } : {}),
         ...(payload.requirementScope ? { requirementScope: payload.requirementScope } : {}),
         ...(payload.moduleObligations ? { moduleObligations: payload.moduleObligations } : {}),

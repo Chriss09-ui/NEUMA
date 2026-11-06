@@ -9,6 +9,7 @@ import { Ajv } from "ajv";
 import { InputError } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { knownModelLimits, reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
+import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { acceptanceEvidenceHash, validateAcceptanceVerification } from "./acceptance-contract.mjs";
 
@@ -109,13 +110,13 @@ export async function verifyConversationTurn({ sessionFactory = createPiSession,
     }
     return plainJson(value.results) as ConversationDecision[];
   };
-  const tool: NeumaTool = { name: "submit_conversation_verification", label: "提交本轮独立对话验收", description: "只提交当前真实观察能够支持的逐项结果，不触发业务或修改交付。",
+  const tool = modelSubmissionTool({ name: "submit_conversation_verification", label: "提交本轮独立对话验收", description: "只提交当前真实观察能够支持的逐项结果，不触发业务或修改交付。",
     parameters: schema, executionMode: "sequential", execute: async (_id, value, toolSignal) => {
       signal?.throwIfAborted(); toolSignal?.throwIfAborted();
       if (!accepting || decision) throw new InputError("本轮对话验收已结束");
       decision = validateDecision(value); session?.setAutoCompactionEnabled?.(false);
       return { content: [{ type: "text", text: JSON.stringify({ submitted: true }) }], details: {}, terminate: true };
-    } };
+    } });
   const rolePrompt = CONVERSATION_VERIFICATION_PROMPT + "\n" + renderPiSubmissionContract({ role: "conversation-verifier", submitName: tool.name, tools: [tool], structuredResponse: true });
   if (prompt.length + rolePrompt.length > contextCharacters) return pending("observation_too_large");
   const abort = () => { try { Promise.resolve(session?.abort?.()).catch(() => {}); } catch { /* Cancellation still propagates through the caller signal. */ } };

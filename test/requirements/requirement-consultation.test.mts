@@ -846,6 +846,15 @@ test("用户已解决问题必须保留真实消息引用，平台路径不得�
   assert.deepEqual(result.assessments!.at(-1)!.issueDecisions![0]!.evidence, decided.evidence);
 });
 
+test("模型预评估一次还原维度和问题清单，按原证据规则接受同一需求", async () => {
+  const assessment = await sufficientPreflight();
+  const real = scriptedPreflight([{ ...assessment, dimensionChecks: JSON.stringify(assessment.dimensionChecks), issues: "[]" }]);
+  const result = await real.preflight!({ draft: draft(), platform: {} });
+  assert.equal(real.requests.length, 1);
+  assert.deepEqual(result.dimensionChecks, assessment.dimensionChecks);
+  assert.deepEqual(result.issues, []);
+});
+
 test("预评估首次即提供完整动态schema，需求编号与最终校验同源，阶段与核实规则保持严格", async () => {
   const value = draft();
   value.constraints = [{ value: "保留全部记录", source: "user" }]; Reflect.set(value, "capabilityDependencies", [{ id: "files" }]);

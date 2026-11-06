@@ -58,6 +58,17 @@ test("捕获只保存完整严格结构合格的当前会话草稿，引用不�
   assert.equal(draftFields(repair.apply({ ...reference, updates: [{ path: "/checks/0/target", value: "one" }] }))!.name, "完整草稿");
 });
 
+test("单字段修正与批量修订共用绑定和类型校验，数组字段可传一层完整JSON", () => {
+  const { repair, submissionHash } = setup();
+  const checks = [{ id: "check", target: "修订" }];
+  const bad = { ...value(), checks: '[{"id":' };
+  const rejected = repair.capture(bad, { allowContainerText: true })!;
+  const changed = repair.apply({ ...rejected, path: "/checks", value: JSON.stringify(checks) });
+  assert.deepEqual(draftFields(changed).checks, checks);
+  for (const invalid of [{ submissionHash, path: "/checks", value: [] },
+    { ...rejected, updates: [], path: "/name", value: "矛盾来源" }]) assert.throws(() => repair.apply(invalid));
+});
+
 test("多处局部替换只返回完整新克隆，显式再次捕获后才推进CAS，跨会话旧引用失效", () => {
   const { repair, submissionHash } = setup();
   const updates = [{ path: "/checks/0/target", value: "one" }, { path: "/checks/1/target", value: "two" },

@@ -32,6 +32,7 @@ import { createModelContextReader, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime
 import { verificationModelContext, projectVerificationMessages } from "./architecture-model-context.mjs";
 import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget, reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
+import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
@@ -375,7 +376,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
     await charge?.(event); calls++;
     await saveProgress();
   };
-  const tool: NeumaTool = { name: "submit_requirement_fidelity", label: "提交需求范围独立复核", description: "仅核对技术设计及验收条件是否改变既有业务承诺，不设计功能、不询问用户。candidatePath相对candidate根、path相对所选source根，均为JSON Pointer，数组下标从0开始并用~0/~1转义。draft是真实需求草稿；quote须来自原来源，不能引用candidate自述冒充原需求。"
+  const tool = modelSubmissionTool({ name: "submit_requirement_fidelity", label: "提交需求范围独立复核", description: "仅核对技术设计及验收条件是否改变既有业务承诺，不设计功能、不询问用户。candidatePath相对candidate根、path相对所选source根，均为JSON Pointer，数组下标从0开始并用~0/~1转义。draft是真实需求草稿；quote须来自原来源，不能引用candidate自述冒充原需求。"
       + " 完整工具参数和归一后的证据分别最多256KiB（JSON UTF-8）；必须保留全部需求判断，可用短引用或必要原文摘录减少重复。"
       + (legacyContract ? " 当前恢复的是旧版最多40条限制依据的原会话，沿用原次数，不创建替代会话；需要更大契约时由后续显式修订新候选处理，不能删减已成立的缩水判断。" : "")
       + (contextVersion ? " full-v2的requirements只用claimRef显式选择需求编号；长原文用明确offset/length，不自动猜测或截断。" : ""),
@@ -396,7 +397,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
       stopReason = "submitted";
       await saveProgress();
       return { content: [{ type: "text", text: '{"submitted":true}' }], details: {}, terminate: true };
-    } };
+    } });
   const abort = () => { try { Promise.resolve(session?.abort?.()).catch(() => {}); } catch {} };
   try {
     signal?.addEventListener("abort", abort, { once: true });

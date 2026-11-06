@@ -186,11 +186,72 @@ export function architectureModuleSubmissionSchema(schema: StageSchema, assignme
     reference.enum = [...assignment.requirementIds];
     reference.description = "仅使用本模块assignment.requirementIds中的正式需求编号；其他模块的要求和后续验证义务只供理解与配合，不能在本模块认领。";
   }
+  if (result.properties?.dependencyCoverage) {
+    const ids = result.properties.components!.items!.properties!.requirementIds!.items!;
+    ids.enum = [...assignment.requirementIds];
+    result.properties.dependencyCoverage.items!.properties!.requirementIds!.items!.enum = [...assignment.requirementIds];
+    result.properties.dependencyCoverage.items!.properties!.moduleId!.description = "仅引用已完成的直接依赖模块。";
+  }
   return result;
 }
 
+function componentCoverageSubmission(module: StageSchema) {
+  const result = copy(module, "moduleSubmission");
+  const fields = result.properties!;
+  const owned = { ...list(identifier, 0, fields.coverage!.maxItems ?? 120), uniqueItems: true,
+    description: "本组件实际承担的本模块需求编号；每条主责需求至少关联一个真实组件。" };
+  fields.components!.items!.properties!.requirementIds = owned;
+  fields.dependencyCoverage = list(object({ moduleId: identifier, id: identifier,
+    requirementIds: { ...owned, minItems: 1 } }), 0, 120);
+  fields.dependencyCoverage.description = "仅在主责需求也使用直接上游组件时，登记该组件的模块编号、组件编号和本模块需求编号。";
+  fields.coverage!.description = "历史完整清单的兼容入口。新提交写handoffText和组件的requirementIds，省略coverage，宿主生成覆盖清单。";
+  fields.handoffText!.description = "写给下游的一段设计说明，交代实现、异常及验证重点。instructions另用于工作智能体执行。";
+  result.required = result.required!.filter(key => key !== "coverage");
+  result.anyOf = [{ required: ["handoffText"] }, { required: ["coverage"] }];
+  return result;
+}
+
+/** Turn explicit ownership into canonical rows. The same canonical result can be saved or validated again. */
+export function materializeModuleCoverage(value: unknown, assignment: BlueprintAssignment, schema: StageSchema): unknown {
+  const input = objectFields(value), components = (input.components as Record<string, unknown>[]), links = input.dependencyCoverage as
+    { moduleId: string; id: string; requirementIds: string[] }[] | undefined;
+  if (Object.hasOwn(input, "coverage")) {
+    if (links !== undefined || components.some(component => Object.hasOwn(component, "requirementIds")))
+      fail("module.coverage", "invalid_contract", "新组件关联和旧coverage只能选择一种来源。请保留组件关联并省略coverage。");
+    return input;
+  }
+  const owners = new Map(assignment.requirementIds.map(id => [id, [] as StageReference[]]));
+  const add = (ids: string[], reference: StageReference) => {
+    for (const id of ids) {
+      const refs = owners.get(id);
+      if (!refs) fail("module.components.requirementIds", "invalid_reference", "组件只能认领本模块主责需求。");
+      if (refs.some(other => isDeepStrictEqual(other, reference)))
+        fail("module.dependencyCoverage", "invalid_reference", "同一需求不得重复登记同一组件。");
+      refs.push(reference);
+    }
+  };
+  const declared = components.map(({ requirementIds, ...component }) => {
+    add((requirementIds ?? []) as string[], String(component.id));
+    return component;
+  });
+  for (const { moduleId, id, requirementIds } of links ?? []) add(requirementIds, { moduleId, id });
+  const missingReferences = [...owners].filter(([, refs]) => !refs.length).map(([id]) => id);
+  if (missingReferences.length) throw Object.assign(new InputError(`主责需求 ${missingReferences.join("、")} 缺少负责组件，请给本模块组件标记需求编号或明确引用直接上游组件。`), {
+    validationIssue: { path: "module.components.requirementIds", reason: "missing_coverage", missingReferences } });
+  const { dependencyCoverage: _links, ...rest } = input;
+  const cases = input.acceptance as ArchitectureModule["acceptance"];
+  const limit = schema.properties!.coverage!.items!.properties!.verification!.maxLength!;
+  const coverage = [...owners].map(([requirementId, componentIds]) => {
+    const rule = `按 acceptance 中关联 ${requirementId} 的全部用例及其指定方式验收。`;
+    const first = cases.find(item => item.requirementIds.includes(requirementId));
+    const example = first ? `${rule}其中一例的输入是${first.input}，预期是${first.expected}。` : rule;
+    return { requirementId, componentIds, verification: Array.from(example).length <= limit ? example : rule };
+  });
+  return { ...rest, components: declared, coverage };
+}
+
 /** Each wire schema derives its business fields from this build's actual final contract. */
-export function createArchitectureStageSchemas({ candidateSchema, requirements = [], legacyBlueprint = false, textHandoffs = false, moduleLimit }: StageSchemaOptions) {
+export function createArchitectureStageSchemas({ candidateSchema, requirements = [], legacyBlueprint = false, textHandoffs = false, compactSubmissions = false, moduleLimit }: StageSchemaOptions) {
   const source = copy(candidateSchema, "candidateSchema", 2 * 1024 * 1024);
   if (!source.properties || !Array.isArray(source.required)) throw new TypeError("架构阶段需要完整候选提交契约");
   const properties: Record<string, StageSchema> = Object.fromEntries(Object.entries(source.properties).filter(([key]) => !PART_FIELDS.some(field => field === key)));
@@ -219,10 +280,11 @@ export function createArchitectureStageSchemas({ candidateSchema, requirements =
   }
   const module = object({ moduleId: identifier, blueprintHash: hash, instructions: text(3000), ...partProperties } as Record<string, StageSchema> & { moduleId: typeof identifier; blueprintHash: typeof hash; instructions: ReturnType<typeof text> },
     ["moduleId", "blueprintHash", "instructions", ...source.required.filter((key) => PART_FIELDS.some(field => field === key))]);
+  if (compactSubmissions) module.properties!.handoffText = { ...text(6000), pattern: "\\S" };
   const integration = object({ baseHash: hash, updates: { type: "array", minItems: 0, maxItems: 24, items: object({
     path: { type: "string", minLength: 1, maxLength: 500 }, value: {},
   }) } });
-  return { blueprint, module, integration };
+  return { blueprint, module, integration, ...(compactSubmissions ? { moduleSubmission: componentCoverageSubmission(module) } : {}) };
 }
 
 /** Read persisted structural evidence without pretending it passed today's semantic checks. */
@@ -258,19 +320,35 @@ export function validateArchitectureBlueprint(value: unknown, context: StageSche
   return blueprint;
 }
 
-/** Bind confirmed actions on submission only. Stored blueprints always require their full original shape. */
+/** Accept a flat global handoff and bind confirmed actions before validating the frozen blueprint. */
 export function architectureBlueprintWriter(schema: StageSchema, context: StageSchemaOptions) {
   const operations = objectFields(objectFields(context.draft).interaction).operations;
-  if (!context.textHandoffs || !Array.isArray(operations) || !operations.length)
+  const bindOperations = context.textHandoffs && Array.isArray(operations) && operations.length > 0;
+  if (!bindOperations && !context.compactSubmissions)
     return { parameters: schema, validate: (value: unknown) => validateArchitectureBlueprint(value, context) };
-  const parameters = structuredClone(schema);
-  const interaction = parameters.properties!.global!.properties!.interaction!;
-  interaction.required = interaction.required!.filter(key => key !== "operations");
-  interaction.properties!.operations = { type: "boolean", const: true, description: "已确认专属操作，宿主自动绑定为 true，可省略。" };
+  const parameters = structuredClone(schema), global = parameters.properties!.global!;
+  if (bindOperations) {
+    const interaction = global.properties!.interaction!;
+    interaction.required = interaction.required!.filter(key => key !== "operations");
+    interaction.properties!.operations = { type: "boolean", const: true, description: "已确认专属操作，宿主自动绑定为 true，可省略。" };
+  }
+  if (context.compactSubmissions) {
+    const flatKey = (key: string) => key === "rationale" ? "handoffText" : key;
+    for (const [key, field] of Object.entries(global.properties!)) parameters.properties![flatKey(key)] = field;
+    parameters.properties!.handoffText = { ...global.properties!.rationale, description: "用一段自然语言说明全局设计依据；分派仍用modules。" };
+    parameters.required = ["modules"];
+    parameters.oneOf = [{ required: ["global"], not: { anyOf: Object.keys(global.properties!).map(key => ({ required: [flatKey(key)] })) } },
+      { not: { required: ["global"] }, required: global.required!.map(flatKey) }];
+  }
   return { parameters, validate(value: unknown) {
-    const input = copy(value, "blueprint");
-    const settings = objectFields(objectFields(objectFields(input).global).interaction);
-    if (!Object.hasOwn(settings, "operations")) settings.operations = true;
+    let input = objectFields(copy(value, "blueprint"));
+    if (context.compactSubmissions && !Object.hasOwn(input, "global")) {
+      const { modules, handoffText, ...fields } = input;
+      if (Object.hasOwn(fields, "rationale")) fail("blueprint.handoffText", "invalid_contract", "顶层格式请用handoffText填写设计依据。");
+      input = { modules, global: { ...fields, rationale: handoffText } };
+    }
+    const settings = objectFields(objectFields(input.global).interaction);
+    if (bindOperations && !Object.hasOwn(settings, "operations")) settings.operations = true;
     return validateArchitectureBlueprint(input, context);
   } };
 }

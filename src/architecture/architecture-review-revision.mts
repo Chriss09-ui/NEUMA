@@ -27,6 +27,8 @@ import { InputError, ProviderError } from "../requirements/core.mjs";
 import { ARCHITECTURE_ROLE_TURN_LIMIT, designHash } from "./architecture-contract.mjs";
 import { architectureDesignCallLimits } from "./architecture-design-pipeline.mjs";
 import { copyArchitectureReviewJson } from "./architecture-review-binding.mjs";
+import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
+import { modelUpdateBatch, singleUpdateSchema } from "../runtime/model-submission-arguments.mjs";
 import { createArchitectureSubmissionRepair } from "./architecture-submission-repair.mjs";
 import { readMainReviewCheckpoint } from "./architecture-main-review-checkpoint.mjs";
 import { readArchitectureFidelityProgress } from "./architecture-fidelity-progress.mjs";
@@ -412,14 +414,15 @@ export async function runArchitectureReviewRevision({ record, source: sourceInpu
     .map(path => path.replace(/^\//u, "").split("/")[0]).filter((field): field is string => field !== undefined && Object.hasOwn(base, field))])];
   const repair = createArchitectureSubmissionRepair({ schema: candidateSchema });
   const reference = repair.capture(base, { signal });
-  const parameters: ToolSchema = { type: "object", additionalProperties: false, required: ["baseHash", "updates"], properties: {
+  const parameters: ToolSchema = singleUpdateSchema({ type: "object", additionalProperties: false, required: ["baseHash", "updates"], properties: {
     baseHash: { type: "string", const: expected.candidateHash },
     updates: { ...repair.parameters.properties.updates, items: { ...repair.parameters.properties.updates.items,
       properties: { ...repair.parameters.properties.updates.items.properties,
         path: { type: "string", minLength: 1, maxLength: 500, pattern: `^/(?:${roots.join("|")})(?:/|$)` } } } },
-  } };
+  } });
   const validateSubmission = (value: unknown) => {
-    const submission = objectFields(value);
+    if (!architectureToolValidation(value, parameters, { root: "review_revision" }).valid) throw invalid();
+    const submission = objectFields(modelUpdateBatch(value));
     if (submission.baseHash !== expected.candidateHash || !isArray(submission.updates)
       || submission.updates.some(item => { const path = objectFields(item).path; return typeof path !== "string" || !roots.includes(path.slice(1).split("/")[0] ?? ""); })) throw invalid();
     const candidate = validateCandidate(repair.apply({ ...reference, updates: submission.updates }, { signal }));

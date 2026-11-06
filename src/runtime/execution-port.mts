@@ -3,6 +3,7 @@ import type { UnknownRecord, JsonValue } from "../contracts/json.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 export interface NeumaTool {
   name: string; label: string; description: string; parameters: ToolSchema; executionMode?: "sequential" | "parallel";
+  prepareArguments?: (input: unknown) => unknown;
   execute(id: string, input: unknown, signal?: AbortSignal, onUpdate?: unknown, context?: unknown): Promise<ToolResult>;
 }
 export type RegisteredTool = NeumaTool;

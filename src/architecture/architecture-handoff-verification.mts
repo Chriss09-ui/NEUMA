@@ -15,6 +15,7 @@ import { createModelContextReader, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime
 import { projectVerificationMessages } from "./architecture-model-context.mjs";
 import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
+import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
@@ -85,7 +86,7 @@ export async function verifyArchitectureHandoff({ issues, context, sessionFactor
     if (calls >= 2) { incomplete = true; throw Object.assign(new InputError("返需必要性评估未完成"), { reason: "handoff_evaluation_incomplete" }); }
     charge?.(event); calls++;
   };
-  const tool: NeumaTool = { name: "submit_handoff_necessity", label: "提交返需必要性复核", description: "独立判定是否因为需求本身仍不清楚而必须返回需求层。技术问题不得判为用户选择。不修改需求、候选或交付。",
+  const tool = modelSubmissionTool({ name: "submit_handoff_necessity", label: "提交返需必要性复核", description: "独立判定是否因为需求本身仍不清楚而必须返回需求层。技术问题不得判为用户选择。不修改需求、候选或交付。",
     parameters: schema, executionMode: "sequential", execute: async (_id, value) => {
       signal?.throwIfAborted();
       if (!active || result) throw new InputError("返需必要性复核已经结束");
@@ -96,7 +97,7 @@ export async function verifyArchitectureHandoff({ issues, context, sessionFactor
         throw new InputError(submissionRemedy);
       result = structuredClone(value);
       return { content: [{ type: "text", text: '{"submitted":true}' }], details: {}, terminate: true };
-    } };
+    } });
   const abort = () => { try { Promise.resolve(session?.abort?.()).catch(() => {}); } catch {} };
   try {
     signal?.addEventListener("abort", abort, { once: true });

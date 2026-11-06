@@ -41,6 +41,7 @@ import { InputError } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { developmentModelOutputBudget } from "../runtime/model-limits.mjs";
 import { toolInputValidation } from "../runtime/tool-input-diagnostics.mjs";
+import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash, supportedArchitectureVersion, requiresDevelopment } from "../architecture/architecture-contract.mjs";
 import { renderPlatformRules, platformCapabilityCatalog, validatePlatformMetadata } from "../architecture/platform-contract.mjs";
@@ -450,7 +451,9 @@ export class DevelopmentController {
       return { ...result, content: [...result.content, { type: "text", text: JSON.stringify({ hostModelBudget: budget(),
         ...(fileState ? { fileState } : {}), ...(draftCheck ? { planDraftCheck: draftCheck } : {}) }) }] };
     } }));
-    const sessionTools = [...guardedTools, ...(blockerTool ? [blockerTool] : []), submit];
+    const planningTools = guardedTools.map(tool => ["save_plan_cases", "edit_plan_cases", "update_plan_json"].includes(tool.name) ? modelSubmissionTool(tool) : tool);
+    handle.structuredSubmissionTools = [...(blockerTool ? [blockerTool] : []), submit].map(modelSubmissionTool);
+    const sessionTools = [...planningTools, ...handle.structuredSubmissionTools];
     const previousInputFailure = persistent.reference.toolInputFailure;
     if (previousInputFailure?.schemaHash) {
       const previousTool = sessionTools.find((tool) => tool.name === previousInputFailure.toolName);
@@ -483,7 +486,6 @@ export class DevelopmentController {
       }
       return feedback;
     };
-    handle.structuredSubmissionTools = [...(blockerTool ? [blockerTool] : []), submit];
     handle.session = await this.sessionFactory({ config: this.config, cwd: await this.workspace.workspacePath(ctx.record.agentId, ctx.record.id),
       reasoningMode: kind === "reviewer" ? "off" : "auto",
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),

@@ -5,6 +5,7 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { SessionFactory, NeumaTool, ExecutionSession } from "./execution-port.mjs";
 import { objectFields } from "./type-boundary.mjs";
 import { toolInputValidation } from "./tool-input-diagnostics.mjs";
+import { modelSubmissionTool, modelUpdateBatch, singleUpdateSchema } from "./model-submission-arguments.mjs";
 import { readPiStructuredSubmission, renderPiSubmissionContract } from "./pi-submission-contract.mjs";
 import { repairHash, type RepairWorker } from "./repair-scheduler.mjs";
 import { createModelContextReader, modelContextValue } from "./model-context.mjs";
@@ -15,7 +16,7 @@ const schema: ToolSchema = { type: "object", additionalProperties: false, requir
     type: "object", additionalProperties: false, required: ["path", "value"], properties: { path: { type: "string", minLength: 1, maxLength: 1000 }, value: {} } } } } };
 const prompt = `你是本次修复调度中的独立子Agent，仅负责repairAssignment列出的几个问题。
 先核对事实和原需求，历史评语可能错误。preparedContext直接提供本组已有字段和必要材料，未内联材料才用read_repair_context读取；只修改本组allowedPaths及其子字段。
-以baseHash绑定的base为基底，用submit_repair_patch提交issueIds、summary及updates:[{path:JSON Pointer,value:替换值}]。
+以baseHash绑定的base为基底，用submit_repair_patch提交issueIds和summary；仅替换一个字段时直接给path和value，多项替换才给updates。
 必须覆盖本组每个问题，在summary解释修复或原意见不成立的依据。不能删减原需求、已有验收输入和断言、授权或编号。
 代码修复的base是{files:{相对路径:完整文本}}，路径中的斜杠须JSON Pointer转义。修改只作为提案，由宿主校验后写入；不能声称验收通过。
 原文可按requests批读，使用返回的nextRequest续读，未读取部分不能猜测。最后一次请求只用于正式提交。每组有独立会话和固定剩余额度，提交后结束；不递归创建Agent。`;
@@ -27,12 +28,12 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
   let submitted = false, accepting = true, calls = worker.group.calls, session: ExecutionSession | undefined;
   const active = () => { signal?.throwIfAborted(); if (!accepting || submitted) throw new InputError("修复子任务已结束。"); };
   const readable = () => { active(); if (calls >= worker.callLimit) throw new InputError("最后一次请求仅用于正式提交，不能继续读取材料。"); };
-  const submit: NeumaTool = { name: "submit_repair_patch", label: "提交本组修复", description: "提交本组全部问题的局部补丁，仍须合并和独立验收。",
-    executionMode: "sequential", parameters: { ...schema, properties: { ...schema.properties, baseHash: { type: "string", const: worker.baseHash },
-      issueIds: { ...schema.properties!.issueIds, items: { type: "string", enum: worker.group.issueIds } } } }, execute: async (_id, value) => {
-      active(); await worker.submit(value); submitted = true; session?.setAutoCompactionEnabled?.(false);
+  const submit = modelSubmissionTool({ name: "submit_repair_patch", label: "提交本组修复", description: "提交本组全部问题的局部补丁，仍须合并和独立验收。",
+    executionMode: "sequential", parameters: singleUpdateSchema({ ...schema, properties: { ...schema.properties, baseHash: { type: "string", const: worker.baseHash },
+      issueIds: { ...schema.properties!.issueIds, items: { type: "string", enum: worker.group.issueIds } } } }), execute: async (_id, value) => {
+      active(); await worker.submit(modelUpdateBatch(value)); submitted = true; session?.setAutoCompactionEnabled?.(false);
       return { content: [{ type: "text", text: '{"submitted":true}' }], details: {}, terminate: true };
-    } };
+    } });
   const sources: Record<string, unknown> = { base: worker.base, ...options.context,
     ...(worker.group.history?.length ? { rejectedRepair: worker.group.history.at(-1) } : {}) };
   const preparedContext: Record<string, unknown> = {}, baseFields: Record<string, unknown> = {};

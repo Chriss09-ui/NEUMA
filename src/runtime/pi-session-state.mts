@@ -183,7 +183,7 @@ function argumentShape(value: unknown, schema: ToolSchema) {
 
 // Raw argument strings live only until normalization finishes. Diagnostics contain schema names,
 // types and bounded sizes, never submitted strings, unknown property names or provider payloads.
-export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, halt }: Pick<PiSessionOptions, "onToolDiagnostic" | "toolErrorResult" | "rawInputValidators" | "transformContext"> & { customTools: (Pick<NonNullable<PiSessionOptions["customTools"]>[number], "name"> & Partial<Pick<NonNullable<PiSessionOptions["customTools"]>[number], "parameters">>)[]; halt(error: unknown): void }) {
+export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, halt }: Pick<PiSessionOptions, "onToolDiagnostic" | "toolErrorResult" | "rawInputValidators" | "transformContext"> & { customTools: (Pick<NonNullable<PiSessionOptions["customTools"]>[number], "name"> & Partial<Pick<NonNullable<PiSessionOptions["customTools"]>[number], "parameters" | "prepareArguments">>)[]; halt(error: unknown): void }) {
   const tools = new Map(customTools.map((tool) => [tool.name, tool]));
   const rawValidators = new Map(Object.entries(rawInputValidators ?? {}));
   if ([...rawValidators].some(([name, validate]) => !tools.has(name) || typeof validate !== "function"))
@@ -197,7 +197,7 @@ export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult
     catch (error) { halt(error); return undefined; }
   };
   const checkRaw = async (call: { name: string; id: string; arguments: unknown }): Promise<RawDecision> => {
-    const outcome = await safeCall(rawValidators.get(call.name), { toolName: call.name, toolCallId: call.id, args: call.arguments });
+    const outcome = await safeCall(rawValidators.get(call.name), { toolName: call.name, toolCallId: call.id, args: tools.get(call.name)?.prepareArguments?.(call.arguments) ?? call.arguments });
     if (outcome?.valid === true) return { valid: true };
     return { valid: false, reason: typeof outcome?.reason === "string" && outcome.reason.length <= 16000 ? outcome.reason : unavailable.reason };
   };
@@ -299,10 +299,12 @@ export function piSessionPolicy({ customTools, onToolDiagnostic, toolErrorResult
       if (!text.startsWith("Validation failed for tool ")) return;
       const assistant = context.sessionManager.getBranch().findLast((entry): entry is Extract<SessionEntry, { type: "message" }> => entry.type === "message" && entry.message.role === "assistant")?.message;
       const call = assistant?.role === "assistant" ? assistant.content.find((item) => item.type === "toolCall" && item.id === message.toolCallId) : undefined;
+      const raw = call?.type === "toolCall" ? call.arguments : undefined;
+      const args = tools.get(message.toolName)?.prepareArguments?.(raw) ?? raw;
       const result = tools.has(message.toolName) ? await safeCall(toolErrorResult,
-        { toolName: message.toolName, toolCallId: message.toolCallId, args: call?.type === "toolCall" ? call.arguments : undefined }) : undefined;
+        { toolName: message.toolName, toolCallId: message.toolCallId, args }) : undefined;
       const feedback = !result?.content && tools.has(message.toolName) && call?.type === "toolCall" && call.name === message.toolName
-        ? toolInputValidation(call.arguments, tools.get(message.toolName)!.parameters as ToolSchema, { root: message.toolName }) : undefined;
+        ? toolInputValidation(args, tools.get(message.toolName)!.parameters as ToolSchema, { root: message.toolName }) : undefined;
       const replacement = { ...message, content: result?.content ?? [{ type: "text", text: JSON.stringify({ executed: false, reason: "sdk_validation",
         ...(feedback && !feedback.valid ? feedback : {}), nextAction: "工具参数未通过结构校验，本次未执行。按具体字段修正；未修改参数的重试不能解决此错误。" }) }],
         details: result?.details ?? { reason: "sdk_validation" }, structuredContent: undefined };

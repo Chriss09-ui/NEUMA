@@ -36,6 +36,17 @@ test("结构化终止提交与模型品牌无关，只解码唯一匹配的完�
   assert.match(renderPiSubmissionContract({ role: "reviewer", submitName: "finish", tools: [tool], structuredResponse: true }), /同一结构校验、版本检查和独立验收/u);
 });
 
+test("编码容器在正式回复中还原，模糊类型、业务文本、坏JSON与原型字段不被猜测", () => {
+  const tool = { name: "finish", parameters: { type: "object", required: ["rows"], additionalProperties: false, properties: {
+    rows: { type: "array", items: { type: "object", required: ["ids", "text", "sample"], additionalProperties: false,
+      properties: { ids: { type: "array", items: { type: "string" } }, text: { type: "string" }, sample: { anyOf: [{ type: "string" }, { type: "object" }] } } } } } } };
+  const send = (rows: unknown) => readPiStructuredSubmission({ role: "assistant", stopReason: "stop",
+    content: [{ type: "text", text: JSON.stringify({ submission: { name: "finish", arguments: { rows } } }) }] }, { tools: [tool] });
+  const row = { ids: '["req"]', text: "[1]", sample: '{"id":2}' };
+  assert.deepEqual(send(JSON.stringify([row]))?.args, { rows: [{ ...row, ids: ["req"] }] });
+  for (const malformed of ['[{"ids":[}', '[{"constructor":{}}]', JSON.stringify([ { ...row, ids: "[3]" } ])]) assert.equal(send(malformed), null);
+});
+
 test("缺失、重复或未注册的正式出口不生成误导提示", () => {
   const base = { role: "reviewer", submitName: "finish", tools: [{ name: "finish" }] };
   for (const override of [{ tools: [] }, { tools: [{ name: "finish" }, { name: "finish" }] }, { alternativeTools: ["absent"] },
