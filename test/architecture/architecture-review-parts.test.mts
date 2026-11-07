@@ -4,6 +4,7 @@ import type {ReviewParts,ArchitectureIssue} from "../../src/contracts/architectu
 type PartController=ReturnType<typeof createArchitectureReviewParts>;
 type PartReference=ReturnType<PartController["reference"]>;
 interface ModelPayload extends Record<string,unknown> {requirements:RequirementItem[];design:ReturnType<typeof validDesign>;candidateHash:string;priorFindings:NonNullable<Parameters<typeof passingReview>[2]>;reviewParts:PartReference & {saved:ReviewParts;rejectedDraft:ReviewParts}}
+import { architectureToolValidation } from "../../src/architecture/architecture-tool-diagnostics.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { fixtureTools } from "../helpers/m7-test-boundaries.mjs";
 import { failureFields } from "../helpers/failure-fields.mjs";
@@ -44,7 +45,8 @@ test("复杂评审按主题与验收分组，独立会话最多三并发，中�
   const initial = material(), design = structuredClone(initial.design);
   design.acceptance = Array.from({ length: 13 }, (_, i) => ({ ...design.acceptance[i % design.acceptance.length]!, id: `acceptance_${i}` }));
   const candidateHash = designHash(design), context = architectureReviewEvidenceContext({ design, requirements: initial.context.requirements, runtimeCapabilities: {} });
-  const schema = reviewSubmissionSchema({ evidenceRequired: true }), review = passingReview(candidateHash, design);
+  const priorFindings = { findings: [{ findingId: "previous_check", issue: { checkId: "verification" } }] };
+  const schema = reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: true }), review = passingReview(candidateHash, design, priorFindings);
   const record: Record<string, unknown> = { candidateHash, status: "failed" }, started: string[] = [];
   let active = 0, maximum = 0, interrupted = false;
   const runRole = async (node: ReviewSliceRole) => {
@@ -52,15 +54,27 @@ test("复杂评审按主题与验收分组，独立会话最多三并发，中�
     try {
       await node.worker.onSession(node.worker.group.sessionFile ?? `${node.assignment.id}.jsonl`); await node.worker.onCall();
       if (!interrupted && node.assignment.ids.includes("interfaces")) { interrupted = true; throw new Error("分项连接中断"); }
-      const parts = node.validate({ summary: "核对本组冻结原文", issues: [], priorFindingDecisions: [],
-        checks: node.assignment.field === "checks" ? review.checks.filter(row => node.assignment.ids.includes(row.id)) : [],
-        acceptanceScopeChecks: node.assignment.field === "acceptanceScopeChecks"
-          ? review.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && node.assignment.ids.includes(row.acceptanceId)) : [] });
+      assert.deepEqual(Object.keys(node.parameters.properties!).sort(), ["summary", "issues", node.assignment.field].sort());
+      const input = { summary: "核对本组冻结原文", issues: [],
+        [node.assignment.field]: node.assignment.field === "checks"
+          ? review.checks.filter(row => node.assignment.ids.includes(row.id))
+          : node.assignment.field === "acceptanceScopeChecks"
+            ? review.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && node.assignment.ids.includes(row.acceptanceId))
+            : review.priorFindingDecisions!.filter(row => node.assignment.ids.includes(row.findingId!)) };
+      assert.equal(architectureToolValidation(input, node.parameters).valid, true);
+      const parts = node.validate(input);
+      const other = node.assignment.field === "checks" ? "acceptanceScopeChecks" : "checks";
+      assert.deepEqual(parts.parts[other], []);
+      assert.deepEqual(node.prepareArguments({ ...input, [other]: [] }), input);
+      assert.deepEqual(node.prepareArguments({ ...input, [other]: " [ \n ] " }), input);
+      const foreign = { ...input, [other]: other === "checks" ? review.checks : review.acceptanceScopeChecks };
+      assert.equal(architectureToolValidation(node.prepareArguments(foreign), node.parameters).valid, false);
+      assert.throws(() => node.validate(foreign), /本组编号/);
       await node.worker.submit({ baseHash: node.worker.baseHash, issueIds: node.worker.group.issueIds, summary: parts.summary,
         updates: [{ path: node.worker.group.paths[0]!, value: parts }] });
     } finally { active--; }
   };
-  const options = { record, candidateHash, platformHash: "a".repeat(64), context, schema, runRole, save: async (_checkpoint: ReviewDispatchCheckpoint) => {} };
+  const options = { record, candidateHash, platformHash: "a".repeat(64), context, schema, priorFindings, runRole, save: async (_checkpoint: ReviewDispatchCheckpoint) => {} };
   assert.equal(shouldDistributeArchitectureReview(context, null), true);
   const oldSchema = structuredClone(schema);
   oldSchema.properties.issues.items.required.push("factClaims");
@@ -74,9 +88,10 @@ test("复杂评审按主题与验收分组，独立会话最多三并发，中�
   const resumed = await runArchitectureReviewDispatch(options);
   assert.equal(record.reviewDispatchSource, saved.bindingHash);
   for (const group of saved.dispatch.groups.filter(group => group.result)) assert.equal(started.slice(before).includes(group.issueIds[0]!), false);
-  assert.equal(maximum, 3); assert.equal(resumed.summary.modelCalls, 8);
+  assert.equal(maximum, 3); assert.equal(resumed.summary.modelCalls, 9);
   assert.equal(resumed.parts.checks.length, 8); assert.equal(resumed.parts.acceptanceScopeChecks.length, 13);
-  const parts = createArchitectureReviewParts({ schema, candidateHash, context, initial: resumed.parts });
+  assert.equal(resumed.parts.priorFindingDecisions.length, 1);
+  const parts = createArchitectureReviewParts({ schema, candidateHash, context, priorFindings, initial: resumed.parts });
   const assembled = parts.assemble({ candidateHash, progressHash: parts.reference().progressHash, verdict: "pass", summary: "已逐项汇总" });
   assert.equal(validateReview(assembled, { candidateHash, schemaVersion: 3, evidenceContext: context }).verdict, "pass");
   const calls = started.length;

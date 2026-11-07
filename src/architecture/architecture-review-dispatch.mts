@@ -4,7 +4,8 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { NeumaTool } from "../runtime/execution-port.mjs";
 import type { RepairCheckpoint, RepairWorker } from "../runtime/repair-scheduler.mjs";
 import { createReviewTaskCheckpoint, readReviewTaskCheckpoint, repairHash, runReviewTaskSchedule } from "../runtime/repair-scheduler.mjs";
-import { objectFields } from "../runtime/type-boundary.mjs";
+import { modelSubmissionArguments } from "../runtime/model-submission-arguments.mjs";
+import { objectFields, isPlainRecord } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { createArchitectureEvidenceReader } from "./architecture-evidence-reader.mjs";
 import { canonicalArchitectureReviewParts } from "./architecture-review-parts.mjs";
@@ -14,7 +15,7 @@ interface Assignment { id: string; field: SliceField; ids: string[] }
 interface SliceResult { summary: string; parts: ReviewParts }
 export interface ReviewDispatchCheckpoint { version: 1; candidateHash: string; bindingHash: string; dispatch: RepairCheckpoint<null> }
 export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; tools: NeumaTool[];
-  payload: UnknownRecord; validate(value: unknown): SliceResult }
+  payload: UnknownRecord; prepareArguments(input: unknown): unknown; validate(value: unknown): SliceResult }
 const rowId = { checks: "id", acceptanceScopeChecks: "acceptanceId", priorFindingDecisions: "findingId" } as const;
 const rows = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.map(objectFields) : [];
 function fail(message: string): never { throw new InputError(message); }
@@ -123,15 +124,27 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
       const reader = createArchitectureEvidenceReader({ context, candidateHash, priorFindings, role: "reviewer" });
       const wire = reader.submissionSchema(schema);
       const properties: Record<string, ToolSchema> = { summary: { type: "string", minLength: 1, maxLength: 1500 } };
-      for (const field of ["checks", "issues", "acceptanceScopeChecks", "priorFindingDecisions"] as const) {
+      for (const field of [assignment.field, "issues"] as const) {
         const selected = structuredClone(wire.properties![field]!);
-        selected.minItems = field === assignment!.field ? assignment!.ids.length : 0;
-        selected.maxItems = field === "issues" ? 4 : field === assignment!.field ? assignment!.ids.length : 0;
+        selected.minItems = field === "issues" ? 0 : assignment.ids.length;
+        selected.maxItems = field === "issues" ? 4 : assignment.ids.length;
         properties[field] = selected;
       }
+      const prepareArguments = (input: unknown) => {
+        if (!isPlainRecord(input)) return input;
+        const prepared = { ...input };
+        for (const field of Object.keys(rowId)) {
+          if (field === assignment.field) continue;
+          const value = modelSubmissionArguments(prepared[field], { type: "array" });
+          // Prior native sessions may echo the empty columns from their original tool contract.
+          if (Array.isArray(value) && value.length === 0) delete prepared[field];
+        }
+        return prepared;
+      };
       const knownFindings = new Set(rows(objectFields(priorFindings).findings).map(row => String(row.findingId)));
       const normalize = (input: unknown) => {
-        const raw = objectFields(input), resolved = objectFields(reader.resolveSubmission({ ...raw, candidateHash }));
+        const raw = objectFields(prepareArguments(input));
+        const resolved = objectFields(reader.resolveSubmission({ checks: [], acceptanceScopeChecks: [], priorFindingDecisions: [], ...raw, candidateHash }));
         const { summary: _summary, ...resolvedParts } = resolved;
         const scoped = { ...resolvedParts, candidateHash, issues: rows(resolved.issues).map(issue => ({ ...issue,
           id: assignment!.field === "priorFindingDecisions" && assignment!.ids.includes(String(issue.id)) && knownFindings.has(String(issue.id))
@@ -139,13 +152,13 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
         return checked({ summary: raw.summary, parts: scoped }, assignment!);
       };
       await options.runRole({ assignment: assignment!, worker, parameters: { type: "object", additionalProperties: false,
-        properties, required: Object.keys(properties) }, tools: [reader.tool], validate: normalize,
+        properties, required: Object.keys(properties) }, tools: [reader.tool], prepareArguments, validate: normalize,
         payload: { assignment, candidateHash, reviewEvidenceIndex: reader.index,
           requirements: objectFields(context).requirements, acceptanceAdapterGuide: objectFields(context).acceptanceAdapterGuide,
           design: objectFields(context).candidate,
           priorFindings: assignment!.field === "priorFindingDecisions" ? { ...objectFields(priorFindings),
             findings: rows(objectFields(priorFindings).findings).filter(row => assignment!.ids.includes(String(row.findingId))) } : null,
-          instruction: "只核对assignment指定的分项，所有未分派数组填空。引用由read_architecture_evidence核对；摘要需说明阻断或不确定项。本组结果仍是待主评审裁决的分项，不能修改候选、代交总评或宣称通过。" } });
+          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，发现相关问题写入本组 issues 并引用原文，由主评审统筹；其他组负责的结果留给对应组提交。引用由 read_architecture_evidence 核对，摘要说明阻断或不确定项。主评审完成总评后才形成整体结论。` } });
     } });
   const slices = ledger(result), parts: ReviewParts = { candidateHash, checks: [], issues: [], acceptanceScopeChecks: [], priorFindingDecisions: [] };
   for (const assignment of plan) {

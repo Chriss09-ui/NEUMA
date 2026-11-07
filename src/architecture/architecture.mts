@@ -453,7 +453,7 @@ export class ArchitectureDesigner {
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T> & {allowHandoff?:false}):Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T>): Promise<T | HandoffResult>;
-  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, onFidelity, onDiagnostics, editableDesign,
+  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, onFidelity, onDiagnostics, editableDesign,
     onMainReviewValidated, onMainReviewBudget, resumeMainReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = role === "reviewer" || payload.pipelineStage === "review_slice" ? null : ARCHITECTURE_ROLE_TURN_LIMIT, previousRejection, onSliceRejection, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
@@ -784,7 +784,7 @@ export class ArchitectureDesigner {
         necessity: { contextHash: decision.contextHash, ...decision.decisions.find((entry) => entry.issueId === item.id) } }));
     };
     const submit: NeumaTool = { name: submitName, label: "提交检查结果", description: "提交本阶段的结构化结果；提交不代表整体通过。",
-      parameters, ...(submitName === "submit_architecture" ? { prepareArguments: completeDecisionNotes } : {}),
+      parameters, ...(submitName === "submit_architecture" ? { prepareArguments: completeDecisionNotes } : prepareSubmission ? { prepareArguments: prepareSubmission } : {}),
       executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
         unsubmittedDraft.clear();
@@ -1826,7 +1826,7 @@ export class ArchitectureDesigner {
                 return this.role({ role: "specialist", agentId: definition.id,
                   systemPrompt: "你是独立评审子Agent，只核对本组指定分项，引用本次冻结证据。结果供主评审核对，不改设计，不代交最终结论。",
                   payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
-                  parameters: node.parameters, tools: node.tools, validate: node.validate,
+                  parameters: node.parameters, prepareSubmission: node.prepareArguments, tools: node.tools, validate: node.validate,
                   modelCallLimit: worker.callLimit, initialModelCalls: worker.group.calls, previousRejection: worker.group.rejection,
                   onSliceRejection: value => worker.onRejection!(value),
                   onStageModelCall: event => worker.onCall(event.retryAttempt),

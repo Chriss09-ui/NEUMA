@@ -151,7 +151,7 @@ export function projectVerificationMessages(messages: ContextEvent["messages"], 
 
 export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol, flatHandoffs = false }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown; flatHandoffs?: boolean }) {
   const textHandoffs = blueprintProtocol === "module-handoff-v3";
-  const task = pipelineStage === "review_slice" ? "你是独立评审者，只核对assignment指定的检查、验收范围或历史问题；完整提交本组编号，其他分项数组填空。核对真实证据及反证，不修改设计，不代替主评审作整体通过决定。"
+  const task = pipelineStage === "review_slice" ? "你是独立评审者，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。其他组的材料可用作核查依据，相关疑点写在issues里，由主评审统筹。核对真实证据及反证，不修改设计，不代替主评审作整体通过决定。"
     : pipelineStage === "blueprint" ? "按本轮工具的模块数量与每模块需求条数上限，设计全局蓝图及模块职责、依赖和需求分工；不提前展开各模块实现。"
     : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
     : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"

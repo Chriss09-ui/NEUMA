@@ -224,7 +224,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 
 > 收：完整候选 + 需求 + 证据目录 + 平台快照 → 出：`ArchitectureReview`；宿主另核候选/平台 SHA-256。持久化：`architecture.json`（`review`、`attempts[]`）。流向：pass → `status:"passed"`；revise/insufficient/infeasible/needs_input → 对应状态并走修订或返需。
 
-评审模型收到的 `modelBudget` 包含 `policy: "task_rejections"`、`limit: null` 和累计请求数 `used`。子组、主评审和范围复核各自跟踪正式提交的连续退回次数。查证、翻页和分项暂存都属于同一任务；同一问题连续退回三次时暂停。中断恢复带上原分项、会话引用和累计用量。
+评审模型收到的 `modelBudget` 包含 `policy: "task_rejections"`、`limit: null` 和累计请求数 `used`。子组的提交工具只显示本组结果字段、问题意见和摘要，宿主在存储时补齐其他类别的空数组。子组、主评审和范围复核各自跟踪正式提交的连续退回次数。查证、翻页和分项暂存都属于同一任务；同一问题连续退回三次时暂停。中断恢复带上原分项、会话引用和累计用量。
 
 ### 输入（最全形态）
 

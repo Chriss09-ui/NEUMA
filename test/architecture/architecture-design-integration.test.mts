@@ -50,7 +50,7 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false, readReviewPages = false, rejectSlice = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
+  acceptanceCount = 0, failReviewSlice = false, readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
   interruptIntegration = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
@@ -166,7 +166,10 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         const payload = payloads.findLast(row => row.pipelineStage === "review_slice")!;
         const assignment = objectFields(payload.assignment), ids = assignment.ids as string[];
         const reviewed = passingReview(payload.candidateHash!, payload.design, payload.priorFindings);
-        name = "submit_architecture_review_slice"; args = { summary: "原生模拟模型独立核对本组原文", issues: [],
+        name = "submit_architecture_review_slice";
+        const published = objectFields(body.tools!.find(tool => tool.function.name === "submit_architecture_review_slice")!.function).parameters;
+        assert.deepEqual(Object.keys(objectFields(objectFields(published).properties)).sort(), ["summary", "issues", assignment.field].sort());
+        args = { summary: "原生模拟模型独立核对本组原文", issues: [],
           checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
           acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
           priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };
@@ -237,6 +240,12 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           const { issues, ...rest } = fields;
           args = { ...rest, ...(Array.isArray(issues) && issues.length ? { issue: issues[0] } : {}) };
         }
+      }
+      if (reviewSliceJson && name === "submit_architecture_review_slice") {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(`data: ${JSON.stringify({ id: "native-slice-json", choices: [{ index: 0,
+          delta: { role: "assistant", content: JSON.stringify(args) }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+        return;
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(`data: ${JSON.stringify({ id: "native-stage-fixture", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0,
@@ -365,7 +374,7 @@ test("复杂架构分组评审中断后沿原子会话继续，主评审和范�
 });
 
 test("子组、主评审和范围复核都能在四次读取后提交，累计用量可重新载入", { timeout: 30000 }, async t => {
-  const f = await fixture(t, { acceptanceCount: 13, readReviewPages: true });
+  const f = await fixture(t, { acceptanceCount: 13, readReviewPages: true, reviewSliceJson: true });
   assert.equal((await f.run()).status, "passed");
   await f.reload();
   const record = (await f.designer.get(f.definition.id))!;
