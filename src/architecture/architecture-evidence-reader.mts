@@ -19,7 +19,7 @@ interface ReferenceHint extends UnknownRecord { issuePath: unknown; reference: {
 type ResolvedReference<T> = T extends { receiptId: string } ? EvidenceReference
   : T extends { source: string; path: string } ? Omit<T, "path"> & { path: string; quote: string } : T;
 type ResolvedReferences<T> = T extends unknown[] ? ResolvedReference<T[number]>[] : T;
-type ResolvedCandidatePaths<T> = T extends unknown[] ? (T[number] extends infer R ? R extends { receiptId: string } ? string : R : never)[] : T;
+type ResolvedCandidatePaths<T> = T extends unknown[] ? (T[number] extends infer R ? R extends string | { receiptId: string } ? string : R : never)[] : T;
 type ResolvedFinding<T, K extends "id" | "findingId"> = T extends { findingRef: unknown } ? Omit<T, "findingRef"> & Record<K, unknown> : T;
 type ResolvedIssue<T> = ResolvedFinding<{ [K in keyof T]: K extends "references" ? ResolvedReferences<T[K]>
   : K extends "candidatePaths" ? ResolvedCandidatePaths<T[K]> : T[K] }, "id">;
@@ -168,9 +168,9 @@ function sliceQuote(text: string, offset: number, limit: number, byteLimit: numb
   return { start, end, quote };
 }
 
-function receiptError(path: string, reason = "invalid_receipt") {
-  return Object.assign(new InputError(`${path} 引用回执未知、过期或格式混合；请在本次评审重新读取证据，不要重写回执。`),
-    { validationIssue: { path, reason } });
+function receiptError(path: string, remedy = "请在本次评审重新读取证据，使用本轮返回的编号。") {
+  return Object.assign(new InputError(`${path} 引用回执未知、过期、来源不适用或格式混合。${remedy}`),
+    { validationIssue: { path, reason: "invalid_receipt", remedy } });
 }
 
 function selectorError(path: string, reason: string, entry?: ScopeEntry | null) {
@@ -240,6 +240,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
   function locate(source: EvidenceSource, pointer: string) {
     const data = frozen[source];
     if (source === "candidate") {
+      pointer = pointer.replace(/^candidate[ \t]+(?=\/)/u, "");
       if (Object.hasOwn(index.candidateSections, pointer)) pointer = index.candidateSections[pointer]!.pointer;
       // Only the model packet wraps the candidate in "design". A real branch owns its entire subtree.
       else if (pointer.startsWith("/design/") && !Object.hasOwn(objectFields(data), "design")) {
@@ -288,14 +289,18 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
     return { found: true, receiptId, contextHash, candidateHash, reference, quoteHash: hash(quote),
       total: serialized.length, offset: start, nextOffset: end < serialized.length ? end : null, offsetUnit: "UTF-16" };
   }
-  function resolveReceipt(reference: object, path: string) {
-    if (Object.keys(reference).length !== 1 || typeof objectFields(reference).receiptId !== "string") throw receiptError(path);
+  function resolveReceipt(reference: object, path: string, { candidateLocation = false } = {}) {
+    const remedy = candidateLocation
+      ? "填写当前设计稿内的实际路径（如 /acceptance/0/expected），其他材料的出处放在 references。"
+      : "优先填写当前材料的 {source,path}；需要摘录一段原文时重新读取本轮回执。";
+    if (Object.keys(reference).length !== 1 || typeof objectFields(reference).receiptId !== "string") throw receiptError(path, remedy);
     const receipt = receipts.get(objectFields(reference).receiptId as string);
     if (!receipt || receipt.role !== role || receipt.candidateHash !== candidateHash || receipt.contextHash !== contextHash
-      || hash(receipt.reference.quote) !== receipt.quoteHash) throw receiptError(path);
+      || candidateLocation && (receipt.reference.source !== "candidate" || !receipt.reference.path)
+      || hash(receipt.reference.quote) !== receipt.quoteHash) throw receiptError(path, remedy);
     const current = at(frozen[receipt.reference.source], receipt.reference.path);
     const text = current.found ? typeof current.value === "string" ? current.value : JSON.stringify(current.value) : "";
-    if (!text?.includes(receipt.reference.quote)) throw receiptError(path);
+    if (!text?.includes(receipt.reference.quote)) throw receiptError(path, remedy);
     return receipt.reference;
   }
   const tool: NeumaTool = { name: "read_architecture_evidence", label: "读取本轮评审依据", parameters, executionMode: "sequential",
@@ -470,11 +475,13 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       for (const [index, rawIssue] of rows(result.issues).entries()) {
         const issue = objectFields(rawIssue);
         if (Array.isArray(issue?.candidatePaths)) issue.candidatePaths = rows(issue.candidatePaths).map((reference, position) => collect(reference, () => {
+          if (typeof reference === "string") {
+            const selected = locate("candidate", reference);
+            return selected.found ? selected.pointer : reference;
+          }
           if (!reference || typeof reference !== "object") return reference;
           const path = `review.issues[${index}].candidatePaths[${position}]`;
-          const resolved = resolveReceipt(reference, path);
-          if (resolved.source !== "candidate" || !resolved.path || !at(frozen.candidate, resolved.path).found) throw receiptError(path);
-          return resolved.path;
+          return resolveReceipt(reference, path, { candidateLocation: true }).path;
         }));
         if (!Array.isArray(issue?.references)) continue;
         issue.references = rows(issue.references).map((input, position) => collect(input, () => {

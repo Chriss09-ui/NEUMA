@@ -8,6 +8,7 @@ import { modelSubmissionArguments } from "../runtime/model-submission-arguments.
 import { objectFields, isPlainRecord } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { createArchitectureEvidenceReader } from "./architecture-evidence-reader.mjs";
+import { prepareReviewArguments } from "./architecture-review-evidence.mjs";
 import { canonicalArchitectureReviewParts } from "./architecture-review-parts.mjs";
 
 type SliceField = "checks" | "acceptanceScopeChecks" | "priorFindingDecisions";
@@ -132,7 +133,7 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
       }
       const prepareArguments = (input: unknown) => {
         if (!isPlainRecord(input)) return input;
-        const prepared = { ...input };
+        const prepared = { ...objectFields(prepareReviewArguments(input)) };
         for (const field of Object.keys(rowId)) {
           if (field === assignment.field) continue;
           const value = modelSubmissionArguments(prepared[field], { type: "array" });

@@ -32,6 +32,11 @@ export function architectureToolValidation(value: unknown, schema: ToolSchema, {
   if (feedback.valid) return feedback;
   const issues = feedback.issues.map(entry => {
     const reason = reasons[entry.reason as keyof typeof reasons] ?? "invalid_contract";
+    if (reason === "unknown_field" && entry.path === root && schema.properties?.issues?.items?.properties?.factClaims
+      && !Object.hasOwn(schema.properties, "factClaims") && Object.hasOwn(objectFields(value), "factClaims")) {
+      const destination = schema.properties.issue ? "对应意见的 issues[i].factClaims 或单项 issue.factClaims" : "对应意见的 issues[i].factClaims";
+      return { ...entry, path: `${root}.factClaims`, reason, remedy: `把报告外层的证据移到${destination}，保留其中的实际内容。` };
+    }
     return { ...entry, reason, remedy: entry.alternatives ? entry.remedy : remedies[reason] };
   });
   return { ...feedback, issues, ...(issues.some((entry) => /\.acceptance\[[0-9]+\]\.verification(?:\.|$)/.test(entry.path))

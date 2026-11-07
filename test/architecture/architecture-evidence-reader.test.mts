@@ -481,7 +481,12 @@ test("候选路径回执只解析当前候选非根路径，其他来源、过�
   for (const reference of [{ receiptId: root!.receiptId }, { receiptId: requirement!.receiptId },
     { receiptId: candidate!.receiptId, path: "/instructions" }])
     assert.throws(() => current.resolveSubmission({ issues: [{ candidatePaths: [reference] }] }), (error) => failureFields(error).validationIssue!.path === "review.issues[0].candidatePaths[0]" && failureFields(error).validationIssue!.reason === "invalid_receipt");
-  assert.throws(() => reader({ candidateHash: "b".repeat(64) }).resolveSubmission(submission), /引用回执未知/u);
+  assert.throws(() => reader().resolveSubmission(submission), (error) => {
+    assert.equal(failureFields(error).validationIssue!.path, "review.issues[0].candidatePaths[0]");
+    assert.equal(failureFields(error).validationIssue!.reason, "invalid_receipt");
+    assert.match(failureFields(error).message!, /填写当前设计稿内的实际路径/u);
+    return true;
+  });
 });
 
 test("索引只列声明的顶层数组和稳定编号，路径缺失优先返回对应分支邻近路径", async () => {
@@ -667,7 +672,9 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
           if (reviewerCalls === 3 || reviewerCalls === 5) {
             const feedback = body.messages.findLast((message) => message.role === "tool")!.content;
             const text = typeof feedback === "string" ? feedback : JSON.stringify(feedback);
-            assert.match(text, /引用回执未知、过期或格式混合/u); assert.ok(receipts.every((id) => !text.includes(id)));
+            assert.match(text, /invalid_receipt/u);
+            assert.match(text, /review\.issues\[0\]\.candidatePaths\[0\]/u);
+            assert.ok(receipts.every((id) => !text.includes(id)));
           }
           if (payload.priorFindings) review.priorFindingDecisions = payload.priorFindings.findings.map(({ findingId }) => ({
             findingId, status: review.verdict === "revise" ? "unresolved" : "unsupported",

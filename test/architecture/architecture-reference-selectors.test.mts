@@ -24,9 +24,13 @@ function fixture() {
 }
 
 test("已完整提供的具体字段由宿主恢复原文，仍保留独立评审的负面判断", () => {
-  const f = fixture(), before = structuredClone(f.review);
+  const f = fixture();
+  f.review.issues[0]!.candidatePaths = ["candidate /acceptance/0"];
+  objectFields(f.review.issues[0]!.references![0]).path = "candidate /acceptance/0/expected";
+  const before = structuredClone(f.review);
   assert.equal(architectureToolValidation(f.review, f.reader.submissionSchema(reviewSubmissionSchema({ evidenceRequired: true }))).valid, true);
   const normalized = f.reader.resolveSubmission(f.review) as import("../../src/contracts/architecture.mjs").ArchitectureReview;
+  assert.deepEqual(normalized.issues[0]!.candidatePaths, ["/acceptance/0"]);
   assert.equal(normalized.issues[0]!.references![0]!.quote, f.context.candidate.acceptance[0]!.expected);
   assert.deepEqual(f.review, before);
   assert.equal(validateReview(normalized, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }).verdict, "revise");
@@ -39,10 +43,15 @@ test("选择器不替换错误显式引文，不接受缺失/混合/陈旧候选
   const explicit = structuredClone(f.review); objectFields(explicit.issues[0]!.references![0]).quote = "并非本轮原文";
   assert.throws(() => validateReview(f.reader.resolveSubmission(explicit), { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }),
     (error) => failureFields(error).validationIssues!.some((issue) => issue.reason === "reference_quote_mismatch"));
-  for (const change of [{ path: "/PRIVATE_MISSING" }, { source: "PRIVATE_SOURCE" }, { extra: "PRIVATE_VALUE" }, { path: "/__proto__" }]) {
+  for (const change of [{ path: "/PRIVATE_MISSING" }, { source: "PRIVATE_SOURCE" }, { extra: "PRIVATE_VALUE" }, { path: "/__proto__" },
+    { source: "runtimeCapabilities", path: "candidate /version" }]) {
     const bad = structuredClone(f.review); Object.assign(bad.issues[0]!.references![0]!, change);
     assert.throws(() => f.reader.resolveSubmission(bad), (error) => !/PRIVATE/u.test(failureFields(error).message!));
   }
+  const missing = structuredClone(f.review);
+  missing.issues[0]!.candidatePaths = ["candidate /acceptance/999/expected"];
+  assert.throws(() => validateReview(f.reader.resolveSubmission(missing), { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }),
+    (error) => failureFields(error).validationIssues!.some((issue) => issue.reason === "candidate_path_missing"));
   assert.throws(() => f.reader.resolveSubmission({ ...f.review, candidateHash: "0".repeat(64) }));
   for (const change of [{ delivery: "summary" }, { sha256: "0".repeat(64) }]) {
     const context = structuredClone(f.context); Object.assign(context.contextManifest.candidate!, change);

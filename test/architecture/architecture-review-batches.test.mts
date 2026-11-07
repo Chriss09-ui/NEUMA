@@ -94,7 +94,7 @@ async function fixture(t: test.TestContext, { count = 22, initialModelCalls = 0,
         assert.ok(["save", "submit-with-parts", "submit"].includes(reference.batch!.stage));
         if (requests.length > 1) assert.ok(JSON.parse(String(await readFile(join(root, "saved-parts.json"), "utf8"))).parts);
         const name = final ? "submit_architecture_review_parts" : "save_architecture_review_parts";
-        const args = { candidateHash: f.candidateHash, progressHash: reference.progressHash, ...rows(f, reference),
+        const args = { candidateHash: f.candidateHash, progressHash: reference.progressHash, ...rows(f, reference), factClaims: "[]",
           ...(final ? { verdict: "pass", summary: "本地协议夹具已逐项核对，非真实业务验收" } : {}) };
         const interrupted = requests.length === 2 && nativeStop, asText = !interrupted && requests.length % 2 === 0;
         const delta = asText ? { content: JSON.stringify({ submission: { name, arguments: args } }) }

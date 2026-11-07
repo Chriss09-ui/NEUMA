@@ -3,9 +3,9 @@ export const BLUEPRINT_ASSIGNMENT_RULE = "requirements中的每个id必须在全
 
 export const INTEGRATION_ACCEPTANCE_RULE = "只有 conflicts 中列出的路径覆盖某条已有验收用例时，才可修正该条的冲突内容。所有原用例都须保留 id 和 requirementIds。其余用例逐项原样保留，包括 verification 中的验证责任 owner、阶段 stage 和适配器 adapterId。确有跨模块验收缺口时，用新 id 在原清单末尾追加用例。没有待解冲突且无需补充时，直接用当前 baseHash 提交 updates: []。";
 
-export const REVIEW_EVIDENCE_READ_RULE = "source=candidate 已经选中了消息中 design 里的整份架构设计稿。可从 reviewEvidenceIndex.candidateSections 直接选本轮项目的查询参数，或将列出的中文名称填入 pointer。选“能力清单”读取 /capabilities。其他位置从所选来源内部开始填写，引用时使用返回的实际路径或回执。";
+export const REVIEW_EVIDENCE_READ_RULE = "source=candidate 已经选中了消息中 design 里的整份架构设计稿。可从 reviewEvidenceIndex.candidateSections 直接选本轮项目的查询参数，或将列出的中文名称填入 pointer。选“能力清单”读取 /capabilities。意见的 candidatePaths 只填设计稿内部的实际位置，例如 [\"/acceptance/0/expected\"]。references 优先填材料与位置，例如 [{source:\"candidate\",path:\"/acceptance/0/expected\"}]，由宿主取当前原文。需摘录长字段的一段时才读取本轮回执。恢复同一任务时按当前材料的位置引用，旧回执不再有效。";
 
-export const REVIEW_FACT_CLAIM_RULE = "尚待验证的事项用 kind=context、blocking=false，引用候选或已安排的验证，说明要验证什么。factClaims 可省略或填 []。对平台支持或不支持某项能力作结论时用 kind=platform，无论是否阻断，都要在 factClaims 提供 runtimeCapabilities 的真实路径与 expectedJson。以材料缺失为由阻断时用 kind=context，并引用可核实的事实。在检查说明中用平台能力判断可行性时也要指出冻结来源。主评审须核对各组意见；提醒里若实际断言平台能力，应按平台结论查证，再作裁决。";
+export const REVIEW_FACT_CLAIM_RULE = "事实证据只放在对应意见的 issues[i].factClaims，工具支持单项 issue 时可放 issue.factClaims。报告最外层没有 factClaims。尚待验证的事项用 kind=context、blocking=false，引用候选或已安排的验证，说明要验证什么，省略这条意见的 factClaims。对平台支持或不支持某项能力作结论时用 kind=platform，无论是否阻断，都要在该意见的 factClaims 提供 runtimeCapabilities 的真实路径与 expectedJson。以材料缺失为由阻断时用 kind=context，并引用可核实的事实。在检查说明中用平台能力判断可行性时也要指出冻结来源。主评审须核对各组意见；提醒里若实际断言平台能力，应按平台结论查证，再作裁决。";
 
 export const CAPABILITY_VERIFICATION_RULE = `capabilities只记录当前执行路径实际要调用的工具、连接或专属代码能力，不记录“尚未验收”的业务效果。available须有当前完整能力目录依据；已有明确且受平台支持的实现路径、需研发的专属代码用needs_development，实际依赖是否存在或可用仍不确定时保留unverified。已排除或未来才采用的方案写入decisions。
 分别核对执行依赖与验收义务：生成页面、数值计算的代码是实现内容，浏览器视觉、滑块交互效果或数值精度尚未验收是验证状态，不能仅凭名称分类。单纯待验收的效果保留在unknowns及适用的acceptance或后续验证义务中，必要时用decisions解释分工；逐条保留原需求引用、验证阶段、具体证据和失败处置，不新增不存在的验收适配器。deferredVerifications已有明确后续安排且不影响当前架构可行性的事项，不因尚未执行就升级为能力缺口，也不代表已验证或可直接交付。

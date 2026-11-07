@@ -169,7 +169,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         name = "submit_architecture_review_slice";
         const published = objectFields(body.tools!.find(tool => tool.function.name === "submit_architecture_review_slice")!.function).parameters;
         assert.deepEqual(Object.keys(objectFields(objectFields(published).properties)).sort(), ["summary", "issues", assignment.field].sort());
-        args = { summary: "原生模拟模型独立核对本组原文", issues: [],
+        args = { summary: "原生模拟模型独立核对本组原文", issues: [], factClaims: reviewSliceJson ? [] : " [\n ] ",
           checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
           acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
           priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };
@@ -187,6 +187,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         const payload = payloads.findLast((row) => row.design && row.candidateHash);
         assert.ok(payload); name = "submit_architecture_review";
         args = passingReview(payload.candidateHash!, payload.design, payload.priorFindings);
+        if (acceptanceCount > 10) Reflect.set(args, "factClaims", "[]");
         args.acceptanceScopeChecks = payload.reviewEvidenceIndex!.acceptanceScope.map((row) => ({ acceptanceId: row.acceptanceId,
           adapterRulePath: payload.reviewEvidenceIndex!.adapterRules[row.adapterId]![0]!, sufficient: true, reason: "固定模型核对本项冻结范围" }));
         if (state.rejectReview && !state.reviewRejected) {
@@ -214,7 +215,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         name = "read_model_context"; args = { requests: [{ section: "requirements" }] };
         assert.ok(names.includes(name));
       } else if (rejectSlice && kind === "review_slice" && payloads.some(row => objectFields(row.assignment).id === "review_checks_0")) {
-        name = "submit_architecture_review_slice"; args = { summary: "缺少受派分项" };
+        args = { ...objectFields(args), factClaims: [{ source: "runtimeCapabilities", path: "/version", expectedJson: "1" }] };
       }
       if (stage === "module" && malformedCoverage) {
         const rejection = body.messages.filter(m => m.role === "tool").map(m => text(m.content)).find(m => m.includes('"rejectedSubmission"'));
@@ -387,13 +388,15 @@ test("子组、主评审和范围复核都能在四次读取后提交，累计�
   assert.deepEqual(f.errors, []);
 });
 
-test("子组连续三次因同一问题正式提交失败后锁住原任务，恢复不再发请求", { timeout: 30000 }, async t => {
+test("子组连续三次把有内容的证据放在报告外层会锁住原任务，恢复不再发请求", { timeout: 30000 }, async t => {
   const f = await fixture(t, { acceptanceCount: 13, rejectSlice: true });
   await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "review_slice_incomplete");
   await f.reload();
   const record = (await f.designer.get(f.definition.id))!;
   const group = readReviewTaskCheckpoint(objectFields(record.reviewDispatchCheckpoint).dispatch).groups[0]!;
   assert.equal(group.calls, 3); assert.equal(group.rejection?.count, 3);
+  assert.equal(record.diagnostic?.lastSubmissionIssue?.path, "review_slice.factClaims");
+  assert.equal(record.diagnostic?.lastSubmissionIssue?.reason, "unknown_field");
   assert.equal(record.designRecovery!.status, "blocked");
   const requests = f.requests.length;
   await assert.rejects(f.run(), /连续三次/);

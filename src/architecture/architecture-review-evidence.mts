@@ -1,6 +1,7 @@
 import type { ArchitectureDesign, ArchitectureReview, ArchitectureIssue, ArchitectureRecord, ArchitectureEvidenceContext, EvidenceItem, RequirementItem } from "../contracts/architecture.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
-import { objectFields } from "../runtime/type-boundary.mjs";
+import { isPlainRecord, objectFields } from "../runtime/type-boundary.mjs";
+import { modelSubmissionArguments } from "../runtime/model-submission-arguments.mjs";
 type EvidenceError = { path: string; reason: string; remedy: string };
 type EvidenceFailure = (path: string, reason: string, remedy: string) => void;
 import { createHash } from "node:crypto";
@@ -21,6 +22,14 @@ export const REVIEW_ISSUE_EVIDENCE_PROPERTIES = Object.freeze({
   factClaims: { type: "array", minItems: 0, maxItems: 12, items: object({ source: { type: "string", enum: ["runtimeCapabilities", "contextManifest"] },
     path: pointer, expectedJson: text(4000) }) },
 });
+
+export function prepareReviewArguments(input: unknown): unknown {
+  if (!isPlainRecord(input) || !Object.hasOwn(input, "factClaims")) return input;
+  const claims = modelSubmissionArguments(input.factClaims, { type: "array" });
+  if (!Array.isArray(claims) || claims.length !== 0) return input;
+  const { factClaims: _empty, ...report } = input;
+  return report;
+}
 
 export const ACCEPTANCE_SCOPE_CHECKS_SCHEMA = {
   type: "array", minItems: 1, maxItems: 80,

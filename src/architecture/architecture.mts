@@ -42,7 +42,7 @@ import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT } f
 import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence,
   platformCapabilityCatalog, validatePlatformMetadata } from "./platform-contract.mjs";
 import { runtimeCapabilityContract } from "../runtime/runtime-capability-contract.mjs";
-import { architectureReviewEvidenceContext, architectureReviewIssues } from "./architecture-review-evidence.mjs";
+import { architectureReviewEvidenceContext, architectureReviewIssues, prepareReviewArguments } from "./architecture-review-evidence.mjs";
 import { architectureToolValidation, diagnoseArchitectureReferences } from "./architecture-tool-diagnostics.mjs";
 import { HANDOFF_REFERENCE_SCHEMA, HANDOFF_POLICY, verifyArchitectureHandoff, validateHandoffProposal } from "./architecture-handoff-verification.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
@@ -783,8 +783,10 @@ export class ArchitectureDesigner {
       return proposals.map((item) => ({ ...structuredClone(item), owner: "user" as const, blocking: true,
         necessity: { contextHash: decision.contextHash, ...decision.decisions.find((entry) => entry.issueId === item.id) } }));
     };
+    const prepareSubmit = submitName === "submit_architecture" ? completeDecisionNotes
+      : prepareSubmission ?? (role === "reviewer" ? prepareReviewArguments : undefined);
     const submit: NeumaTool = { name: submitName, label: "提交检查结果", description: "提交本阶段的结构化结果；提交不代表整体通过。",
-      parameters, ...(submitName === "submit_architecture" ? { prepareArguments: completeDecisionNotes } : prepareSubmission ? { prepareArguments: prepareSubmission } : {}),
+      parameters, ...(prepareSubmit ? { prepareArguments: prepareSubmit } : {}),
       executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted();
         unsubmittedDraft.clear();
@@ -925,7 +927,7 @@ export class ArchitectureDesigner {
       } };
     const saveReviewParts: NeumaTool | null = reviewParts ? { name: "save_architecture_review_parts", label: "保存已核对的评审分项",
       description: "按宿主当前candidateHash和progressHash保存部分checks/issues/acceptanceScopeChecks/priorFindingDecisions；同编号明确替换，未提交编号保留，移除旧问题须removeIssueIds。有rejectedPartsHash时可引用当前未通过草稿为基底，仅重交需修正的行，所有行仍重验。精确校验后保存，最终仍须完整提交与独立复核。",
-      parameters: reviewParts.saveParameters, executionMode: "sequential", execute: async (_id, value) => {
+      parameters: reviewParts.saveParameters, prepareArguments: prepareReviewArguments, executionMode: "sequential", execute: async (_id, value) => {
         signal?.throwIfAborted(); if (result !== undefined) throw new InputError("本阶段已经提交，请结束本轮");
         if (truncated || failed || ["length", "error", "aborted"].includes(currentPromptAssistant?.stopReason ?? ""))
           throw new InputError("当前模型响应未完整结束，不能新增评审分项；更早已保存成果保留。");
@@ -937,7 +939,7 @@ export class ArchitectureDesigner {
       } } : null;
     const submitReviewParts: NeumaTool | null = reviewParts ? { name: "submit_architecture_review_parts", label: "正式提交已保存的完整评审",
       description: "引用宿主当前candidateHash和progressHash提交verdict与summary；可同时携带最后真实分项，或使用当前rejectedPartsHash为基底只替换错误行。先按CAS校验保存，再组装并重跑原完整结构、覆盖、语义及独立范围复核。缺项不接受，被拒草稿和保存均不代表通过。",
-      parameters: reviewParts.submitParameters, executionMode: "sequential", execute: async (callId, value) => {
+      parameters: reviewParts.submitParameters, prepareArguments: prepareReviewArguments, executionMode: "sequential", execute: async (callId, value) => {
         signal?.throwIfAborted(); if (result !== undefined) throw new InputError("本阶段已经提交，请结束本轮");
         if (truncated || failed || ["length", "error", "aborted"].includes(currentPromptAssistant?.stopReason ?? ""))
           throw new InputError("当前模型响应未完整结束，不能保存或正式提交评审分项。");
