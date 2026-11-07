@@ -55,7 +55,7 @@ export function architectureModelContext(source: UnknownRecord, { role, continua
   if (continuation && source.pipelineStage === "integration") fields.push("conflicts");
   if (!continuation) {
     fields.push("requirements", "confirmedRequirementContext", "assignment", "dependencyInterfaces", "blueprintBoundary", "baseCandidate", "previousDesign",
-      "design", "issues", "conflicts", "deterministicIssues", "researchGaps", "reviewRetry", "developmentRevision", "requirementFidelityFeedback", "rejectedRequirementFidelitySubmission", "validationRepair", "repairPreparation", "distributedReview");
+      "design", "issues", "conflicts", "deterministicIssues", "researchGaps", "reviewRetry", "reviewReferenceRecovery", "developmentRevision", "requirementFidelityFeedback", "rejectedRequirementFidelitySubmission", "validationRepair", "repairPreparation", "distributedReview");
     if (source.pipelineStage === "module" && source.blueprintProtocol === "module-handoff-v3" && source.blueprint) {
       const blueprint = objectFields(source.blueprint);
       // This module already has its full assignment. Other modules' briefs remain readable by pointer.

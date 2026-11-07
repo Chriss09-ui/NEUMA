@@ -1,11 +1,13 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
-import type { NeumaTool } from "../runtime/execution-port.mjs";
-import { objectFields, isRecord, isInteger } from "../runtime/type-boundary.mjs";
+import type { NeumaTool, SessionMessage } from "../runtime/execution-port.mjs";
+import type { ReviewDiagnosticIssue } from "../contracts/architecture.mjs";
+import { objectFields, isPlainRecord, isRecord, isInteger } from "../runtime/type-boundary.mjs";
 type EvidenceSource = "candidate" | "requirements" | "runtimeCapabilities" | "contextManifest" | "evidence" | "confirmedRequirementContext" | "deferredVerifications" | "acceptanceAdapterGuide";
 interface EvidenceRequest { source: EvidenceSource; pointer: string; offset?: number; limit?: number; pathOffset?: number; acceptanceId?: string }
 interface EvidenceReference { source: EvidenceSource; path: string; quote: string }
 interface EvidenceReceipt { role: string; candidateHash: unknown; contextHash: string; reference: EvidenceReference; quoteHash: string }
+interface HistoricalReceipt { reference: EvidenceReference; wholeField: boolean }
 interface ScopeEntry { acceptanceId: string; adapterId: string; scope: string; criterionPath: string; adapterRulePaths: string[] }
 interface ScopeReceipt { role: string; candidateHash: unknown; contextHash: string; criterionPath: string; pointer: string;
   row: { acceptanceId: string; adapterId: string; scope: string; criterionQuote: string; adapterQuote: string } }
@@ -54,6 +56,7 @@ const REQUEST_FIELDS = {
 };
 const REQUEST_SCHEMA = { type: "object", properties: REQUEST_FIELDS, required: ["source", "pointer"], additionalProperties: false };
 const MAX_BATCH_QUOTE_BYTES = 24 * 1024;
+const MAX_RECOVERED_RECEIPTS = 256, MAX_RECOVERY_BYTES = 64 * 1024;
 const stableId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,79}$/u.test(value);
 const encodePointer = (value: string) => value.replace(/~/g, "~0").replace(/\//g, "~1");
 const SAFE_KEYS = new Set(["id", "text", "content", "value", "label", "source", "kind", "evidence", "messageId", "quote", "version", "items",
@@ -192,6 +195,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
 }) {
   const frozen = objectFields(structuredClone(context)), contextHash = hash(JSON.stringify(frozen)), nonce = randomUUID(), receipts = new Map<string, EvidenceReceipt>();
   const scopeReceipts = new Map<string, ScopeReceipt>();
+  const historicalReceipts = new Map<string, HistoricalReceipt>();
   const keys = declaredKeys(candidateSchema);
   for (const source of SOURCES) keys.add(source);
   for (const key of Object.keys(objectFields(objectFields(frozen.acceptanceAdapterGuide).adapters))) keys.add(key);
@@ -249,6 +253,59 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       }
     }
     return { pointer, ...at(data, pointer) };
+  }
+  function recoverReadPage(value: unknown, request: EvidenceRequest) {
+    const page = objectFields(value), reference = objectFields(page.reference);
+    const { source, path, quote } = reference, id = page.receiptId;
+    if (page.found !== true || page.contextHash !== contextHash || page.candidateHash !== candidateHash || page.offsetUnit !== "UTF-16"
+      || typeof id !== "string" || !/^ref_[a-f0-9]{64}$/u.test(id) || source !== request.source
+      || typeof path !== "string" || typeof quote !== "string" || !quote.trim() || quote.length > 1000
+      || !isInteger(page.offset) || page.offset < 0 || !fullSource(request.source)) return;
+    const current = locate(request.source, request.pointer);
+    const original = current.found && (typeof current.value === "string" ? current.value : JSON.stringify(current.value));
+    const end = page.offset + quote.length;
+    if (current.pointer !== path || typeof original !== "string" || original.length !== page.total
+      || page.nextOffset !== (end < original.length ? end : null)
+      || original.slice(page.offset, end) !== quote || hash(quote) !== page.quoteHash) return;
+    if (historicalReceipts.size < MAX_RECOVERED_RECEIPTS)
+      historicalReceipts.set(id, { reference: { source: request.source, path, quote }, wholeField: page.offset === 0 && end === original.length });
+  }
+  const recoveryChoice = ({ reference, wholeField }: HistoricalReceipt) => wholeField
+    ? { source: reference.source, path: reference.path } : { ...reference };
+  function recoveredReceipt(value: unknown) {
+    const fields = objectFields(value);
+    return Object.keys(fields).length === 1 && typeof fields.receiptId === "string" ? historicalReceipts.get(fields.receiptId) : undefined;
+  }
+  function restoreIssueReferences(issue: UnknownRecord, index: number, reselect?: ReviewDiagnosticIssue[]) {
+    const outdated = (value: unknown, path: string, remedy: string) => {
+      if (!reselect || !Object.hasOwn(objectFields(value), "receiptId")) return [value];
+      reselect.push({ path, reason: "invalid_receipt", remedy });
+      return [];
+    };
+    if (Array.isArray(issue.references)) issue.references = issue.references.flatMap((value, position) => {
+      const restored = recoveredReceipt(value);
+      return restored ? [recoveryChoice(restored)] : outdated(value, "review.issues[" + index + "].references[" + position + "]",
+        "从当前材料选择来源与位置，需要原文片段时重新读取。");
+    });
+    if (!Array.isArray(issue.candidatePaths)) return;
+    const paths = issue.candidatePaths.map(value => {
+      const restored = recoveredReceipt(value)?.reference;
+      if (restored?.source === "candidate" && restored.path) return restored.path;
+      if (typeof value !== "string") return value;
+      const current = locate("candidate", value);
+      return current.found ? current.pointer : value;
+    });
+    const hasDesignLocation = paths.some(path => typeof path === "string" && path && at(frozen.candidate, path).found);
+    issue.candidatePaths = paths.flatMap((value, position) => {
+      const misplaced = recoveredReceipt(value)?.reference;
+      // Remove only a demonstrably redundant citation, never a design location or sole evidence.
+      if (hasDesignLocation && misplaced && misplaced.source !== "candidate" && rows(issue.references).some(input => {
+        const reference = objectFields(input);
+        return reference.source === misplaced.source && reference.path === misplaced.path
+          && (Object.keys(reference).length === 2 || typeof reference.quote === "string" && reference.quote.includes(misplaced.quote));
+      })) return [];
+      return outdated(value, "review.issues[" + index + "].candidatePaths[" + position + "]", "从当前设计稿选择实际位置，其他材料放在 references。");
+    });
   }
   function read(request: EvidenceRequest, quoteBudget = Infinity): ReadPage {
     const { source, offset = 0, limit = 500, pathOffset = 0, acceptanceId } = request;
@@ -334,6 +391,44 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: {} };
     } };
   return { tool, contextHash, get index() { return structuredClone(index); },
+    recoverHistory(messages: readonly SessionMessage[], submitName: string, prepareDraft: (input: unknown) => unknown) {
+      const pending = new Map<string, { name: string; arguments: unknown }>();
+      let rejected: unknown;
+      for (const message of messages) {
+        if (message.role === "assistant" && Array.isArray(message.content)) {
+          for (const part of message.content)
+            if (part.type === "toolCall" && [tool.name, submitName].includes(part.name)) pending.set(part.id, part);
+          continue;
+        }
+        if (message.role !== "toolResult" || !message.toolCallId) continue;
+        const call = pending.get(message.toolCallId);
+        if (!call || message.toolName !== call.name) continue;
+        pending.delete(message.toolCallId);
+        if (call.name === submitName && message.isError) rejected = call.arguments;
+        if (call.name !== tool.name || message.isError !== false || !Array.isArray(message.content)) continue;
+        const response = message.content.find(part => part.type === "text")?.text;
+        if (!response || Buffer.byteLength(response) > 4 * MAX_RECOVERY_BYTES) continue;
+        const input = objectFields(call.arguments), batch = Array.isArray(input.requests), requests = batch ? rows(input.requests) : [input];
+        if (requests.length > 16 || !requests.every(validRequest)) continue;
+        let output: unknown;
+        try { output = JSON.parse(response); } catch { continue; }
+        const pages = batch ? rows(objectFields(output).results) : [output];
+        if (pages.length === requests.length) requests.forEach((request, index) => recoverReadPage(pages[index], request));
+      }
+      const reselect: ReviewDiagnosticIssue[] = [];
+      const prepared = isPlainRecord(rejected) && Buffer.byteLength(JSON.stringify(rejected)) <= MAX_RECOVERY_BYTES ? prepareDraft(rejected) : undefined;
+      const draft = isPlainRecord(prepared) ? structuredClone(prepared) : undefined;
+      rows(draft?.issues).forEach((issue, index) => restoreIssueReferences(objectFields(issue), index, reselect));
+      if (!historicalReceipts.size && !reselect.length) return undefined;
+      const readReferences = [...historicalReceipts.values()].slice(-12).map(recoveryChoice);
+      const designLocations = [...new Set([
+        ...rows(draft?.issues).flatMap(issue => rows(objectFields(issue).candidatePaths))
+          .filter((path): path is string => typeof path === "string" && Boolean(path) && at(frozen.candidate, path).found),
+        ...readReferences.filter(reference => reference.source === "candidate" && reference.path).map(reference => reference.path),
+      ])].slice(0, 16);
+      return { ...(draft ? { draft } : {}), reselect, designLocations, readReferences,
+        instruction: "同一子组续评。draft 是未接收的待核对稿，引用已经按当前材料整理。candidatePaths 从当前设计稿选位置，readReferences 供 references 查证。补齐 reselect 指出的位置，独立复核意见后正式提交。" };
+    },
     referenceHints(submission: unknown, validationIssues: unknown, { canonicalSubmission = submission }: { canonicalSubmission?: unknown } = {}) {
       const hints: ReferenceHint[] = [], seen = new Set<string>();
       let quoteBudget = MAX_BATCH_QUOTE_BYTES;
@@ -474,6 +569,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       }));
       for (const [index, rawIssue] of rows(result.issues).entries()) {
         const issue = objectFields(rawIssue);
+        if (historicalReceipts.size && result.candidateHash === candidateHash) restoreIssueReferences(issue, index);
         if (Array.isArray(issue?.candidatePaths)) issue.candidatePaths = rows(issue.candidatePaths).map((reference, position) => collect(reference, () => {
           if (typeof reference === "string") {
             const selected = locate("candidate", reference);

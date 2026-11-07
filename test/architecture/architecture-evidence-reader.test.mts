@@ -26,6 +26,7 @@ import { ACCEPTANCE_ADAPTERS } from "../../src/verification/acceptance-contract.
 import { validDesign, validDraft, passingReview } from "../helpers/architecture.mjs";
 import type { ArchitectureReview,ArchitectureBase } from "../../src/contracts/architecture.mjs";
 import type { ToolResult } from "../../src/contracts/tools.mjs";
+import type { SessionMessage } from "../../src/runtime/execution-port.mjs";
 import type { CandidateDraft } from "../../src/contracts/architecture-stages.mjs";
 
 const result=(value:ToolResult):ReaderWire=>{const data:unknown=JSON.parse(toolText(value));assert.ok(data&&typeof data==="object");return data as ReaderWire;};
@@ -487,6 +488,39 @@ test("候选路径回执只解析当前候选非根路径，其他来源、过�
     assert.match(failureFields(error).message!, /填写当前设计稿内的实际路径/u);
     return true;
   });
+});
+
+test("恢复旧出处仍拒绝缺少设计位置、唯一依据或历史原文不吻合的提交", async () => {
+  const f = scopeFixture(), source = "acceptanceAdapterGuide", path = "/adapters/action/executionRule";
+  const read = await f.current.tool.execute("read", { source, pointer: path });
+  const { receiptId } = result(read);
+  assert.ok(receiptId);
+  const misplaced = { receiptId }, submitName = "submit_architecture_review_slice";
+  const report = { candidateHash: f.candidateHash, issues: [{ candidatePaths: [misplaced, "/acceptance/0/expected"], references: [{ source, path }] }] };
+  const messages: SessionMessage[] = [
+    { role: "assistant", content: [{ type: "toolCall", id: "read", name: f.current.tool.name, arguments: { source, pointer: path } }] },
+    { role: "toolResult", toolName: f.current.tool.name, toolCallId: "read", isError: false, content: [{ type: "text", text: toolText(read) }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "submit", name: submitName, arguments: report }] },
+    { role: "toolResult", toolName: submitName, toolCallId: "submit", isError: true, content: [] },
+  ];
+  const resumed = () => createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash });
+  const current = resumed();
+  current.recoverHistory(messages, submitName, value => value);
+  const rejectsMisplaced = (error: unknown) => failureFields(error).validationIssue?.path === "review.issues[0].candidatePaths[0]"
+    && failureFields(error).validationIssue?.reason === "invalid_receipt";
+  for (const issue of [
+    { candidatePaths: [misplaced], references: [{ source, path }] },
+    { candidatePaths: [misplaced, "/acceptance/0/expected"], references: [{ source, path: "/adapters/action/proves" }] },
+  ]) assert.throws(() => current.resolveSubmission({ ...report, issues: [issue] }), rejectsMisplaced);
+
+  const corrupted = structuredClone(messages);
+  const wrongPage = result(read);
+  wrongPage.reference!.quote = "不匹配的历史摘录";
+  corrupted[1]!.content = [{ type: "text", text: JSON.stringify(wrongPage) }];
+  const unverified = resumed(), recovery = unverified.recoverHistory(corrupted, submitName, value => value);
+  assert.equal(recovery?.reselect[0]?.path, "review.issues[0].candidatePaths[0]");
+  assert.equal(JSON.stringify(recovery).includes(receiptId), false);
+  assert.throws(() => unverified.resolveSubmission(report), rejectsMisplaced);
 });
 
 test("索引只列声明的顶层数组和稳定编号，路径缺失优先返回对应分支邻近路径", async () => {

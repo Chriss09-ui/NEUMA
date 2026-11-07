@@ -1,7 +1,7 @@
 import type { ReviewParts } from "../contracts/architecture.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
-import type { NeumaTool } from "../runtime/execution-port.mjs";
+import type { NeumaTool, SessionMessage } from "../runtime/execution-port.mjs";
 import type { RepairCheckpoint, RepairWorker } from "../runtime/repair-scheduler.mjs";
 import { createReviewTaskCheckpoint, readReviewTaskCheckpoint, repairHash, runReviewTaskSchedule } from "../runtime/repair-scheduler.mjs";
 import { modelSubmissionArguments } from "../runtime/model-submission-arguments.mjs";
@@ -16,7 +16,8 @@ interface Assignment { id: string; field: SliceField; ids: string[] }
 interface SliceResult { summary: string; parts: ReviewParts }
 export interface ReviewDispatchCheckpoint { version: 1; candidateHash: string; bindingHash: string; dispatch: RepairCheckpoint<null> }
 export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; tools: NeumaTool[];
-  payload: UnknownRecord; prepareArguments(input: unknown): unknown; validate(value: unknown): SliceResult }
+  payload: UnknownRecord; prepareArguments(input: unknown): unknown; recoverReviewReferences(messages: readonly SessionMessage[]): UnknownRecord | undefined;
+  validate(value: unknown): SliceResult }
 const rowId = { checks: "id", acceptanceScopeChecks: "acceptanceId", priorFindingDecisions: "findingId" } as const;
 const rows = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.map(objectFields) : [];
 function fail(message: string): never { throw new InputError(message); }
@@ -152,8 +153,10 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
             ? issue.id : `${assignment!.id}_${repairHash(issue.id).slice(0, 16)}` })) };
         return checked({ summary: raw.summary, parts: scoped }, assignment!);
       };
-      await options.runRole({ assignment: assignment!, worker, parameters: { type: "object", additionalProperties: false,
-        properties, required: Object.keys(properties) }, tools: [reader.tool], prepareArguments, validate: normalize,
+      const parameters: ToolSchema = { type: "object", additionalProperties: false, properties, required: Object.keys(properties) };
+      await options.runRole({ assignment: assignment!, worker, parameters, tools: [reader.tool], prepareArguments, validate: normalize,
+        recoverReviewReferences: messages => reader.recoverHistory(messages, "submit_architecture_review_slice",
+          draft => prepareArguments(modelSubmissionArguments(draft, parameters))),
         payload: { assignment, candidateHash, reviewEvidenceIndex: reader.index,
           requirements: objectFields(context).requirements, acceptanceAdapterGuide: objectFields(context).acceptanceAdapterGuide,
           design: objectFields(context).candidate,

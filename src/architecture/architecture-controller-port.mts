@@ -5,7 +5,7 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import type { AgentStoragePort } from "../runtime/storage-port.mjs";
-import type { SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, Progress } from "../runtime/execution-port.mjs";
+import type { SessionFactory, VerificationSessionFactory, PiSessionPort, NeumaTool, SessionStorage, SessionMessage, Progress } from "../runtime/execution-port.mjs";
 import type { createTechnicalResearch } from "./architecture-research.mjs";
 import type { WebCapabilities } from "../runtime/web-capabilities.mjs";
 import type { developmentRevisionReference } from "./architecture-development-revision.mjs";
@@ -41,6 +41,7 @@ export interface ArchitectureRolePayload extends UnknownRecord { requirements?: 
 export type ReviewRoleProgress = Pick<import("../contracts/architecture.mjs").ReviewProgressCheckpoint, "modelCalls"> & Partial<Pick<import("../contracts/architecture.mjs").ReviewProgressCheckpoint, "origin" | "diagnostic" | "parts" | "rejectedParts" | "rejectedInput">> & { review?: Pick<ArchitectureReview, "candidateHash"> | null | undefined };
 export interface ArchitectureRoleOptions<T = unknown> { role: string; agentId?: string | undefined; systemPrompt: string; payload: ArchitectureRolePayload; submitName: string; parameters: ToolSchema; prepareSubmission?: NeumaTool["prepareArguments"]; validate: (value: unknown) => T;
   tools?: NeumaTool[]; signal?: AbortSignal | undefined; onProgress?: Progress | undefined; allowHandoff?: boolean; reviewEvidenceContext?: unknown;
+  recoverReviewReferences?: (messages: readonly SessionMessage[]) => UnknownRecord | undefined;
   onFidelity?: (value: Awaited<ReturnType<typeof import("./requirement-fidelity.mjs").verifyRequirementFidelity>>) => unknown | Promise<unknown>; onDiagnostics?: (value: ArchitectureRoleDiagnostic) => unknown | Promise<unknown>;
   editableDesign?: unknown; onMainReviewValidated?: (value: T, turns: number) => unknown | Promise<unknown>; onMainReviewBudget?: (turns: number) => unknown | Promise<unknown>;
   resumeMainReview?: ReturnType<typeof import("./architecture-main-review-checkpoint.mjs").readMainReviewCheckpoint> | undefined; initialModelCalls?: number; resumeReviewProgress?: ReviewRoleProgress | null | undefined; onReviewProgress?: (value: { review?: unknown; origin?: string; parts?: unknown; rejectedParts?: unknown; rejectedInput?: unknown; modelCalls: number; diagnostic?: import("../contracts/architecture.mjs").ReviewDiagnostic }) => unknown | Promise<unknown>;

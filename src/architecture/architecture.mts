@@ -453,7 +453,7 @@ export class ArchitectureDesigner {
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T> & {allowHandoff?:false}):Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T>): Promise<T | HandoffResult>;
-  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, onFidelity, onDiagnostics, editableDesign,
+  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, recoverReviewReferences, onFidelity, onDiagnostics, editableDesign,
     onMainReviewValidated, onMainReviewBudget, resumeMainReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = role === "reviewer" || payload.pipelineStage === "review_slice" ? null : ARCHITECTURE_ROLE_TURN_LIMIT, previousRejection, onSliceRejection, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
@@ -1124,6 +1124,11 @@ export class ArchitectureDesigner {
       if (boundedStage || payload.pipelineStage === "review_slice") session.setAutoCompactionEnabled?.(false);
       if (onSessionRef && session.sessionFile) await onSessionRef({ file: basename(session.sessionFile) });
       signal?.throwIfAborted();
+      if (recoverReviewReferences && sessionStorage?.file && session.sessionBindingHash && session.sessionFile
+        && basename(session.sessionFile) === sessionStorage.file && session.messages) {
+        const reviewReferenceRecovery = recoverReviewReferences(session.messages);
+        if (reviewReferenceRecovery) payload = { ...payload, reviewReferenceRecovery };
+      }
       if (resumeStage && payload.stageRepair && role === "specialist" && submissionRepair) {
         const previousFailure = session.messages?.findLast(message => message.role === "toolResult" && message.toolName === submitName);
         if (previousFailure?.role === "toolResult" && previousFailure.isError) {
@@ -1829,6 +1834,7 @@ export class ArchitectureDesigner {
                   systemPrompt: "你是独立评审子Agent，只核对本组指定分项，引用本次冻结证据。结果供主评审核对，不改设计，不代交最终结论。",
                   payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
                   parameters: node.parameters, prepareSubmission: node.prepareArguments, tools: node.tools, validate: node.validate,
+                  recoverReviewReferences: node.recoverReviewReferences,
                   modelCallLimit: worker.callLimit, initialModelCalls: worker.group.calls, previousRejection: worker.group.rejection,
                   onSliceRejection: value => worker.onRejection!(value),
                   onStageModelCall: event => worker.onCall(event.retryAttempt),

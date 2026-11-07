@@ -59,6 +59,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
     blueprintRawRejected: false, blueprintRawFeedback: "",
     cancelStage: null as "blueprint" | "module" | "integration" | "research" | null, controller: null as AbortController | null }, dataDir = join(root, "data");
   let designer: ArchitectureDesigner, candidate: CandidateDraft;
+  let rejectedSlice: Record<string, unknown> | undefined;
+  const guideReference = { source: "acceptanceAdapterGuide", path: "/adapters/action/executionRule" };
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "all_records", dimension: "processing", content: "完整核对全部工作记录", applicability: "applies", critical: true,
     source: { kind: "user", evidence: [{ messageId: "confirmed", quote: "完整核对全部工作记录" }] } }] };
@@ -70,6 +72,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       const stage = (Object.keys(stageNames) as (keyof typeof stageNames)[]).find(key => names.includes(stageNames[key]));
       const kind = stage ?? (names.includes("submit_architecture_review_slice") ? "review_slice" : names.includes("submit_blueprint_analysis") ? "consultation" : names.includes("submit_repair_patch") ? "repair" : names.includes("submit_architecture_review_revision") ? "review_revision"
         : names.includes("submit_requirement_fidelity") ? "fidelity" : "reviewer");
+      const firstSlice = kind === "review_slice" && objectFields(payloads.findLast(row => row.pipelineStage === "review_slice")?.assignment).id === "review_checks_0";
       requests.push({ kind, body });
       if (stage === "module" && stallModule) {
         response.writeHead(200, { "content-type": "text/event-stream" });
@@ -78,13 +81,16 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         return;
       }
       let name, args;
-      if (stage === "integration" && interruptIntegration || kind === "review_slice" && failReviewSlice || kind === "consultation" && failConsultation
+      if (stage === "integration" && interruptIntegration || firstSlice && failReviewSlice && rejectedSlice || kind === "consultation" && failConsultation
         || kind === "review_revision" && state.failRevisionCalls-- > 0
         || kind === "repair" && failRepairCalls-- > 0
         || kind === "reviewer" && state.reviewRejected && state.failRevisedReview-- > 0) {
         if (stage === "integration") interruptIntegration = false;
         if (kind === "consultation") failConsultation = false;
-        if (kind === "review_slice") failReviewSlice = false;
+        if (firstSlice && failReviewSlice) {
+          assert.match(text(body.messages.findLast(message => message.role === "tool")!.content), /invalid_receipt/u);
+          failReviewSlice = false;
+        }
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(`data: ${JSON.stringify({ id: "revision-length", choices: [{ index: 0, delta: { role: "assistant", content: "固定修订阶段截断" }, finish_reason: "length" }] })}\n\ndata: [DONE]\n\n`);
         return;
@@ -173,6 +179,26 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
           acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
           priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };
+        if (firstSlice && failReviewSlice) {
+          const read = body.messages.findLast(message => message.role === "tool");
+          if (!read) {
+            name = "read_architecture_evidence"; args = { source: guideReference.source, pointer: guideReference.path };
+          } else {
+            const page = objectFields(JSON.parse(text(read.content).split("\n")[0]!));
+            assert.ok(typeof page.receiptId === "string");
+            const issue = { id: "verify_action", kind: "context", checkId: ids[0], blocking: false, description: "研发时核对动作的测试范围。",
+              remedy: "对照实际验收结果。", candidatePaths: [{ receiptId: page.receiptId }, "candidate /acceptance/0/expected"], references: [guideReference] };
+            args = { ...args, issues: [issue] }; rejectedSlice = args;
+          }
+        } else if (firstSlice && rejectedSlice) {
+          const recovery = objectFields(payload.reviewReferenceRecovery), draft = objectFields(recovery.draft);
+          const recoveredIssue = recordArray(draft.issues)[0]!;
+          assert.deepEqual(recovery.reselect, []);
+          assert.deepEqual(recovery.designLocations, ["/acceptance/0/expected"]);
+          assert.deepEqual(recoveredIssue.candidatePaths, recovery.designLocations);
+          assert.deepEqual(recoveredIssue.references, [guideReference]);
+          args = rejectedSlice;
+        }
       } else if (kind === "repair") {
         const assignment = payloads.findLast(row => row.repairAssignment)!.repairAssignment!;
         name = "submit_repair_patch";
@@ -352,13 +378,14 @@ test("结构损坏的覆盖清单先被拒，原生会话只补该字段即可�
   assert.equal(built.design!.coverage.length, built.requirements.length);
 });
 
-test("复杂架构分组评审中断后沿原子会话继续，主评审和范围复核仍独立完成", { timeout: 30000 }, async t => {
+test("原生子组续接从冻结材料恢复出处，旧的重复错填不阻断主评审和范围复核", { timeout: 30000 }, async t => {
   const f = await fixture(t, { acceptanceCount: 13, failReviewSlice: true });
   await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "review_slice_incomplete");
   const before = (await f.designer.get(f.definition.id))!;
   const saved = readReviewTaskCheckpoint(objectFields(before.reviewDispatchCheckpoint).dispatch);
-  assert.equal(saved.groups.length, 7); assert.equal(saved.calls, 3);
+  assert.equal(saved.groups.length, 7); assert.equal(saved.calls, 5);
   assert.equal(saved.groups.filter(group => group.result).length, 2);
+  assert.equal(saved.groups[0]!.rejection?.count, 1);
   assert.equal(before.reviewProgressCheckpoint!.modelCalls, 0);
   assert.equal(before.designRecovery!.kind, "review_specialists");
   const start = f.requests.length;
@@ -366,7 +393,7 @@ test("复杂架构分组评审中断后沿原子会话继续，主评审和范�
   assert.equal(result.status, "passed");
   assert.equal(f.requests.slice(start).some(request => ["blueprint", "module", "integration"].includes(request.kind)), false);
   const completed = readReviewTaskCheckpoint(objectFields(result.reviewDispatchCheckpoint).dispatch);
-  assert.equal(completed.calls, 8);
+  assert.equal(completed.calls, 10);
   for (const group of saved.groups.filter(group => group.result))
     assert.deepEqual(completed.groups.find(item => item.id === group.id), group);
   assert.equal(result.reviewProgressCheckpoint!.modelCalls, 2);
