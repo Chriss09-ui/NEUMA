@@ -1304,8 +1304,28 @@ export class PrototypeAgents {
           ...(typeof this.architecture.getVersion === "function" ? { readArchitecture: (version) => this.architecture.getVersion(definition.id, version) } : {}) });
       }
       controller.signal.throwIfAborted();
-      architecture = await this.architecture.design(definition, { signal: controller.signal, onProgress, consultation, developmentFailure, historicalPlanningReference,
-        ...(objectFields(input).architectureRepair !== undefined ? { architectureRepair: objectFields(input).architectureRepair } : {}) });
+      const automaticRevision = (record: StoredArchitectureRecord | null) => {
+        const recovery = objectFields(record?.designRecovery);
+        if (!definition.draft.taskSpec || record?.status !== "needs_changes" || record.sourceFingerprint !== definition.fingerprint
+          || recovery.kind !== "review_revision" || recovery.status !== "available" || objectFields(recovery.request).kind !== "review_revision") return undefined;
+        return recovery.request;
+      };
+      const designOptions = { signal: controller.signal, onProgress, consultation, developmentFailure, historicalPlanningReference };
+      const requestedRepair = objectFields(input).architectureRepair;
+      const initialRepair = requestedRepair === undefined ? automaticRevision(latest) : requestedRepair;
+      architecture = await this.architecture.design(definition, { ...designOptions,
+        ...(initialRepair !== undefined ? { architectureRepair: initialRepair } : {}) });
+      controller.signal.throwIfAborted();
+      const revisionRequest = architecture.status === "needs_changes" ? automaticRevision(await this.getArchitecture(definition.id)) : undefined;
+      if (revisionRequest) {
+        const reviewed = architecture;
+        // A failed revision owns a new record. Keep the completed review intact if it throws.
+        architecture = undefined;
+        controller.signal.throwIfAborted();
+        onProgress({ type: "status", phase: "designing", label: "主评审提出修改意见，正在修订方案并重新评审…", architecture: reviewed });
+        controller.signal.throwIfAborted();
+        architecture = await this.architecture.design(definition, { ...designOptions, architectureRepair: revisionRequest });
+      }
       controller.signal.throwIfAborted();
       if (architecture.status === "passed" && requiresDevelopment(architecture.design)) {
         onProgress({ type: "status", phase: "intake", label: "架构评估通过，正在进入研发…", architecture });

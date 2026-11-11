@@ -13,6 +13,11 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
+import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
+import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { networkAllowed } from "../../src/runtime/web-capabilities.mjs";
+import { authorizeConfirmedRequirement, evaluateConsultation, issueConfirmation, newConsultation } from "../../src/requirements/consultation.mjs";
+import { sufficientPreflight } from "../helpers/consultation.mjs";
 import { readReviewTaskCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { designHash } from "../../src/architecture/architecture-contract.mjs";
@@ -179,6 +184,12 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
           acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
           priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };
+        if (rejectReview && !state.reviewRejected && ids.includes("verification")) {
+          args.checks.find(row => row.id === "verification")!.passed = false;
+          args = { ...args, issues: [{ id: "review_scope", blocking: false, kind: "context", checkId: "verification",
+            description: "本组认为职责说明需进一步核对，交主评审裁决。", remedy: "核对并完善职责说明。",
+            candidatePaths: ["/components/0/purpose"], references: [{ source: "candidate", path: "/components/0/purpose" }] }] };
+        }
         if (firstSlice && failReviewSlice) {
           const read = body.messages.findLast(message => message.role === "tool");
           if (!read) {
@@ -314,12 +325,25 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
   };
   await create();
   t.after(async () => { await designer.persistence; model.closeAllConnections(); await new Promise<void>(resolve => model.close(error => error ? assert.fail(error.message) : resolve())); await rm(root, { recursive: true, force: true }); });
-  return { root, dataDir, definition, state, requests, errors, sessions, researchCalls,
+  return { root, dataDir, config, definition, state, requests, errors, sessions, researchCalls,
     get designer() { return designer; },
     reload: async () => { await designer.persistence; await create(); },
     run: (options = {}) => designer.design(definition, { signal: state.controller?.signal, ...options }),
     sessionDirectory: () => sessions.find(row => row.options.sessionStorage)!.options.sessionStorage!.directory,
     sessionPath: (file: unknown) => join(sessions.find(row => row.options.sessionStorage)?.options.sessionStorage!.directory!, fixtureString(file)) };
+}
+
+async function normalBuild(t: test.TestContext, f: Awaited<ReturnType<typeof fixture>>) {
+  const platform = createPlatformSnapshot({ allowNetwork: networkAllowed(f.definition.draft) });
+  const source = newConsultation();
+  source.evidenceMessages.push({ id: "confirmed", role: "user", content: "完整核对全部工作记录" });
+  const consultation = await evaluateConsultation({ draft: f.definition.draft, consultation: source, platform, preflight: sufficientPreflight });
+  const confirmationReceipt = authorizeConfirmedRequirement(f.definition.draft, issueConfirmation(f.definition.draft, consultation, { platform }));
+  const agents = new PrototypeAgents({ config: f.config, cwd: f.root, dataDir: f.dataDir, architecture: f.designer });
+  await agents.ready;
+  await agents.library.saveRequirement(f.definition.id, f.definition, { consultation, confirmationReceipt });
+  t.after(() => agents.close());
+  return agents;
 }
 
 test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选，交接正文不进入执行指令", { timeout: 30000 }, async t => {
@@ -819,6 +843,59 @@ test("原生评审以短历史编号和原文路径提交，落盘完整编号�
   assert.ok(passed.review!.priorFindingDecisions!.every((row) => row.findingId.startsWith("finding_") && !Object.hasOwn(row, "findingRef")));
   assert.ok(passed.review!.issues.every((row) => row.id && !Object.hasOwn(row, "findingRef") && row.references!.every(ref => ref.quote)));
   assert.ok(passed.requirementFidelity);
+});
+
+test("普通制作汇总子组负评后自动局部修订，重新评审及范围复核通过才交付", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { rejectReview: true, acceptanceCount: 13 });
+  const agents = await normalBuild(t, f), progress: unknown[] = [];
+  const built = await agents.build(f.definition, { onProgress: event => progress.push(event) });
+  const architecture = objectFields(built.architecture);
+  assert.equal(architecture.status, "passed");
+  assert.equal(objectFields(built.agent).status, "ready");
+  const reviewed = await f.designer.getVersion(f.definition.id, 1);
+  assert.equal(reviewed!.status, "needs_changes");
+  assert.notEqual(reviewed!.candidateHash, architecture.candidateHash);
+  assert.deepEqual(architecture.designProgressCheckpoint, reviewed!.designProgressCheckpoint);
+  assert.equal(objectFields(architecture.reviewRevisionCheckpoint).modelCalls, 1);
+  const slices = readReviewTaskCheckpoint(objectFields(reviewed!.reviewDispatchCheckpoint).dispatch).groups;
+  assert.ok(slices.some(group => group.result!.updates.some(update => recordArray(objectFields(objectFields(update.value).parts).checks)
+    .some(check => check.id === "verification" && check.passed === false))));
+  assert.ok(progress.some(event => objectFields(event).label === "主评审提出修改意见，正在修订方案并重新评审…"));
+  for (const kind of ["blueprint", "module", "integration", "review_revision"])
+    assert.equal(f.requests.filter(request => request.kind === kind).length, 1);
+  assert.equal(f.requests.filter(request => request.kind === "reviewer").length, 2);
+  assert.equal(f.requests.filter(request => request.kind === "fidelity").length, 1);
+  assert.deepEqual(f.errors, []);
+});
+
+test("自动修订中断保留原负评，重启续用原会话及额度，仍有阻断时停止", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { rejectReview: true, failRepairCalls: 1, programBlocker: true });
+  const agents = await normalBuild(t, f);
+  await assert.rejects(agents.build(f.definition));
+  const reviewed = await f.designer.getVersion(f.definition.id, 1), stopped = await f.designer.get(f.definition.id);
+  assert.equal(reviewed!.status, "needs_changes");
+  assert.equal(stopped!.status, "failed");
+  assert.equal(stopped!.reviewRevisionCheckpoint!.modelCalls, 2);
+  const groups = recordArray(objectFields(stopped!.reviewRevisionCheckpoint!.dispatch).groups);
+  assert.equal(groups.filter(group => group.result).length, 1);
+  await agents.close(); await f.reload();
+  const restarted = new PrototypeAgents({ config: f.config, cwd: f.root, dataDir: f.dataDir, architecture: f.designer });
+  await restarted.ready; t.after(() => restarted.close());
+  const result = await restarted.build(f.definition);
+  assert.equal(result.architecture!.status, "needs_changes");
+  assert.equal(result.agent, null);
+  assert.equal(result.architecture!.reviewRevisionCheckpoint!.modelCalls, 3);
+  const resumedGroups = recordArray(objectFields(result.architecture!.reviewRevisionCheckpoint!.dispatch).groups);
+  for (const group of groups) {
+    const resumed = resumedGroups.find(row => row.id === group.id)!;
+    assert.equal(resumed.sessionFile, group.sessionFile);
+    if (group.result) assert.deepEqual(resumed, group);
+  }
+  const start = f.requests.length;
+  await assert.rejects(restarted.build(f.definition));
+  assert.equal(f.requests.length, start);
+  assert.equal((await f.designer.getVersion(f.definition.id, 1))!.status, "needs_changes");
+  assert.deepEqual(f.errors, []);
 });
 
 test("真实独立评审完成后显式局部修订，不重跑原节点，候选变化后重新评审及范围复核", { timeout: 30000 }, async t => {
