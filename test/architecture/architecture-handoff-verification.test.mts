@@ -1,3 +1,4 @@
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 import { fixtureText } from "../helpers/m7-test-boundaries.mjs";
 import { callFixture, recordArray } from "../helpers/m7-test-boundaries.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
@@ -176,7 +177,7 @@ for (const failBudgetSave of [false, true]) test(`正式主独评返需复核${f
       const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8"));
       const checker = body.tools!.some((tool) => tool.function.name === "submit_handoff_necessity");
       requests.push({ role: checker ? "checker" : "reviewer", savedModelCalls: await savedCalls() });
-      const payload = objectFields(JSON.parse(modelText(body.messages.findLast((message) => message.role === "user")!.content)));
+      const payload = fixtureMaterialSources(objectFields(JSON.parse(modelText(body.messages.findLast((message) => message.role === "user")!.content))));
       let name: string, value: unknown;
       if (checker) {
         name = "submit_handoff_necessity";

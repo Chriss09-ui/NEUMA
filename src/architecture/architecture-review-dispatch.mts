@@ -8,14 +8,14 @@ import { modelSubmissionArguments } from "../runtime/model-submission-arguments.
 import { objectFields, isPlainRecord } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { createArchitectureEvidenceReader } from "./architecture-evidence-reader.mjs";
-import { prepareReviewArguments } from "./architecture-review-evidence.mjs";
+import { legacyReviewSchema, prepareReviewArguments } from "./architecture-review-evidence.mjs";
 import { canonicalArchitectureReviewParts } from "./architecture-review-parts.mjs";
 
 type SliceField = "checks" | "acceptanceScopeChecks" | "priorFindingDecisions";
 interface Assignment { id: string; field: SliceField; ids: string[] }
 interface SliceResult { summary: string; parts: ReviewParts }
 export interface ReviewDispatchCheckpoint { version: 1; candidateHash: string; bindingHash: string; dispatch: RepairCheckpoint<null> }
-export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; tools: NeumaTool[];
+export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; legacyParameters: ToolSchema; tools: NeumaTool[];
   payload: UnknownRecord; prepareArguments(input: unknown): unknown; recoverReviewReferences(messages: readonly SessionMessage[]): UnknownRecord | undefined;
   validate(value: unknown): SliceResult }
 const rowId = { checks: "id", acceptanceScopeChecks: "acceptanceId", priorFindingDecisions: "findingId" } as const;
@@ -67,21 +67,20 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
   const plan = assignments(schema, context, priorFindings);
   let binding = { version: 1, candidateHash, platformHash: options.platformHash, contextHash: repairHash(context),
     priorHash: repairHash(priorFindings ?? null), schemaHash: repairHash(schema), plan };
-  let bindingHash = repairHash(binding);
+  let bindingHash = repairHash(binding), boundSchema = schema;
   const base = { slices: Object.fromEntries(plan.map(item => [item.id, null])) };
   const issues = plan.map(item => ({ id: item.id, owner: item.id, paths: [`/slices/${item.id}`],
     description: `独立核对${item.field}中的指定编号：${item.ids.join("、")}`, remedy: "按真实候选和冻结依据提交本组检查分项；不能修改候选或提前宣布整体通过。" }));
   let checkpoint: ReviewDispatchCheckpoint;
   if (record.reviewDispatchCheckpoint !== undefined) {
     const saved = objectFields(record.reviewDispatchCheckpoint);
-    // Older dispatches bound the same review schema with factClaims required on every issue.
-    if (saved.bindingHash !== bindingHash) {
-      const oldSchema = structuredClone(schema), issue = oldSchema.properties?.issues?.items;
-      if (issue?.required?.includes("kind") && !issue.required.includes("factClaims")) {
-        issue.required.push("factClaims");
-        const oldBinding = { ...binding, schemaHash: repairHash(oldSchema) };
-        const oldHash = repairHash(oldBinding);
-        if (saved.bindingHash === oldHash) { binding = oldBinding; bindingHash = oldHash; }
+    // Recognize exact previous schemas without changing the bound task, saved rows or counters.
+    for (const compatible of [schema, legacyReviewSchema(schema)]) {
+      for (const requireFacts of [false, true]) {
+        const previousSchema = structuredClone(compatible), issue = previousSchema.properties?.issues?.items;
+        if (requireFacts && issue?.required?.includes("kind") && !issue.required.includes("factClaims")) issue.required.push("factClaims");
+        const previousBinding = { ...binding, schemaHash: repairHash(previousSchema) };
+        if (saved.bindingHash === repairHash(previousBinding)) { binding = previousBinding; bindingHash = repairHash(previousBinding); boundSchema = previousSchema; }
       }
     }
     if (Object.keys(saved).sort().join() !== "bindingHash,candidateHash,dispatch,version" || saved.version !== 1
@@ -125,6 +124,7 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
       if (!assignment) fail("评审责任分组不存在。");
       const reader = createArchitectureEvidenceReader({ context, candidateHash, priorFindings, role: "reviewer" });
       const wire = reader.submissionSchema(schema);
+      const legacyWire = reader.submissionSchema(boundSchema, { legacy: true });
       const properties: Record<string, ToolSchema> = { summary: { type: "string", minLength: 1, maxLength: 1500 } };
       for (const field of [assignment.field, "issues"] as const) {
         const selected = structuredClone(wire.properties![field]!);
@@ -154,10 +154,13 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
         return checked({ summary: raw.summary, parts: scoped }, assignment!);
       };
       const parameters: ToolSchema = { type: "object", additionalProperties: false, properties, required: Object.keys(properties) };
-      await options.runRole({ assignment: assignment!, worker, parameters, tools: [reader.tool], prepareArguments, validate: normalize,
+      const legacyParameters = structuredClone(parameters);
+      for (const field of [assignment.field, "issues"] as const) legacyParameters.properties![field] = {
+        ...legacyWire.properties![field]!, minItems: parameters.properties![field]!.minItems!, maxItems: parameters.properties![field]!.maxItems! };
+      await options.runRole({ assignment: assignment!, worker, parameters, legacyParameters, tools: [reader.tool], prepareArguments, validate: normalize,
         recoverReviewReferences: messages => reader.recoverHistory(messages, "submit_architecture_review_slice",
           draft => prepareArguments(modelSubmissionArguments(draft, parameters))),
-        payload: { assignment, candidateHash, reviewEvidenceIndex: reader.index,
+        payload: { ...objectFields(context), assignment, candidateHash, reviewEvidenceIndex: reader.index,
           requirements: objectFields(context).requirements, acceptanceAdapterGuide: objectFields(context).acceptanceAdapterGuide,
           design: objectFields(context).candidate,
           priorFindings: assignment!.field === "priorFindingDecisions" ? { ...objectFields(priorFindings),

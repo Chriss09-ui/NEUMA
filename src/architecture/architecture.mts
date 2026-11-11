@@ -20,8 +20,9 @@ import { createExecutionSession as createPiSession, classifyModelFailure } from 
 import { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { architectureModelOutputBudget } from "../runtime/model-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
+import { createArchitectureMaterialFiles } from "./architecture-material-files.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
-import { projectArchitectureMessages, architectureNodePrompt } from "./architecture-model-context.mjs";
+import { projectArchitectureMessages, architectureRepairModelContext, architectureNodePrompt } from "./architecture-model-context.mjs";
 import { architectureVerificationContext, architectureConfirmedContext } from "./architecture-input-context.mjs";
 export { architectureVerificationContext, architectureConfirmedContext };
 import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, reviewedArchitectureSeed, architectureRevisionSeed, fidelityArchitectureRevisionSeed,
@@ -42,7 +43,7 @@ import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT } f
 import { PLATFORM_CONTRACT_VERSION, createPlatformSnapshot, renderPlatformRules, platformEvidence,
   platformCapabilityCatalog, validatePlatformMetadata } from "./platform-contract.mjs";
 import { runtimeCapabilityContract } from "../runtime/runtime-capability-contract.mjs";
-import { architectureReviewEvidenceContext, architectureReviewIssues, prepareReviewArguments } from "./architecture-review-evidence.mjs";
+import { architectureReviewEvidenceContext, architectureReviewIssues, legacyReviewSchema, prepareReviewArguments } from "./architecture-review-evidence.mjs";
 import { architectureToolValidation, diagnoseArchitectureReferences } from "./architecture-tool-diagnostics.mjs";
 import { HANDOFF_REFERENCE_SCHEMA, HANDOFF_POLICY, verifyArchitectureHandoff, validateHandoffProposal } from "./architecture-handoff-verification.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
@@ -147,7 +148,7 @@ function reviewedFields(input: unknown): Pick<ArchitectureReview, "verdict" | "i
   if (!["pass", "revise", "insufficient", "infeasible", "needs_input"].includes(value.verdict) || !isArray(value.issues)
     || value.issues.some(input => { const issue = objectFields(input); return typeof issue.id !== "string" || typeof issue.blocking !== "boolean"
       || typeof issue.remedy !== "string" || typeof issue.description !== "string" || issue.references !== undefined && (!isArray(issue.references)
-        || issue.references.some(input => { const reference = objectFields(input); return typeof reference.source !== "string" || typeof reference.path !== "string" || typeof reference.quote !== "string"; })); }))
+        || issue.references.some(input => { const reference = objectFields(input); return typeof reference.source !== "string" || typeof reference.path !== "string" || reference.quote !== undefined && typeof reference.quote !== "string"; })); }))
     throw new InputError("评审输出结构无效");
   return input as Pick<ArchitectureReview, "verdict" | "issues">;
 }
@@ -453,7 +454,7 @@ export class ArchitectureDesigner {
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T> & {allowHandoff?:false}):Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T>): Promise<T | HandoffResult>;
-  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, recoverReviewReferences, onFidelity, onDiagnostics, editableDesign,
+  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, legacyReviewParameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, recoverReviewReferences, onFidelity, onDiagnostics, editableDesign,
     onMainReviewValidated, onMainReviewBudget, resumeMainReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = role === "reviewer" || payload.pipelineStage === "review_slice" ? null : ARCHITECTURE_ROLE_TURN_LIMIT, previousRejection, onSliceRejection, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
@@ -472,9 +473,16 @@ export class ArchitectureDesigner {
       payload = { ...payload, repairPreparation: preparation };
     }
     let modelMaterials: UnknownRecord = { ...payload, roleGuide: systemPrompt };
-    const contextReader = createModelContextReader(() => ({ ...modelMaterials,
+    const currentMaterials = () => ({ ...modelMaterials,
       ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(), rejectedDraft: reviewParts.rejectedSnapshot() } } : {}),
-      ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) }));
+      ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) });
+    const contextReader = createModelContextReader(currentMaterials);
+    const fileMaterials = role === "reviewer" || ["review_slice", "review_revision"].includes(String(payload.pipelineStage))
+      ? createArchitectureMaterialFiles(id ? await this.storage.directory(id, "", { create: true }) : this.dataDir) : null;
+    const publishMaterials = () => fileMaterials?.publish({ ...currentMaterials(),
+      ...(modelMaterials.design !== undefined ? { candidate: modelMaterials.design }
+        : modelMaterials.baseCandidate !== undefined ? { candidate: modelMaterials.baseCandidate } : {}),
+      ...objectFields(reviewEvidenceContext) });
     const modelPrompt = (value: UnknownRecord, continuation = false) => {
       if (continuation && payload.pipelineStage === "integration" && payload.integrationPolicy) {
         value = { ...value, pipelineStage: payload.pipelineStage, baseHash: payload.baseHash,
@@ -526,14 +534,22 @@ export class ArchitectureDesigner {
     }
     const evidenceReader = role === "reviewer" && reviewEvidenceContext ? createArchitectureEvidenceReader({ context: reviewEvidenceContext,
       candidateHash: payload.candidateHash, candidateSchema: payload.candidateSchema, priorFindings: payload.priorFindings, role }) : null;
-    if (evidenceReader) parameters = evidenceReader.submissionSchema(parameters);
+    if (evidenceReader) {
+      legacyReviewParameters = evidenceReader.submissionSchema(legacyReviewSchema(parameters), { legacy: true });
+      parameters = evidenceReader.submissionSchema(parameters);
+    }
     const singleReviewIssue = role === "reviewer" && Boolean(parameters.properties?.issues?.items && parameters.properties?.verdict);
     if (singleReviewIssue) {
-      parameters = structuredClone(parameters);
-      parameters.properties!.issue = { ...parameters.properties!.issues!.items, description: "只有一条问题时直接提交该问题；多条使用issues。" };
-      parameters.required = parameters.required!.filter(key => key !== "issues");
-      parameters.allOf = [...parameters.allOf ?? [], { not: { required: ["issue", "issues"] } },
-        { anyOf: [{ required: ["issue"] }, { required: ["issues"] }, { required: ["verdict"], properties: { verdict: { const: "pass" } } }] }];
+      const addSingleIssue = (input: ToolSchema) => {
+        const parameters = structuredClone(input);
+        parameters.properties!.issue = { ...parameters.properties!.issues!.items, description: "只有一条问题时直接提交该问题；多条使用issues。" };
+        parameters.required = parameters.required!.filter(key => key !== "issues");
+        parameters.allOf = [...parameters.allOf ?? [], { not: { required: ["issue", "issues"] } },
+          { anyOf: [{ required: ["issue"] }, { required: ["issues"] }, { required: ["verdict"], properties: { verdict: { const: "pass" } } }] }];
+        return parameters;
+      };
+      parameters = addSingleIssue(parameters);
+      if (legacyReviewParameters) legacyReviewParameters = addSingleIssue(legacyReviewParameters);
     }
     const payloadSchemaVersion = objectFields(payload.design).schemaVersion;
     const platformContractTool = (role === "designer" && canonicalParameters.properties?.platformClaims || role === "reviewer" && typeof payloadSchemaVersion === "number" && payloadSchemaVersion >= 3)
@@ -588,7 +604,18 @@ export class ArchitectureDesigner {
     const modelContractHash = designHash({ model: this.config.model ?? null, schema: parameters,
       ...(role === "reviewer" ? { protocolVersion: ARCHITECTURE_REVIEW_PROTOCOL_VERSION } : {}) });
     const previousFailure = previousRejection ?? resumeReviewProgress?.diagnostic?.repeatedFailure;
-    let repeatedFailure = previousFailure?.modelContractHash === modelContractHash ? structuredClone(previousFailure) : null;
+    const compatibleContractHashes = [modelContractHash];
+    if (legacyReviewParameters) {
+      for (const requireFacts of [false, true]) {
+        const schema = structuredClone(legacyReviewParameters);
+        if (requireFacts) for (const issue of [schema.properties?.issues?.items, schema.properties?.issue])
+          if (issue?.required?.includes("kind") && !issue.required.includes("factClaims")) issue.required.push("factClaims");
+        compatibleContractHashes.push(designHash({ model: this.config.model ?? null, schema,
+          ...(role === "reviewer" ? { protocolVersion: ARCHITECTURE_REVIEW_PROTOCOL_VERSION } : {}) }));
+      }
+    }
+    let repeatedFailure = previousFailure && compatibleContractHashes.includes(previousFailure.modelContractHash)
+      ? { ...structuredClone(previousFailure), modelContractHash } : null;
     const rejectedCalls = new Set();
     let rejectedInput = resumeReviewProgress?.rejectedInput, progressPersistenceError: unknown;
     const assertProgressWritable = () => { if (progressPersistenceError) throw progressPersistenceError; };
@@ -950,7 +977,7 @@ export class ArchitectureDesigner {
         }
       } } : null;
     const terminalTools = () => new Set([submitName, ...(reviseSubmission && (editableSubmission || hasRejectedSubmission) ? [reviseSubmission.name] : [])]);
-    const roleTools = [...tools, contextReader, ...(evidenceReader ? [evidenceReader.tool] : []), ...(platformContractTool ? [platformContractTool] : []), ...(allowHandoff ? [requestRequirements] : []),
+    const roleTools = [...tools, contextReader, ...(fileMaterials ? [fileMaterials.tool] : []), ...(evidenceReader ? [evidenceReader.tool] : []), ...(platformContractTool ? [platformContractTool] : []), ...(allowHandoff ? [requestRequirements] : []),
       ...(reviewParts ? [saveReviewParts!, submitReviewParts!] : []),
       submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), submit]
       .filter(tool => !boundedStage || modelCallLimit - initialModelCalls > 1 || terminalTools().has(tool.name))
@@ -1095,9 +1122,9 @@ export class ArchitectureDesigner {
         reasoningMode: stageReasoningMode ?? (role === "reviewer" || role === "designer" && editableDesign
           || role === "specialist" && technicalRevision ? "off" : "auto"),
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
-        transformContext: messages => projectArchitectureMessages(messages, { role, roleGuide: systemPrompt }),
-        preparePrompt: text => {
-          const projected = projectArchitectureMessages([{ role: "user", content: text, timestamp: 0 }], { role, roleGuide: systemPrompt })[0];
+        transformContext: async messages => projectArchitectureMessages(messages, { role, roleGuide: systemPrompt, materialFiles: await publishMaterials() }),
+        preparePrompt: async text => {
+          const projected = projectArchitectureMessages([{ role: "user", content: text, timestamp: 0 }], { role, roleGuide: systemPrompt, materialFiles: await publishMaterials() })[0];
           return projected?.role === "user" && typeof projected.content === "string" ? projected.content : text;
         },
         systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName, blueprintProtocol: payload.blueprintProtocol,
@@ -1662,6 +1689,11 @@ export class ArchitectureDesigner {
             cwd: this.cwd, dataDir: this.dataDir, sessionFactory: this.sessionFactory,
             sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),
             maxOutputTokens: architectureModelOutputBudget(this.config, "specialist"), signal,
+            prepareMaterials: async sources => {
+              const files = createArchitectureMaterialFiles(await this.storage.directory(record.agentId, "", { create: true }));
+              const catalog = await files.publish({ ...sources, candidate: sources.base });
+              return { tool: files.tool, project: input => architectureRepairModelContext(input, catalog, sources.acceptanceAdapterGuide) };
+            },
             tools: [createPlatformContractTool(context())] }),
           sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),
           onSave: async checkpoint => {
@@ -1838,7 +1870,7 @@ export class ArchitectureDesigner {
                 return this.role({ role: "specialist", agentId: definition.id,
                   systemPrompt: "你是独立评审子Agent，只核对本组指定分项，引用本次冻结证据。结果供主评审核对，不改设计，不代交最终结论。",
                   payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
-                  parameters: node.parameters, prepareSubmission: node.prepareArguments, tools: node.tools, validate: node.validate,
+                  parameters: node.parameters, prepareSubmission: node.prepareArguments, legacyReviewParameters: node.legacyParameters, tools: node.tools, validate: node.validate,
                   recoverReviewReferences: node.recoverReviewReferences,
                   modelCallLimit: worker.callLimit, initialModelCalls: worker.group.calls, previousRejection: worker.group.rejection,
                   onSliceRejection: value => worker.onRejection!(value),

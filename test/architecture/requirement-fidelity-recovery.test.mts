@@ -1,3 +1,4 @@
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 interface FixtureNativeEntry { id: string; parentId?: string; type: string; message: { role: string; toolName?: string; toolCallId?: string; isError?: boolean; content: { type: string; id?: string; text?: string }[]; stopReason?: string } }
 import type { PiSessionOptions } from "../../src/runtime/pi-port.mjs";
@@ -34,7 +35,7 @@ function context() {
 
 const textOf = (content: unknown) => typeof content === "string" ? content
   : recordArray(content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
-const latestUser = (body: FixtureModelRequest) => JSON.parse(String(textOf(body.messages.findLast((message) => message.role === "user")!.content)));
+const latestUser = (body: FixtureModelRequest) => fixtureMaterialSources(JSON.parse(String(textOf(body.messages.findLast((message) => message.role === "user")!.content))));
 const incomplete = (error: TestFailure) => error.reason === "scope_evaluation_incomplete";
 const nativeEntries = async (file: PathLike|FileHandle) : Promise<FixtureNativeEntry[]> => (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(String(line)));
 const successReceipt = (entry: FixtureNativeEntry) => entry.type === "message" && entry.message.role === "toolResult"
@@ -106,7 +107,7 @@ test("native fidelity recovery keeps the rejected tool history and exact feedbac
   let valid!: ReturnType<typeof fidelityResult>, rejectedFeedback: unknown, charges = 0;
   const f = await fixture(t, (body, turn) => {
     const payload = latestUser(body);
-    assert.deepEqual(body.tools!.map((item) => item.function.name), ["submit_requirement_fidelity", "read_model_context"]);
+    assert.deepEqual(body.tools!.map((item) => item.function.name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
     if (turn === 1) {
       valid = fidelityResult(payload, "narrowed");
       const invalid = structuredClone(valid); invalid.restrictions![0]!.quote = "UNMATCHED_FIXTURE_QUOTE";
@@ -124,7 +125,7 @@ test("native fidelity recovery keeps the rejected tool history and exact feedbac
     assert.ok(previousError); assert.match(textOf(previousError.content), /reference_quote_mismatch/u);
     assert.doesNotMatch(textOf(previousError.content), /UNMATCHED_FIXTURE_QUOTE/u);
     const original = body.messages.find((message) => message.role === "user" && textOf(message.content).includes('"requirements"'));
-    assert.deepEqual(JSON.parse(String(textOf(original!.content))).requirements, context().requirements);
+    assert.deepEqual(fixtureMaterialSources(JSON.parse(String(textOf(original!.content)))).requirements, context().requirements);
     return { value: valid };
   });
   const { progress, saved } = await interruptAfterRejection(f, { charge: () => { charges++; } });
@@ -353,15 +354,15 @@ test("full-v2实际wire使用ID selector，原生成功回执恢复canonical证�
   const f = await fixture(t, (body) => {
     const message = latestUser(body), schema = body.tools![0]!.function.parameters;
     assert.equal(message.fidelityContextVersion, "full-v2");
-    assert.deepEqual(message.deferredObligations, current.deferredVerifications.issues);
-    assert.equal(message.deferredVerifications, undefined);
-    assert.ok(message.contextIndex.some((item: { section: string; delivery: string; }) => item.section === "deferredVerifications" && item.delivery === "paged"));
+    assert.equal(message.deferredObligations, undefined);
+    assert.deepEqual(message.deferredVerifications, current.deferredVerifications);
+    assert.ok(recordArray(message.contextIndex).some((item) => item.section === "deferredVerifications" && item.delivery === "paged"));
     assert.ok(schema.properties.restrictions!.items.anyOf.some((item) => item.properties?.claimRef));
     const system = body.messages.filter((item) => item.role === "system").map((item) => textOf(item.content)).join("\n");
     assert.match(system, /原本合法输入被候选排除/u); assert.match(system, /合法延期至development/u);
     const value = fidelityResult(message, "narrowed");
     assert.deepEqual(Object.keys(value.restrictions[0]!).sort(), ["candidatePath", "claimRef", "reason"]);
-    assert.deepEqual(value.restrictions![0]!.claimRef, { source: "requirements", requirementId: message.requirements[0].id });
+    assert.deepEqual(value.restrictions![0]!.claimRef, { source: "requirements", requirementId: recordArray(message.requirements)[0]!.id });
     return { value };
   });
   const controller = new AbortController(), reason = new Error("cancel-after-v2-receipt"), saved: FidelitySnapshot[] = [];
@@ -374,7 +375,7 @@ test("full-v2实际wire使用ID selector，原生成功回执恢复canonical证�
   const result = await f.run({ context: current, progress, sessionStorage: { ...f.storage, file: progress!.sessionFile },
     charge() { assert.fail("成功回执恢复不得新增请求"); } });
   assert.equal(result.contextVersion, "full-v2"); assert.equal(result.modelCalls, 1); assert.equal(result.verdict, "narrowed");
-  assert.equal(result.restrictions![0]!.quote, current.requirements![0]!.text);
+  assert.equal(result.restrictions![0]!.quote, undefined);
   assert.equal(result.restrictions![0]!.path, "/0/text"); assert.ok(!Object.hasOwn(result.restrictions![0]!, "claimRef"));
   assert.equal(f.requests.length, 1); assert.equal(f.factories[1]!.file, f.factories[0]!.file);
 });
@@ -383,7 +384,7 @@ test("full-v2三次同因退回保留原生失败和已用数，恢复不创建�
   const current = { ...context(), fidelityContextVersion: "full-v2" }, saved: FidelitySnapshot[] = [];
   const f = await fixture(t, (body) => {
     const original = body.messages.filter((message) => message.role === "user").map((message) => {
-      try { return JSON.parse(String(textOf(message.content))); } catch { return null; }
+      try { return fixtureMaterialSources(JSON.parse(String(textOf(message.content)))); } catch { return null; }
     }).find((message) => message?.requirements);
     const value = fidelityResult(original, "narrowed"); value.restrictions![0]!.claimRef!.requirementId = "PRIVATE_UNKNOWN_SELECTOR";
     return { value };

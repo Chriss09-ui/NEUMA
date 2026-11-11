@@ -3,7 +3,7 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import { checkedStoredDraft } from "../requirements/consultation-storage.mjs";
 import { InputError } from "../requirements/core.mjs";
-import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, REVIEW_SCHEMA } from "./architecture-contract.mjs";
+import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, reviewSubmissionSchema } from "./architecture-contract.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { objectFields, isRecord, isArray, isInteger } from "../runtime/type-boundary.mjs";
 const strings = (value: unknown): value is string[] => isArray(value) && value.every(entry => typeof entry === "string");
@@ -43,7 +43,7 @@ const issueSchema = { type: "object", required: ["id", "blocking", "description"
   id: { type: "string" }, blocking: { type: "boolean" }, description: { type: "string" }, remedy: { type: "string" },
   source: { type: "string" }, checkId: { type: "string" }, kind: { type: "string" },
   candidateFields: { type: "array", items: { type: "string" } }, candidatePaths: { type: "array", items: { type: "string" } },
-  references: { type: "array", items: { type: "object", required: ["source", "path", "quote"], properties: { source: { type: "string" }, path: { type: "string" }, quote: { type: "string" } } } },
+  references: { type: "array", items: { type: "object", required: ["source", "path"], properties: { source: { type: "string" }, path: { type: "string" }, quote: { type: "string" } } } },
   factClaims: { type: "array", items: { type: "object", required: ["source", "path", "expectedJson"], properties: { source: { type: "string" }, path: { type: "string" }, expectedJson: { type: "string" } } } },
 } };
 /** Decode only stored field shapes. Checkpoint payloads stay opaque until their versioned readers validate bindings and budgets. */
@@ -67,7 +67,7 @@ export function checkedStoredArchitectureRecord(input: unknown): StoredArchitect
     const version = objectFields(value.design).schemaVersion;
     if (!architectureToolValidation(value.design, version === 3 ? storedDesignSchemas[3] : version === 2 ? storedDesignSchemas[2] : storedDesignSchemas.legacy).valid) invalid();
   }
-  if (value.review !== null && !architectureToolValidation(value.review, REVIEW_SCHEMA).valid) invalid();
+  if (value.review !== null && !architectureToolValidation(value.review, reviewSubmissionSchema()).valid) invalid();
   for (const key of ["updatedAt", "platformHash", "designProgressEvidenceHash", "reviewRevisionSource", "reviewDispatchSource"]) if (value[key] !== undefined && typeof value[key] !== "string") invalid();
   for (const key of ["platformContractVersion", "capabilityCatalogVersion", "designResearchCalls"]) if (value[key] !== undefined && !isInteger(value[key])) invalid();
   if (value.reviewContext !== undefined && value.reviewContext !== null && !isRecord(value.reviewContext)) invalid();

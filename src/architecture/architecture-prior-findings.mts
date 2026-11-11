@@ -17,7 +17,7 @@ function acceptance(candidate: unknown): ArchitectureAcceptance[] {
 import { InputError } from "../requirements/core.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { developmentPlanningFailureSummary } from "./architecture-development-revision.mjs";
-import { architectureReviewEvidenceContext, validateArchitectureReviewEvidence } from "./architecture-review-evidence.mjs";
+import { architectureReferenceText, architectureReviewEvidenceContext, validateArchitectureReviewEvidence } from "./architecture-review-evidence.mjs";
 import { architectureFeedbackFindings } from "./architecture-feedback-ledger.mjs";
 import { validateHistoricalRepairDecision } from "./architecture-repair-evidence.mjs";
 
@@ -220,9 +220,11 @@ function nativeDecisionEvidence(row: Decision, finding: FeedbackFinding, review:
       && references.some((reference) => {
         if (reference.source !== "candidate") return false;
         if ([`${root}/input`, `${root}/expected`].includes(reference.path)) return true;
-        if (reference.path !== root || typeof reference.quote !== "string") return false;
+        if (reference.path !== root) return false;
+        const text = architectureReferenceText(reference, { candidate });
+        if (typeof text !== "string") return false;
         const criterion = acceptance(candidate)[Number(root.split("/")[2])]!;
-        return [criterion.input, criterion.expected].some((body) => body.includes(reference.quote) || reference.quote.includes(body));
+        return [criterion.input, criterion.expected].some((body) => body.includes(text) || text.includes(body));
       }));
   const adapterReference = positions.some((root) => {
     const criterion = acceptance(candidate)[Number(root.split("/")[2])]!, id = criterion.verification?.adapterId;

@@ -1,6 +1,6 @@
 import {fixtureToolAt,recordArray} from "../helpers/m7-test-boundaries.mjs";
 import {fixtureString} from "../helpers/http-model.mjs";
-import type {ReviewParts,ArchitectureIssue} from "../../src/contracts/architecture.mjs";
+import type {ReviewParts,ArchitectureIssue,ReviewDiagnostic} from "../../src/contracts/architecture.mjs";
 type PartController=ReturnType<typeof createArchitectureReviewParts>;
 type PartReference=ReturnType<PartController["reference"]>;
 interface ModelPayload extends Record<string,unknown> {requirements:RequirementItem[];design:ReturnType<typeof validDesign>;candidateHash:string;priorFindings:NonNullable<Parameters<typeof passingReview>[2]>;reviewParts:PartReference & {saved:ReviewParts;rejectedDraft:ReviewParts}}
@@ -16,8 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { designHash, reviewSubmissionSchema, validateReview } from "../../src/architecture/architecture-contract.mjs";
-import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
+import { legacyReviewSchema, architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { createArchitectureEvidenceReader } from "../../src/architecture/architecture-evidence-reader.mjs";
+import { nextReviewRejection } from "../../src/architecture/architecture-review-protocol.mjs";
 import { createArchitectureReviewParts, canonicalArchitectureReviewParts } from "../../src/architecture/architecture-review-parts.mjs";
 import { runArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "../../src/architecture/architecture-review-dispatch.mjs";
 import type { ReviewSliceRole, ReviewDispatchCheckpoint } from "../../src/architecture/architecture-review-dispatch.mjs";
@@ -40,6 +41,35 @@ function material() {
   const options = { schema, toolSchema: reader.submissionSchema(schema), candidateHash, context, resolve: reader.resolveSubmission };
   return { design, candidateHash, context, schema, reader, options, review: passingReview(candidateHash, design) };
 }
+
+test("引用格式升级延续原任务的两次退回，第三次同因拒交后不再请求模型", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-review-location-counter-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const f = material(), parameters = f.reader.submissionSchema(f.schema);
+  const legacyParameters = f.reader.submissionSchema(f.schema, { legacy: true });
+  const invalid = { ...f.review, issues: false };
+  const originalIssue = architectureToolValidation(invalid, legacyParameters, { root: "review_slice" }).issues;
+  const legacyHash = designHash({ model: "fixture-model", schema: legacyParameters });
+  const previous = nextReviewRejection(nextReviewRejection(null, legacyHash, originalIssue), legacyHash, originalIssue);
+  let calls = 0, rejected: ReviewDiagnostic["repeatedFailure"], verified = false;
+  const designer = new ArchitectureDesigner({ config: { model: "fixture-model" }, cwd: directory, dataDir: directory,
+    sessionFactory: async options => ({ modelCallAccounting: true, messages: [], subscribe: () => () => {}, dispose() {}, async abort() {},
+      async prompt() {
+        await options.onModelCall!();
+        const feedback = await options.rawInputValidators!.submit_architecture_review_slice!({
+          toolName: "submit_architecture_review_slice", toolCallId: "third-rejection", args: invalid });
+        assert.equal(feedback.valid, false);
+        await assert.rejects(async () => { await options.onModelCall!(); }, /连续三次/);
+        verified = true; throw new Error("fixture stopped after rejection");
+      } }) });
+  await designer.ready;
+  await assert.rejects(designer.role({ role: "specialist", systemPrompt: "固定评审协议测试", submitName: "submit_architecture_review_slice",
+    payload: { pipelineStage: "review_slice", candidateHash: f.candidateHash }, parameters, legacyReviewParameters: legacyParameters,
+    modelCallLimit: null, initialModelCalls: 2, previousRejection: previous, onSliceRejection: async value => { rejected = value; },
+    onStageModelCall: () => { calls++; }, validate: () => assert.fail("拒交不能进入正式验收") }));
+  assert.equal(verified, true); assert.equal(calls, 1); assert.equal(rejected?.count, 3);
+  assert.equal(rejected?.fingerprint, previous.fingerprint);
+});
 
 test("复杂评审按主题与验收分组，独立会话最多三并发，中断只续未完成组", async () => {
   const initial = material(), design = structuredClone(initial.design);
@@ -76,7 +106,7 @@ test("复杂评审按主题与验收分组，独立会话最多三并发，中�
   };
   const options = { record, candidateHash, platformHash: "a".repeat(64), context, schema, priorFindings, runRole, save: async (_checkpoint: ReviewDispatchCheckpoint) => {} };
   assert.equal(shouldDistributeArchitectureReview(context, null), true);
-  const oldSchema = structuredClone(schema);
+  const oldSchema = legacyReviewSchema(schema);
   oldSchema.properties.issues.items.required.push("factClaims");
   await assert.rejects(runArchitectureReviewDispatch({ ...options, schema: oldSchema }), /分项连接中断/u);
   const saved = structuredClone(record.reviewDispatchCheckpoint) as ReviewDispatchCheckpoint;
@@ -139,13 +169,13 @@ test("分项保存只更新明确编号，精确校验后仍须完整正式评�
   assert.equal(validateReview(assembled, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }).verdict, "pass");
 });
 
-test("短引用保存为原文，旧会话回执及坏引用不能改写已有成果", async () => {
+test("短引用保存位置，旧会话回执及坏引用不能改写已有成果", async () => {
   const f = material(), parts = createArchitectureReviewParts(f.options);
   const scope = f.reader.index.acceptanceScope![0];
   await parts.save({ candidateHash: f.candidateHash, progressHash: parts.reference().progressHash,
     acceptanceScopeChecks: [{ acceptanceId: scope!.acceptanceId, adapterRulePath: scope!.adapterRulePaths[0], sufficient: true, reason: "核对原范围" }] });
   const before = parts.snapshot();
-  assert.ok(before.acceptanceScopeChecks[0]!.criterionQuote); assert.equal(objectFields(before.acceptanceScopeChecks[0]).adapterRulePath, undefined);
+  assert.equal(before.acceptanceScopeChecks[0]!.criterionQuote, undefined); assert.ok(before.acceptanceScopeChecks[0]!.adapterRulePath);
   const read = JSON.parse(toolText((await f.reader.tool.execute("quote", { source: "candidate", pointer: "/acceptance/0/expected" }))));
   const otherReader = createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash, role: "reviewer" });
   const resumed = createArchitectureReviewParts({ ...f.options, initial: before, resolve: otherReader.resolveSubmission });
@@ -154,7 +184,7 @@ test("短引用保存为原文，旧会话回执及坏引用不能改写已有�
       candidatePaths: ["/acceptance/0"], references: [{ receiptId: read.receiptId }], factClaims: [] }] }),
   error => failureFields(error).validationIssue!.reason === "invalid_receipt");
   await assert.rejects(resumed.save({ candidateHash: f.candidateHash, progressHash: resumed.reference().progressHash,
-    acceptanceScopeChecks: [{ ...before.acceptanceScopeChecks[0], criterionQuote: "不存在的引文" }] }),
+    acceptanceScopeChecks: [{ ...f.review.acceptanceScopeChecks![0], criterionQuote: "不存在的引文" }] }),
   error => failureFields(error).validationIssue!.reason === "reference_quote_mismatch");
   assert.deepEqual(resumed.snapshot(), before);
   await assert.rejects(resumed.save({ candidateHash: "a".repeat(64), progressHash: resumed.reference().progressHash, checks: [f.review.checks[0]] }));

@@ -1,3 +1,4 @@
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 import { fixtureTools, recordArray, fixtureFailure } from "../helpers/m7-test-boundaries.mjs";
 import type { FidelityOptions, FidelityDiagnostic } from "../../src/architecture/requirement-fidelity.mjs";
@@ -41,7 +42,7 @@ const invoke = (options: Partial<FidelityOptions>) => verifyRequirementFidelity(
 test("独立只读范围判断绑定完整上下文，每项原要求均核对而不改变输入", async () => {
   const current = context(), before = structuredClone(current), charges: ((unknown))[] = [];
   const result = await invoke({ context: current, sessionFactory: fidelityChecker("preserved", { inspect(payload, options: PiSessionOptions) {
-    assert.deepEqual(options.customTools!.map((item) => item.name), ["submit_requirement_fidelity", "read_model_context"]);
+    assert.deepEqual(options.customTools!.map((item) => item.name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
     assert.match(options.systemPrompt!, /role=requirement-fidelity，submitName=submit_requirement_fidelity/u);
     assert.match(options.systemPrompt!, /结构化结果也是本阶段正式提交通道/u);
     assert.equal(options.reasoningMode, "off");
@@ -89,7 +90,7 @@ test("验收输入和交付前提的新增约束沿原checks提交，依据须�
     const result = await invoke({ context: current, charge() { calls++; }, sessionFactory: async (options) => ({
       modelCallAccounting: true, dispose() {}, async prompt(text: string) {
         await options.onModelCall!({}); const payload = JSON.parse(String(text)), tool = fixtureToolAt(options.customTools, 0);
-        assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context"]);
+        assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
         assert.match(options.systemPrompt!, /acceptance\.input、acceptance\.expected及decisions/u);
         assert.match(options.systemPrompt!, /按交集核对样本可达性/u);
         assert.match(options.systemPrompt!, /无代理对字符.*无控制字符/u);
@@ -125,7 +126,7 @@ test("验收可构造性未证明可用既有unproven返回，合法自选样本
         await options.onModelCall!({}); const payload = JSON.parse(String(text)), value = fidelityResult(payload, classification);
         assert.match(options.systemPrompt!, /不要求用户提供具体样本或逐一确认可选质量提升/u);
         assert.match(options.systemPrompt!, /可构造性尚无足够依据时判unproven，不能判preserved/u);
-        assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context"]);
+        assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
         if (classification === "unproven") value.checks[0]!.deliveryPreserved = false;
         await fixtureToolAt(options.customTools, 0)!.execute("classification", value);
       },
@@ -238,7 +239,7 @@ test("真实Pi假引文在原复核纠正，有效范围否定直接给设计者
         "submit_architecture_integration", "submit_architecture_review"].find((name) => names.includes(name));
       assert.ok(name, "每个原生请求须明确对应实际阶段或独立复核工具");
       requests.push(name); const content = body.messages.findLast((message: { role: string; }) => message.role === "user").content;
-      const payload = JSON.parse(String(typeof content === "string" ? content : content.filter((item: { type: string; }) => item.type === "text").map((item: { text: unknown; }) => item.text).join("")));
+      const payload = fixtureMaterialSources(JSON.parse(String(typeof content === "string" ? content : content.filter((item: { type: string; }) => item.type === "text").map((item: { text: unknown; }) => item.text).join("")))) as Record<string, unknown> & { requirements: { id: string; text: string }[]; candidate: ArchitectureBase; design: ArchitectureBase; candidateHash: string; priorFindings?: Parameters<typeof passingReview>[2] };
       let value;
       if (["submit_architecture_blueprint", "submit_architecture_module", "submit_architecture_integration"].includes(name)) {
         if (name === "submit_architecture_blueprint") fixedCandidate = validDesign(payload.requirements, { schemaVersion: 3, connections: [],
@@ -252,7 +253,7 @@ test("真实Pi假引文在原复核纠正，有效范围否定直接给设计者
         const submission = architectureStageSubmission({ tools: body.tools.map((item: { function: unknown; }) => item.function), payload, candidate });
         assert.equal(submission!.name!, name); value = submission!.args!;
       } else if (name === "submit_requirement_fidelity") {
-        fidelities++; assert.deepEqual(names, ["submit_requirement_fidelity", "read_model_context"]);
+        fidelities++; assert.deepEqual(names, ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
         const requirement = payload.requirements.find((item: { text: string|string[]; }) => item.text.includes("允许任意字符")); assert.ok(requirement);
         if (fidelities === 1) {
           const system = body.messages.filter((message: { role: string; }) => message.role === "system").map((message: { content: unknown; }) => message.content).join("\n");
@@ -441,7 +442,7 @@ const textContent = (content: unknown) => typeof content === "string" ? content 
 for (const wrapped of [false, true]) test(`真实Pi范围复核完整JSON${wrapped ? "终止封装" : "参数正文"}首轮通过同一提交校验`, { timeout: 15000 }, async (t) => {
   const f = await localFidelityModel(t, (body, turn) => {
     assert.equal(body.tool_choice, undefined);
-    assert.deepEqual(body.tools!.map((item) => item.function.name), ["submit_requirement_fidelity", "read_model_context"]);
+    assert.deepEqual(body.tools!.map((item) => item.function.name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
     const payload = JSON.parse(String(textContent(objectFields(body.messages.findLast((item) => item.role === "user")).content)));
     assert.equal(turn, 1);
     const value = fidelityResult(payload, "preserved");

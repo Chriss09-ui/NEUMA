@@ -1,3 +1,4 @@
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 import { failureFields } from "../helpers/failure-fields.mjs";
 import { fixtureChatRequest, fixtureString } from "../helpers/http-model.mjs";
 import type { StageSchema } from "../../src/contracts/architecture-stages.mjs";
@@ -161,7 +162,7 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   assert.deepEqual(sessions[1]!.payload!.candidateSchema, sessions[0]!.tools.submit_architecture!.parameters);
   for (const session of sessions) assert.deepEqual(session.payload!.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
   assert.deepEqual(Object.keys(sessions[0]!.tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
-  assert.deepEqual(Object.keys(sessions[1]!.tools), ["read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
+  assert.deepEqual(Object.keys(sessions[1]!.tools), ["read_model_context", "read_architecture_file", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.deepEqual(researchCalls, []); assert.deepEqual(result.modules, []);
   assert.ok(sessions.every((item) => item.disposed));
   const ready = await designer.markReady(result);
@@ -1047,7 +1048,7 @@ test("真实Pi SDK一次收到全部验收缺项后可一次修正，不靠逐�
     const role = roles[tool!.function.name]!;
     const attempt = requests.filter((value) => value === role).length + 1; requests.push(role);
     const content = body.messages.findLast((message: { role: string; }) => message.role === "user")!.content;
-    const payload: FixturePayload = JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""));
+    const payload: FixturePayload = fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as FixturePayload;
     let value: ArchitectureBase | ReturnType<typeof passingReview> | NonNullable<ReturnType<typeof architectureStageSubmission>>["args"];
     if (role !== "reviewer") {
       if (role === "blueprint") candidate = validDesign(payload.requirements!, { schemaVersion: 3, connections: [],
@@ -1102,7 +1103,7 @@ test("真实Pi评审语义引用拒绝保留路径和修正说明，原会话修
       const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")), tool = body.tools!.find((item: { function: { name: string; }; }) => ["submit_architecture", "submit_architecture_review"].includes(item.function.name));
       const role = tool!.function.name === "submit_architecture" ? "designer" : "reviewer";
       const content = body.messages.findLast((message: { role: string; }) => message.role === "user")!.content;
-      const payload: FixturePayload = JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""));
+      const payload: FixturePayload = fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as FixturePayload;
       requests.push(role);
       let value: ArchitectureBase | ReturnType<typeof passingReview> | NonNullable<ReturnType<typeof architectureStageSubmission>>["args"];
       if (role === "designer") {
@@ -1184,7 +1185,7 @@ test("真实Pi阶段工具保留完整v3连接与动态schema，不以多轮修�
     const role = roles[tool!.function.name]!;
     requests.push(role);
     const source = body.messages.findLast((message: { role: string; }) => message.role === "user")!.content;
-    const payload: FixturePayload = JSON.parse(typeof source === "string" ? source : source!.filter((part) => part.type === "text").map((part) => part.text).join(""));
+    const payload: FixturePayload = fixtureMaterialSources(JSON.parse(typeof source === "string" ? source : source!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as FixturePayload;
     let value: ArchitectureBase | ReturnType<typeof passingReview> | NonNullable<ReturnType<typeof architectureStageSubmission>>["args"];
     if (role !== "reviewer") {
       if (role === "blueprint") {
@@ -1215,7 +1216,8 @@ test("真实Pi阶段工具保留完整v3连接与动态schema，不以多轮修�
       const submission = architectureStageSubmission({ tools: body.tools!.map((item) => item.function), payload, candidate });
       assert.equal(submission!.name, tool!.function.name); value = submission!.args;
     } else {
-      assert.equal(payload.candidateSchema, undefined);
+      const wirePacket = JSON.parse(typeof source === "string" ? source : source!.filter(part => part.type === "text").map(part => part.text).join(""));
+      assert.equal(wirePacket.candidateSchema, undefined);
       assert.ok(recordArray(payload.contextIndex).some(item => item.section === "candidateSchema"), "完整契约仍可按需读取");
       const system = body.messages.filter((message: { role: string; }) => ["system", "developer"].includes(message.role))
         .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
@@ -1272,7 +1274,7 @@ test("真实 Pi SDK 按架构角色使用输出预算，并识别截断和不完
         model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
       if (count === 1) {
         const content = body.messages.findLast((message: { role: string; }) => message.role === "user")!.content;
-        const payload: FixturePayload = JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""));
+        const payload: FixturePayload = fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as FixturePayload;
         const value = role === "designer" ? validDesign(payload.requirements!, {
           instructions: "依据用户本轮材料完成任务，缺少输入先询问，保留可核对结果。".repeat(180),
         }) : passingReview(payload.candidateHash!, payload.design!, payload.priorFindings);

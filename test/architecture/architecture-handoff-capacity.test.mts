@@ -152,6 +152,8 @@ test("动态条数不放宽整份证据字节限额，超量反馈要求精简�
   for (const requirement of expanded.requirements) objectFields(requirement).text = "原".repeat(1000);
   const short = narrowed(expanded);
   assert.ok(Buffer.byteLength(JSON.stringify(short)) < 256 * 1024, "短引用本身未超量");
+  assert.equal(diagnoseRequirementFidelitySubmission(expanded, short).valid, true, "只存位置不会自动膨胀为原文");
+  for (const row of short.restrictions) Object.assign(row.claimRef!, { offset: 0, length: 1000 });
   assert.ok(diagnoseRequirementFidelitySubmission(expanded, short).issues.some((issue) => issue.reason === "submission_size_limit"), "同时核对实际归一后的证据量");
   for (const row of short.restrictions) Object.assign(row.claimRef!, { offset: 0, length: 1 });
   assert.equal(diagnoseRequirementFidelitySubmission(expanded, short).valid, true, "显式选择必要摘录后可完整提交全部项，不自动截断原文");

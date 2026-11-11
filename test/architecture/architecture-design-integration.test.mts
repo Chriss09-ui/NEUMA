@@ -26,7 +26,7 @@ import { createArchitectureReviewRetry, createArchitectureReviewTestRetry } from
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
 import { architectureStageSubmission } from "../helpers/architecture-stages.mjs";
 import { fidelityResult } from "../helpers/fidelity.mjs";
-import { readModelContextSection } from "../helpers/model-context.mjs";
+import { fixtureMaterialSources, readModelContextSection } from "../helpers/model-context.mjs";
 import type { NeumaPiSession, PiSessionOptions } from "../../src/runtime/pi-port.mjs";
 import type { ArchitectureBase } from "../../src/contracts/architecture.mjs";
 
@@ -40,8 +40,8 @@ interface NativePayload extends Record<string, unknown> {
   evidenceCatalog?: { id: string }[]; stageRepair?: { additionalCalls: number }; reviewParts?: { saved?: unknown; missing: { acceptanceScopeChecks: unknown[] } };
 }
 const text = (content: unknown): string => typeof content === "string" ? content : recordArray(content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
-const users = (body: FixtureChatRequest): NativePayload[] => body.messages.filter(message => message.role === "user").map(message => {
-  try { const value: unknown = JSON.parse(text(message.content)); return value && typeof value === "object" && !Array.isArray(value) ? value as NativePayload : null; } catch { return null; }
+const users = (body: FixtureChatRequest, readFiles = true): NativePayload[] => body.messages.filter(message => message.role === "user").map(message => {
+  try { const value: unknown = JSON.parse(text(message.content)); return value && typeof value === "object" && !Array.isArray(value) ? (readFiles ? fixtureMaterialSources(value as NativePayload) : value) as NativePayload : null; } catch { return null; }
 }).filter((value): value is NativePayload => value !== null);
 interface NativeStage { result: unknown; resultHash: unknown; modelCalls: number; sessionRef: { file: string } }
 interface NativeCheckpoint { blueprint: NativeStage; modules: NativeStage[]; integration: NativeStage; modelCalls: number }
@@ -265,7 +265,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       }
       const reviewNode = ["review_slice", "reviewer", "fidelity"].includes(kind);
       if (reviewNode && readReviewPages && body.messages.filter(row => row.role === "tool").length < 4) {
-        name = "read_model_context"; args = { requests: [{ section: "requirements" }] };
+        name = "read_architecture_file"; args = { requests: [{ file: "requirements.json" }] };
         assert.ok(names.includes(name));
       } else if (rejectSlice && kind === "review_slice" && payloads.some(row => objectFields(row.assignment).id === "review_checks_0")) {
         args = { ...objectFields(args), factClaims: [{ source: "runtimeCapabilities", path: "/version", expectedJson: "1" }] };
@@ -478,6 +478,13 @@ test("子组、主评审和范围复核都能在四次读取后提交，累计�
   assert.equal(record.reviewProgressCheckpoint!.modelCalls, 10);
   assert.equal(objectFields(record.requirementFidelityProgress!.state).calls, 5);
   assert.equal(record.designProgressCheckpoint!.modelCalls, 3);
+  for (const entry of f.requests.filter(item => ["review_slice", "reviewer", "fidelity"].includes(item.kind))) {
+    const packets = entry.body.messages.filter(message => message.role === "user").map(message => { try { return JSON.parse(text(message.content)); } catch { return null; } }).filter(Boolean);
+    assert.ok(packets.some(packet => packet.materialFiles));
+    assert.ok(packets.every(packet => !packet.design && !packet.candidate && !packet.requirements && !packet.acceptanceAdapterGuide));
+  }
+  const reads = f.requests.flatMap(entry => entry.body.messages.filter(message => message.role === "tool" && text(message.content).includes('"file":"requirements.json"')));
+  assert.ok(reads.length); assert.ok(reads.some(message => text(message.content).includes("完整核对全部工作记录")));
   assert.deepEqual(f.errors, []);
 });
 
@@ -866,7 +873,7 @@ test("修复后显式测试续评核对两级授权，保存后等待手动运�
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), [...Array(7).fill("reviewer"), "fidelity"]);
   const payload = users(f.requests[before]!.body).find((row) => row.candidateHash);
   assert.deepEqual(payload!.modelBudget, { policy: "task_rejections", limit: null, used: 7 });
-  assert.equal(payload!.reviewParts!.saved, undefined);
+  assert.equal(users(f.requests[before]!.body, false).find(row => row.candidateHash)!.reviewParts!.saved, undefined);
   const reader = f.sessions.findLast(row => row.options.customTools!.some((tool: { name: string; }) => tool.name === "submit_architecture_review"))!.options;
   assert.deepEqual(await readModelContextSection(reader, "reviewParts", "/saved/acceptanceScopeChecks"), objectFields(progress.parts).acceptanceScopeChecks);
   assert.equal(passed.reviewProgressCheckpoint!.modelCalls, 15);
@@ -883,7 +890,7 @@ test("原生评审以短历史编号和原文路径提交，落盘完整编号�
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["review_revision", "reviewer", "fidelity"]);
   assert.ok(passed.review!.priorFindingDecisions!.length);
   assert.ok(passed.review!.priorFindingDecisions!.every((row) => row.findingId.startsWith("finding_") && !Object.hasOwn(row, "findingRef")));
-  assert.ok(passed.review!.issues.every((row) => row.id && !Object.hasOwn(row, "findingRef") && row.references!.every(ref => ref.quote)));
+  assert.ok(passed.review!.issues.every((row) => row.id && !Object.hasOwn(row, "findingRef") && row.references!.every(ref => ref.source && typeof ref.path === "string" && !Object.hasOwn(ref, "quote"))));
   assert.ok(passed.requirementFidelity);
 });
 
@@ -1062,8 +1069,10 @@ for (const legacy of [false, true]) test(`评审后追加检索资料仍能完�
   assert.equal(passed.status, "passed");
   assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["review_revision", "reviewer", "fidelity"]);
   const payload = users(f.requests[before]!.body).find((row) => row.pipelineStage === "review_revision");
-  assert.equal(payload!.evidence, undefined);
-  assert.deepEqual(payload!.evidenceCatalog!.map((row) => row.id), source!.evidence!.map(row => row.id));
+  const wire = users(f.requests[before]!.body, false).find(row => row.pipelineStage === "review_revision")!;
+  assert.equal(wire.evidence, undefined);
+  assert.ok(recordArray(wire.materialFiles).some(row => row.file === "evidence.json"));
+  assert.deepEqual(payload!.evidence, source!.evidence);
   const reader = f.sessions.findLast(row => row.options.customTools!.some((tool: { name: string; }) => tool.name === "submit_architecture_review"))!.options;
   assert.deepEqual(await readModelContextSection(reader, "evidence"), source!.evidence!);
   assert.deepEqual(passed.evidence, source!.evidence!); assert.deepEqual(passed.researchGaps, source!.researchGaps!);

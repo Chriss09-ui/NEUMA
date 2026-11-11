@@ -65,7 +65,7 @@ test("批次按真实剩余额度缩并，范围稳定编号优先且保留两�
 });
 
 test("同编号实质修改可保存，完全相同或仅换行顺序不推进分项", async () => {
-  const f = material(), writes: ({ "candidateHash": (string); "checks": ({ id: string; passed: boolean; evidence: string; }[]); "issues": (import("../../src/contracts/architecture.d.mjs").ArchitectureIssue[]); "acceptanceScopeChecks": ({ acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; criterionQuote: string; adapterQuote: string; }[]); "priorFindingDecisions": ({ findingId: string; status: string; reason: string; checkIds: string[]; candidatePaths: string[]; }[]); })[] = [];
+  const f = material(), writes: ReviewParts[] = [];
   const note = (id: string) => ({ id, blocking: false, description: "保留当前原文说明", remedy: "核对当前候选", checkId: "verification",
     kind: "design", candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions", quote: f.design.instructions }], factClaims: [] });
   const initial = savedRows(f, { issues: [note("note_a"), note("note_b")] });
@@ -86,7 +86,7 @@ test("同编号实质修改可保存，完全相同或仅换行顺序不推进�
 });
 
 test("旧详细行的坏逐字引文与旧CAS均保留已有成果", async () => {
-  const f = material(), writes: ({ "candidateHash": (string); "checks": ({ id: string; passed: boolean; evidence: string; }[]); "issues": (import("../../src/contracts/architecture.d.mjs").ArchitectureIssue[]); "acceptanceScopeChecks": ({ acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; criterionQuote: string; adapterQuote: string; }[]); "priorFindingDecisions": ({ findingId: string; status: string; reason: string; checkIds: string[]; candidatePaths: string[]; }[]); })[] = [], parts = createArchitectureReviewParts({ ...f.options,
+  const f = material(), writes: ReviewParts[] = [], parts = createArchitectureReviewParts({ ...f.options,
     onSave: (value) => writes.push(value) });
   const stale = input(parts);
   await parts.save(input(parts, { acceptanceScopeChecks: [f.review!.acceptanceScopeChecks![0]] }));
@@ -103,7 +103,7 @@ test("旧详细行的坏逐字引文与旧CAS均保留已有成果", async () =>
 });
 
 test("宿主batch仅派发两种四字段短行，保存为canonical且旧完整提交保持兼容", async () => {
-  const f = material(), writes: ({ "candidateHash": (string); "checks": ({ id: string; passed: boolean; evidence: string; }[]); "issues": (import("../../src/contracts/architecture.d.mjs").ArchitectureIssue[]); "acceptanceScopeChecks": ({ acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; criterionQuote: string; adapterQuote: string; }[]); "priorFindingDecisions": ({ findingId: string; status: string; reason: string; checkIds: string[]; candidatePaths: string[]; }[]); })[] = [], parts = createArchitectureReviewParts({ ...f.options, remainingModelCalls: () => 12,
+  const f = material(), writes: ReviewParts[] = [], parts = createArchitectureReviewParts({ ...f.options, remainingModelCalls: () => 12,
     onSave: value => writes.push(value) });
   for (const schema of [parts.saveParameters, parts.submitParameters]) {
     const branches = fixtureSchema(schema).properties!.acceptanceScopeChecks!.items!.anyOf!;
@@ -120,14 +120,16 @@ test("宿主batch仅派发两种四字段短行，保存为canonical且旧完整
   const short = { acceptanceId: detailed!.acceptanceId!, adapterRulePath: `/adapters/${detailed!.adapterId!}/proves`,
     sufficient: detailed!.sufficient!, reason: detailed!.reason! };
   await parts.save(input(parts, { acceptanceScopeChecks: [short] }));
-  assert.deepEqual(parts.snapshot().acceptanceScopeChecks[0], detailed);
+  const { criterionQuote: _criterion, adapterQuote: _adapter, ...position } = detailed;
+  assert.deepEqual(parts.snapshot().acceptanceScopeChecks[0], { ...position, adapterRulePath: short.adapterRulePath });
   const second = f.review!.acceptanceScopeChecks![1]!; assert.ok("adapterId" in second);
   const reader = createArchitectureEvidenceReader({ context: f.context, candidateHash: f.candidateHash, role: "reviewer" });
   const receipt = JSON.parse(String(toolText((await reader.tool.execute("scope", { source: "acceptanceAdapterGuide", pointer: `/adapters/${second!.adapterId!}/proves`, acceptanceId: second!.acceptanceId! })))));
   const withReceipt = createArchitectureReviewParts({ ...f.options, resolve: reader.resolveSubmission, remainingModelCalls: () => 12 });
   await withReceipt.save(input(withReceipt, { acceptanceScopeChecks: [{ acceptanceId: second!.acceptanceId!,
     scopeReceiptId: receipt.scopeReceiptId, sufficient: true, reason: second!.reason! }] }));
-  assert.deepEqual(withReceipt.snapshot().acceptanceScopeChecks[0], second);
+  const { criterionQuote: _secondCriterion, adapterQuote: _secondAdapter, ...secondPosition } = second;
+  assert.deepEqual(withReceipt.snapshot().acceptanceScopeChecks[0], { ...secondPosition, adapterRulePath: `/adapters/${second.adapterId}/proves` });
   assert.equal(architectureToolValidation(f.review, f.options.toolSchema).valid, true);
   assert.equal(validateReview(f.review, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }).verdict, "pass");
   const restored = createArchitectureReviewParts({ ...f.options, initial: savedRows(f), remainingModelCalls: () => 12 });
@@ -155,7 +157,7 @@ test("保存失败或等待落盘时取消，不发布新分项或新CAS", async
 });
 
 test("最后一批与正式结论可同次提交，但必须先保存真实行再按新CAS组装", async () => {
-  const f = material(), writes: ({ "candidateHash": (string); "checks": ({ id: string; passed: boolean; evidence: string; }[]); "issues": (import("../../src/contracts/architecture.d.mjs").ArchitectureIssue[]); "acceptanceScopeChecks": ({ acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; criterionQuote: string; adapterQuote: string; }[]); "priorFindingDecisions": ({ findingId: string; status: string; reason: string; checkIds: string[]; candidatePaths: string[]; }[]); })[] = [], last = f.review.checks.at(-1);
+  const f = material(), writes: ReviewParts[] = [], last = f.review.checks.at(-1);
   let parts: Parts;
   parts = createArchitectureReviewParts({ ...f.options, remainingModelCalls: () => 3,
     initial: savedRows(f, { checks: f.review.checks.slice(0, -1) }), onSave: (value) => {
@@ -192,7 +194,7 @@ test("最后一批保存中取消不得完成提交，合法部分行也不替�
 });
 
 test("未启用宿主批次的旧调用继续允许同值保存，不增加新无进展限制", async () => {
-  const f = material(), writes: ({ "candidateHash": (string); "checks": ({ id: string; passed: boolean; evidence: string; }[]); "issues": (import("../../src/contracts/architecture.d.mjs").ArchitectureIssue[]); "acceptanceScopeChecks": ({ acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; criterionQuote: string; adapterQuote: string; }[]); "priorFindingDecisions": ({ findingId: string; status: string; reason: string; checkIds: string[]; candidatePaths: string[]; }[]); })[] = [], parts = createArchitectureReviewParts({ ...f.options, onSave: (value) => writes.push(value) });
+  const f = material(), writes: ReviewParts[] = [], parts = createArchitectureReviewParts({ ...f.options, onSave: (value) => writes.push(value) });
   assert.equal(parts.reference().batch, undefined);
   const first = await parts.save(input(parts, { checks: [f.review.checks[0]] }));
   const second = await parts.save(input(parts, { checks: [f.review.checks[0]] }));

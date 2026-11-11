@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { InputError, normalizeDraft, decideNext } from "../requirements/core.mjs";
 import { taskSpecRequirementItems } from "../requirements/task-spec.mjs";
 import { CONNECTION_DEFINITION_SCHEMA, validateConnectionDefinition } from "../connections/connection-contract.mjs";
-import { REVIEW_ISSUE_EVIDENCE_PROPERTIES, ACCEPTANCE_SCOPE_CHECKS_SCHEMA, validateArchitectureReviewEvidence } from "./architecture-review-evidence.mjs";
+import { REVIEW_ISSUE_EVIDENCE_PROPERTIES, ACCEPTANCE_SCOPE_CHECKS_SCHEMA, reviewLocationSchema, validateArchitectureReviewEvidence } from "./architecture-review-evidence.mjs";
 import { ACCEPTANCE_VERIFICATION_SCHEMA, ACCEPTANCE_ADAPTER_GUIDE, validateAcceptanceVerification, validateAcceptanceCoverage } from "../verification/acceptance-contract.mjs";
 import { hostDeliveryCapabilityCatalog, runtimeCapabilityContract } from "../runtime/runtime-capability-contract.mjs";
 import { PLATFORM_CLAIMS_SCHEMA, validateArchitecturePlatformClaims } from "./architecture-platform-claims.mjs";
@@ -214,7 +214,7 @@ export function reviewSubmissionSchema({ evidenceRequired = false, priorFindings
     schema.required.push("acceptanceScopeChecks");
   }
   if (priorFindingsRequired) schema.required.push("priorFindingDecisions");
-  return schema;
+  return reviewLocationSchema(schema);
 }
 
 function fail(message: string, validationIssue?: UnknownRecord): never {

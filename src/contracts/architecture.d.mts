@@ -24,9 +24,9 @@ export type ArchitectureDesign = ArchitectureBase & (
       selectionBasis: { capacity: string; process: string; quality: string; requirementIds: string[]; assumptions: string[] }; platformClaims?: PlatformClaim[] });
 export interface PlatformClaim { id: string; source: "runtimeCapabilities" | "acceptanceAdapterGuide"; path: string; expected: unknown; decisionIds: string[]; acceptanceIds: string[] }
 export interface ArchitectureIssue { id: string; blocking: boolean; description: string; remedy: string; source?: string; candidateFields?: string[];
-  checkId?: string; kind?: string; candidatePaths?: string[]; references?: { source: string; path: string; quote: string }[]; factClaims?: { source: string; path: string; expectedJson: string }[] }
+  checkId?: string; kind?: string; candidatePaths?: string[]; references?: { source: string; path: string; quote?: string }[]; factClaims?: { source: string; path: string; expectedJson: string }[] }
 export interface ArchitectureReview { candidateHash: string; verdict: "pass" | "revise" | "insufficient" | "infeasible" | "needs_input"; checks: { id: string; passed: boolean; evidence: string }[]; issues: ArchitectureIssue[]; summary: string;
-  acceptanceScopeChecks?: { acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; criterionQuote: string; adapterQuote: string }[];
+  acceptanceScopeChecks?: { acceptanceId: string; adapterId: string; scope: string; sufficient: boolean; reason: string; adapterRulePath?: string; criterionQuote?: string; adapterQuote?: string }[];
   priorFindingDecisions?: { findingId: string; status: string; reason: string; checkIds: string[]; candidatePaths: string[] }[] }
 export interface EvidenceItem { id: string; [key: string]: unknown }
 export interface ConfirmedRequirementContext { hash: string; sourceQuotes: { id: string; messageId: string; quote: string; [key: string]: unknown }[]; taskSources?: { quoteIds?: string[] }[]; resolvedChoices?: { quoteIds?: string[] }[]; [key: string]: unknown }

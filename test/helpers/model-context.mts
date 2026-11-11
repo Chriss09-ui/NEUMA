@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { fixtureTools, type FixtureTool } from "./m7-test-boundaries.mjs";
 import type { PiSessionOptions } from "../../src/runtime/pi-port.mjs";
@@ -36,6 +37,20 @@ export async function completeVerificationContext(packet: Record<string, unknown
     assert.ok(section && typeof section === "object" && "section" in section && typeof section.section === "string");
     result[section.section] = await readModelContextSection(options, section.section);
   }
-  for (const key of ["contextIndex", "inputContextVersion", "platformOverview", "deferredObligations"]) delete result[key];
+  for (const key of ["contextIndex", "inputContextVersion", "platformOverview", "deferredObligations", "materialDelivery", "materialFiles", "materialInstruction"]) delete result[key];
+  return result;
+}
+
+/** Fixed model fixtures may inspect the published snapshots to construct responses; wire assertions use the original packet. */
+export function fixtureMaterialSources(packet: Record<string, unknown>) {
+  const result = { ...packet };
+  if (packet.materialDelivery !== "files-v1") return result;
+  assert.ok(Array.isArray(packet.materialFiles));
+  for (const item of packet.materialFiles) {
+    assert.ok(item && typeof item.file === "string" && typeof item.path === "string");
+    result[item.file.slice(0, -5)] = JSON.parse(readFileSync(item.path, "utf8"));
+  }
+  // Projection indexes contain derived conveniences alongside the immutable source index.
+  if (packet.reviewEvidenceIndex) result.reviewEvidenceIndex = packet.reviewEvidenceIndex;
   return result;
 }

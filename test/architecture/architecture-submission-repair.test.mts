@@ -1,3 +1,4 @@
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 interface ModelPayload extends Record<string,unknown> {requirements:RequirementItem[];design:ReturnType<typeof validDesign>;candidateHash:string;editableSubmission:{submissionHash:string;baseCandidateHash:string;source:string;trust:string};priorFindings:NonNullable<Parameters<typeof passingReview>[2]>;previousDesign:ReturnType<typeof validDesign>;remaining:{revisions:number}}
 import {fixtureTools,callFixture,recordArray} from "../helpers/m7-test-boundaries.mjs";
 import {fixturePort,fixtureText,fixtureJsonObject,type FixtureChatRequest} from "../helpers/http-model.mjs";
@@ -198,7 +199,7 @@ const feedbackText = (body:FixtureChatRequest) => {
 };
 const requestPayload = (body:FixtureChatRequest):ModelPayload => {
   const content = body.messages.findLast((item) => item.role === "user")!.content;
-  return JSON.parse(typeof content === "string" ? content : content!.filter((item) => item.type === "text").map((item) => item.text).join("\n"));
+  return fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((item) => item.type === "text").map((item) => item.text).join("\n"))) as ModelPayload;
 };
 const editableOptions = (draft:RequirementDraft, requirements: RequirementItem[], design: ArchitectureBase) => ({ editableDesign: design,
   payload: { draft, requirements, candidateSchema: designSubmissionSchema(draft, { requirements }), previousDesign: design } });

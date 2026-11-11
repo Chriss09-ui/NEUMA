@@ -39,6 +39,35 @@ export const ACCEPTANCE_SCOPE_CHECKS_SCHEMA = {
   description: "每项候选验收恰好一行，逐字引用该项 expected 及其适配器指南，独立判断检查范围能否证明完整承诺；不足时 acceptance_quality 必须失败并附引用该验收路径的阻断。跨范围承诺应拆分。",
 };
 
+/** Storage accepts positions and exact legacy excerpts. The legacy shape stays reproducible for bound sessions. */
+export function reviewLocationSchema<S extends ToolSchema>(schema: S): S {
+  const result = structuredClone(schema);
+  const reference = result.properties?.issues?.items?.properties?.references?.items;
+  if (reference?.required) reference.required = reference.required.filter(key => key !== "quote");
+  const scope = result.properties?.acceptanceScopeChecks?.items;
+  if (scope?.properties && scope.required) {
+    scope.properties.adapterRulePath = { type: "string", minLength: 1, maxLength: 500 };
+    scope.required = scope.required.filter(key => !["criterionQuote", "adapterQuote"].includes(key));
+    scope.anyOf = [{ required: ["adapterRulePath"], not: { anyOf: [{ required: ["criterionQuote"] }, { required: ["adapterQuote"] }] } },
+      { required: ["criterionQuote", "adapterQuote"], not: { required: ["adapterRulePath"] } }];
+  }
+  return result;
+}
+
+export function legacyReviewSchema<S extends ToolSchema>(schema: S): S {
+  const result = structuredClone(schema);
+  const references = result.properties?.issues?.items?.properties?.references;
+  if (references) references.items = structuredClone(REVIEW_ISSUE_EVIDENCE_PROPERTIES.references.items);
+  const scope = result.properties?.acceptanceScopeChecks;
+  if (scope) scope.items = structuredClone(ACCEPTANCE_SCOPE_CHECKS_SCHEMA.items);
+  return result;
+}
+
+export function architectureReferenceText(reference: { source: string; path: string; quote?: string }, context: unknown) {
+  const current = at(objectFields(context)[reference.source], reference.path);
+  return reference.quote ?? (current.found ? typeof current.value === "string" ? current.value : JSON.stringify(current.value) : undefined);
+}
+
 function evidenceErrors() {
   const issues: EvidenceError[] = [], seen = new Set<string>();
   let total = 0;
@@ -123,7 +152,7 @@ export function validateArchitectureReviewEvidence<T extends Pick<ArchitectureRe
       fail(`${path}.candidatePaths`, "candidate_path_missing", "候选路径不存在；必须引用当前候选中实际存在的 JSON Pointer 路径");
     else for (const [position, pointer] of issue.candidatePaths.entries()) if (!at(objectFields(context).candidate, pointer).found)
       fail(`${path}.candidatePaths[${position}]`, "candidate_path_missing", "候选路径不存在；必须引用当前候选中实际存在的 JSON Pointer 路径");
-    if (!Array.isArray(issue.references) || !issue.references.length) fail(`${path}.references`, "required_field", "必须给出当前材料的逐字依据");
+    if (!Array.isArray(issue.references) || !issue.references.length) fail(`${path}.references`, "required_field", "必须给出当前材料的位置");
     for (const [position, reference] of (Array.isArray(issue.references) ? issue.references : []).entries()) {
       if (!sources.includes(reference.source)) {
         fail(`${path}.references[${position}]`, "reference_source_invalid", "引用来源无效；请使用本轮提供的材料来源");
@@ -132,7 +161,7 @@ export function validateArchitectureReviewEvidence<T extends Pick<ArchitectureRe
       const current = at(objectFields(context)[reference.source], reference.path);
       const serialized = current.found ? typeof current.value === "string" ? current.value : JSON.stringify(current.value) : "";
       if (!current.found) fail(`${path}.references[${position}]`, "reference_path_missing", "引用路径不存在；核对当前材料的 JSON Pointer 路径，可用 read_architecture_evidence 读取本轮原文并以 receiptId 引用");
-      else if (typeof reference.quote !== "string" || !reference.quote.trim() || !serialized?.includes(reference.quote))
+      else if (Object.hasOwn(reference, "quote") && (typeof reference.quote !== "string" || !reference.quote.trim() || !serialized?.includes(reference.quote)))
         fail(`${path}.references[${position}]`, "reference_quote_mismatch", "路径存在但逐字摘录不匹配；请复制本轮该路径的实际文本，不要沿用旧评语或改写，可用 read_architecture_evidence 读取本轮原文并以 receiptId 引用");
     }
     const claims = Array.isArray(issue.factClaims) ? issue.factClaims : [];
@@ -191,16 +220,34 @@ function validateAcceptanceScopeChecks(review: Pick<ArchitectureReview, "checks"
     if (!adapter || row.adapterId !== descriptor.adapterId || row.scope !== ACCEPTANCE_ADAPTERS[descriptor.adapterId].scope
       || adapter.scope !== ACCEPTANCE_ADAPTERS[descriptor.adapterId].scope)
       fail(`${path}.adapterId`, "scope_mismatch", "必须核对本条候选实际选择的适配器及其固定验证范围");
-    if (typeof row.criterionQuote !== "string" || !row.criterionQuote.trim() || (typeof criterion.expected !== "string" || !criterion.expected.includes(row.criterionQuote)))
-      fail(`${path}.criterionQuote`, "reference_quote_mismatch", "必须逐字引用本条验收 expected 的实际承诺");
-    if (typeof row.adapterQuote !== "string" || !row.adapterQuote.trim()
-      || !matchesAdapterQuote(row.adapterQuote, objectFields(context).acceptanceAdapterGuide, descriptor.adapterId))
-      fail(`${path}.adapterQuote`, "reference_quote_mismatch", "必须逐字引用本条适配器的范围、当前准入说明或通用组合规则；专属规则不可跨适配器引用");
+    if (row.adapterRulePath !== undefined) {
+      const rule = at(objectFields(context).acceptanceAdapterGuide, row.adapterRulePath);
+      if (!architectureAdapterRulePaths(objectFields(context).acceptanceAdapterGuide, descriptor.adapterId).includes(row.adapterRulePath)
+        || typeof rule.value !== "string" || typeof criterion.expected !== "string" || !criterion.expected.trim())
+        fail(`${path}.adapterRulePath`, "scope_rule_invalid", "规则位置必须属于本条实际适配器，且指向有效规则正文");
+    } else {
+      if (typeof row.criterionQuote !== "string" || !row.criterionQuote.trim() || (typeof criterion.expected !== "string" || !criterion.expected.includes(row.criterionQuote)))
+        fail(`${path}.criterionQuote`, "reference_quote_mismatch", "必须逐字引用本条验收 expected 的实际承诺");
+      if (typeof row.adapterQuote !== "string" || !row.adapterQuote.trim()
+        || !matchesAdapterQuote(row.adapterQuote, objectFields(context).acceptanceAdapterGuide, descriptor.adapterId))
+        fail(`${path}.adapterQuote`, "reference_quote_mismatch", "必须逐字引用本条适配器的范围、当前准入说明或通用组合规则；专属规则不可跨适配器引用");
+    }
     if (!partial && !row.sufficient && (checks.get("acceptance_quality")?.passed !== false
       || !review.issues.some((issue) => issue.blocking && issue.checkId === "acceptance_quality"
         && issue.candidatePaths?.some((pointer) => pointer === `/acceptance/${position}` || pointer.startsWith(`/acceptance/${position}/`)))))
       fail(`${path}.sufficient`, "missing_scope_issue", "验证范围不足时 acceptance_quality 必须失败，并有准确引用本条验收的阻断问题");
   }
+}
+
+export function architectureAdapterRulePaths(guide: unknown, adapterId: string) {
+  const admission = objectFields(objectFields(objectFields(guide).admission)[adapterId]);
+  const paths = [
+    ...["proves", "doesNotProve", "splitRule", "executionRule"].map(key => `/adapters/${adapterId}/${key}`),
+    ...["caseSetRule", "requirementCoverageRule", "splitRule", ...(adapterId === "host-business" ? ["hostBusinessRule"] : [])].map(key => `/composition/${key}`),
+    ...["rule", "measure", "outcomeRule"].map(key => `/admission/${adapterId}/${key}`),
+    ...(Array.isArray(admission.excludedProof) ? admission.excludedProof.map((_, index) => `/admission/${adapterId}/excludedProof/${index}`) : []),
+  ];
+  return paths.filter(path => { const selected = at(guide, path); return typeof selected.value === "string" && selected.value.trim(); });
 }
 
 export function architectureReviewIssues(programIssues: ArchitectureIssue[], review: ArchitectureReview) {

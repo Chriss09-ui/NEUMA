@@ -32,7 +32,7 @@ function fixture<C extends Controller>(controller:C, respond:(input:{payload:Rec
   const run = () => controller.run({ context, issues, config: {}, cwd: "/tmp", dataDir: "/tmp", signal,
     charge() { state.charges++; }, sessionFactory: async (options: PiSessionOptions) => {
       assert.equal(options.reasoningMode, controller === controllers.fidelity ? "off" : "auto");
-      assert.deepEqual(options.customTools!.map((tool) => tool.name), [controller.name, "read_model_context"]);
+      assert.deepEqual(options.customTools!.map((tool) => tool.name), [controller.name, "read_model_context", ...(controller === controllers.fidelity ? ["read_architecture_file"] : [])]);
       assert.match(options.systemPrompt!, /结构化结果也是本阶段正式提交通道/u);
       const tool = options.customTools![0], execute = tool!.execute;
       state.tool = fixtureToolAt([tool!],0); state.value = callFixture(controller.value, undefined, [fixtureString(objectFields(objectFields(objectFields(tool!.parameters).properties).contextHash).const)]) as ReturnType<C["value"]>;

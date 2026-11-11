@@ -1,5 +1,7 @@
 import { basename, join } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
+import type { UnknownRecord } from "../contracts/json.mjs";
+import type { ContextEvent } from "./execution-port.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { SessionFactory, NeumaTool, ExecutionSession } from "./execution-port.mjs";
@@ -23,7 +25,8 @@ const prompt = `你是本次修复调度中的独立子Agent，仅负责repairAs
 
 export async function runRepairAgent(options: { worker: RepairWorker; context: Record<string, unknown>; binding: unknown;
   config: ModelConfig; cwd: string; dataDir: string; sessionDirectory: string; sessionFactory: SessionFactory;
-  maxOutputTokens: number; signal?: AbortSignal | undefined; tools?: NeumaTool[] }): Promise<void> {
+  maxOutputTokens: number; signal?: AbortSignal | undefined; tools?: NeumaTool[];
+  prepareMaterials?: (sources: UnknownRecord) => Promise<{ tool: NeumaTool; project: (input: UnknownRecord) => UnknownRecord }> }): Promise<void> {
   const { worker, signal } = options;
   let submitted = false, accepting = true, calls = worker.group.calls, session: ExecutionSession | undefined;
   const active = () => { signal?.throwIfAborted(); if (!accepting || submitted) throw new InputError("修复子任务已结束。"); };
@@ -36,6 +39,18 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
     } });
   const sources: Record<string, unknown> = { base: worker.base, ...options.context,
     ...(worker.group.history?.length ? { rejectedRepair: worker.group.history.at(-1) } : {}) };
+  const fileDelivery = await options.prepareMaterials?.(sources);
+  const projectMessage = (text: string) => {
+    if (!fileDelivery) return text;
+    let input: unknown;
+    try { input = JSON.parse(text); } catch { return text; }
+    return objectFields(input).repairAssignment ? JSON.stringify(fileDelivery.project(objectFields(input))) : text;
+  };
+  const projectHistory = (messages: ContextEvent["messages"]) => messages.map(message => {
+    if (message.role !== "user") return message;
+    if (typeof message.content === "string") return { ...message, content: projectMessage(message.content) };
+    return { ...message, content: (message.content ?? []).map(block => block.type === "text" ? { ...block, text: projectMessage(block.text) } : block) };
+  });
   const preparedContext: Record<string, unknown> = {}, baseFields: Record<string, unknown> = {};
   let bytes = 0;
   const include = (target: Record<string, unknown>, key: string, value: unknown) => {
@@ -67,14 +82,15 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
       if (row.error) throw new InputError(String(objectFields(row.error).message));
       return { content: [{ type: "text", text: JSON.stringify({ ...row, totalChars: row.totalCharacters, baseHash: worker.baseHash }) }], details: {} };
     } };
-  const tools = [read, ...(options.tools ?? []).map(tool => ({ ...tool, execute: async (...args: Parameters<NeumaTool["execute"]>) => {
+  const tools = [read, ...[...(fileDelivery ? [fileDelivery.tool] : []), ...(options.tools ?? [])].map(tool => ({ ...tool, execute: async (...args: Parameters<NeumaTool["execute"]>) => {
     readable(); const value = await tool.execute(...args); active(); return value;
   } })), submit];
   const abort = () => { accepting = false; void session?.abort(); };
   signal?.addEventListener("abort", abort, { once: true });
   try {
     session = await options.sessionFactory({ config: options.config, cwd: options.cwd, dataDir: options.dataDir, reasoningMode: "off",
-      maxOutputTokens: options.maxOutputTokens, systemPrompt: prompt + "\n" + renderPiSubmissionContract({ role: "repair", submitName: submit.name, tools, structuredResponse: true }),
+      maxOutputTokens: options.maxOutputTokens, systemPrompt: (fileDelivery ? prompt.replace("preparedContext直接提供本组已有字段和必要材料，未内联材料才用read_repair_context读取", "materialFiles提供本组资料文件目录，先用read_architecture_file读取需要的原文；旧read_repair_context同样可用") : prompt) + "\n" + renderPiSubmissionContract({ role: "repair", submitName: submit.name, tools, structuredResponse: true }),
+      ...(fileDelivery ? { preparePrompt: projectMessage, transformContext: projectHistory } : {}),
       customTools: tools, sessionStorage: { directory: options.sessionDirectory,
         binding: { version: 1, role: "repair", bindingHash: repairHash(options.binding), groupId: worker.group.id, baseHash: worker.baseHash },
         ...(worker.group.sessionFile ? { file: join(options.sessionDirectory, worker.group.sessionFile) } : {}) },

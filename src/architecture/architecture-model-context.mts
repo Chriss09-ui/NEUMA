@@ -4,6 +4,8 @@ import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 function array(value: unknown): unknown[] { if (!isArray(value)) throw new TypeError("Model context list is invalid"); return value; }
 import { modelContextPacket, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
 import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, INTEGRATION_ACCEPTANCE_RULE, REVIEW_EVIDENCE_READ_RULE, REVIEW_FACT_CLAIM_RULE, REVIEW_FORMAT_RULE } from "./architecture-prompts.mjs";
+import { architectureAdapterRulePaths } from "./architecture-review-evidence.mjs";
+import type { ArchitectureMaterialFile } from "./architecture-material-files.mjs";
 import { MODULE_OBLIGATION_RULE } from "./architecture-module-obligations.mjs";
 
 const pick = (value: unknown, fields: string[]) => { const record = objectFields(value); return Object.fromEntries(fields.filter(key => record[key] !== undefined).map(key => [key, record[key]])); };
@@ -48,7 +50,50 @@ function reviewIndex(value: unknown) {
     acceptanceScope: index.acceptanceScope == null ? undefined : array(index.acceptanceScope).map(item => pick(item, ["acceptanceId", "adapterId", "scope", "criterionPath"])) };
 }
 
-export function architectureModelContext(source: UnknownRecord, { role, continuation = false }: { role?: string | undefined; continuation?: boolean } = {}) {
+/** Remove transport copies only; original reports and user/source quotations remain in their files. */
+function positionReport(value: unknown, guide: unknown, historicalFile?: string, pointer = ""): unknown {
+  if (Array.isArray(value)) return value.map((item, index) => positionReport(item, guide, historicalFile, `${pointer}/${index}`));
+  if (!value || typeof value !== "object") return value;
+  const row = objectFields(value), result: UnknownRecord = {};
+  for (const [key, child] of Object.entries(row)) {
+    if (["references", "readReferences"].includes(key) && Array.isArray(child)) result[key] = child.map((input, index) => {
+      const ref = objectFields(input);
+      return typeof ref.source === "string" && typeof ref.path === "string"
+        ? historicalFile ? { file: historicalFile, path: `${pointer}/${key}/${index}` } : { file: `${ref.source}.json`, path: ref.path } : input;
+    });
+    else if (!["criterionQuote", "adapterQuote"].includes(key)) result[key] = positionReport(child, guide, key === "priorFindings" ? "priorFindings.json" : historicalFile,
+      key === "priorFindings" ? "" : `${pointer}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`);
+  }
+  if (typeof row.acceptanceId === "string" && typeof row.adapterId === "string" && typeof row.adapterQuote === "string") {
+    const paths = architectureAdapterRulePaths(guide, row.adapterId);
+    const selected = paths.find(path => {
+      let value = guide;
+      for (const key of path.slice(1).split("/")) value = objectFields(value)[key];
+      return typeof value === "string" && value.includes(row.adapterQuote as string);
+    });
+    if (selected) result.adapterRulePath = selected;
+  }
+  return result;
+}
+
+function filePacket(source: UnknownRecord, fields: string[], materialFiles?: ArchitectureMaterialFile[] | undefined): UnknownRecord {
+  const packet = modelContextPacket(source, fields);
+  if (packet.reviewParts) packet.reviewParts = Object.fromEntries(Object.entries(objectFields(packet.reviewParts)).filter(([key]) => !["saved", "rejectedDraft"].includes(key)));
+  if (packet.reviewReferenceRecovery) {
+    const { draft, ...recovery } = objectFields(packet.reviewReferenceRecovery);
+    packet.reviewReferenceRecovery = { ...recovery, ...(draft ? { draftLocation: { file: "reviewReferenceRecovery.json", path: "/draft" } } : {}) };
+  }
+  if (source.reviewEvidenceIndex) packet.reviewEvidenceIndex = reviewIndex(source.reviewEvidenceIndex);
+  const projected = objectFields(positionReport(packet, source.acceptanceAdapterGuide));
+  return { ...projected, materialDelivery: "files-v1", ...(materialFiles ? { materialFiles } : {}),
+    materialInstruction: "materialFiles是本节点只读资料目录。先读取本次判断需要的候选、原要求和规则；file用目录文件名，path从文件内部开始，空path表示整份文件。报告只交位置，不复制原文。nextRequest非空须继续读取所需内容。" };
+}
+
+export function architectureModelContext(source: UnknownRecord, { role, continuation = false, materialFiles }: { role?: string | undefined; continuation?: boolean; materialFiles?: ArchitectureMaterialFile[] | undefined } = {}) {
+  const filesMode = role === "reviewer" || ["review_slice", "review_revision"].includes(String(source.pipelineStage));
+  if (filesMode) return filePacket(source, [...metadata, "assignment", "issues", "deterministicIssues", "distributedReview", "priorFindings",
+    "reviewRetry", "reviewReferenceRecovery", "reviewEvidenceIndex", "reviewParts", "revisionFeedback"].filter(key =>
+      !["unsubmittedDraft", "editableSubmission", "repairPreparation"].includes(key)), materialFiles);
   const fields = [...metadata];
   const derived: UnknownRecord = {};
   if (continuation && source.blueprintProtocol === "module-handoff-v3") fields.push("assignment");
@@ -110,12 +155,22 @@ export function architectureModelContext(source: UnknownRecord, { role, continua
   return packet;
 }
 
-export function verificationModelContext(source: UnknownRecord) {
+export function architectureRepairModelContext(input: UnknownRecord, materialFiles: ArchitectureMaterialFile[], guide: unknown) {
+  return { repairAssignment: positionReport(input.repairAssignment, guide), materialFiles, materialDelivery: "files-v1",
+    instruction: "按materialFiles读取base.json中的当前设计和requirements.json中的原要求，检查规则按需读取。报告只附位置；修复范围仍以repairAssignment.allowedPaths为准。" };
+}
+
+/** Original packet for handoff necessity checks and exact historical fidelity verification. */
+export function legacyVerificationModelContext(source: UnknownRecord) {
   return modelContextPacket(source, ["contextHash", "budget", "fidelityContextVersion", "requirements", "candidate", "proposal", "confirmedRequirementContext",
     "acceptanceAdapterGuide", "acceptanceAdapterGuideSource"], {
     inputContextVersion: 1, platformOverview: platformOverview(source),
     ...(source.deferredVerifications ? { deferredObligations: deferredObligations(source.deferredVerifications) } : {}),
   });
+}
+
+export function verificationModelContext(source: UnknownRecord, materialFiles?: ArchitectureMaterialFile[] | undefined) {
+  return filePacket(source, ["contextHash", "budget", "fidelityContextVersion", "acceptanceAdapterGuideSource"], materialFiles);
 }
 
 function projectUserMessages(messages: ContextEvent["messages"], project: (value: unknown) => unknown): ContextEvent["messages"] {
@@ -134,19 +189,27 @@ function projectUserMessages(messages: ContextEvent["messages"], project: (value
 }
 
 /** Request-only projection also handles existing bound sessions; persisted history stays intact. */
-export function projectArchitectureMessages(messages: ContextEvent["messages"], { role, roleGuide }: { role: string; roleGuide: string }) {
+export function projectArchitectureMessages(messages: ContextEvent["messages"], { role, roleGuide, materialFiles }: { role: string; roleGuide: string; materialFiles?: ArchitectureMaterialFile[] | undefined }) {
   return projectUserMessages(messages, input => {
     const value = objectFields(input);
     const budget = objectFields(value.modelBudget);
+    if (value.materialDelivery === "files-v1") return materialFiles ? { ...value, materialFiles } : null;
+    if (value.contextIndex && (role === "reviewer" || ["review_slice", "review_revision"].includes(String(value.pipelineStage))))
+      return architectureModelContext({ ...value, roleGuide }, { role, materialFiles });
     if (!input || !(Number.isSafeInteger(budget.limit) || budget.policy === "task_rejections" && budget.limit === null) || value.contextIndex) return null;
     const continuation = ["resume_architecture_stage", "review_batch", "submission_required"].some(type => type === value.type);
-    return architectureModelContext({ ...value, roleGuide }, { role, continuation });
+    return architectureModelContext({ ...value, roleGuide }, { role, continuation, materialFiles });
   });
 }
 
-export function projectVerificationMessages(messages: ContextEvent["messages"], contextHash: string) {
-  return projectUserMessages(messages, input => { const value = objectFields(input); return value.contextHash === contextHash && value.candidate && value.requirements
-    && !value.inputContextVersion ? verificationModelContext(value) : null; });
+export function projectVerificationMessages(messages: ContextEvent["messages"], contextHash: string, materialFiles?: ArchitectureMaterialFile[] | undefined) {
+  return projectUserMessages(messages, input => {
+    const value = objectFields(input);
+    if (value.contextHash !== contextHash) return null;
+    if (!materialFiles) return value.candidate && value.requirements && !value.inputContextVersion ? legacyVerificationModelContext(value) : null;
+    if (value.materialDelivery === "files-v1") return materialFiles ? { ...value, materialFiles } : null;
+    return value.candidate && value.requirements ? verificationModelContext(value, materialFiles) : null;
+  });
 }
 
 export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol, flatHandoffs = false }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown; flatHandoffs?: boolean }) {
@@ -184,5 +247,5 @@ ${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内
 ${pipelineStage === "integration" ? INTEGRATION_ACCEPTANCE_RULE : "正式重查可修正技术验收与证据分工；完整保留已确认业务范围、边界、结果、验证义务及明确选择，重新程序检查和独立评审，不以纠错缩水。"}
 ${CAPABILITY_VERIFICATION_RULE}
 适配器只证明自己的范围：action真实执行生成动作，冻结模拟回执不证明真实宿主；page-resources仅适用于实际托管页面，在隔离Node执行资源与共享纯逻辑检查，不证明浏览器DOM、布局或视觉；host-business真实重跑冻结业务用例。对无法证明的跨范围承诺明确拆分并保留全部义务。
-${role === "reviewer" ? "逐项核对所有验收及priorFindings，不照抄旧结论。reviewParts是状态与本批编号，完整已保存分项可按需读取；续轮只提交新增或修正行。恢复只内联最近待修稿，其他旧稿在contextIndex；不得把被拒内容当作接受结果。原文引用用read_architecture_evidence回执或明确source/path选择；验收规则路径在reviewEvidenceIndex.adapterRules，来源manifest只说明冻结存储，未内联原文需先读取。关闭历史问题须逐条提供当前相关候选依据。" : "正式需求编号使用requirements中的id；证据编号从evidenceCatalog选择，具体论据须读取原文。能力与容量存疑时按具体路径读取runtimeCapabilities或验收指南，不能凭记忆猜测。"}`;
+${role === "reviewer" ? "逐项核对所有验收及priorFindings，不照抄旧结论。reviewParts是状态与本批编号，完整已保存分项可按需读取；续轮只提交新增或修正行。恢复稿按materialFiles或contextIndex读取；不得把被拒内容当作接受结果。引用提交materialFiles中的file/path位置；验收规则路径在reviewEvidenceIndex.adapterRules，来源manifest只说明冻结存储，未内联原文需先读取。关闭历史问题须逐条提供当前相关候选依据。" : "正式需求编号使用requirements中的id；证据编号从evidenceCatalog选择，具体论据须读取原文。能力与容量存疑时按具体路径读取runtimeCapabilities或验收指南，不能凭记忆猜测。"}`;
 }

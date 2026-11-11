@@ -21,6 +21,7 @@ import { createArchitectureEvidenceReader } from "../../src/architecture/archite
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { reviewSubmissionSchema, validateReview, requirementItems, designHash, designSubmissionSchema } from "../../src/architecture/architecture-contract.mjs";
 import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { ACCEPTANCE_ADAPTERS } from "../../src/verification/acceptance-contract.mjs";
 import { validDesign, validDraft, passingReview } from "../helpers/architecture.mjs";
@@ -63,35 +64,16 @@ test("历史关闭缺项按合并草稿的问题编号提供原文，输入换�
   assert.equal(f.current.referenceHints(raw, [...diagnostics, ...diagnostics], { canonicalSubmission: canonical }).length, 4);
 });
 
-test("超长对象和长文本一次定位全部引用错误，真实子字段或分页回执须显式选择", () => {
-  const candidateHash = "a".repeat(64), resolution = { reason: "浏览器效果留待实际打开验收。", evidenceIds: Array(80).fill("reference_0123456789") };
-  const context = architectureReviewEvidenceContext({ design: { instructions: "中😀".repeat(600) }, requirements: [], runtimeCapabilities: {},
-    deferredVerifications: { issues: [{ resolution }] } });
+test("长文件和整段位置可提交且不复制正文，不存在的位置仍拒绝", () => {
+  const candidateHash = "a".repeat(64), components = [{ purpose: "A".repeat(2305) }];
+  const context = architectureReviewEvidenceContext({ design: { components }, requirements: [], runtimeCapabilities: {} });
   const current = reader({ candidateHash, context });
-  const submission = { candidateHash, issues: [{ references: [
-    { source: "deferredVerifications", path: "/issues/0/resolution" },
-    { source: "candidate", path: "/design/instructions" },
-    { source: "candidate", path: "/missing" },
-  ] }] }, before = structuredClone(submission);
-  let issues;
-  assert.throws(() => current.resolveSubmission(submission), error => {
-    issues = failureFields(error).validationIssues;
-    assert.deepEqual(issues!.map((item) => item.reason), ["reference_too_broad", "reference_too_broad", "reference_path_missing"]);
-    assert.equal(issues![0]!.sourcePath, "/issues/0/resolution");
-    assert.equal(issues![0]!.characters, JSON.stringify(resolution).length); assert.equal(issues![0]!.limit, 1000);
-    assert.equal(failureFields(error).validationIssueTotal, 3); return true;
-  });
+  const submission = { candidateHash, issues: [{ references: [{ file: "candidate.json", path: "/components" }, { file: "candidate.json", path: "" }] }] };
+  const before = structuredClone(submission), resolved = current.resolveSubmission(submission);
+  assert.deepEqual(resolved.issues[0]!.references, [{ source: "candidate", path: "/components" }, { source: "candidate", path: "" }]);
   assert.deepEqual(submission, before);
-  const hints = current.referenceHints(submission, issues);
-  assert.equal(hints[0]!.path, "/issues/0/resolution/reason"); assert.equal(hints[0]!.quote, resolution.reason);
-  assert.equal(hints[1]!.path, "/instructions");
-  assert.ok(fixtureNumber(hints[1]!.nextOffset)>0); assert.ok(hints[1]!.quote.length <= 500);
-  assert.ok(hints.every(hint => typeof hint.reference.receiptId === "string"));
-  const corrected = { candidateHash, issues: [{ references: hints.map(hint => hint.reference) }] };
-  const resolved = current.resolveSubmission(corrected);
-  assert.equal(resolved.issues[0]!.references[0]!.quote, resolution.reason);
-  assert.deepEqual(submission, before, "提供建议不会自动改写或接受提交");
-  assert.throws(() => reader({ candidateHash, context }).resolveSubmission(corrected), /引用回执未知/u);
+  for (const ref of [{ file: "candidate.json", path: "/missing" }, { file: "../candidate.json", path: "" }])
+    assert.throws(() => current.resolveSubmission({ candidateHash, issues: [{ references: [ref] }] }));
 });
 
 test("原文选择与历史短引用由宿主填入，错候选、错清单、混填及截短长编号拒绝", () => {
@@ -111,7 +93,7 @@ test("原文选择与历史短引用由宿主填入，错候选、错清单、�
   const input = structuredClone(review), canonical = reader.resolveSubmission(review);
   assert.deepEqual(review, input); assert.deepEqual(official, before);
   assert.equal(canonical.issues[0]!.id, findingId); assert.equal(canonical.priorFindingDecisions![0]!.findingId, findingId);
-  assert.equal(canonical.issues[0]!.references![0]!.quote, f.candidate.instructions);
+  assert.deepEqual(canonical.issues[0]!.references![0], { source: "candidate", path: "/instructions" });
   assert.equal(Object.hasOwn(canonical.issues[0]!, "findingRef"), false);
   assert.equal(Object.hasOwn(canonical.priorFindingDecisions![0]!, "findingRef"), false);
   assert.equal(valid(canonical), true);
@@ -140,8 +122,7 @@ test("当前规则选择无需预读或回执即可还原原文，原完整覆�
   assert.equal(new Ajv({ strict: false }).compile(schema)(review), true);
   const unchanged = structuredClone(review), normalized = current.resolveSubmission(review);
   assert.deepEqual(review, unchanged);
-  assert.ok(normalized.acceptanceScopeChecks!.every((row, index) => row.criterionQuote === candidate.acceptance[index]!.expected
-    && row.adapterQuote === objectFields(objectFields(objectFields(context.acceptanceAdapterGuide).adapters).action).proves && !Object.hasOwn(row, "adapterRulePath")));
+  assert.ok(normalized.acceptanceScopeChecks!.every(row => row.adapterRulePath === "/adapters/action/proves" && row.criterionQuote === undefined && row.adapterQuote === undefined));
   assert.doesNotThrow(() => validateReview(normalized, { candidateHash, schemaVersion: 3, evidenceContext: context }));
   review.acceptanceScopeChecks![0]!.sufficient = false;
   assert.throws(() => validateReview(current.resolveSubmission(review), { candidateHash, schemaVersion: 3, evidenceContext: context }),
@@ -184,8 +165,8 @@ test("规则选择只解释完整当前材料，拒绝越界、混合、旧候�
   const changedContext = architectureReviewEvidenceContext({ design: candidate, requirements: context.requirements,
     runtimeCapabilities: context.runtimeCapabilities, acceptanceAdapterGuide: guide });
   const changed = createArchitectureEvidenceReader({ context: changedContext, candidateHash }).resolveSubmission(review);
-  assert.equal(changed.acceptanceScopeChecks![0]!.adapterQuote, objectFields(objectFields(objectFields(guide).adapters).action).proves);
-  assert.notEqual(changed.acceptanceScopeChecks![0]!.adapterQuote, objectFields(objectFields(objectFields(context.acceptanceAdapterGuide).adapters).action).proves);
+  assert.equal(changed.acceptanceScopeChecks![0]!.adapterRulePath, "/adapters/action/proves");
+  assert.doesNotThrow(() => validateReview(changed, { candidateHash, schemaVersion: 3, evidenceContext: changedContext }));
 });
 
 test("范围回执短行恢复精确依据，原详细行兼容，充分性和完整覆盖仍由原评审门槛判断", async () => {
@@ -204,8 +185,8 @@ test("范围回执短行恢复精确依据，原详细行兼容，充分性和�
   assert.equal(new Ajv({ strict: false }).compile(official)(review), false);
   const unchanged = structuredClone(review), normalized = current.resolveSubmission(review);
   assert.deepEqual(review, unchanged);
-  assert.equal(normalized.acceptanceScopeChecks![0]!.criterionQuote, candidate.acceptance[0]!.expected);
-  assert.equal(normalized.acceptanceScopeChecks![0]!.adapterQuote, read.reference!.quote);
+  assert.equal(normalized.acceptanceScopeChecks![0]!.criterionQuote, undefined);
+  assert.equal(normalized.acceptanceScopeChecks![0]!.adapterRulePath, "/adapters/action/executionRule");
   assert.equal(normalized.acceptanceScopeChecks![0]!.adapterId, "action");
   assert.equal(normalized.acceptanceScopeChecks![0]!.scope, ACCEPTANCE_ADAPTERS.action.scope);
   assert.doesNotThrow(() => validateReview(normalized, { candidateHash, schemaVersion: 3, evidenceContext: context }));
@@ -301,8 +282,7 @@ test("真实Pi零范围读取直接选择当前规则，不足判断缺对应阻
   const review = await designer.role({ role: "reviewer", systemPrompt: "固定本地协议测试，不预读范围回执，独立判断不足时给对应阻断。", onProgress() {},
     payload: { requirements, design: candidate, candidateHash, candidateSchema: designSubmissionSchema(draft, { requirements }) },
     submitName: "submit_architecture_review", parameters: reviewSubmissionSchema({ evidenceRequired: true }), reviewEvidenceContext: context,
-    validate: (value) => { validations++; assert.ok(recordArray(objectFields(value).acceptanceScopeChecks).every((row) => row.criterionQuote && row.adapterQuote
-      && !Object.hasOwn(row, "adapterRulePath"))); return validateReview(value, { candidateHash, schemaVersion: 3, evidenceContext: context }); },
+    validate: (value) => { validations++; assert.ok(recordArray(objectFields(value).acceptanceScopeChecks).every((row) => row.adapterRulePath && !Object.hasOwn(row, "criterionQuote"))); return validateReview(value, { candidateHash, schemaVersion: 3, evidenceContext: context }); },
     onDiagnostics: (value) => { diagnostic = value; } });
   assert.equal(review.verdict, "revise"); assert.equal(review.acceptanceScopeChecks![0]!.sufficient, false);
   assert.equal(validations, 2); assert.equal(modelCalls, 2); assert.equal(diagnostic!.modelCalls, 2); assert.equal(diagnostic!.submissionAttempts, 2);
@@ -321,7 +301,7 @@ test("真实Pi批量取得范围回执后提交短行，独立不足结论保持
       let name, args;
       if (modelCalls === 1) {
         const content = body.messages.findLast((message) => message.role === "user")!.content;
-        const payload:ModelPayload = JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""));
+        const payload:ModelPayload = fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as ModelPayload;
         assert.equal(payload.reviewEvidenceIndex.acceptanceScope!.length, candidate.acceptance.length);
         assert.equal(payload.modelBudget.limit, null);
         name = "read_architecture_evidence";
@@ -363,7 +343,7 @@ test("真实Pi批量取得范围回执后提交短行，独立不足结论保持
     onDiagnostics: (value) => { diagnostic = value; } });
   assert.equal(review.verdict, "revise"); assert.equal(review.acceptanceScopeChecks![0]!.sufficient, false);
   assert.equal(review.acceptanceScopeChecks!.length, candidate.acceptance.length);
-  assert.ok(recordArray(objectFields(normalized).acceptanceScopeChecks).every((row) => row.criterionQuote && row.adapterQuote && !Object.hasOwn(row, "scopeReceiptId")));
+  assert.ok(recordArray(objectFields(normalized).acceptanceScopeChecks).every((row) => row.adapterRulePath && !Object.hasOwn(row, "scopeReceiptId")));
   assert.equal(modelCalls, 2); assert.equal(diagnostic!.modelCalls, 2); assert.equal(diagnostic!.submissionAttempts, 1);
   assert.equal(diagnostic!.evidenceReads.requests, candidate.acceptance.length);
 });
@@ -409,7 +389,7 @@ test("能力清单和多写一层 design 的查询均签发实际候选路径的
   assert.deepEqual(review.issues[0]!.references, [repeated.reference]);
   assert.deepEqual(review.issues[0]!.candidatePaths, ["/capabilities"]);
   const direct = current.resolveSubmission({ candidateHash, issues: [{ references: [{ source: "candidate", path: "/design/capabilities" }] }] });
-  assert.deepEqual(direct.issues[0]!.references, [repeated.reference]);
+  assert.deepEqual(direct.issues[0]!.references, [{ source: "candidate", path: "/capabilities" }]);
 });
 
 test("候选查询优先读取真实 design 分支，缺项或其他来源不能借用候选内容", async () => {
@@ -659,7 +639,7 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")), isDesigner = body.tools!.some((item) => item.function.name === "submit_architecture");
       const content = body.messages.findLast((message) => message.role === "user")!.content;
-      const payload:ModelPayload = JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""));
+      const payload:ModelPayload = fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as ModelPayload;
       let name:string|undefined,args:ReturnType<typeof passingReview>|ReturnType<typeof validDesign>|undefined,toolCalls:{name:string|undefined;args:unknown}[]|undefined;
       if (isDesigner) {
         designs++; calls.push("designer"); name = "submit_architecture";

@@ -25,7 +25,7 @@ const invoke = (current: { fidelityContextVersion: string; requirements: { id: s
     await options.onModelCall!(); await inspect(JSON.parse(text), options);
   } }) });
 
-test("full-v2的ID短行通过实际SDK校验，只恢复明确选择的原文为canonical证据", async () => {
+test("full-v2的ID短行通过实际SDK校验，只保存明确选择的位置为canonical证据", async () => {
   const manifestPath = findPackageJSON("@earendil-works/pi-ai", import.meta.resolve("@earendil-works/pi-coding-agent"));
   const manifest = JSON.parse(await readFile(manifestPath!, "utf8"));
   const validationPath = manifest.exports["./utils/*"].import.replace("*", "validation");
@@ -34,7 +34,7 @@ test("full-v2的ID短行通过实际SDK校验，只恢复明确选择的原文�
   const result = await invoke(current, async (message: unknown, options: PiSessionOptions) => {
     const tool = fixtureToolAt(options.customTools!,0), value = wireResult(message, "narrowed"), untouched = structuredClone(value);
     assert.equal(options.reasoningMode, "off"); assert.equal(options.maxOutputTokens, 8192);
-    assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context"]);
+    assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
     assert.match(options.systemPrompt!, /原本合法输入被候选排除、用户被要求新增资料或确认义务、原承诺输出或覆盖程度被减少/u);
     assert.match(options.systemPrompt!, /实现选择、无损协议包装、系统自选验收见证、系统承担的技术证明义务，本身不构成用户新限制/u);
     assert.match(options.systemPrompt!, /合法延期至development的验证，不因尚未执行就自动判unproven或narrowed/u);
@@ -46,17 +46,17 @@ test("full-v2的ID短行通过实际SDK校验，只恢复明确选择的原文�
   });
   assert.equal(result.contextVersion, "full-v2"); assert.equal(result.fidelityDiagnostic.contextVersion, "full-v2");
   assert.equal(result.restrictions![0]!.source, "requirements"); assert.equal(result.restrictions![0]!.path, "/0/text");
-  assert.equal(result.restrictions![0]!.quote, current.requirements[0]!.text); assert.ok(!Object.hasOwn(result.restrictions![0]!, "claimRef"));
+  assert.equal(result.restrictions![0]!.quote, undefined); assert.ok(!Object.hasOwn(result.restrictions![0]!, "claimRef"));
   assert.equal(diagnoseRequirementFidelitySubmission(current, formal(result), { canonical: true }).valid, true);
   assert.equal(diagnoseRequirementFidelitySubmission(current, formal(result)).valid, false, "canonical证据不能冒充新版wire提交");
   assert.deepEqual(current, before);
 });
 
-test("长原需求必须显式选范围，未指定时不截断，数值字符串在SDK前拒绝", async () => {
+test("长原需求可按整条位置提交，显式摘录的数值类型与边界仍核对", async () => {
   const current = context(); current.requirements[0]!.text = "甲".repeat(1100) + "原业务全部内容必须完整交付。";
   const result = await invoke(current, async (message: unknown, options: PiSessionOptions) => {
     const tool = fixtureToolAt(options.customTools!,0), value = wireResult(message, "narrowed");
-    await assert.rejects(tool!.execute("whole", value), (error) => failureFields(error).validationIssues!.some((issue) => issue.reason === "reference_excerpt_required"));
+    assert.equal(diagnoseRequirementFidelitySubmission(current, value).valid, true);
     value.restrictions[0]!.claimRef = { ...value.restrictions[0]!.claimRef!, offset: 1100, length: 8 };
     const wrong = structuredClone(value); wrong.restrictions[0]!.claimRef!.offset = "1100";
     assert.equal((await callFixture(options.rawInputValidators![tool!.name]!,undefined,[{ args: wrong, toolCallId: "wrong-type" }])).valid, false);

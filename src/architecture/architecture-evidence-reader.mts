@@ -19,7 +19,8 @@ interface ReadPage extends UnknownRecord { found: boolean; contextHash: string; 
 interface ReferenceHint extends UnknownRecord { issuePath: unknown; reference: { receiptId: string }; source: EvidenceSource; path: string; quote: string }
 /** Resolution preserves uninspected input fields and types only the selectors this reader expands. */
 type ResolvedReference<T> = T extends { receiptId: string } ? EvidenceReference
-  : T extends { source: string; path: string } ? Omit<T, "path"> & { path: string; quote: string } : T;
+  : T extends { file: string; path: string } ? { source: string; path: string }
+  : T extends { source: string; path: string } ? Omit<T, "path"> & { path: string; quote?: string } : T;
 type ResolvedReferences<T> = T extends unknown[] ? ResolvedReference<T[number]>[] : T;
 type ResolvedCandidatePaths<T> = T extends unknown[] ? (T[number] extends infer R ? R extends string | { receiptId: string } ? string : R : never)[] : T;
 type ResolvedFinding<T, K extends "id" | "findingId"> = T extends { findingRef: unknown } ? Omit<T, "findingRef"> & Record<K, unknown> : T;
@@ -28,7 +29,7 @@ type ResolvedIssue<T> = ResolvedFinding<{ [K in keyof T]: K extends "references"
 type ResolvedIssues<T> = T extends unknown[] ? ResolvedIssue<T[number]>[] : T;
 type ResolvedFindings<T> = T extends unknown[] ? ResolvedFinding<T[number], "findingId">[] : T;
 type ResolvedScope<T> = T extends { adapterRulePath: string } | { scopeReceiptId: string }
-  ? Omit<T, "adapterRulePath" | "scopeReceiptId"> & { adapterId: string; scope: string; criterionQuote: string; adapterQuote: string } : T;
+  ? Omit<T, "adapterRulePath" | "scopeReceiptId"> & { adapterId: string; scope: string; adapterRulePath: string; criterionQuote?: never; adapterQuote?: never } : T;
 type ResolvedScopes<T> = T extends unknown[] ? ResolvedScope<T[number]>[] : T;
 export type ResolvedReviewSubmission<T> = { [K in keyof T]: K extends "issues" ? ResolvedIssues<T[K]>
   : K extends "priorFindingDecisions" ? ResolvedFindings<T[K]> : K extends "acceptanceScopeChecks" ? ResolvedScopes<T[K]> : T[K] };
@@ -37,6 +38,7 @@ const rows = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
 import { createHash, randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
+import { architectureAdapterRulePaths, legacyReviewSchema } from "./architecture-review-evidence.mjs";
 import { ACCEPTANCE_ADAPTERS, validateAcceptanceVerification } from "../verification/acceptance-contract.mjs";
 
 const SOURCES: EvidenceSource[] = ["candidate", "requirements", "runtimeCapabilities", "contextManifest", "evidence", "confirmedRequirementContext", "deferredVerifications", "acceptanceAdapterGuide"];
@@ -143,18 +145,7 @@ function validRequest(input: unknown): input is EvidenceRequest {
       && ["offset", "limit", "pathOffset"].every((key) => !Object.hasOwn(value, key)));
 }
 
-function adapterRulePaths(guide: unknown, adapterId: string) {
-  const admission = objectFields(objectFields(objectFields(guide).admission)[adapterId]);
-  const paths = [
-    ...["proves", "doesNotProve", "splitRule", "executionRule"].map((key) => `/adapters/${adapterId}/${key}`),
-    ...["caseSetRule", "requirementCoverageRule", "splitRule", ...(adapterId === "host-business" ? ["hostBusinessRule"] : [])]
-      .map((key) => `/composition/${key}`),
-    ...["rule", "measure", "outcomeRule"].map((key) => `/admission/${adapterId}/${key}`),
-    ...(Array.isArray(admission.excludedProof)
-      ? rows(admission.excludedProof).map((_item, index) => `/admission/${adapterId}/excludedProof/${index}`) : []),
-  ];
-  return paths.filter((path) => { const selected = at(guide, path); return typeof selected.value === "string" && selected.value.trim(); });
-}
+const adapterRulePaths = architectureAdapterRulePaths;
 
 function sliceQuote(text: string, offset: number, limit: number, byteLimit: number) {
   let start = offset, end;
@@ -186,7 +177,7 @@ function referenceSelectorError(path: string, reason: string, reference?: Unknow
   const validationIssue = { path, reason, ...(reference ? { source: reference.source, sourcePath: reference.path } : {}),
     ...(characters === undefined ? {} : { characters, limit: 1000 }),
     remedy: "选择具体子字段，或用 read_architecture_evidence 读取局部原文后显式选择 receiptId；引用仍须支持判断。" };
-  return Object.assign(new InputError("评审原文选择无效；只引用本轮完整材料中存在且不超过1000字符的具体字段：" + JSON.stringify(validationIssue)),
+  return Object.assign(new InputError("评审原文选择无效；只引用本轮冻结材料中存在的文件或字段：" + JSON.stringify(validationIssue)),
     { validationIssue });
 }
 
@@ -235,7 +226,8 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       criterionPath: `/acceptance/${position}/expected`, adapterRulePaths: adapterRulePaths(frozen.acceptanceAdapterGuide, descriptor.adapterId) }];
   });
   if (scopeEntries.length) index.acceptanceScope = scopeEntries;
-  const fullSource = (source: string) => {
+  const fullSource = (source: string): boolean => {
+    if (source === "contextManifest") return SOURCES.filter(key => key !== "contextManifest" && Object.hasOwn(frozen, key)).every(fullSource);
     const manifest = objectFields(objectFields(frozen.contextManifest)[source]), serialized = JSON.stringify(frozen[source]);
     return manifest?.delivery === "full" && typeof serialized === "string"
       && manifest.characters === serialized.length && manifest.sha256 === hash(serialized);
@@ -492,15 +484,17 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       }
       return hints;
     },
-    submissionSchema(schema: ToolSchema) {
-      const result = structuredClone(schema), references = result.properties?.issues?.items?.properties?.references;
+    submissionSchema(schema: ToolSchema, { legacy = false } = {}) {
+      const result = legacy ? legacyReviewSchema(schema) : structuredClone(schema), references = result.properties?.issues?.items?.properties?.references;
       if (references) {
-        references.items = { anyOf: [REFERENCE_SELECTOR_SCHEMA, RECEIPT_SCHEMA, references.items!] };
-        references.description = "优先只交{source,path}，由宿主从本轮完整原文填入quote；长字段先细化路径或读取receiptId。含quote的写法仅兼容精确旧引用，不能改写原文。";
+        references.items = { anyOf: [...(legacy ? [] : [object({ file: { type: "string", enum: SOURCES.map(source => `${source}.json`) }, path: { type: "string", maxLength: 500 } })]), REFERENCE_SELECTOR_SCHEMA, RECEIPT_SCHEMA, references.items!] };
+        references.description = legacy ? "优先只交{source,path}，由宿主从本轮完整原文填入quote；长字段先细化路径或读取receiptId。含quote的写法仅兼容精确旧引用，不能改写原文。"
+          : "提交文件位置{file,path}，file从materialFiles选择，path可为空表示整份文件。兼容{source,path}及旧回执；无需复制原文，位置有效不代表结论成立。";
       }
       const paths = result.properties?.issues?.items?.properties?.candidatePaths;
       if (paths) paths.items = { anyOf: [paths.items!, RECEIPT_SCHEMA] };
       const scope = result.properties?.acceptanceScopeChecks;
+      if (scope && !legacy) scope.description = "每项验收恰好一行。读取完整验收与实际规则后，提交acceptanceId、adapterRulePath、sufficient、reason；无需复制原文。范围不足须有对应阻断。";
       if (scope?.items?.properties) scope.items = { anyOf: [object({
         acceptanceId: scope.items.properties.acceptanceId!, adapterRulePath: { type: "string", minLength: 1, maxLength: 500 },
         sufficient: scope.items.properties.sufficient!, reason: scope.items.properties.reason!,
@@ -536,23 +530,22 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
         collect(row, () => resolveFinding(row, "findingId", `review.priorFindingDecisions[${position}]`, result.candidateHash)));
       if (Array.isArray(result?.issues)) result.issues = result.issues.map((row, position) =>
         collect(row, () => resolveFinding(row, "id", `review.issues[${position}]`, result.candidateHash)));
-      let selectorBytes = 0;
-      const selectedQuotes = new Set<string>();
       if (Array.isArray(result?.acceptanceScopeChecks)) result.acceptanceScopeChecks = result.acceptanceScopeChecks.map((input, index) => collect(input, () => {
         if (!input || typeof input !== "object") return input;
         const row = objectFields(input);
         if (Object.hasOwn(row, "adapterRulePath") && !Object.hasOwn(row, "scopeReceiptId")) {
           const path = `review.acceptanceScopeChecks[${index}].adapterRulePath`;
           const entries = scopeEntries.filter((entry) => entry.acceptanceId === row.acceptanceId), entry = entries[0]!;
-          if (Object.keys(row).length !== 4 || !["acceptanceId", "adapterRulePath", "sufficient", "reason"].every((key) => Object.hasOwn(row, key)))
+          if (![4, 6].includes(Object.keys(row).length) || !["acceptanceId", "adapterRulePath", "sufficient", "reason"].every((key) => Object.hasOwn(row, key))
+            || Object.keys(row).some(key => !["acceptanceId", "adapterRulePath", "sufficient", "reason", "adapterId", "scope"].includes(key))
+            || row.adapterId !== undefined && row.adapterId !== entry?.adapterId || row.scope !== undefined && row.scope !== entry?.scope)
             throw selectorError(path, "invalid_selector", entries.length === 1 ? entry : null);
           if (!fullScopeSources) throw selectorError(path, "context_not_full");
           if (result.candidateHash !== candidateHash) throw selectorError("review.candidateHash", "candidate_mismatch");
           if (entries.length !== 1) throw selectorError(path, "invalid_reference");
           if (typeof row.adapterRulePath !== "string" || !entry.adapterRulePaths.includes(row.adapterRulePath)) throw selectorError(path, "scope_rule_invalid", entry);
           return { acceptanceId: row.acceptanceId, adapterId: entry.adapterId, scope: entry.scope,
-            criterionQuote: sliceQuote(at(frozen.candidate, entry.criterionPath).value as string, 0, 1000, Infinity).quote,
-            adapterQuote: sliceQuote(at(frozen.acceptanceAdapterGuide, row.adapterRulePath).value as string, 0, 1000, Infinity).quote,
+            adapterRulePath: row.adapterRulePath,
             sufficient: row.sufficient, reason: row.reason };
         }
         if (!Object.hasOwn(row, "scopeReceiptId")) return row;
@@ -565,7 +558,8 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
           || !entry.adapterRulePaths.includes(receipt.pointer)
           || !(at(frozen.candidate, receipt.criterionPath).value as string | undefined)?.includes(receipt.row.criterionQuote)
           || !(at(frozen.acceptanceAdapterGuide, receipt.pointer).value as string | undefined)?.includes(receipt.row.adapterQuote)) throw receiptError(path);
-        return { ...structuredClone(receipt.row), sufficient: row.sufficient, reason: row.reason };
+        return { acceptanceId: receipt.row.acceptanceId, adapterId: receipt.row.adapterId, scope: receipt.row.scope,
+          adapterRulePath: receipt.pointer, sufficient: row.sufficient, reason: row.reason };
       }));
       for (const [index, rawIssue] of rows(result.issues).entries()) {
         const issue = objectFields(rawIssue);
@@ -582,8 +576,13 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
         if (!Array.isArray(issue?.references)) continue;
         issue.references = rows(issue.references).map((input, position) => collect(input, () => {
           if (!input || typeof input !== "object") return input;
-          const reference = objectFields(input);
+          let reference = objectFields(input);
           const path = `review.issues[${index}].references[${position}]`;
+          if (Object.hasOwn(reference, "file")) {
+            if (Object.keys(reference).sort().join() !== "file,path" || typeof reference.file !== "string"
+              || !SOURCES.some(source => `${source}.json` === reference.file)) throw referenceSelectorError(path, "invalid_selector");
+            reference = { source: reference.file.slice(0, -5), path: reference.path };
+          }
           if (Object.hasOwn(reference, "receiptId")) return structuredClone(resolveReceipt(reference, path));
           if (Object.hasOwn(reference, "quote")) return reference;
           if (Object.keys(reference).length !== 2 || !sourceName(reference.source) || typeof reference.path !== "string"
@@ -594,11 +593,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
           const quote = current.found ? typeof current.value === "string" ? current.value : JSON.stringify(current.value) : undefined;
           if (typeof quote !== "string" || !quote.trim()) throw referenceSelectorError(path, "reference_path_missing");
           const selector = { source: reference.source, path: current.pointer };
-          if (quote.length > 1000) throw referenceSelectorError(path, "reference_too_broad", selector, quote.length);
-          const key = JSON.stringify(selector);
-          if (!selectedQuotes.has(key)) { selectorBytes += Buffer.byteLength(quote); selectedQuotes.add(key); }
-          if (selectorBytes > MAX_BATCH_QUOTE_BYTES) throw referenceSelectorError(path, "batch_quote_limit");
-          return { ...selector, quote };
+          return selector;
         }));
       }
       if (problems.length) {

@@ -1,7 +1,7 @@
 import type { UnknownRecord } from "../contracts/json.mjs";
 import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 export interface FeedbackIssue extends UnknownRecord {
-  candidatePaths?: string[]; references?: { source: string; path: string; quote: string }[];
+  candidatePaths?: string[]; references?: { source: string; path: string; quote?: string }[];
 }
 export interface FeedbackClosure extends UnknownRecord {
   status: string; candidateHash: string; factsHash: string;
@@ -33,7 +33,8 @@ export function feedbackFinding(input: unknown): FeedbackFinding {
     || issue.candidatePaths !== undefined && (!isArray(issue.candidatePaths) || issue.candidatePaths.some(path => typeof path !== "string"))
     || issue.references !== undefined && (!isArray(issue.references) || issue.references.some(input => {
       const reference = objectFields(input);
-      return [reference.source, reference.path, reference.quote].some(field => typeof field !== "string");
+      return [reference.source, reference.path].some(field => typeof field !== "string")
+        || reference.quote !== undefined && typeof reference.quote !== "string";
     }))) throw new TypeError("Invalid historical feedback finding");
   if (value.closure !== undefined) {
     const closure = objectFields(value.closure);

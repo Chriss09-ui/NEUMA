@@ -7,6 +7,41 @@ import assert from "node:assert/strict";
 import { architectureModelContext, architectureNodePrompt, verificationModelContext, projectArchitectureMessages } from "../../src/architecture/architecture-model-context.mjs";
 import { createModelContextReader } from "../../src/runtime/model-context.mjs";
 import { requirementMessageContext } from "../../src/requirements/providers.mjs";
+import { createArchitectureMaterialFiles } from "../../src/architecture/architecture-material-files.mjs";
+import { mkdtemp, readFile, writeFile, chmod, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+test("评审只投递位置，真实资料文件分页可读；旧报告原文保留，错路径与文件变更拒绝", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-review-materials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const candidate = { components: [{ purpose: "说明😀".repeat(5000) }] };
+  const source = { candidate, design: candidate, requirements: [{ id: "r", text: "全部处理" }],
+    distributedReview: { issues: [{ description: "核对组件", references: [{ source: "candidate", path: "/components", quote: "旧原文" }] }] } };
+  const before = structuredClone(source), files = createArchitectureMaterialFiles(directory), catalog = await files.publish(source);
+  const parallel = await Promise.all(Array.from({ length: 3 }, () => createArchitectureMaterialFiles(join(directory, "parallel")).publish({ candidate, requirements: source.requirements })));
+  assert.ok(parallel.every(entries => entries.find(entry => entry.file === "candidate.json")!.path === parallel[0]!.find(entry => entry.file === "candidate.json")!.path));
+  const packet = architectureModelContext(source, { role: "reviewer", materialFiles: catalog });
+  assert.equal(packet.design, undefined); assert.equal(packet.requirements, undefined);
+  assert.doesNotMatch(JSON.stringify(packet), /旧原文|说明😀/);
+  assert.deepEqual(recordArray(objectFields(packet.distributedReview).issues)[0]!.references, [{ file: "candidate.json", path: "/components" }]);
+  let request: Record<string, unknown> = { file: "candidate.json", path: "/components" }, complete = "", pages = 0;
+  do {
+    const output = JSON.parse(toolText(await files.tool.execute("read", { requests: [request] })));
+    const row = output.results[0]; assert.equal(row.error, undefined);
+    complete += row.text; pages++; request = row.nextRequest;
+  } while (request);
+  assert.ok(pages > 1); assert.deepEqual(JSON.parse(complete), candidate.components);
+  assert.deepEqual(source, before);
+  const reportFile = catalog.find(item => item.file === "distributedReview.json")!;
+  assert.match(await readFile(reportFile.path, "utf8"), /旧原文/);
+  await assert.rejects(files.tool.execute("outside", { requests: [{ file: "/tmp/not-in-this-task.json" }] }), /不在当前节点目录/);
+  const missing = JSON.parse(toolText(await files.tool.execute("missing", { requests: [{ file: "candidate.json", path: "/missing" }] })));
+  assert.equal(missing.results[0].error.reason, "path_missing");
+  const entry = catalog.find(item => item.file === "candidate.json")!;
+  await chmod(entry.path, 0o600); await writeFile(entry.path, '{"changed":true}');
+  await assert.rejects(files.tool.execute("changed", { requests: [{ file: "candidate.json" }] }), /已变化/);
+});
 
 test("蓝图主要能力与后续义务直接给齐，完整方案结构不会冒充本阶段提交结构", () => {
   const source = { pipelineStage: "blueprint", requirements: [{ id: "r", text: "交互演示" }],
@@ -25,8 +60,7 @@ test("蓝图主要能力与后续义务直接给齐，完整方案结构不会�
   assert.deepEqual(index!.propertyKeys, ["global", "modules"]);
   assert.deepEqual(packet.stageContract, source.stageContract);
   assert.match(fixtureString(index!.scope), /本阶段/);
-  assert.equal(recordArray(objectFields(verificationModelContext(source)).deferredObligations)[0]!.resolution, undefined,
-    "范围复核的原始精简消息格式保持兼容，不能因蓝图补资料改变旧会话绑定");
+  assert.equal(objectFields(verificationModelContext(source)).deferredObligations, undefined);
 });
 
 test("模块只收到职责与主要事实，完整指南、结构和历史可以精确按需读取", async () => {
@@ -50,13 +84,14 @@ test("模块只收到职责与主要事实，完整指南、结构和历史可�
   assert.deepEqual(source, original);
 });
 
-test("恢复只内联最近拒稿，原稿仍保留；续轮不重抄已接受行或重复来源", () => {
+test("恢复只投递目录和进度，原稿仍保留；续轮不重抄已接受行或重复来源", () => {
   const source = { design: { acceptance: [{ id: "a", expected: "全部结果" }] }, requirements: [{ id: "r", text: "全部结果" }], draft: { original: "需求" },
     requirement: { original: "需求" }, contextManifest: { candidate: { delivery: "full", characters: 30, sha256: "a".repeat(64) } },
     reviewParts: { progressHash: "p", rejectedPartsHash: "q", saved: { checks: [{ id: "r", passed: true }] }, rejectedDraft: { checks: [{ id: "r", passed: false }] } },
     latestRejectedInput: { toolName: "submit", input: { checks: [{ id: "r", passed: false, reason: "待修" }] } } };
   const packet = objectFields(architectureModelContext(source, { role: "reviewer" }));
-  assert.deepEqual(packet.design, source.design); assert.deepEqual(packet.latestRejectedInput, source.latestRejectedInput);
+  assert.equal(packet.design, undefined); assert.equal(packet.latestRejectedInput, undefined);
+  assert.ok(recordArray(packet.contextIndex).some(row => row.section === "latestRejectedInput"));
   assert.equal(objectFields(packet.reviewParts).saved, undefined); assert.equal(objectFields(packet.reviewParts).rejectedDraft, undefined);
   assert.equal(objectFields(packet.reviewParts).rejectedPartsHash, "q");
   assert.equal(packet.draft, undefined); assert.equal(packet.requirement, undefined);
@@ -66,12 +101,13 @@ test("恢复只内联最近拒稿，原稿仍保留；续轮不重抄已接受�
   assert.deepEqual(next.modelBudget, { remaining: 2 });
 });
 
-test("范围复核仍获得完整候选及已确认来源，摘要不冒充已投递全文", () => {
+test("范围复核通过目录读取候选及已确认来源，目录不冒充已投递全文", () => {
   const source = { contextHash: "hash", requirements: [{ id: "r", text: "保留所有合法输入" }], candidate: { acceptance: [{ expected: "边界也须正确" }] },
     confirmedRequirementContext: { sourceQuotes: [{ quote: "原话" }] }, runtimeCapabilities: { limits: { input: 12 } } };
   const packet = objectFields(verificationModelContext(source));
-  assert.deepEqual(packet.candidate, source.candidate); assert.deepEqual(packet.requirements, source.requirements);
-  assert.deepEqual(packet.confirmedRequirementContext, source.confirmedRequirementContext);
+  assert.equal(packet.candidate, undefined); assert.equal(packet.requirements, undefined);
+  assert.equal(packet.confirmedRequirementContext, undefined);
+  assert.ok(recordArray(packet.contextIndex).some(row => row.section === "candidate"));
   assert.equal(packet.contextHash, "hash"); assert.equal(packet.runtimeCapabilities, undefined);
   assert.equal(recordArray(packet.contextIndex).find(row => row.section === "runtimeCapabilities")!.delivery, "paged");
   assert.match(architectureNodePrompt({ role: "reviewer", submitName: "submit_architecture_review" }), /被拒内容当作接受结果/);

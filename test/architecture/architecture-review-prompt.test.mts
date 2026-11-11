@@ -67,7 +67,7 @@ test("完整与分批评审要求逐条关闭依据，并支持用未通过草�
     assert.match(prompt, /仅重交需要修正的行/u);
     assert.match(prompt, /未重交的草稿行会一起重验/u);
     assert.match(prompt, /进度保存失败时停止并保留原稿/u);
-    assert.match(prompt, /引用优先只提交\{source,path\}/u);
+    assert.match(prompt, /报告references优先用\{file:/u);
     assert.match(prompt, /以findingRef代替findingId/u);
     assert.match(prompt, /blocking:true只能关联passed:false/u);
     assert.match(prompt, /空列表\[\]表示未额外指定操作，不等于候选布尔字段operations=false/u);
@@ -114,7 +114,7 @@ test("聚焦当前批仍保留真实依据、适配器范围和原需求边界",
   const batch = renderArchitectureReviewPrompt({ batchMode: true });
   assert.match(batch, /不修改候选、不调用设计者、不委派、不执行外部动作/);
   assert.match(batch, /保留用户已确认的需求、输入集合、交付承诺和验证义务/);
-  assert.match(batch, /显式quote必须逐字一致/);
+  assert.match(batch, /显式quote仅兼容旧格式，仍逐字核对/);
   assert.match(batch, /factClaims须等于当前实际JSON值/);
   assert.match(batch, /false不能授予能力/);
   assert.match(batch, /限制、排除项、前置条件或明确由其他条款负责的事项/);

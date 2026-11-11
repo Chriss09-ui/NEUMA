@@ -23,7 +23,7 @@ function fixture() {
   return { context, candidateHash, reader, review };
 }
 
-test("已完整提供的具体字段由宿主恢复原文，仍保留独立评审的负面判断", () => {
+test("冻结材料的位置规范化后，仍保留独立评审的负面判断", () => {
   const f = fixture();
   f.review.issues[0]!.candidatePaths = ["candidate /acceptance/0"];
   objectFields(f.review.issues[0]!.references![0]).path = "candidate /acceptance/0/expected";
@@ -31,7 +31,7 @@ test("已完整提供的具体字段由宿主恢复原文，仍保留独立评�
   assert.equal(architectureToolValidation(f.review, f.reader.submissionSchema(reviewSubmissionSchema({ evidenceRequired: true }))).valid, true);
   const normalized = f.reader.resolveSubmission(f.review) as import("../../src/contracts/architecture.mjs").ArchitectureReview;
   assert.deepEqual(normalized.issues[0]!.candidatePaths, ["/acceptance/0"]);
-  assert.equal(normalized.issues[0]!.references![0]!.quote, f.context.candidate.acceptance[0]!.expected);
+  assert.deepEqual(normalized.issues[0]!.references![0], { source: "candidate", path: "/acceptance/0/expected" });
   assert.deepEqual(f.review, before);
   assert.equal(validateReview(normalized, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }).verdict, "revise");
   normalized.checks.find((item: { id: string; }) => item.id === "acceptance_quality")!.passed = true;
@@ -58,11 +58,4 @@ test("选择器不替换错误显式引文，不接受缺失/混合/陈旧候选
     assert.throws(() => createArchitectureEvidenceReader({ context, candidateHash: f.candidateHash }).resolveSubmission(f.review),
       (error) => failureFields(error).validationIssue!.reason === "context_not_full");
   }
-});
-
-test("原文过长必须具体定位，选择器不静默截取而制造无关引文", () => {
-  const f = fixture(), context = architectureReviewEvidenceContext({ ...f.context, design: { ...f.context.candidate, instructions: "长".repeat(1001) } });
-  const candidateHash = designHash(context.candidate), reader = createArchitectureEvidenceReader({ context, candidateHash });
-  const review = { ...f.review, candidateHash }; objectFields(review.issues[0]!.references![0]).path = "/instructions";
-  assert.throws(() => reader.resolveSubmission(review), (error) => failureFields(error).validationIssue!.reason === "reference_too_broad");
 });

@@ -22,11 +22,13 @@ function narrowed(current:unknown = context()) {
 
 const referenceIndex = (prompt: string) => JSON.parse(prompt.split("引用位置索引（entries为[id,JSON Pointer]，候选编号只定位数组元素）：")[1]!.split("\n")[0]!) as {requirements:{entries:[string,string][];total:number;truncated:boolean};candidate:{entries:[string,string][];total:number;truncated:boolean};candidateRoots:{path:string;type:string}[]};
 
-test("引用说明及有界真实索引不改canonical schema、上下文摘要或原首包", async () => {
+test("文件交接保留旧契约恢复与原上下文摘要，位置索引仍有界", async () => {
   const current = context(), before = structuredClone(current);
   const baseline = diagnoseRequirementFidelitySubmission(current, {});
   assert.equal(baseline.contextHash, "3c4e8e5f08aaa7f2fc8bc69083b7aafc5ec190df81f9e5a6a64115e8b508c0fe");
-  assert.equal(baseline.schemaHash, "04e1bc4c756837ddc1b71ccf8fbc178189036dabef40b845308596e667c4637c");
+  const oldHash = "04e1bc4c756837ddc1b71ccf8fbc178189036dabef40b845308596e667c4637c";
+  assert.notEqual(baseline.schemaHash, oldHash);
+  assert.equal(diagnoseRequirementFidelitySubmission(current, {}, { schemaHash: oldHash }).schemaHash, oldHash);
   const result = await verifyRequirementFidelity({ context: current, config: {}, cwd: "/tmp", dataDir: "/tmp",
     sessionFactory: fidelityChecker("narrowed", { inspect(payload, options) {
       assert.deepEqual(payload, { ...current, acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE,

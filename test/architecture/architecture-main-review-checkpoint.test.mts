@@ -241,7 +241,7 @@ test("正式主评审通过宿主验证后复核中断，重启仅续范围复�
   const source = await f.designer.get(f.definition.id), before = designHash(source);
   assert.equal(source!.review, null); assert.deepEqual<NonNullable<NonNullable<typeof source>>["attempts"]>(source!.attempts, []);
   assert.equal(source!.mainReviewCheckpoint!.modelCalls, 2); assert.equal(source!.mainReviewCheckpoint!.fidelityStatus, "pending");
-  assert.ok(recordArray(objectFields(source!.mainReviewCheckpoint!.review).acceptanceScopeChecks).every((row) => row.criterionQuote && row.adapterQuote && !row.adapterRulePath && !row.scopeReceiptId));
+  assert.ok(recordArray(objectFields(source!.mainReviewCheckpoint!.review).acceptanceScopeChecks).every((row) => row.adapterRulePath && !row.criterionQuote && !row.adapterQuote && !row.scopeReceiptId));
   assert.deepEqual(f.countsBeforeFidelity, [2]);
   await f.reload();
   const calls = f.calls.length, stageCount = f.stageCalls.length; f.state.fidelity = "pass";

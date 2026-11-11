@@ -1,3 +1,4 @@
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
 import {fixtureText,fixturePort} from "../helpers/http-model.mjs";
 import type {ValueSchema} from "../../src/contracts/application.mjs";
 import type {DevelopmentPlan,DevelopmentService,DevelopmentApplication} from "../../src/contracts/development.mjs";
@@ -102,7 +103,8 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
   const model = createServer(async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")), payload = JSON.parse(textOf(body.messages.find((item) => item.role === "user")!.content));
+      const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")), packet = JSON.parse(textOf(body.messages.find((item) => item.role === "user")!.content));
+      const payload = Object.assign(packet, fixtureMaterialSources(packet));
       const names = (body.tools || []).map((item) => item.function.name), calls = body.messages.flatMap((item) => item.tool_calls || []);
       let name, args;
       if (names.includes("submit_development_plan") && payload.contextTruncated) {
@@ -130,7 +132,7 @@ test("真实Pi与OS隔离完成schema3服务研发、HTTP任务、失败保留�
       else if (names.includes("submit_architecture_review")) {
         name = "submit_architecture_review"; args = passingReview(payload.candidateHash, payload.design);
       } else if (names.includes("submit_requirement_fidelity")) {
-        assert.deepEqual(names, ["submit_requirement_fidelity", "read_model_context"], "范围复核只有提交及当前冻结材料读取");
+        assert.deepEqual(names, ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"], "范围复核只有提交及当前冻结材料读取");
         name = "submit_requirement_fidelity"; args = fidelityResult(payload, "preserved");
       } else if (names.includes("submit_development_plan")) {
         if (!invalid || !calls.some((call) => call.function.name === "submit_development_plan")) {

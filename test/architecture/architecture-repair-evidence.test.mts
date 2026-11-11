@@ -64,6 +64,19 @@ test("真正修改相关选择并以当前平台值和逐字说明复核可通�
   assert.doesNotThrow(() => validateHistoricalRepairDecision(f.row, reloaded, f.review, f.candidate, f.context()));
 });
 
+test("文件位置同样核对功能正文，只有真实修订才能关闭历史问题", () => {
+  for (const changed of [false, true]) {
+    const f = fixture({ choice: changed ? correctedChoice : wrongChoice });
+    f.row.candidatePaths = ["/decisions/0"];
+    const report = { ...f.review, issues: [{ ...f.explanation, candidatePaths: ["/decisions/0"], references: [
+      { source: "candidate", path: "/decisions/0" }, { source: "acceptanceAdapterGuide", path: factPath },
+    ] }] };
+    const validate = () => validateHistoricalRepairDecision(f.row, f.finding, report, f.candidate, f.context());
+    if (changed) assert.doesNotThrow(validate);
+    else assert.throws(validate, error => failureFields(error).validationIssue?.reason === "repair_basis_unchanged");
+  }
+});
+
 test("修改了方案也不能凭一句已修复或复制旧remedy关闭", () => {
   const missing = fixture(); missing.review.issues = [];
   rejects(missing, "repair_counterevidence_missing");

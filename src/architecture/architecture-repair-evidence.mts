@@ -8,7 +8,7 @@ function candidateRows(candidate: unknown, field: string) { const value = object
 import { InputError } from "../requirements/core.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { copyArchitectureReviewJson } from "./architecture-review-binding.mjs";
-import { architectureReviewEvidenceContext, validateArchitectureReviewEvidence } from "./architecture-review-evidence.mjs";
+import { architectureReviewEvidenceContext, architectureReferenceText, validateArchitectureReviewEvidence } from "./architecture-review-evidence.mjs";
 import { validateArchitecturePlatformClaims } from "./architecture-platform-claims.mjs";
 
 const beneath = (path: string, root: string) => path === root || path.startsWith(`${root}/`);
@@ -86,8 +86,9 @@ function materialReference(reference: NonNullable<ArchitectureIssue["references"
   const row = objectFields(segments.length === 2 ? (group as unknown[])[Number(segments[1])] : group);
   const values = (entityFields[anchor.kind] ?? []).filter((field) => !["id", "kind", "componentId", "dependsOn"].includes(field))
     .map((field) => typeof row[field] === "string" ? row[field] : Object.hasOwn(row, field) ? JSON.stringify(row[field]) : null);
-  return values.some((value) => typeof value === "string" && typeof reference.quote === "string"
-    && (value.includes(reference.quote) || reference.quote.includes(value)));
+  const text = architectureReferenceText(reference, { candidate });
+  return values.some(value => typeof value === "string" && typeof text === "string"
+    && (value.includes(text) || text.includes(value)));
 }
 
 function validBasis(basis: unknown): RepairBasis | null {

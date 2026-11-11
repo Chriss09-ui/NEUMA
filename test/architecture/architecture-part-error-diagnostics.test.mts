@@ -86,7 +86,7 @@ test("恢复历史关闭缺项用规范草稿定位，仅补说明行即可保�
   assert.ifError(innerFailure); assert.equal(verified, true); assert.equal(calls, 20);
 });
 
-test("引用解析前失败也保存最新原始提交，恢复提供新回执并沿累计预算修正", async t => {
+test("引用解析前失败也保存最新原始提交，恢复按文件位置修正并沿累计预算修正", async t => {
   const cwd = await mkdtemp(join(tmpdir(), "neuma-raw-review-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const requirements = [{ id: "R1", text: "完整处理输入" }], design = validDesign(requirements, { schemaVersion: 3 });
@@ -103,10 +103,10 @@ test("引用解析前失败也保存最新原始提交，恢复提供新回执�
           initial = { candidateHash, progressHash: payload.reviewParts.progressHash,
             checks: [{ id: "verification", passed: true, evidence: "最新检查" }],
             issues: [{ id: "latest_change", blocking: false, checkId: "verification", kind: "design", description: "应保留的最新修改",
-              remedy: "核对处理说明", candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions" }], factClaims: [] }] };
+              remedy: "核对处理说明", candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/missing" }], factClaims: [] }] };
           await assert.rejects(tool!.execute("too-broad-original", initial), error => {
-            assert.equal(failureFields(error).validationIssue!.reason, "reference_too_broad");
-            assert.match(fixtureString(failureFields(error).message), /referenceHints/u); diagnostics = failureFields(error).validationIssues; return true;
+            assert.equal(failureFields(error).validationIssue!.reason, "reference_path_missing");
+            diagnostics = failureFields(error).validationIssues; return true;
           });
           assert.deepEqual(objectFields(progress.findLast(value => value.rejectedInput)!.rejectedInput).input, initial);
           assert.equal(progress.some(value => value.parts || value.review), false);
@@ -114,14 +114,13 @@ test("引用解析前失败也保存最新原始提交，恢复提供新回执�
           assert.equal(payload.modelBudget.used, 1);
           assert.deepEqual(payload.latestRejectedInput.input, initial);
           assert.notEqual(payload.reviewParts.progressHash, objectFields(initial).progressHash);
-          assert.equal(payload.reviewReferenceHints[0].path, "/instructions");
           const corrected = structuredClone(initial); objectFields(corrected).progressHash = payload.reviewParts.progressHash;
-          partIssues(corrected)[0]!.references = [payload.reviewReferenceHints[0].reference];
+          partIssues(corrected)[0]!.references = [{ file: "candidate.json", path: "/instructions" }];
           await tool!.execute("explicit-recovered-correction", corrected);
           const saved = progress.findLast(value => value.parts);
           assert.equal(saved!.modelCalls, 2);
           assert.equal(partIssues(saved!.parts)[0]!.description, "应保留的最新修改");
-          assert.ok(design.instructions.includes(fixtureString(recordArray(partIssues(saved!.parts)[0]!.references)[0]!.quote)));
+          assert.deepEqual(partIssues(saved!.parts)[0]!.references, [{ source: "candidate", path: "/instructions" }]);
           assert.equal(saved!.rejectedInput, null);
         }
         verified++; throw new Error("offline stop");
@@ -152,7 +151,7 @@ test("原始提交保存失败锁定后续请求和迟到工具调用", async t 
         await options.onModelCall!(); const payload = JSON.parse(text), tool = fixtureTools(options.customTools).save_architecture_review_parts;
         const args = { candidateHash, progressHash: payload.reviewParts.progressHash, issues: [{ id: "quote", blocking: false,
           checkId: "verification", kind: "design", description: "检查说明", remedy: "核对", candidatePaths: ["/instructions"],
-          references: [{ source: "candidate", path: "/instructions" }], factClaims: [] }] };
+          references: [{ source: "candidate", path: "/missing" }], factClaims: [] }] };
         await assert.rejects(tool!.execute("raw-save-fail", args), /raw persistence failed/u);
         await assert.rejects(async () => { await options.onModelCall!(); }, /raw persistence failed/u);
         await assert.rejects(tool!.execute("late-correction", args), /raw persistence failed/u);

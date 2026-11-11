@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { designHash } from "../../src/architecture/architecture-contract.mjs";
 import type { PiSessionOptions } from "../../src/runtime/pi-port.mjs";
-import { fixtureTool, completeVerificationContext } from "./model-context.mjs";
+import { fixtureTool, fixtureMaterialSources, completeVerificationContext } from "./model-context.mjs";
 
 interface FidelityPayload { contextHash: string; requirements: { id: string; text: string }[]; candidate: object; fidelityContextVersion?: string }
 interface ResultOptions { requirementId?: string; candidatePath?: string; canonical?: boolean }
@@ -14,7 +14,8 @@ function fidelityPayload(value: unknown): FidelityPayload {
   return value as FidelityPayload;
 }
 export function fidelityResult(input: unknown, classification = "preserved", options: ResultOptions = {}) {
-  const payload = fidelityPayload(input);
+  const payload = fidelityPayload(input && typeof input === "object" && "materialFiles" in input
+    ? fixtureMaterialSources(input as Record<string, unknown>) : input);
   const { requirementId = payload.requirements[0]!.id, candidatePath = "/instructions", canonical = false } = options;
   assert.ok(["preserved", "narrowed", "unproven"].includes(classification));
   const index = payload.requirements.findIndex((item) => item.id === requirementId);
@@ -34,7 +35,7 @@ export function fidelityChecker(classification = "preserved", { inspect, ...resu
   return async (options: PiSessionOptions) => ({ modelCallAccounting: true, setAutoCompactionEnabled() {}, dispose() {}, async abort() {},
     async prompt(text: string) {
       await options.onModelCall?.({});
-      assert.deepEqual(options.customTools!.map((tool) => tool.name), ["submit_requirement_fidelity", "read_model_context"], "独立复核只有提交及本节点冻结材料读取，不继承文件、网络或主角色工具");
+      assert.deepEqual(options.customTools!.map((tool) => tool.name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"], "独立复核只有提交及本节点冻结材料读取，不继承文件、网络或主角色工具");
       const complete = await completeVerificationContext(JSON.parse(text), options), payload = Object.assign(complete, fidelityPayload(complete)), { contextHash, ...context } = payload;
       assert.equal(contextHash, designHash(context), "模型决定必须绑定完整当前只读上下文");
       assert.ok(payload.requirements.length); assert.equal(new Set(payload.requirements.map((item) => item.id)).size, payload.requirements.length);
