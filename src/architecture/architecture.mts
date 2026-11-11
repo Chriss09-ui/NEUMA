@@ -1127,7 +1127,12 @@ export class ArchitectureDesigner {
       if (recoverReviewReferences && sessionStorage?.file && session.sessionBindingHash && session.sessionFile
         && basename(session.sessionFile) === sessionStorage.file && session.messages) {
         const reviewReferenceRecovery = recoverReviewReferences(session.messages);
-        if (reviewReferenceRecovery) payload = { ...payload, reviewReferenceRecovery };
+        if (reviewReferenceRecovery) {
+          const feedback = reviewReferenceRecovery.draft
+            ? architectureToolValidation(reviewReferenceRecovery.draft, parameters, { root: toolRoot(submitName) }) : undefined;
+          payload = { ...payload, reviewReferenceRecovery: { ...reviewReferenceRecovery,
+            ...(feedback && !feedback.valid ? { submissionIssues: feedback.issues } : {}) } };
+        }
       }
       if (resumeStage && payload.stageRepair && role === "specialist" && submissionRepair) {
         const previousFailure = session.messages?.findLast(message => message.role === "toolResult" && message.toolName === submitName);

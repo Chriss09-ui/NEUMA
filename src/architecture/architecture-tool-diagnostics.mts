@@ -26,6 +26,18 @@ const remedies = Object.freeze({ required_field: "补齐这个已声明的必填
   invalid_reference: "只引用工具和当前上下文实际列出的编号，不能重复或虚构引用。",
   invalid_contract: "核对当前工具公开结构及具体字段，修正后继续当前会话。" });
 
+function malformedContainerText(value: unknown, issue: ToolInputIssue, root: string) {
+  if (issue.reason !== "type" || issue.receivedType !== "string" || !["array", "object"].includes(issue.expectedType ?? "")) return false;
+  const parts = issue.path.slice(root.length).replace(/\[([0-9]+)\]/g, ".$1").split(".").filter(Boolean);
+  for (const part of parts) {
+    if (!value || typeof value !== "object") return false;
+    value = Object.getOwnPropertyDescriptor(value, part)?.value;
+  }
+  if (typeof value !== "string" || value.length > 256 * 1024 || Buffer.byteLength(value, "utf8") > 256 * 1024
+    || !value.trimStart().startsWith(issue.expectedType === "array" ? "[" : "{")) return false;
+  try { JSON.parse(value); return false; } catch { return true; }
+}
+
 // Derive paths from schema properties only. Neither SDK exception text nor submitted values enter feedback.
 export function architectureToolValidation(value: unknown, schema: ToolSchema, { root = "root" } = {}) {
   const feedback = toolInputValidation(value, schema, { root });
@@ -37,6 +49,8 @@ export function architectureToolValidation(value: unknown, schema: ToolSchema, {
       const destination = schema.properties.issue ? "对应意见的 issues[i].factClaims 或单项 issue.factClaims" : "对应意见的 issues[i].factClaims";
       return { ...entry, path: `${root}.factClaims`, reason, remedy: `把报告外层的证据移到${destination}，保留其中的实际内容。` };
     }
+    if (malformedContainerText(value, entry, root)) return { ...entry, reason,
+      remedy: "该字段的JSON文字无法解析，请检查内部引号、转义或括号。保留现有内容和编号，直接提交原生数组或对象；条目中的自然语言仍为字符串，然后在当前会话重新提交。" };
     return { ...entry, reason, remedy: entry.alternatives ? entry.remedy : remedies[reason] };
   });
   return { ...feedback, issues, ...(issues.some((entry) => /\.acceptance\[[0-9]+\]\.verification(?:\.|$)/.test(entry.path))

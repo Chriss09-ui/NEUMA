@@ -55,11 +55,11 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false, readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
+  acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
   interruptIntegration = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
-    programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false,
+    programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false,
     blueprintDraft: null as Record<string, unknown> | null, blueprintAllocation: null as Record<string, unknown> | null, blueprintPatched: false,
     blueprintRawRejected: false, blueprintRawFeedback: "",
     cancelStage: null as "blueprint" | "module" | "integration" | "research" | null, controller: null as AbortController | null }, dataDir = join(root, "data");
@@ -87,6 +87,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       }
       let name, args;
       if (stage === "integration" && interruptIntegration || firstSlice && failReviewSlice && rejectedSlice || kind === "consultation" && failConsultation
+        || firstSlice && malformedReviewSlice && state.malformedSliceSubmitted && !state.malformedSliceInterrupted
         || kind === "review_revision" && state.failRevisionCalls-- > 0
         || kind === "repair" && failRepairCalls-- > 0
         || kind === "reviewer" && state.reviewRejected && state.failRevisedReview-- > 0) {
@@ -95,6 +96,10 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         if (firstSlice && failReviewSlice) {
           assert.match(text(body.messages.findLast(message => message.role === "tool")!.content), /invalid_receipt/u);
           failReviewSlice = false;
+        }
+        if (firstSlice && malformedReviewSlice) {
+          state.malformedSliceInterrupted = true;
+          assert.match(text(body.messages.findLast(message => message.role === "tool")!.content), /JSON文字无法解析/);
         }
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(`data: ${JSON.stringify({ id: "revision-length", choices: [{ index: 0, delta: { role: "assistant", content: "固定修订阶段截断" }, finish_reason: "length" }] })}\n\ndata: [DONE]\n\n`);
@@ -209,6 +214,17 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           assert.deepEqual(recoveredIssue.candidatePaths, recovery.designLocations);
           assert.deepEqual(recoveredIssue.references, [guideReference]);
           args = rejectedSlice;
+        }
+        if (firstSlice && malformedReviewSlice) {
+          const checks = recordArray(objectFields(args).checks).map(row => ({ ...row, evidence: '核对"引号"格式并保留本组判断' }));
+          const issues = [{ id: "format_note", blocking: false, kind: "context", checkId: ids[0], description: '核对"引号"格式',
+            remedy: "保留本组判断", candidatePaths: ["/components/0/purpose"], references: [{ source: "candidate", path: "/components/0/purpose" }] }];
+          if (!state.malformedSliceSubmitted) {
+            state.malformedSliceSubmitted = true;
+            args = { ...args, checks: JSON.stringify(checks).replaceAll('\\"', '"'), issues: JSON.stringify(issues).replaceAll('\\"', '"') };
+          } else {
+            args = { ...args, checks, issues };
+          }
         }
       } else if (kind === "repair") {
         const assignment = payloads.findLast(row => row.repairAssignment)!.repairAssignment!;
@@ -423,6 +439,32 @@ test("原生子组续接从冻结材料恢复出处，旧的重复错填不阻�
   assert.equal(result.reviewProgressCheckpoint!.modelCalls, 2);
   assert.ok(f.requests.slice(start).some(request => request.kind === "fidelity"));
   assert.deepEqual(f.errors, []);
+});
+
+test("原生评审列表文字损坏后逐字段回填诊断，重启原会话重交且保留同因计数", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, malformedReviewSlice: true });
+  await assert.rejects(f.run(), error => objectFields(objectFields(error).diagnostic).reason === "review_slice_incomplete");
+  assert.deepEqual(f.errors, []);
+  const before = (await f.designer.get(f.definition.id))!, saved = readReviewTaskCheckpoint(objectFields(before.reviewDispatchCheckpoint).dispatch);
+  const stopped = saved.groups[0]!;
+  assert.equal(stopped.calls, 2); assert.equal(stopped.rejection!.count, 1); assert.equal(stopped.result, null);
+  const start = f.requests.length;
+  await f.reload();
+  const result = await f.run();
+  assert.deepEqual(f.errors, []); assert.equal(result.status, "passed");
+  const completed = readReviewTaskCheckpoint(objectFields(result.reviewDispatchCheckpoint).dispatch), resumed = completed.groups[0]!;
+  assert.equal(resumed.sessionFile, stopped.sessionFile); assert.equal(resumed.calls, 3);
+  assert.deepEqual(resumed.rejection, stopped.rejection);
+  for (const group of saved.groups.filter(row => row.result)) assert.deepEqual(completed.groups.find(row => row.id === group.id), group);
+  const request = f.requests.slice(start).find(row => row.kind === "review_slice")!, packet = users(request.body).at(-1)!;
+  assert.equal(packet.modelBudget!.used, stopped.calls);
+  const recovery = objectFields(packet.reviewReferenceRecovery), diagnostics = recordArray(recovery.submissionIssues);
+  assert.deepEqual(diagnostics.map(row => row.path).sort(), ["review_slice.checks", "review_slice.issues"]);
+  assert.ok(diagnostics.every(row => row.reason === "invalid_type" && String(row.remedy).includes("JSON文字无法解析")));
+  assert.equal(typeof objectFields(recovery.draft).checks, "string");
+  const prompt = request.body.messages.filter(row => ["system", "developer"].includes(row.role)).map(row => text(row.content)).join("\n");
+  assert.match(prompt, /列表直接提交原生数组/);
+  assert.deepEqual(result.designProgressCheckpoint, before.designProgressCheckpoint);
 });
 
 test("子组、主评审和范围复核都能在四次读取后提交，累计用量可重新载入", { timeout: 30000 }, async t => {

@@ -419,7 +419,7 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       const prepared = isPlainRecord(rejected) && Buffer.byteLength(JSON.stringify(rejected)) <= MAX_RECOVERY_BYTES ? prepareDraft(rejected) : undefined;
       const draft = isPlainRecord(prepared) ? structuredClone(prepared) : undefined;
       rows(draft?.issues).forEach((issue, index) => restoreIssueReferences(objectFields(issue), index, reselect));
-      if (!historicalReceipts.size && !reselect.length) return undefined;
+      if (!historicalReceipts.size && !reselect.length && !draft) return undefined;
       const readReferences = [...historicalReceipts.values()].slice(-12).map(recoveryChoice);
       const designLocations = [...new Set([
         ...rows(draft?.issues).flatMap(issue => rows(objectFields(issue).candidatePaths))

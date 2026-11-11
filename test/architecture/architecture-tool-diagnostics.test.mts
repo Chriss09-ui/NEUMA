@@ -46,6 +46,26 @@ test("结构反馈覆盖必填、类型、枚举与动态字段，逐项路径�
   assert.deepEqual(architectureToolValidation({ items: [{ title: "明确", passed: true }] }, schema), { valid: true, issues: [] });
 });
 
+test("损坏的容器JSON逐字段说明引号与转义问题，不猜改内容或回显正文", () => {
+  const schema = { type: "object", properties: { acceptanceScopeChecks: { type: "array" }, issues: { type: "array" },
+    details: { type: "object" }, note: { type: "string" }, passed: { type: "boolean" } } };
+  const value = { acceptanceScopeChecks: '[{"reason":"PRIVATE_SCOPE "quoted""}]', issues: '[{"description":"PRIVATE_ISSUE "quoted""}]',
+    details: '{"reason":"PRIVATE_DETAILS "quoted""}', note: '["PRIVATE_LITERAL "quoted""]', passed: "false" };
+  const before = structuredClone(value), result = architectureToolValidation(value, schema, { root: "review_slice" });
+  assert.equal(result.valid, false);
+  for (const field of ["acceptanceScopeChecks", "issues", "details"]) {
+    const issue: ToolInputIssue = result.issues.find(entry => entry.path === `review_slice.${field}`)!;
+    assert.equal(issue.reason, "invalid_type");
+    assert.match(issue.remedy, /JSON文字无法解析/);
+    assert.match(issue.remedy, /引号、转义或括号/);
+    assert.match(issue.remedy, /直接提交原生数组或对象/);
+  }
+  assert.equal(result.issues.some(entry => entry.path === "review_slice.note"), false);
+  assert.doesNotMatch(result.issues.find(entry => entry.path === "review_slice.passed")!.remedy, /JSON文字无法解析/);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_|quoted/);
+  assert.deepEqual(value, before);
+});
+
 test("未知字段提示仅派生当前对象schema的有界声明字段，不回显未知名称、值或原型字段", () => {
   const fields = Object.fromEntries([...Array.from({ length: 40 }, (_, index) => [`declared_${index}`, { type: "string" }]),
     ...["bad/name", "带空格 字段", "constructor", "__proto__"].map((field) => [field, { type: "string" }])]);
