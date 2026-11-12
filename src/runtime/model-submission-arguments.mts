@@ -113,6 +113,32 @@ export function modelSubmissionArguments(input: unknown, schema: ContainerSchema
   return exceeded ? input : result;
 }
 
+/** Resolve declared patch slots only. Ambiguous branches and arbitrary business keys stay literal. */
+export function modelSubmissionSchemaAtPath(schema: ToolSchema, pointer: string): ToolSchema | undefined {
+  if (!pointer.startsWith("/") || /~(?![01])/u.test(pointer)) return undefined;
+  const parts = pointer.slice(1).split("/").map(part => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+  if (parts.length > 32 || parts.some(part => forbidden.has(part))) return undefined;
+  const resolve = (input: ToolSchema | undefined): ToolSchema | undefined => {
+    let rule = input;
+    for (let depth = 0; depth <= 32; depth++) {
+      if (!rule || typeof rule === "boolean" || rule.anyOf || rule.oneOf || rule.allOf || Array.isArray(rule.type)) return undefined;
+      if (rule.$ref === undefined) return rule;
+      const name = typeof rule.$ref === "string" && /^#\/definitions\/([\w-]+)$/u.exec(rule.$ref)?.[1];
+      if (!name || !isPlainRecord(schema.definitions) || !Object.hasOwn(schema.definitions, name)
+        || !isPlainRecord(schema.definitions[name])) return undefined;
+      rule = schema.definitions[name] as ToolSchema;
+    }
+    return undefined;
+  };
+  let rule = resolve(schema);
+  for (const part of parts) {
+    rule = rule?.type === "object" && rule.properties && Object.hasOwn(rule.properties, part) ? resolve(rule.properties[part])
+      : rule?.type === "array" && /^(0|[1-9][0-9]*)$/u.test(part) ? resolve(rule.items) : undefined;
+    if (!rule) return undefined;
+  }
+  return rule && schema.definitions ? { ...rule, definitions: schema.definitions } : rule;
+}
+
 export function modelSubmissionTool(tool: NeumaTool): NeumaTool {
   const prepareArguments = (input: unknown) => {
     const args = modelSubmissionArguments(input, tool.parameters);

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
 import { designSubmissionSchema, designHash, validateDesign } from "../../src/architecture/architecture-contract.mjs";
 import { createArchitectureStageSchemas, architectureBlueprintWriter, readArchitectureBlueprintStructure, validateArchitectureBlueprint, validateArchitectureModule,
-  assembleArchitectureCandidate, applyArchitectureIntegration, diagnoseBlueprintAssignments } from "../../src/architecture/architecture-design-stages.mjs";
+  assembleArchitectureCandidate, applyArchitectureIntegration, prepareArchitectureIntegration, readArchitectureIntegrationStructure, diagnoseBlueprintAssignments } from "../../src/architecture/architecture-design-stages.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { validDesign, validDraft } from "../helpers/architecture.mjs";
 import { validateArchitecturePlatformClaims } from "../../src/architecture/architecture-platform-claims.mjs";
@@ -437,10 +437,30 @@ test("整合绑定实际模块与冲突，禁止改写蓝图、模块内容、�
   rejected(() => callFixture(applyArchitectureIntegration, undefined, [input([]), { ...options, conflicts: [{ path: "/execution" }] }]), "baseHash");
   for (const path of ["/profile", "/execution/language", "/components/0/purpose", "/steps/1/id", "/__proto__/polluted"])
     rejected(() => applyArchitectureIntegration(input([{ path, value: "rewritten" }]), options), "updates.path");
-  rejected(() => applyArchitectureIntegration(input([{ path: "/acceptance", value: assembled.candidate.acceptance.slice(1) }]), options), "candidate.acceptance");
+  rejected(() => applyArchitectureIntegration(input([{ path: "/acceptance", value: assembled.candidate.acceptance.slice(1) }]), options), "updates[0].value");
   const acceptance = changed(assembled.candidate.acceptance, (rows) => { rows[0]!.requirementIds = ["summary"]; });
   rejected(() => applyArchitectureIntegration(input([{ path: "/acceptance", value: acceptance }]), options), "acceptance");
   rejected(() => applyArchitectureIntegration(input([{ path: "/instructions", value: "第一项" }, { path: "/instructions", value: "第二项" }]), options), "updates.path");
+});
+
+test("整合接收对象或数组文字后保存原生结构，坏格式定位到提交值，语义限制与历史严格读取不变", () => {
+  const f = fixture(), assembled = assembleArchitectureCandidate(f.options), options = { ...f.options, ...assembled };
+  const input = (path: string, value: unknown) => ({ baseHash: designHash(assembled.candidate), updates: [{ path, value }] });
+  for (const [path, value] of [["/acceptance/0", assembled.candidate.acceptance[0]], ["/acceptance", assembled.candidate.acceptance]] as const) {
+    const raw = input(path, JSON.stringify(value)), before = structuredClone(raw);
+    const canonical = prepareArchitectureIntegration(raw, options);
+    assert.deepEqual(canonical.updates[0]!.value, value);
+    assert.deepEqual(applyArchitectureIntegration(raw, options), assembled.candidate);
+    assert.deepEqual(readArchitectureIntegrationStructure(canonical, options), assembled.candidate);
+    assert.deepEqual(raw, before);
+    rejected(() => readArchitectureIntegrationStructure(raw, options), "candidate.acceptance");
+  }
+  for (const value of ['{"id":', JSON.stringify({ ...assembled.candidate.acceptance[0], note: "额外字段" })])
+    rejected(() => prepareArchitectureIntegration(input("/acceptance/0", value), options), "updates[0].value");
+  const changedRow = { ...assembled.candidate.acceptance[0], expected: "删除原来验收义务" };
+  rejected(() => prepareArchitectureIntegration(input("/acceptance/0", JSON.stringify(changedRow)), options), "integration.acceptance");
+  const text = '{"仍然是":"指令正文"}';
+  assert.equal(applyArchitectureIntegration(input("/instructions", text), options).instructions, text);
 });
 
 test("模块漏验收在组装前指明原责任，缺失模块不能提前成为完整候选", () => {

@@ -58,7 +58,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
   acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, autoCorrectSlice = false, mixedFormatSlice = false,
   readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
-  interruptIntegration = false } = {}) {
+  interruptIntegration = false, encodedIntegrationValue = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, formatModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false, formatSliceCalls: 0,
@@ -138,6 +138,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
             ? { name: stageNames.integration, args: { baseHash: payload.baseHash, path: "/instructions", value: candidate.instructions } }
             : architectureStageSubmission({ tools: Object.fromEntries(names.map((toolName) => [toolName, { name: toolName }])), payload, candidate });
           name = submission!.name!; args = submission!.args!;
+          if (stage === "integration" && encodedIntegrationValue)
+            args = { baseHash: payload.baseHash, path: "/acceptance/0", value: JSON.stringify(recordArray(objectFields(payload.baseCandidate).acceptance)[0]) };
           if (stage === "blueprint" && omitBlueprintRequirement) {
             if (!state.blueprintRawRejected) {
               Reflect.set(recordArray(objectFields(args).modules)[0]!, "requirementIds", [
@@ -385,8 +387,8 @@ async function normalBuild(t: test.TestContext, f: Awaited<ReturnType<typeof fix
   return agents;
 }
 
-test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选，交接正文不进入执行指令", { timeout: 30000 }, async t => {
-  const f = await fixture(t, { compactHandoffs: true });
+test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选，整合按目标类型还原并持久保存", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { compactHandoffs: true, encodedIntegrationValue: true });
   const built = await f.run();
   assert.equal(built.status, "passed", built.summary);
   assert.deepEqual(f.errors, []);
@@ -402,6 +404,9 @@ test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选
   const boundary = objectFields(users(f.requests.find(row => row.kind === "integration")!.body)[0]!.blueprintBoundary);
   assert.equal(recordArray(boundary.moduleHandoffs)[0]!.handoffText, result.handoffText);
   assert.deepEqual(built.review!.issues, []);
+  assert.equal(checkpoint.integration.modelCalls, 1);
+  assert.deepEqual(recordArray(objectFields(checkpoint.integration.result).updates)[0]!.value, built.design!.acceptance[0]);
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(built.designProgressCheckpoint!.submissionPolicy), "integration"), { content: 0, format: 0 });
   await f.reload(); assert.equal((await f.designer.get(f.definition.id))!.candidateHash, built.candidateHash);
 });
 

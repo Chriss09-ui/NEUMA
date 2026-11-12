@@ -24,7 +24,8 @@ import { createArchitectureRoundContext } from "./architecture-round-context.mjs
 import { architectureMaterialPointer } from "./architecture-material-path.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
 import { architectureModelContext, architectureRepairModelContext, architectureNodePrompt } from "./architecture-model-context.mjs";
-import { DESIGN_SUBMISSION_REJECTION_LIMIT, designRejectionKind, recoverDesignSubmissionPolicy, assertDesignSubmissionHistory } from "./architecture-design-rejections.mjs";
+import { DESIGN_SUBMISSION_REJECTION_LIMIT, designRejectionKind, recoverDesignSubmissionPolicy, readDesignSubmissionPolicy, assertDesignSubmissionHistory } from "./architecture-design-rejections.mjs";
+import type { DesignSubmissionPolicy } from "./architecture-design-rejections.mjs";
 import { architectureVerificationContext, architectureConfirmedContext } from "./architecture-input-context.mjs";
 export { architectureVerificationContext, architectureConfirmedContext };
 import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, reviewedArchitectureSeed, architectureRevisionSeed, fidelityArchitectureRevisionSeed,
@@ -65,7 +66,7 @@ import { createArchitectureReviewParts } from "./architecture-review-parts.mjs";
 import { createPlatformContractTool, validateArchitecturePlatformClaims, prepareArchitectureRepairFacts } from "./architecture-platform-claims.mjs";
 import { createArchitectureFidelityProgress, readArchitectureFidelityProgress, architectureFidelityProgressMatches } from "./architecture-fidelity-progress.mjs";
 import { ARCHITECTURE_FIDELITY_CONTEXT_VERSION, architectureFidelityContextVersion, createArchitectureFidelityContext } from "./architecture-fidelity-context.mjs";
-import { architectureDesignRecovery, runArchitectureDesignPipeline, architectureDesignCallLimits, architectureDesignTestContinuation,
+import { architectureDesignRecovery, readArchitectureIntegrationReplay, runArchitectureDesignPipeline, architectureDesignCallLimits, architectureDesignTestContinuation,
   ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT } from "./architecture-design-pipeline.mjs";
 import { applyArchitectureIntegration, diagnoseBlueprintAssignments } from "./architecture-design-stages.mjs";
 import { architectureReviewRevisionRecovery, createArchitectureReviewRevision, readArchitectureReviewRevision, runArchitectureReviewRevision,
@@ -286,16 +287,38 @@ export class ArchitectureDesigner {
       && (architectureReviewFailureStalled(readReviewProgressCheckpoint(record)?.diagnostic)
         || architectureReviewFailureStalled(readArchitectureFidelityProgress(record)?.state.diagnostic));
     const historicalDispatch = inheritedFidelityReviewDispatch(record, [...this.records.values()]);
-    let designRecovery = architectureDesignRecovery(record);
+    let designRecovery: (NonNullable<ReturnType<typeof architectureDesignRecovery>> & { localCompletion?: boolean }) | null = architectureDesignRecovery(record);
+    let recoveredPolicy: DesignSubmissionPolicy | undefined;
     let counterUpgrade: { kind: string; status: string; stageKey: string; message: string } | undefined;
     if (record && objectFields(record.designProgressCheckpoint?.submissionPolicy).version === 1 && ["failed", "cancelled"].includes(record.status)) {
       try {
-        designRecovery = architectureDesignRecovery(record, await this.recoverDesignPolicy(record.agentId, record.designProgressCheckpoint));
+        recoveredPolicy = await this.recoverDesignPolicy(record.agentId, record.designProgressCheckpoint);
+        designRecovery = architectureDesignRecovery(record, recoveredPolicy);
         if (!designRecovery) counterUpgrade = { kind: "design_counter_upgrade", status: "continuing", stageKey: "history",
           message: "已核对原回执，格式纠错与内容退回均未达对应上限；继续原任务并保存分开的计数。" };
       }
       catch { record.designRecovery = { kind: "design_counter_history", status: "blocked", stageKey: "history",
         message: "原退回记录的格式与内容分类尚不能核验，已停止恢复；不能清零或猜测次数。" }; return record; }
+    }
+    if (record && designRecovery?.kind === "design_format" && designRecovery.stageKey === "integration") {
+      try {
+        if (record.designProgressEvidenceHash !== designEvidenceHash(record)) throw new InputError("原设计材料摘要已变化");
+        const context = { draft: record.draft, requirements: record.requirements,
+          candidateSchema: designSubmissionSchema(record.draft, { requirements: record.requirements }),
+          capabilities: record.platformSnapshot ? platformCapabilityCatalog(record.platformSnapshot, { runtimeCapabilities: record.runtimeCapabilities }) : CAPABILITIES,
+          runtimeCapabilities: record.runtimeCapabilities, requireAcceptanceVerification: Boolean(record.draft.taskSpec),
+          evidence: record.evidence, confirmedRequirementContext: record.confirmedRequirementContext, deferredVerifications: record.deferredVerifications,
+          platformSnapshot: objectFields(record.platformSnapshot), platformHash: record.platformHash, platformContractVersion: record.platformContractVersion };
+        const directory = await this.storage.directory(id, "architecture-design/sessions", { create: false });
+        const replay = await readArchitectureIntegrationReplay(record.designProgressCheckpoint, context,
+          recoveredPolicy ?? readDesignSubmissionPolicy(record.designProgressCheckpoint?.submissionPolicy), directory,
+          storage => readExecutionHistory({ cwd: this.cwd, storage }));
+        if (replay) {
+          validateDesign(replay.candidate, context);
+          designRecovery = { ...designRecovery, status: "continuing", localCompletion: true,
+            message: "原会话最后一份整合提交经格式还原已通过完整校验；继续时复核并保存原提交，不新增整合请求，保留原失败记录。" };
+        }
+      } catch { /* A read-only compatibility probe never grants new calls or replaces a blocked result. */ }
     }
     const recovery = missingDispatch ? { kind: "review_specialists", status: "blocked", actionLabel: "检查分组评审材料",
       message: "本方案已分派独立评审，但当前检查点缺失；不能重新领取子任务额度。" }
@@ -417,6 +440,7 @@ export class ArchitectureDesigner {
       return await runArchitectureDesignPipeline({ record, context, binding, revision, repair, forceIntegration, signal, onProgress, sessionDirectory,
         submissionPolicy: true,
         recoverSubmissionPolicy: checkpoint => this.recoverDesignPolicy(record.agentId, checkpoint, signal),
+        readHistory: storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }),
         validateHistory: storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }),
         validateAssembledCandidate: candidate => validateDesign(candidate, context),
         validateProgramCandidate: async (candidate, { sessionStorage }) => {

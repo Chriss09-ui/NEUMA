@@ -4,6 +4,7 @@ import type { ArchitectureBlueprint, ArchitectureModule, CandidateDraft, StageSc
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { StoredArchitectureRecord } from "./architecture-controller-port.mjs";
 import type { NeumaTool, Progress, SessionStorage } from "../runtime/execution-port.mjs";
+import type { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
 import { DESIGN_SUBMISSION_REJECTION_LIMIT, readDesignSubmissionPolicy, designSubmissionRejections, designFormatRejections,
   emptyDesignSubmissionPolicy, recordDesignSubmissionRejection, recordDesignSubmissionAccepted } from "./architecture-design-rejections.mjs";
@@ -11,8 +12,10 @@ import type { DesignRejectionKind, DesignSubmissionCounts } from "./architecture
 import { MODEL_FORMAT_REJECTION_LIMIT } from "../runtime/model-submission-arguments.mjs";
 import type { DesignSubmissionPolicy } from "./architecture-design-rejections.mjs";
 type DesignStage = "blueprint" | "module" | "integration" | "consultation";
+interface IntegrationReplayReceipt { version: 1; sourceCheckpointHash: string; sessionHash: string; bindingHash: string;
+  toolCallId: string; rejectionId: string; rawHash: string; resultHash: string }
 interface DesignStageState { key: string; modelCalls: number; sessionStartCalls: number; generation: number; sessionRef: { file: string } | null;
-  result: unknown; resultHash: string | null; completedBy?: "program" }
+  result: unknown; resultHash: string | null; completedBy?: "program"; submissionReplay?: IntegrationReplayReceipt }
 interface ConsultationState extends DesignStageState { assignment: BlueprintConsultationAssignment }
 export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7; moduleLimit?: number; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
   revisionHash: string | null; assignmentHash: string | null; assemblyVersion?: 2; blueprint: DesignStageState; modules: DesignStageState[]; integration: DesignStageState; hash: string;
@@ -41,10 +44,11 @@ interface PipelineOptions { record: Pick<StoredArchitectureRecord, "version"> & 
   submissionPolicy?: boolean; recoverSubmissionPolicy?: (checkpoint: DesignCheckpoint) => Promise<DesignSubmissionPolicy>;
   validateProgramCandidate?: (candidate: CandidateDraft, options: { sessionStorage: SessionStorage }) => unknown | Promise<unknown>;
   validateAssembledCandidate?: (candidate: CandidateDraft) => unknown | Promise<unknown>;
+  readHistory?: (storage: SessionStorage) => ReturnType<typeof readExecutionHistory>;
   validateHistory?: (storage: SessionStorage) => unknown | Promise<unknown> }
 const rows = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 
-import { modelUpdateBatch, singleUpdateSchema } from "../runtime/model-submission-arguments.mjs";
+import { modelSubmissionArguments, modelUpdateBatch, singleUpdateSchema } from "../runtime/model-submission-arguments.mjs";
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
@@ -56,7 +60,7 @@ import { architectureStageRepairPlan } from "./architecture-stage-recovery.mjs";
 import { architectureModuleObligations } from "./architecture-module-obligations.mjs";
 import { copyArchitectureReviewJson, reviewCheckpointObject } from "./architecture-review-binding.mjs";
 import { createArchitectureStageSchemas, validateArchitectureBlueprint, validateArchitectureModule, architectureModuleLayers,
-  assembleArchitectureCandidate, applyArchitectureIntegration, readArchitectureBlueprintStructure, readArchitectureModuleStructure,
+  assembleArchitectureCandidate, applyArchitectureIntegration, prepareArchitectureIntegration, readArchitectureBlueprintStructure, readArchitectureModuleStructure,
   readArchitectureAssemblyStructure, readArchitectureIntegrationStructure, architectureBlueprintWriter, architectureModuleCapacities, architectureModuleSubmissionSchema, materializeModuleCoverage } from "./architecture-design-stages.mjs";
 import { BLUEPRINT_CONSULTATION_LIMIT, BLUEPRINT_CONSULTATION_CALL_LIMIT, blueprintConsultationSchemas,
   blueprintConsultationContext, validateBlueprintConsultationAssignment,
@@ -134,7 +138,8 @@ const recoveryStages = (checkpoint: DesignCheckpoint): { stage: DesignStage; ent
 
 function stageState(value: unknown, limit = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT) {
   const program = Object.hasOwn(value ?? {}, "completedBy");
-  if (!exact(value, program ? [...stageKeys, "completedBy"] : stageKeys)
+  const replay = Object.hasOwn(value ?? {}, "submissionReplay");
+  if (!exact(value, [...stageKeys, ...(program ? ["completedBy"] : []), ...(replay ? ["submissionReplay"] : [])])
     || program && (value.key !== "integration" || value.completedBy !== "program" || value.result === null)
     || typeof value.key !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,99}$/u.test(value.key)
     || !isInteger(value.modelCalls) || value.modelCalls < 0 || value.modelCalls > limit
@@ -147,6 +152,14 @@ function stageState(value: unknown, limit = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT
   if (value.modelCalls > value.sessionStartCalls && !value.sessionRef) throw invalid("design_history_unavailable");
   if (value.result === null ? value.resultHash !== null : !hash(value.resultHash) || value.resultHash !== designHash(value.result)
     || value.modelCalls === value.sessionStartCalls || !value.sessionRef) throw invalid();
+  if (replay) {
+    const receipt = value.submissionReplay;
+    if (program || value.key !== "integration" || value.result === null
+      || !exact(receipt, ["version", "sourceCheckpointHash", "sessionHash", "bindingHash", "toolCallId", "rejectionId", "rawHash", "resultHash"])
+      || receipt.version !== 1 || typeof receipt.toolCallId !== "string" || !receipt.toolCallId || receipt.toolCallId.length > 256
+      || ["sourceCheckpointHash", "sessionHash", "bindingHash", "rejectionId", "rawHash", "resultHash"].some(key => !hash(receipt[key]))
+      || receipt.resultHash !== value.resultHash) throw invalid();
+  }
   return value as typeof value & DesignStageState;
 }
 
@@ -196,6 +209,12 @@ function checkpointState(input: unknown): asserts input is DesignCheckpoint {
     || checkpoint.modelCalls !== [blueprint, ...modules, integration, ...consultations].reduce((total, entry) => total + entry.modelCalls, 0)) throw invalid();
   if (integration.completedBy === "program" && (checkpoint.assemblyVersion !== 2
     || objectFields(objectFields(integration.result).updates).length !== 0)) throw invalid();
+  if (integration.submissionReplay) {
+    const policy = readDesignSubmissionPolicy(checkpoint.submissionPolicy), replay = integration.submissionReplay;
+    if (policy.version !== 2 || !policy.events.integration?.some(event => event.id === replay.rejectionId && event.kind === "format")
+      || !policy.events.integration.some(event => event.kind === "accepted" && event.id === designHash({ kind: "accepted",
+        receipt: { file: integration.sessionRef!.file, modelCalls: integration.modelCalls, resultHash: integration.resultHash } }))) throw invalid();
+  }
   if (checkpoint.validationRepair !== undefined) {
     const repair = checkpoint.validationRepair;
     if (!exact(repair, ["version", "sourceVersion", "source", "targets"]) || repair.version !== 1
@@ -322,6 +341,56 @@ function programIntegration(checkpoint: DesignCheckpoint, context: DesignPipelin
   const submission = { baseHash: designHash(assembled.candidate), updates: [] };
   const candidate = applyArchitectureIntegration(submission, { ...context, ...assembled, blueprint, modules, mergeCapabilityReasons: true });
   return { submission, candidate };
+}
+
+/** Recheck the last rejected native submission, never manufacture a replacement or spend another model call. */
+export async function readArchitectureIntegrationReplay(input: unknown, context: DesignPipelineContext, policy: DesignSubmissionPolicy,
+  directory: string, read: NonNullable<PipelineOptions["readHistory"]>) {
+  checkpointState(input);
+  const checkpoint = copy(input), entry = checkpoint.integration;
+  policy = readDesignSubmissionPolicy(policy);
+  if (policy.version !== 2 || complete(entry) || !entry.sessionRef || entry.modelCalls <= entry.sessionStartCalls
+    || !complete(checkpoint.blueprint) || !checkpoint.modules.length || !checkpoint.modules.every(complete)
+    || designFormatRejections(policy, entry.key) === 0
+    || recoveryStages(checkpoint).some(({ entry: stage }) => designSubmissionRejections(policy, stage.key) >= DESIGN_SUBMISSION_REJECTION_LIMIT
+      || stage.key !== entry.key && designFormatRejections(policy, stage.key) >= MODEL_FORMAT_REJECTION_LIMIT)) return null;
+  context = { ...context, ...stageOptions(checkpoint) };
+  const { schemas, schemaHash } = inputs({ context, binding: {} });
+  if (checkpoint.schemaHash !== schemaHash) throw invalid();
+  const storage: SessionStorage = { directory, file: entry.sessionRef.file,
+    binding: { version: 1, role: "architecture-design-stage", stage: "integration", key: entry.key, pipelineId: checkpoint.pipelineId,
+      parentBindingHash: checkpoint.bindingHash, blueprintHash: checkpoint.blueprint.resultHash, schemaHash, generation: entry.generation } };
+  const native = await read(storage), messages = native.entries.map(row => row.message);
+  if (!hash(native.sessionHash) || !hash(native.bindingHash)) throw invalid("design_history_unavailable");
+  // A guard can leave one empty error after the last tool receipt without generating a new answer.
+  const emptyGuard = (message: typeof messages[number]) => message.role === "assistant" && message.stopReason === "error"
+    && message.usage?.output === 0 && Array.isArray(message.content) && message.content.length === 0;
+  let end = messages.length - 1;
+  if (end >= 0 && emptyGuard(messages[end]!)) end--;
+  const feedback = messages[end], assistant = messages[end - 1];
+  if (feedback?.role !== "toolResult" || feedback.toolName !== "submit_architecture_integration" || feedback.isError !== true
+    || assistant?.role !== "assistant" || assistant.stopReason !== "toolUse" || !Array.isArray(assistant.content)) return null;
+  const calls = assistant.content.filter(part => part.type === "toolCall");
+  if (calls.length !== 1 || calls[0]!.name !== feedback.toolName || calls[0]!.id !== feedback.toolCallId) return null;
+  const call = calls[0]!, event = policy.events[entry.key]?.at(-1), file = entry.sessionRef.file;
+  if (!event || event.kind !== "format" || ![designHash({ file, toolCallId: call.id }),
+    designHash({ file, toolCallId: call.id, modelCalls: entry.modelCalls })].includes(event.id)) return null;
+  const parameters = context.compactSubmissions ? singleUpdateSchema(schemas.integration) : schemas.integration;
+  const args = modelSubmissionArguments(call.arguments, parameters);
+  if (!architectureToolValidation(args, parameters, { root: "integration" }).valid) return null;
+  const batch = context.compactSubmissions ? modelUpdateBatch(args) : args;
+  const blueprint = validateArchitectureBlueprint(checkpoint.blueprint.result, context), modules = checkedModules(checkpoint, blueprint, context);
+  const mergeCapabilityReasons = checkpoint.assemblyVersion === 2;
+  const assembled = assembleArchitectureCandidate({ ...context, blueprint, modules, mergeCapabilityReasons });
+  const integrationContext = { ...context, ...assembled, blueprint, modules, mergeCapabilityReasons };
+  let submission: ReturnType<typeof prepareArchitectureIntegration>;
+  try { submission = prepareArchitectureIntegration(batch, integrationContext); }
+  catch (error) { if (error instanceof InputError) return null; throw error; }
+  if (designHash(batch) === designHash(submission)) return null;
+  const candidate = readArchitectureIntegrationStructure(submission, integrationContext);
+  const receipt: IntegrationReplayReceipt = { version: 1, sourceCheckpointHash: checkpoint.hash, sessionHash: native.sessionHash,
+    bindingHash: native.bindingHash, toolCallId: call.id, rejectionId: event.id, rawHash: designHash(call.arguments), resultHash: designHash(submission) };
+  return { submission, candidate, receipt };
 }
 
 /** Presentation only: granting still requires the full frozen-input and native-session checks. */
@@ -496,7 +565,7 @@ function revisionOwners(revision: DesignRevision, blueprint: ArchitectureBluepri
 
 /** Runs only the new design path. Its caller retains the final full validation and independent review. */
 export async function runArchitectureDesignPipeline({ record, context, binding, runRole, onSave, signal, onProgress, sessionDirectory, revision, repair, submissionPolicy = false, recoverSubmissionPolicy,
-  forceIntegration = false, validateProgramCandidate = value => value, validateAssembledCandidate, validateHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
+  forceIntegration = false, validateProgramCandidate = value => value, validateAssembledCandidate, validateHistory, readHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
   if (typeof runRole !== "function" || typeof onSave !== "function" || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) throw invalid();
   const saved = readArchitectureDesignProgress(record, { context, binding });
   const fresh = { schemaVersion: 7 as const, moduleLimit: Math.min(6, Math.max(3, Math.ceil(context.requirements.length / 24))) };
@@ -583,7 +652,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     await update(next => {
       next.validationRepair = { version: 1, sourceVersion: Math.max(1, record.version - 1), source: repairSource, targets: validationPlan.targets };
       for (const { entry } of stages(next)) if (validationPlan.targets.includes(entry.key)) {
-        entry.result = null; entry.resultHash = null; entry.sessionRef = null; delete entry.completedBy;
+        entry.result = null; entry.resultHash = null; entry.sessionRef = null; delete entry.completedBy; delete entry.submissionReplay;
         entry.sessionStartCalls = entry.modelCalls; entry.generation++;
       }
     });
@@ -631,6 +700,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         const invalidate = (entry: DesignStageState) => {
           entry.result = null; entry.resultHash = null; entry.sessionRef = null;
           delete entry.completedBy;
+          delete entry.submissionReplay;
           entry.sessionStartCalls = entry.modelCalls; entry.generation++;
         };
         if (reviseBlueprint) invalidate(next.blueprint);
@@ -668,7 +738,6 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     active();
     const existing = entryAt(checkpoint, stage, key);
     if (complete(existing)) return copy(existing.result);
-    rejectionLimit([key]);
     const otherPending = checkpoint.validationRepair ? stages(checkpoint).filter(item => item.entry.key !== key && !complete(item.entry)).length
       : stage === "blueprint" ? integrationReserve(checkpoint) + (checkpoint.modules.length ? checkpoint.modules.filter(entry => !complete(entry)).length : checkpoint.moduleLimit ?? 3) : 0;
     const modelCallLimit = checkpoint.submissionPolicy ? null : allocations.get(`${stage}:${key}`) ?? Math.min(stageLimit(checkpoint, stage, key), existing.modelCalls
@@ -698,13 +767,14 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         entry.modelCalls++; next.modelCalls++;
       });
     };
-    const onResult = async (value: unknown) => {
+    const onResult = async (value: unknown, replay?: IntegrationReplayReceipt) => {
       active(); const result = validate(copy(value)), resultHash = designHash(result);
       await update(next => {
         const entry = entryAt(next, stage, key);
         if (entry.result !== null) { if (entry.resultHash !== resultHash) throw invalid(); return; }
         if (entry.modelCalls <= entry.sessionStartCalls || !entry.sessionRef) throw invalid("design_history_unavailable");
         entry.result = result; entry.resultHash = resultHash;
+        if (replay) entry.submissionReplay = copy(replay);
         if (next.submissionPolicy) recordDesignSubmissionAccepted(next.submissionPolicy, key,
           { file: entry.sessionRef.file, modelCalls: entry.modelCalls, resultHash });
         if (stage === "blueprint") {
@@ -716,6 +786,16 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         }
       });
     };
+    if (stage === "integration" && checkpoint.submissionPolicy && readHistory && validateAssembledCandidate) {
+      const replay = await readArchitectureIntegrationReplay(checkpoint, context, checkpoint.submissionPolicy, sessionDirectory, readHistory);
+      if (replay) {
+        await validateAssembledCandidate(replay.candidate); active();
+        await onResult(replay.submission, { ...replay.receipt, sourceCheckpointHash: saved?.hash ?? replay.receipt.sourceCheckpointHash });
+        onProgress?.({ type: "status", phase: "designing", label: "原会话最后一次整合提交已通过格式还原和完整校验，继续独立评审…" });
+        return copy(replay.submission);
+      }
+    }
+    rejectionLimit([key]);
     onProgress?.({ type: "status", phase: "designing", label: ({ blueprint: "正在确定架构蓝图与模块边界…", module: "正在设计功能模块并核对上游接口…", integration: "正在整合模块并核对交接…", consultation: "正在分组核对蓝图专项问题…" })[stage] });
     const submitName = ({ blueprint: "submit_architecture_blueprint", module: "submit_architecture_module", integration: "submit_architecture_integration", consultation: "submit_blueprint_analysis" })[stage];
     const value = await runRole({ stage, key, role, stageInstruction: stage === "consultation"
@@ -889,8 +969,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       instruction: "path 指向 baseCandidate 的已有位置，保留冻结的组件、步骤和编号。按本轮工具声明提交单项或批量修改，并绑定当前 baseHash。" + INTEGRATION_ACCEPTANCE_RULE } }, integrationParameters, value => {
     if (!architectureToolValidation(value, integrationParameters, { root: "integration" }).valid) throw new InputError("整合补丁必须选择单项path/value或完整updates。");
     const batch = context.compactSubmissions ? modelUpdateBatch(value) : value;
-    applyArchitectureIntegration(batch, integrationContext);
-    return copy(batch);
+    return prepareArchitectureIntegration(batch, integrationContext);
   }, integrationContext);
   active();
   return applyArchitectureIntegration(integration, integrationContext);

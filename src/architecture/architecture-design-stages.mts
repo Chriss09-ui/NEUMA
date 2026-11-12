@@ -9,6 +9,7 @@ import { architectureGlobalIssues, architectureCapabilityIssues, type StageSeman
 import { copyArchitectureReviewJson } from "./architecture-review-binding.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { architectureModuleObligationIssues } from "./architecture-module-obligations.mjs";
+import { modelSubmissionArguments, modelSubmissionSchemaAtPath } from "../runtime/model-submission-arguments.mjs";
 
 const PART_FIELDS = ["components", "steps", "capabilities", "failureHandling", "decisions", "coverage", "acceptance", "unknowns", "platformClaims"] as const;
 const LOCAL_ID_FIELDS = ["decisions", "acceptance", "platformClaims"] as const;
@@ -532,8 +533,9 @@ function target(candidate: unknown, path: string) {
 }
 
 type IntegrationContext = StageAssemblyOptions & { candidate: CandidateDraft; conflicts?: ArchitectureConflict[] };
-export function applyArchitectureIntegration(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, true); }
-export function readArchitectureIntegrationStructure(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, false); }
+export function applyArchitectureIntegration(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, true).candidate; }
+export function prepareArchitectureIntegration(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, true).submission; }
+export function readArchitectureIntegrationStructure(value: unknown, context: IntegrationContext) { return applyIntegration(value, context, false).candidate; }
 function applyIntegration(value: unknown, context: IntegrationContext, semantic: boolean) {
   const { candidate, conflicts = [], candidateSchema, requirements = [], blueprint, modules, legacyBlueprint = false } = context;
   const input = checked(value, createArchitectureStageSchemas(context).integration, "integration") as { baseHash: string; updates: { path: string; value: unknown }[] };
@@ -545,12 +547,25 @@ function applyIntegration(value: unknown, context: IntegrationContext, semantic:
     fail("integration.baseHash", "invalid_reference", "整合基底或冲突清单与当前模块成果不一致。");
   const permitted = new Set(conflicts.map((entry) => entry.path)), changed: string[] = [];
   const conflictAllows = (path: string) => [...permitted].some((allowed) => path === allowed || path.startsWith(allowed + "/"));
-  for (const update of input.updates) {
+  for (const [index, update] of input.updates.entries()) {
     const location = target(result, update.path), root = location.parts[0]!;
     if (!DERIVED_FIELDS.has(root) && !conflictAllows(update.path))
       fail("integration.updates.path", "invalid_reference", "整合仅能修正明确冲突或派生的总指令、失败处理、覆盖、验收与未知项。");
     if (changed.some((path) => path === update.path || path.startsWith(update.path + "/") || update.path.startsWith(path + "/")))
       fail("integration.updates.path", "invalid_reference", "整合路径不能重复或互相覆盖。");
+    if (semantic) {
+      const schema = modelSubmissionSchemaAtPath(candidateSchema, update.path);
+      if (schema) {
+        update.value = modelSubmissionArguments(update.value, schema);
+        const feedback = architectureToolValidation(update.value, schema, { root: "value" });
+        if (!feedback.valid) {
+          const issues = feedback.issues.map(issue => ({ ...issue, path: `integration.updates[${index}].${issue.path}`, candidatePath: update.path }));
+          throw Object.assign(new InputError("整合补丁值未满足目标字段结构：" + JSON.stringify({ ...feedback, issues })), {
+            validationIssue: issues[0], validationIssues: issues,
+          });
+        }
+      }
+    }
     changed.push(update.path); location.parent[location.key] = copy(update.value);
   }
   const feedback = architectureToolValidation(result, candidateSchema, { root: "candidate" });
@@ -602,5 +617,5 @@ function applyIntegration(value: unknown, context: IntegrationContext, semantic:
   for (const row of result.acceptance ?? []) if (!Array.isArray(row.requirementIds) || row.requirementIds.some((id) => !requirementIds.has(id)))
     fail("integration.acceptance.requirementIds", "invalid_reference", "跨模块验收只能引用当前正式需求。");
   for (const field of ["capabilities", "decisions", "acceptance", "platformClaims"] as const) if (result[field]) unique(result[field], `candidate.${field}`);
-  return copy(result);
+  return { candidate: copy(result), submission: copy(input) };
 }

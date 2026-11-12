@@ -1230,3 +1230,82 @@ test("蓝图经既有必要性复核返回真实需求缺口，不伪造蓝图�
   assert.equal(f.record.designProgressCheckpoint!.blueprint.result, null);
   assert.equal(f.record.designProgressCheckpoint!.modelCalls, 1);
 });
+
+async function rejectedEncodedIntegration() {
+  const f = fixture(), messages: SessionMessage[] = [];
+  let args: IntegrationPatch | undefined;
+  await assert.rejects(f.run({ submissionPolicy: true, runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage !== "integration") { await send(); await options.onResult(value); return value; }
+    args = { baseHash: options.payload.baseHash, updates: [{ path: "/acceptance/0", value: JSON.stringify(options.payload.baseCandidate!.acceptance[0]) }] };
+    for (let i = 0; i < 5; i++) {
+      await send();
+      await options.onSubmissionRejected!(`legacy_${i}`, i < 2 ? "content" : "format");
+      messages.push({ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: `legacy_${i}`, name: options.submitName, arguments: structuredClone(args) }] },
+        { role: "toolResult", toolCallId: `legacy_${i}`, toolName: options.submitName, isError: true, content: [{ type: "text", text: "旧程序拒绝编码对象" }] });
+    }
+    throw new Error("历史格式三次停点");
+  }) }), /历史格式三次停点/);
+  const cp = structuredClone(f.record.designProgressCheckpoint!);
+  const readHistory = async (storage: SessionStorage) => {
+    assert.equal(storage.file, cp.integration.sessionRef!.file);
+    assert.equal(objectFields(storage.binding).blueprintHash, cp.blueprint.resultHash);
+    assert.equal(objectFields(storage.binding).pipelineId, cp.pipelineId);
+    return { entries: messages.map((message, i) => ({ type: "message" as const, id: `message_${i}`, message })),
+      sessionHash: designHash(messages), bindingHash: designHash(storage.binding), leafId: "last" };
+  };
+  return { f, cp, args: args!, messages, readHistory };
+}
+
+test("格式兼容修复重验原生末次整合，零新请求、保留全部退回记录并原子保存接受凭据", async () => {
+  const { f, cp, args, messages, readHistory } = await rejectedEncodedIntegration(), start = f.calls.length;
+  messages.push({ role: "assistant", stopReason: "error", usage: { output: 0 }, content: [] });
+  const nativeBefore = structuredClone(messages);
+  await assert.rejects(f.run({ readHistory, validateAssembledCandidate: () => {}, onSave: async next => {
+    if (next.integration.result) throw new Error("接受落盘失败");
+  } }), /接受落盘失败/);
+  assert.deepEqual(f.record.designProgressCheckpoint!.submissionPolicy, cp.submissionPolicy);
+  assert.equal(f.record.designProgressCheckpoint!.integration.result, null);
+  f.record.version++;
+  const candidate = candidateResult(await f.run({ readHistory, validateAssembledCandidate: value => validateDesign(value, { requirements: f.context.requirements }) }));
+  const saved = f.record.designProgressCheckpoint!, receipt = saved.integration.submissionReplay!;
+  assert.equal(f.calls.length, start); assert.equal(saved.modelCalls, cp.modelCalls);
+  assert.deepEqual(saved.modules, cp.modules); assert.deepEqual(saved.blueprint, cp.blueprint);
+  assert.deepEqual(saved.integration.sessionRef, cp.integration.sessionRef);
+  assert.deepEqual(saved.integration.result!.updates[0]!.value, candidate.acceptance[0]);
+  assert.equal(receipt.rawHash, designHash(args)); assert.equal(receipt.toolCallId, "legacy_4");
+  assert.equal(receipt.sourceCheckpointHash, cp.hash);
+  assertDesignSubmissionHistory(saved.submissionPolicy, [cp.submissionPolicy]);
+  assert.deepEqual(designSubmissionCounts(saved.submissionPolicy, "integration"), { content: 2, format: 0 });
+  const savedPolicy = saved.submissionPolicy!;
+  assert.equal(savedPolicy.version === 2 && savedPolicy.events.integration!.filter(event => event.kind === "format").length, 3);
+  assert.deepEqual(readArchitectureDesignProgress(f.record, f), saved);
+  assert.deepEqual(messages, nativeBefore);
+  assert.deepEqual(await f.run({ readHistory }), candidate);
+  assert.equal(f.calls.length, start);
+});
+
+test("原提交重验拒绝旧稿回退、错版本、内容问题、失配回执和耗尽内容次数，不刷新格式预算", async () => {
+  for (const damage of ["malformed", "semantic", "stale", "newer", "receipt", "content_limit", "missing_history", "full_check"]) {
+    const { f, cp, messages, readHistory } = await rejectedEncodedIntegration(), start = f.calls.length;
+    const last = messages.at(-2)!;
+    assert.ok(Array.isArray(last.content) && last.content[0]!.type === "toolCall");
+    const args = objectFields(last.content[0]!.arguments), update = objectFields((args.updates as unknown[])[0]);
+    if (damage === "malformed") update.value = '{"id":';
+    if (damage === "semantic") update.value = JSON.stringify({ ...JSON.parse(String(update.value)), expected: "丢弃原有验收要求" });
+    if (damage === "stale") args.baseHash = "0".repeat(64);
+    if (damage === "newer") messages.push({ role: "assistant", stopReason: "length", content: [{ type: "text", text: "未完成的新稿" }] });
+    if (damage === "receipt") messages.at(-1)!.toolCallId = "another_call";
+    if (damage === "content_limit") {
+      const policy = cp.submissionPolicy!;
+      assert.equal(policy.version, 2);
+      if (policy.version === 2) policy.events.integration!.unshift(...[0, 1, 2].map(i => ({ kind: "content" as const, id: designHash({ return: i }) })));
+      const { hash: _hash, ...body } = cp; cp.hash = designHash(body); f.record.designProgressCheckpoint = cp;
+    }
+    const before = structuredClone(f.record.designProgressCheckpoint!);
+    await assert.rejects(f.run({ readHistory: damage === "missing_history" ? async () => { throw new InputError("原会话缺失"); } : readHistory,
+      validateAssembledCandidate: () => { if (damage === "full_check") throw new InputError("完整候选仍不合格"); } }));
+    assert.equal(f.calls.length, start, damage);
+    assert.deepEqual(f.record.designProgressCheckpoint!.submissionPolicy, before.submissionPolicy, damage);
+    assert.equal(f.record.designProgressCheckpoint!.integration.result, null, damage);
+  }
+});

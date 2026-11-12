@@ -2,7 +2,7 @@ import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../../src/runtime/pi-submission-contract.mjs";
-import { modelSubmissionFormatRecovery, modelReadInputIssues, modelReadRecoveryResult } from "../../src/runtime/model-submission-arguments.mjs";
+import { modelSubmissionArguments, modelSubmissionSchemaAtPath, modelSubmissionFormatRecovery, modelReadInputIssues, modelReadRecoveryResult } from "../../src/runtime/model-submission-arguments.mjs";
 
 test("格式重交反馈只接受程序识别的格式诊断，三轮停止且内容错误不能混入", () => {
   const issues = [{ path: "review.checks", reason: "invalid_type" }, { path: "review.issues", reason: "unknown_field" },
@@ -79,4 +79,20 @@ test("缺失、重复或未注册的正式出口不生成误导提示", () => {
     { role: "PRIVATE invalid role" }, { submitName: {} }])
     assert.throws(() => callFixture(renderPiSubmissionContract, undefined, [{ ...base, ...override }]), (error) => error instanceof TypeError && !error.message.includes("PRIVATE"));
   assert.doesNotMatch(renderPiSubmissionContract(base), /正式终止出口/u);
+});
+
+test("补丁按声明路径恢复容器，保留业务文本和数字，不猜测联合类型或未声明字段", () => {
+  const schema = { type: "object", properties: {
+    rows: { type: "array", items: { $ref: "#/definitions/row" } },
+    free: {}, union: { anyOf: [{ type: "object" }, { type: "string" }] },
+  }, definitions: { row: { type: "object", properties: { text: { type: "string" }, number: { type: "integer" }, ids: { type: "array", items: { type: "string" } } } } } };
+  const read = (path: string, value: unknown) => {
+    const target = modelSubmissionSchemaAtPath(schema, path);
+    return target ? modelSubmissionArguments(value, target) : value;
+  };
+  const raw = JSON.stringify({ text: '{"id":1}', number: "3", ids: '["a"]' });
+  assert.deepEqual(read("/rows/0", raw), { text: '{"id":1}', number: "3", ids: ["a"] });
+  for (const path of ["/rows/0/text", "/rows/0/number", "/rows/01", "/rows/0/extra", "/union", "/free", "/__proto__", "/rows/~2"])
+    assert.equal(read(path, raw), raw, path);
+  for (const value of ['{"ids":[}', '"3"', '3', '{"__proto__":{}}']) assert.equal(read("/rows/0", value), value);
 });
