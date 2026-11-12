@@ -3,6 +3,7 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { NeumaTool, SessionMessage } from "../runtime/execution-port.mjs";
 import type { ReviewDiagnosticIssue } from "../contracts/architecture.mjs";
 import { objectFields, isPlainRecord, isRecord, isInteger } from "../runtime/type-boundary.mjs";
+import { architectureMaterialId, locateArchitectureMaterial } from "./architecture-material-path.mjs";
 type EvidenceSource = "candidate" | "requirements" | "runtimeCapabilities" | "contextManifest" | "evidence" | "confirmedRequirementContext" | "deferredVerifications" | "acceptanceAdapterGuide";
 interface EvidenceRequest { source: EvidenceSource; pointer: string; offset?: number; limit?: number; pathOffset?: number; acceptanceId?: string }
 interface EvidenceReference { source: EvidenceSource; path: string; quote: string }
@@ -44,6 +45,7 @@ import { ACCEPTANCE_ADAPTERS, validateAcceptanceVerification } from "../verifica
 const SOURCES: EvidenceSource[] = ["candidate", "requirements", "runtimeCapabilities", "contextManifest", "evidence", "confirmedRequirementContext", "deferredVerifications", "acceptanceAdapterGuide"];
 const CANDIDATE_SECTIONS = { 能力清单: "capabilities", 组件清单: "components", 执行步骤: "steps",
   需求覆盖: "coverage", 验收用例: "acceptance", 设计决策: "decisions" };
+const CANDIDATE_ARRAY_FIELDS = [...Object.values(CANDIDATE_SECTIONS), "connections", "failureHandling", "unknowns", "platformClaims"];
 const object = (properties: Record<string, ToolSchema>): ToolSchema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const RECEIPT_SCHEMA = object({ receiptId: { type: "string", pattern: "^ref_[a-f0-9]{64}$" } });
@@ -51,7 +53,7 @@ const REFERENCE_SELECTOR_SCHEMA = object({ source: { type: "string", enum: SOURC
 const SCOPE_RECEIPT_SCHEMA = { type: "string", pattern: "^scope_[a-f0-9]{64}$" };
 const REQUEST_FIELDS = {
   source: { type: "string", enum: SOURCES }, pointer: { type: "string", maxLength: 500,
-    description: "所选来源内部的 JSON Pointer。candidate 已经是设计稿，可选 reviewEvidenceIndex.candidateSections 中的名称，如“能力清单”，也可直接使用该项的 pointer。" },
+    description: "所选来源内部的位置。数组可用唯一id代替数字，如/components/FailureHandler/purpose；返回实际数字路径。candidate也可选reviewEvidenceIndex.candidateSections中的名称，如“能力清单”。" },
   offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, limit: { type: "integer", minimum: 1, maximum: 1000 },
   pathOffset: { type: "integer", minimum: 0, maximum: 512 },
   acceptanceId: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9_-]{0,79}$" },
@@ -63,7 +65,8 @@ const stableId = (value: unknown): value is string => typeof value === "string" 
 const encodePointer = (value: string) => value.replace(/~/g, "~0").replace(/\//g, "~1");
 const SAFE_KEYS = new Set(["id", "text", "content", "value", "label", "source", "kind", "evidence", "messageId", "quote", "version", "items",
   "requirements", "resolvedIssues", "decisions", "issueId", "dimension", "critical", "applicability", "reason", "status", "adapters",
-  "stage", "owner", "scope", "proves", "doesNotProve", "splitRule", "delivery", "characters", "sha256"]);
+  "stage", "owner", "scope", "proves", "doesNotProve", "splitRule", "delivery", "characters", "sha256",
+  ...CANDIDATE_ARRAY_FIELDS, "purpose", "necessity", "inputs", "outputs", "input", "output", "expected", "verification", "completion"]);
 
 function at(value: unknown, pointer: unknown): { found: boolean; value?: unknown } {
   if (pointer === "") return { found: true, value };
@@ -121,11 +124,12 @@ function evidenceIndex(context: UnknownRecord, candidateSchema: ToolSchema | und
     if (Object.hasOwn(design, field) && (!candidateSchema || Object.hasOwn(candidateSchema.properties ?? {}, field)))
       candidateSections[label] = { source: "candidate", pointer: `/${field}` };
   }
-  for (const [key, schema] of Object.entries(candidateSchema?.properties ?? {})) {
-    if (schema?.type !== "array" || !Array.isArray(design[key])) continue;
+  const arrayFields = candidateSchema ? Object.entries(candidateSchema.properties ?? {}).filter(([, schema]) => schema.type === "array").map(([key]) => key)
+    : CANDIDATE_ARRAY_FIELDS;
+  for (const key of arrayFields) {
+    if (!Array.isArray(design[key])) continue;
     candidate[key] = rows(design[key]).map((input, index) => {
-      const item = objectFields(input);
-      const id = stableId(item?.id) ? item.id : stableId(item?.requirementId) ? item.requirementId : undefined;
+      const id = architectureMaterialId(input);
       return { ...(id ? { id } : {}), path: `/${encodePointer(key)}/${index}` };
     });
   }
@@ -240,11 +244,11 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       if (Object.hasOwn(index.candidateSections, pointer)) pointer = index.candidateSections[pointer]!.pointer;
       // Only the model packet wraps the candidate in "design". A real branch owns its entire subtree.
       else if (pointer.startsWith("/design/") && !Object.hasOwn(objectFields(data), "design")) {
-        const relative = pointer.slice("/design".length), selected = at(data, relative);
-        if (selected.found) return { pointer: relative, ...selected };
+        const relative = pointer.slice("/design".length), selected = locateArchitectureMaterial(data, relative);
+        if (selected.found || selected.reason === "reference_id_ambiguous") return selected;
       }
     }
-    return { pointer, ...at(data, pointer) };
+    return locateArchitectureMaterial(data, pointer);
   }
   function recoverReadPage(value: unknown, request: EvidenceRequest) {
     const page = objectFields(value), reference = objectFields(page.reference);
@@ -320,6 +324,9 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
     }
     const selected = locate(source, request.pointer), pointer = selected.pointer;
     if (!selected.found) {
+      if (selected.reason === "reference_id_ambiguous") return { found: false, reason: selected.reason, source, contextHash,
+        parentPointer: selected.parentPointer, availablePaths: selected.availablePaths, totalMatches: selected.totalMatches,
+        remedy: "编号重复，不能自动选择；请使用列出的实际数字位置。" };
       const catalog = nearbyPaths(frozen[source], pointer, keys, pathCatalog.get(source)!);
       return { found: false, reason: "reference_path_missing", source, contextHash,
         availablePaths: catalog.paths.slice(pathOffset, pathOffset + 24), pathOffset,
@@ -567,6 +574,8 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
         if (Array.isArray(issue?.candidatePaths)) issue.candidatePaths = rows(issue.candidatePaths).map((reference, position) => collect(reference, () => {
           if (typeof reference === "string") {
             const selected = locate("candidate", reference);
+            if (!selected.found && selected.reason === "reference_id_ambiguous")
+              throw referenceSelectorError(`review.issues[${index}].candidatePaths[${position}]`, selected.reason);
             return selected.found ? selected.pointer : reference;
           }
           if (!reference || typeof reference !== "object") return reference;
@@ -590,7 +599,8 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
           if (result.candidateHash !== candidateHash) throw referenceSelectorError("review.candidateHash", "candidate_mismatch");
           if (!fullSource(reference.source)) throw referenceSelectorError(path, "context_not_full");
           const current = locate(reference.source, reference.path);
-          const quote = current.found ? typeof current.value === "string" ? current.value : JSON.stringify(current.value) : undefined;
+          if (!current.found) throw referenceSelectorError(path, current.reason);
+          const quote = typeof current.value === "string" ? current.value : JSON.stringify(current.value);
           if (typeof quote !== "string" || !quote.trim()) throw referenceSelectorError(path, "reference_path_missing");
           const selector = { source: reference.source, path: current.pointer };
           return selector;

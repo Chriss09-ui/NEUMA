@@ -32,6 +32,7 @@ function fidelityContext(value: unknown): FidelityContext {
 }
 import { InputError } from "../requirements/core.mjs";
 import { createArchitectureMaterialFiles } from "./architecture-material-files.mjs";
+import { architectureMaterialPointer, ARCHITECTURE_ID_READ_RULE } from "./architecture-material-path.mjs";
 import { createModelContextReader, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
 import { legacyVerificationModelContext, verificationModelContext, projectVerificationMessages } from "./architecture-model-context.mjs";
 import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
@@ -443,7 +444,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
       await saveProgress();
       signal?.throwIfAborted();
     }
-    const contextReader = createModelContextReader(() => current);
+    const contextReader = createModelContextReader(() => current, { resolvePointer: architectureMaterialPointer });
     const files = createArchitectureMaterialFiles(dataDir);
     const materialFiles = await files.publish(current);
     session = await sessionFactory({ config, cwd, dataDir, customTools: [tool, contextReader, files.tool], onModelCall: account,
@@ -459,6 +460,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
         + "\n引用优先交{candidatePath,requirementId,file,path,reason}，file从资料目录的原需求文件选择。requirements.json的path必须属于该requirementId。整条长需求可按位置引用，不复制原文；兼容claimRef稳定需求编号和旧详细摘录。目录只是位置，必须读取相关完整内容后独立判断。"
 
         + "\n" + MODEL_CONTEXT_INSTRUCTIONS
+        + "\n" + ARCHITECTURE_ID_READ_RULE
         + "\n" + renderPiSubmissionContract({ role: "requirement-fidelity", submitName: tool.name, tools: [tool, contextReader, files.tool], structuredResponse: true }),
       rawInputValidators: { [tool.name]: async ({ args, toolCallId }) => {
         if (stalled()) throw new InputError("范围复核连续三次因同一问题提交失败");

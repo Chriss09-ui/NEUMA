@@ -6,6 +6,7 @@ import type { NeumaTool } from "../runtime/execution-port.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
+import { architectureMaterialPointer, ARCHITECTURE_ID_READ_RULE } from "./architecture-material-path.mjs";
 
 export interface ArchitectureMaterialFile { file: string; path: string; characters: number }
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -46,7 +47,7 @@ export function createArchitectureMaterialFiles(directory: string) {
   };
   const tool: NeumaTool = {
     name: "read_architecture_file", label: "读取架构资料文件",
-    description: "只读materialFiles目录中的文件。file使用目录中的文件名或完整路径，path可省略表示整份文件。每项最多10000字符，一批最多8项；nextRequest非空时原样续读。不能读取目录外文件。",
+    description: "只读materialFiles目录中的文件。file使用目录中的文件名或完整路径，path可省略表示整份文件。每项最多10000字符，一批最多8项；nextRequest非空时原样续读。不能读取目录外文件。" + ARCHITECTURE_ID_READ_RULE,
     parameters: { type: "object", additionalProperties: false, required: ["requests"], properties: {
       requests: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false,
         required: ["file"], properties: { file: { type: "string", minLength: 1, maxLength: 4096 },
@@ -72,7 +73,7 @@ export function createArchitectureMaterialFiles(directory: string) {
         requests.push({ section: entry.section, ...(request.path !== undefined ? { pointer: request.path } : {}),
           ...(request.cursor !== undefined ? { cursor: request.cursor } : {}) });
       }
-      const output = await createModelContextReader(() => source).execute(id, { requests }, signal);
+      const output = await createModelContextReader(() => source, { resolvePointer: architectureMaterialPointer }).execute(id, { requests }, signal);
       return { ...output, content: output.content.map(block => {
         if (block.type !== "text") return block;
         const result = objectFields(JSON.parse(block.text));

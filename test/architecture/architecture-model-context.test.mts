@@ -15,7 +15,7 @@ import { join } from "node:path";
 test("评审只投递位置，真实资料文件分页可读；旧报告原文保留，错路径与文件变更拒绝", async t => {
   const directory = await mkdtemp(join(tmpdir(), "neuma-review-materials-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const candidate = { components: [{ purpose: "说明😀".repeat(5000) }] };
+  const candidate = { components: [{ id: "FailureHandler", purpose: "说明😀".repeat(5000) }] };
   const source = { candidate, design: candidate, requirements: [{ id: "r", text: "全部处理" }],
     distributedReview: { issues: [{ description: "核对组件", references: [{ source: "candidate", path: "/components", quote: "旧原文" }] }] } };
   const before = structuredClone(source), files = createArchitectureMaterialFiles(directory), catalog = await files.publish(source);
@@ -25,13 +25,15 @@ test("评审只投递位置，真实资料文件分页可读；旧报告原文�
   assert.equal(packet.design, undefined); assert.equal(packet.requirements, undefined);
   assert.doesNotMatch(JSON.stringify(packet), /旧原文|说明😀/);
   assert.deepEqual(recordArray(objectFields(packet.distributedReview).issues)[0]!.references, [{ file: "candidate.json", path: "/components" }]);
-  let request: Record<string, unknown> = { file: "candidate.json", path: "/components" }, complete = "", pages = 0;
+  let request: Record<string, unknown> = { file: "candidate.json", path: "/components/FailureHandler/purpose" }, complete = "", pages = 0;
   do {
     const output = JSON.parse(toolText(await files.tool.execute("read", { requests: [request] })));
     const row = output.results[0]; assert.equal(row.error, undefined);
+    assert.equal(row.path, "/components/0/purpose");
     complete += row.text; pages++; request = row.nextRequest;
+    if (pages === 1 && request) request = { ...request, path: "/components/FailureHandler/purpose" };
   } while (request);
-  assert.ok(pages > 1); assert.deepEqual(JSON.parse(complete), candidate.components);
+  assert.ok(pages > 1); assert.equal(JSON.parse(complete), candidate.components[0]!.purpose);
   assert.deepEqual(source, before);
   const reportFile = catalog.find(item => item.file === "distributedReview.json")!;
   assert.match(await readFile(reportFile.path, "utf8"), /旧原文/);
@@ -41,6 +43,24 @@ test("评审只投递位置，真实资料文件分页可读；旧报告原文�
   const entry = catalog.find(item => item.file === "candidate.json")!;
   await chmod(entry.path, 0o600); await writeFile(entry.path, '{"changed":true}');
   await assert.rejects(files.tool.execute("changed", { requests: [{ file: "candidate.json" }] }), /已变化/);
+});
+
+test("文件批读对重复编号明确报错，其他项目及需求编号仍能独立读取", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-review-materials-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const files = createArchitectureMaterialFiles(directory);
+  await files.publish({ candidate: { components: [{ id: "same", purpose: "第一项" }, { id: "same", purpose: "第二项" }],
+    coverage: [{ requirementId: "R1", verification: "全部检查" }] } });
+  const output = JSON.parse(toolText(await files.tool.execute("batch", { requests: [
+    { file: "candidate.json", path: "/components/same/purpose" },
+    { file: "candidate.json", path: "/components/1/purpose" },
+    { file: "candidate.json", path: "/coverage/R1/verification" },
+  ] })));
+  assert.equal(output.results[0].error.reason, "reference_id_ambiguous");
+  assert.deepEqual(output.results[0].error.availablePaths, ["/components/0", "/components/1"]);
+  assert.equal(JSON.parse(output.results[1].text), "第二项");
+  assert.equal(output.results[2].path, "/coverage/0/verification");
+  assert.equal(JSON.parse(output.results[2].text), "全部检查");
 });
 
 test("蓝图主要能力与后续义务直接给齐，完整方案结构不会冒充本阶段提交结构", () => {

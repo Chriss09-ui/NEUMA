@@ -265,7 +265,15 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       }
       const reviewNode = ["review_slice", "reviewer", "fidelity"].includes(kind);
       if (reviewNode && readReviewPages && body.messages.filter(row => row.role === "tool").length < 4) {
-        name = "read_architecture_file"; args = { requests: [{ file: "requirements.json" }] };
+        const page = body.messages.filter(row => row.role === "tool").length;
+        const pointer = `/components/${candidate.components[0]!.id}/purpose`;
+        if (page === 2) {
+          name = "read_model_context"; args = { requests: [{ section: kind === "fidelity" ? "candidate" : "design", pointer }] };
+        } else if (page === 3 && kind !== "fidelity") {
+          name = "read_architecture_evidence"; args = { source: "candidate", pointer };
+        } else {
+          name = "read_architecture_file"; args = { requests: [page === 1 ? { file: "candidate.json", path: pointer } : { file: "requirements.json" }] };
+        }
         assert.ok(names.includes(name));
       } else if (rejectSlice && kind === "review_slice" && payloads.some(row => objectFields(row.assignment).id === "review_checks_0")) {
         args = { ...objectFields(args), factClaims: [{ source: "runtimeCapabilities", path: "/version", expectedJson: "1" }] };
@@ -482,7 +490,14 @@ test("子组、主评审和范围复核都能在四次读取后提交，累计�
     const packets = entry.body.messages.filter(message => message.role === "user").map(message => { try { return JSON.parse(text(message.content)); } catch { return null; } }).filter(Boolean);
     assert.ok(packets.some(packet => packet.materialFiles));
     assert.ok(packets.every(packet => !packet.design && !packet.candidate && !packet.requirements && !packet.acceptanceAdapterGuide));
+    if (entry.kind === "review_slice") assert.ok(packets.some(packet => packet.reviewEvidenceIndex?.candidate?.components?.some(
+      (row: { id?: string; path: string }) => row.id === "summarize" && row.path === "/components/0")));
   }
+  const componentReads = f.requests.flatMap(entry => entry.body.messages.filter(message => message.role === "tool")
+    .flatMap(message => text(message.content).split("\n").flatMap(part => { try { return [JSON.parse(part)]; } catch { return []; } })));
+  assert.ok(componentReads.some(row => row.reference?.path === "/components/0/purpose" && row.found));
+  assert.ok(componentReads.some(row => row.results?.some((page: { section?: string; pointer?: string }) => page.section === "design" && page.pointer === "/components/0/purpose")));
+  assert.ok(componentReads.some(row => row.results?.some((page: { file?: string; path?: string }) => page.file === "candidate.json" && page.path === "/components/0/purpose")));
   const reads = f.requests.flatMap(entry => entry.body.messages.filter(message => message.role === "tool" && text(message.content).includes('"file":"requirements.json"')));
   assert.ok(reads.length); assert.ok(reads.some(message => text(message.content).includes("完整核对全部工作记录")));
   assert.deepEqual(f.errors, []);

@@ -10,7 +10,7 @@ import { toolInputValidation } from "./tool-input-diagnostics.mjs";
 import { modelSubmissionTool, modelUpdateBatch, singleUpdateSchema } from "./model-submission-arguments.mjs";
 import { readPiStructuredSubmission, renderPiSubmissionContract } from "./pi-submission-contract.mjs";
 import { repairHash, type RepairWorker } from "./repair-scheduler.mjs";
-import { createModelContextReader, modelContextValue } from "./model-context.mjs";
+import { createModelContextReader, modelContextValue, type ModelContextPointerResolver } from "./model-context.mjs";
 
 const schema: ToolSchema = { type: "object", additionalProperties: false, required: ["baseHash", "issueIds", "summary", "updates"], properties: {
   baseHash: { type: "string" }, issueIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3, uniqueItems: true },
@@ -26,7 +26,7 @@ const prompt = `你是本次修复调度中的独立子Agent，仅负责repairAs
 export async function runRepairAgent(options: { worker: RepairWorker; context: Record<string, unknown>; binding: unknown;
   config: ModelConfig; cwd: string; dataDir: string; sessionDirectory: string; sessionFactory: SessionFactory;
   maxOutputTokens: number; signal?: AbortSignal | undefined; tools?: NeumaTool[];
-  prepareMaterials?: (sources: UnknownRecord) => Promise<{ tool: NeumaTool; project: (input: UnknownRecord) => UnknownRecord }> }): Promise<void> {
+  prepareMaterials?: (sources: UnknownRecord) => Promise<{ tool: NeumaTool; project: (input: UnknownRecord) => UnknownRecord; resolvePointer?: ModelContextPointerResolver }> }): Promise<void> {
   const { worker, signal } = options;
   let submitted = false, accepting = true, calls = worker.group.calls, session: ExecutionSession | undefined;
   const active = () => { signal?.throwIfAborted(); if (!accepting || submitted) throw new InputError("修复子任务已结束。"); };
@@ -66,7 +66,7 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
   const ready = worker.group.paths.every(path => Object.hasOwn(baseFields, path))
     && ["requirements", "candidateSchema"].every(section => sources[section] === undefined || Object.hasOwn(preparedContext, section));
   if (!ready && worker.callLimit - calls < 2) throw new InputError("本组必要原文未完整内联，剩余次数不足以读取并正式提交；未新增模型调用。");
-  const reader = createModelContextReader(() => sources);
+  const reader = createModelContextReader(() => sources, { resolvePointer: fileDelivery?.resolvePointer });
   const read: NeumaTool = { name: "read_repair_context", label: "读取修复原文", description: "按requests批量读取本组固定原文，每项最多10000字符，按nextRequest续读；兼容旧section/pointer读取。",
     executionMode: "sequential", parameters: { type: "object", anyOf: [reader.parameters, { type: "object", additionalProperties: false, required: ["section"], properties: {
       section: { type: "string" }, pointer: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 24000 } } },

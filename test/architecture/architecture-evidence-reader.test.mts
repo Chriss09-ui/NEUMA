@@ -371,6 +371,41 @@ test("UTF-16分页不切断代理对，缺失路径只返回有界安全路径�
   assert.equal(result(await current.tool.execute("bad", { source: "candidate", pointer: "/__proto__" })).found, false);
 });
 
+test("子组无候选schema也能按唯一编号定位，读取和提交使用同一真实位置", async () => {
+  const candidateHash = "a".repeat(64), components = [
+    { id: "InputValidator", purpose: "检查输入" }, { id: "FailureHandler", purpose: "返回通用错误并记录日志" },
+  ];
+  const context = architectureReviewEvidenceContext({ design: { components }, requirements: [{ id: "R1", text: "处理错误" }], runtimeCapabilities: {} });
+  const current = reader({ context, candidateHash });
+  const named = result(await current.tool.execute("by-id", { source: "candidate", pointer: "/components/FailureHandler/purpose" }));
+  assert.equal(named.found, true);
+  assert.deepEqual(named.reference, { source: "candidate", path: "/components/1/purpose", quote: components[1]!.purpose });
+  const numbered = result(await current.tool.execute("by-position", { source: "candidate", pointer: "/components/1/purpose" }));
+  assert.equal(named.receiptId, numbered.receiptId);
+  assert.deepEqual(current.index.candidate.components, components.map((item, index) => ({ id: item.id, path: `/components/${index}` })));
+  const report = current.resolveSubmission({ candidateHash, issues: [{ candidatePaths: ["/components/FailureHandler"],
+    references: [{ file: "candidate.json", path: "/components/FailureHandler/purpose" }] }] });
+  assert.deepEqual(report.issues[0]!.candidatePaths, ["/components/1"]);
+  assert.deepEqual(report.issues[0]!.references, [{ source: "candidate", path: "/components/1/purpose" }]);
+  const source = result(await current.tool.execute("requirement", { source: "requirements", pointer: "/R1/text" }));
+  assert.deepEqual(source.reference, { source: "requirements", path: "/0/text", quote: "处理错误" });
+});
+
+test("编号查找拒绝重复或近似名称，失败提示限定相关列表且原数字路径仍可读取", async () => {
+  const context = architectureReviewEvidenceContext({ design: { components: [
+    { id: "FailureHandler", purpose: "第一项" }, { id: "InputValidator", purpose: "其他项" }, { id: "FailureHandler", purpose: "第二项" },
+  ] }, requirements: [], runtimeCapabilities: {} });
+  const current = reader({ context });
+  const ambiguous = result(await current.tool.execute("ambiguous", { source: "candidate", pointer: "/components/FailureHandler" }));
+  assert.equal(ambiguous.reason, "reference_id_ambiguous"); assert.equal(ambiguous.receiptId, undefined);
+  assert.deepEqual(ambiguous.availablePaths, ["/components/0", "/components/2"]);
+  const missing = result(await current.tool.execute("missing", { source: "candidate", pointer: "/components/failurehandler" }));
+  assert.equal(missing.reason, "reference_path_missing"); assert.equal(missing.receiptId, undefined);
+  assert.ok(missing.availablePaths!.every(path => path.startsWith("/components")));
+  assert.deepEqual(result(await current.tool.execute("numeric", { source: "candidate", pointer: "/components/2/purpose" })).reference,
+    { source: "candidate", path: "/components/2/purpose", quote: "第二项" });
+});
+
 test("能力清单和多写一层 design 的查询均签发实际候选路径的回执", async () => {
   const capabilities = [{ id: "calculate", status: "available" }], candidateHash = "a".repeat(64);
   const context = architectureReviewEvidenceContext({ design: { capabilities }, requirements: [], runtimeCapabilities: {} });

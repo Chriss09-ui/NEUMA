@@ -21,6 +21,7 @@ import { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { architectureModelOutputBudget } from "../runtime/model-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
 import { createArchitectureMaterialFiles } from "./architecture-material-files.mjs";
+import { architectureMaterialPointer } from "./architecture-material-path.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
 import { projectArchitectureMessages, architectureRepairModelContext, architectureNodePrompt } from "./architecture-model-context.mjs";
 import { architectureVerificationContext, architectureConfirmedContext } from "./architecture-input-context.mjs";
@@ -476,7 +477,7 @@ export class ArchitectureDesigner {
     const currentMaterials = () => ({ ...modelMaterials,
       ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(), rejectedDraft: reviewParts.rejectedSnapshot() } } : {}),
       ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) });
-    const contextReader = createModelContextReader(currentMaterials);
+    const contextReader = createModelContextReader(currentMaterials, { resolvePointer: architectureMaterialPointer });
     const fileMaterials = role === "reviewer" || ["review_slice", "review_revision"].includes(String(payload.pipelineStage))
       ? createArchitectureMaterialFiles(id ? await this.storage.directory(id, "", { create: true }) : this.dataDir) : null;
     const publishMaterials = () => fileMaterials?.publish({ ...currentMaterials(),
@@ -1692,7 +1693,8 @@ export class ArchitectureDesigner {
             prepareMaterials: async sources => {
               const files = createArchitectureMaterialFiles(await this.storage.directory(record.agentId, "", { create: true }));
               const catalog = await files.publish({ ...sources, candidate: sources.base });
-              return { tool: files.tool, project: input => architectureRepairModelContext(input, catalog, sources.acceptanceAdapterGuide) };
+              return { tool: files.tool, resolvePointer: architectureMaterialPointer,
+                project: input => architectureRepairModelContext(input, catalog, sources.acceptanceAdapterGuide) };
             },
             tools: [createPlatformContractTool(context())] }),
           sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),

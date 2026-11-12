@@ -3,6 +3,7 @@ import type { ContextEvent } from "../runtime/execution-port.mjs";
 import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 function array(value: unknown): unknown[] { if (!isArray(value)) throw new TypeError("Model context list is invalid"); return value; }
 import { modelContextPacket, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
+import { ARCHITECTURE_ID_READ_RULE } from "./architecture-material-path.mjs";
 import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, INTEGRATION_ACCEPTANCE_RULE, REVIEW_EVIDENCE_READ_RULE, REVIEW_FACT_CLAIM_RULE, REVIEW_FORMAT_RULE } from "./architecture-prompts.mjs";
 import { architectureAdapterRulePaths } from "./architecture-review-evidence.mjs";
 import type { ArchitectureMaterialFile } from "./architecture-material-files.mjs";
@@ -225,6 +226,7 @@ export function architectureNodePrompt({ role, pipelineStage, submitName, bluepr
               : "依据已确认需求设计最简且充分的完整方案；修订时只改相关内容，保留有效设计与编号。";
   return `你是NEUMA的${role}。${task}
 ${MODEL_CONTEXT_INSTRUCTIONS}
+${role !== "reviewer" && pipelineStage !== "review_slice" ? ARCHITECTURE_ID_READ_RULE : ""}
 按实际公开工具schema提交${submitName}；不要复制schema或编造字段。modelBudget记录请求用量，policy为task_rejections时依同一任务正式退回次数停止，提交后停止。roleGuide保留本角色详细规程，遇到具体协议疑问再读取。
 ${textHandoffs && pipelineStage === "blueprint" ? "给模块或专项顾问派单时，只把主责、上游输入、交付要求和例外写成一个handoffText，自然分段。编号、主题和依赖按工具单独提交。已确认的专属操作由宿主绑定，工具标明可省略时不用复写开关。" : ""}
 ${textHandoffs && pipelineStage === "consultation" ? "直接回答assignment.handoffText。在一个handoffText中写出判断、建议和仍待验证的事项，references只指向本组实际材料。" : ""}

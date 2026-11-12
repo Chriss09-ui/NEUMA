@@ -66,7 +66,9 @@ export function modelContextValue(source: UnknownRecord, section: unknown, point
   return value;
 }
 
-export function createModelContextReader(getSource: () => UnknownRecord | Promise<UnknownRecord>): NeumaTool {
+export type ModelContextPointerResolver = (source: UnknownRecord, section: unknown, pointer: unknown) => string;
+export function createModelContextReader(getSource: () => UnknownRecord | Promise<UnknownRecord>,
+  { resolvePointer }: { resolvePointer?: ModelContextPointerResolver | undefined } = {}): NeumaTool {
   const request = { type: "object", additionalProperties: false, required: ["section"], properties: {
     section: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]{0,79}$" },
     pointer: { type: "string", maxLength: 500 }, offset: { type: "integer", minimum: 0 },
@@ -96,10 +98,13 @@ export function createModelContextReader(getSource: () => UnknownRecord | Promis
           if (item.cursor !== undefined && ["offset", "limit", "expectedHash"].some(key => Object.hasOwn(item, key)))
             throw new InputError("续读标记不能与旧分页参数混用。");
           const { section } = item;
-          const { pointer = "", offset = 0, limit = MODEL_CONTEXT_PAGE_CHARACTERS, expectedHash } = item.cursor === undefined
-            ? item : { ...cursorPosition(item.cursor, section, item.pointer), limit: MODEL_CONTEXT_PAGE_CHARACTERS };
+          const cursorPointer = item.cursor !== undefined && item.pointer !== undefined && resolvePointer
+            ? resolvePointer(source, section, item.pointer) : item.pointer;
+          const { pointer: requestedPointer = "", offset = 0, limit = MODEL_CONTEXT_PAGE_CHARACTERS, expectedHash } = item.cursor === undefined
+            ? item : { ...cursorPosition(item.cursor, section, cursorPointer), limit: MODEL_CONTEXT_PAGE_CHARACTERS };
           if (!isInteger(offset) || offset < 0 || !isInteger(limit) || limit < 1 || limit > MODEL_CONTEXT_PAGE_CHARACTERS)
             throw new InputError("上下文分页范围无效。");
+          const pointer = resolvePointer ? resolvePointer(source, section, requestedPointer) : requestedPointer;
           const text = encode(modelContextValue(source, section, pointer));
           if (typeof text !== "string") throw new InputError("上下文原文不可读取。");
           const contentHash = hash(text);
