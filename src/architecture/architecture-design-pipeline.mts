@@ -545,7 +545,12 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     const revisionValue = objectFields(revision);
     const revisionHash = designHash(copy(revision));
     if (checkpoint.revisionHash !== revisionHash) {
-      if (checkpoint.revisionHash !== null || !complete(checkpoint.blueprint) || !complete(checkpoint.integration)
+      const replacement = revisionValue.replacesRevisionHash;
+      const routing = objectFields(record.revisionSource?.fidelityRouting);
+      if (replacement !== undefined && (!hash(replacement) || replacement !== checkpoint.revisionHash
+        || routing.version !== 1 || routing.replacesRevisionHash !== replacement
+        || routing.baseCandidateHash !== designHash(revisionValue.candidate))) throw invalid();
+      if (checkpoint.revisionHash !== null && replacement === undefined || !complete(checkpoint.blueprint) || !complete(checkpoint.integration)
         || !checkpoint.modules.every(complete) || !revisionValue.candidate || !Array.isArray(revisionValue.issues)) throw invalid();
       const blueprint = validateArchitectureBlueprint(checkpoint.blueprint.result, context), modules = checkedModules(checkpoint, blueprint, context);
       const mergeCapabilityReasons = checkpoint.assemblyVersion === 2;
@@ -557,11 +562,14 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       if (!hasBlockingIssues && !forceIntegration) return candidate;
       const targets = stages(checkpoint).filter(({ stage, entry }) => stage === "integration"
         || stage === "blueprint" && reviseBlueprint || stage === "module" && (reviseBlueprint || owners.has(entry.key)));
+      const requiredStages = targets.map(({ stage, entry }) => ({ stage, key: entry.key,
+        modelCalls: entry.modelCalls, modelCallLimit: stageLimit(checkpoint, stage, entry.key) }));
+      const exhaustedStages = requiredStages.filter(entry => entry.modelCalls >= entry.modelCallLimit);
       if (checkpoint.modelCalls + targets.length > architectureDesignCallLimits(checkpoint).pipeline
-        || targets.some(({ stage, entry }) => entry.modelCalls >= stageLimit(checkpoint, stage, entry.key))) {
+        || exhaustedStages.length) {
         const error = new InputError("评审修订所需节点没有足够的剩余调用额度；已评审候选、阶段成果和评审意见均保留，不能启动无法完成的修订。");
         error.diagnostic = { stage: "architecture", reason: "revision_budget_exhausted", role: "designer", phase: "designing",
-          modelCalls: checkpoint.modelCalls, modelCallLimit: architectureDesignCallLimits(checkpoint).pipeline };
+          modelCalls: checkpoint.modelCalls, modelCallLimit: architectureDesignCallLimits(checkpoint).pipeline, requiredStages, exhaustedStages };
         throw error;
       }
       await update(next => {

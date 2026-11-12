@@ -43,7 +43,8 @@ function assertRevisionBase(payload: CheckpointPayload, original: StoredArchitec
 
 async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "neuma-main-review-checkpoint-")), calls: { role: string; payload: CheckpointPayload }[] = [], stageCalls: { role: string; payload: CheckpointPayload }[] = [], countsBeforeFidelity: unknown[] = [];
-  const state = { fidelity: "interrupt", main: "valid", mainCalls: 1, controller: null as AbortController | null, designSuffix: "", interruptDesigner: false };
+  const state = { fidelity: "interrupt", fidelityPath: "/instructions", acceptanceExpected: "", main: "valid", mainCalls: 1,
+    controller: null as AbortController | null, designSuffix: "", interruptDesigner: false, extraIntegrationCalls: 0 };
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
     critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
@@ -57,11 +58,13 @@ async function fixture(t: test.TestContext) {
       selectionBasis: { capacity: "已确认边界", process: "完整处理", quality: "逐项核对",
         requirementIds: payload.requirements!.map((item) => item.id), assumptions: [] } });
     candidate.instructions += state.designSuffix;
+    if (state.acceptanceExpected) candidate.acceptance[0]!.expected = state.acceptanceExpected;
     return candidate;
   };
   const stageSessions = createArchitectureStageSessionFactory(makeCandidate, {
-    onPrompt: ({ stage, payload, options }) => {
+    onPrompt: async ({ stage, payload, options }) => {
       stageCalls.push({ role: stage, payload });
+      if (stage === "integration") for (let index = 0; index < state.extraIntegrationCalls; index++) await options.onModelCall!();
       if (state.interruptDesigner && Number(objectFields(options.sessionStorage!.binding).generation) > 0)
         throw new Error("synthetic interruption before revised stage submission");
     },
@@ -100,7 +103,13 @@ async function fixture(t: test.TestContext) {
       try { return JSON.parse(typeof message.content === "string" ? message.content : toolText(message)); } catch { return null; }
     }).find((payload) => payload?.requirements);
     const verdict = ["unproven", "narrowed"].includes(state.fidelity) ? state.fidelity : "preserved";
-    let value = source ? fidelityResult(source, verdict) : undefined;
+    const decision = (payload: unknown) => {
+      const result = fidelityResult(payload, verdict, { candidatePath: state.fidelityPath });
+      if (verdict === "unproven" && state.fidelityPath !== "/instructions")
+        result.restrictions = fidelityResult(payload, "narrowed", { candidatePath: state.fidelityPath }).restrictions;
+      return result;
+    };
+    let value = source ? decision(source) : undefined;
     const append = (message: SessionMessage & { timestamp: number }) => { callFixture(native.appendMessage, native, [message]); messages.push(message); };
     const session = { messages, modelCallAccounting: true, setAutoCompactionEnabled() {}, dispose() {}, async abort() {}, async prompt(text: string) {
       append({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
@@ -108,7 +117,7 @@ async function fixture(t: test.TestContext) {
       const saved = await designer.get(definition.id);
       assert.ok(readMainReviewCheckpoint(saved), "发送复核请求前完整检查点和本次记账必须已保存");
       countsBeforeFidelity.push(saved!.mainReviewCheckpoint!.modelCalls);
-      if (payload.requirements) value = fidelityResult(payload, verdict);
+      if (payload.requirements) value = decision(payload);
       if (state.fidelity === "cancel") state.controller!.abort();
       if (state.fidelity === "rejected-native") {
         const invalid = fidelityResult(source ?? payload, "narrowed");
@@ -324,6 +333,96 @@ test("有效范围否定直接给设计者技术修订，新候选仍经过完�
     assert.equal(next.status, "passed"); assert.equal(next.mainReviewCheckpoint!.modelCalls, 2);
     assert.equal(designHash(await f.designer.getVersion(f.definition.id, rejected!.version)), originalHash);
   });
+});
+
+test("范围否定命中已有验收时退回负责模块，修正真实验收后重新完整评审", async t => {
+  for (const verdict of ["narrowed", "unproven"]) await t.test(verdict, async t => {
+    const f = await fixture(t);
+    f.state.fidelity = verdict; f.state.fidelityPath = "/acceptance/0/expected";
+    f.state.acceptanceExpected = "拒绝数字写法3.0";
+    await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "scope_not_preserved");
+    const original = (await f.designer.get(f.definition.id))!, before = structuredClone(original), start = f.stageCalls.length;
+    f.state.fidelity = "pass"; f.state.acceptanceExpected = "接受数值为整数的3.0，与3得到相同结果";
+    await f.reload();
+    const next = await f.run();
+    assert.deepEqual(f.stageCalls.slice(start).map(row => row.role), ["module", "integration"]);
+    assert.equal(next.design!.acceptance[0]!.expected, f.state.acceptanceExpected);
+    assert.equal(next.status, "passed");
+    assert.equal(next.requirementFidelity!.verdict, "preserved");
+    assert.deepEqual(await f.designer.getVersion(f.definition.id, before.version), before);
+    const oldCheckpoint = before.designProgressCheckpoint!, newCheckpoint = next.designProgressCheckpoint!;
+    assert.equal(newCheckpoint.pipelineId, oldCheckpoint.pipelineId);
+    assert.deepEqual(newCheckpoint.blueprint, oldCheckpoint.blueprint);
+    assert.equal(newCheckpoint.modelCalls, Number(oldCheckpoint.modelCalls) + 2);
+    assert.equal(objectFields(recordArray(newCheckpoint.modules)[0]).modelCalls,
+      Number(objectFields(recordArray(oldCheckpoint.modules)[0]).modelCalls) + 1);
+  });
+});
+
+test("旧版只改总说明的范围修订停点补派原模块，保留用量并能继续新候选评审", async t => {
+  const f = await fixture(t);
+  f.state.fidelity = "narrowed"; f.state.fidelityPath = "/acceptance/0/expected";
+  f.state.acceptanceExpected = "拒绝数字写法3.0";
+  await assert.rejects(f.run());
+  const original = (await f.designer.get(f.definition.id))!;
+  const staged = f.designer.stagedDesign.bind(f.designer);
+  // Reproduce the historical dispatcher through the real stage controller and persistence.
+  f.designer.stagedDesign = options => {
+    delete options.record.revisionSource!.fidelityRouting;
+    const revision = objectFields(options.revision);
+    return staged({ ...options, revision: { ...revision,
+      issues: recordArray(revision.issues).filter(issue => issue.source !== "requirement-fidelity") } });
+  };
+  f.state.designSuffix = "\n总说明接受3.0。"; f.state.main = "late-cancel"; f.state.controller = new AbortController();
+  await assert.rejects(f.run());
+  const legacy = (await f.designer.get(f.definition.id))!, legacyHash = designHash(legacy);
+  assert.notEqual(legacy.candidateHash, original.candidateHash);
+  assert.equal(legacy.design!.acceptance[0]!.expected, original.design!.acceptance[0]!.expected);
+  assert.deepEqual(legacy.designProgressCheckpoint!.modules, original.designProgressCheckpoint!.modules);
+  assert.equal(legacy.revisionSource!.fidelityRouting, undefined);
+
+  await f.reload(); f.state.controller = new AbortController();
+  f.state.acceptanceExpected = "接受数值为整数的3.0，与3得到相同结果";
+  const start = f.stageCalls.length;
+  await assert.rejects(f.run()); // Interrupt after the corrected candidate, before review completes.
+  const corrected = (await f.designer.get(f.definition.id))!;
+  assert.deepEqual(f.stageCalls.slice(start).map(row => row.role), ["module", "integration"]);
+  assert.equal(corrected.design!.acceptance[0]!.expected, f.state.acceptanceExpected);
+  assert.equal(corrected.designProgressCheckpoint!.modelCalls, Number(legacy.designProgressCheckpoint!.modelCalls) + 2);
+  assert.equal(designHash(await f.designer.getVersion(f.definition.id, legacy.version)), legacyHash);
+
+  const tampered = structuredClone(corrected);
+  objectFields(tampered.revisionSource!.fidelityRouting).baseCandidateHash = "b".repeat(64);
+  await f.designer.save(tampered); await f.reload(); f.state.controller = null;
+  const callsBeforeInvalidSource = f.calls.length;
+  await assert.rejects(f.run(), /原始基底不可恢复/u);
+  assert.equal(f.calls.length, callsBeforeInvalidSource);
+  await f.designer.save(corrected);
+  await f.reload(); f.state.controller = null; f.state.main = "valid"; f.state.fidelity = "pass";
+  const stageEnd = f.stageCalls.length;
+  const passed = await f.run();
+  assert.equal(passed.status, "passed");
+  assert.equal(f.stageCalls.length, stageEnd, "已经修正的模块不能在恢复评审时再次派发");
+  assert.equal(passed.designProgressCheckpoint!.modelCalls, corrected.designProgressCheckpoint!.modelCalls);
+  assert.ok(Number(passed.mainReviewCheckpoint!.modelCalls) > Number(corrected.reviewProgressCheckpoint!.modelCalls));
+});
+
+test("范围责任修订余量不足时反复续跑也不能绕回旧稿评审", async t => {
+  const f = await fixture(t);
+  f.state.fidelity = "narrowed"; f.state.fidelityPath = "/acceptance/0/expected"; f.state.extraIntegrationCalls = 4;
+  await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "scope_not_preserved");
+  const original = (await f.designer.get(f.definition.id))!, oldCheckpoint = structuredClone(original.designProgressCheckpoint);
+  assert.equal(objectFields(oldCheckpoint!.integration).modelCalls, 5);
+  f.state.extraIntegrationCalls = 0; f.state.fidelity = "pass";
+  const calls = f.calls.length, stages = f.stageCalls.length;
+  for (let retry = 0; retry < 2; retry++) {
+    await f.reload();
+    await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "revision_budget_exhausted");
+    assert.equal(f.calls.length, calls); assert.equal(f.stageCalls.length, stages);
+    const stopped = (await f.designer.get(f.definition.id))!;
+    assert.deepEqual(stopped.designProgressCheckpoint, oldCheckpoint);
+    assert.equal(stopped.revisionSource!.version, original.version);
+  }
 });
 
 test("已有有效范围否定的相同候选不能换新评审预算，多次重启仍保留实际spent", async (t) => {

@@ -1431,7 +1431,8 @@ export class ArchitectureDesigner {
     if (reviewRevision) revisionSeed = reviewRevisionContinuationSeed(previous, definition, revisionContext,
       reviewedRevisionSeed, savedReviewRevision);
     // An interrupted first design owns its progress; an older full candidate must not replace it.
-    if (!reviewRevision && designProgressSource && !designProgressSource.design && !designProgressSource.designProgressCheckpoint?.revisionHash)
+    if (!reviewRevision && designProgressSource && !designProgressSource.design && !designProgressSource.designProgressCheckpoint?.revisionHash
+      && !revisionSeed?.fidelityRevision)
       revisionSeed = null;
     if (developmentFailure === null && savedDevelopmentRevisionSource(previous))
       throw feedbackRepairError("宿主已确认原研发记录缺失或不能核验，不能沿缓存投影继续。");
@@ -1702,7 +1703,9 @@ export class ArchitectureDesigner {
               || objectFields(objectFields(revisionSeed?.developmentRevision).planningToolFailures).status === "available"),
             repair: objectFields(architectureRepair).kind === "stage_validation_retry" ? architectureRepair : record.designProgressCheckpoint?.repair ? undefined : architectureRepair,
             ...(editableDesign ? { revision: { candidate: editableDesign,
-              issues: record.design ? record.issues : revisionSeed?.issues ?? record.issues } } : {}) }) : null;
+              issues: record.design ? record.issues : revisionSeed?.issues ?? record.issues,
+              ...(objectFields(record.revisionSource?.fidelityRouting).replacesRevisionHash
+                ? { replacesRevisionHash: objectFields(record.revisionSource?.fidelityRouting).replacesRevisionHash } : {}) } } : {}) }) : null;
         const revisedCandidate = !resumeReview && reviewRevision ? await runArchitectureReviewRevision({ record, source: reviewRevisionSource,
           candidateSchema, validate: value => validateDesign(value, context()), signal,
           runWorker: async worker => runRepairAgent({ worker, context: { requirements, candidateSchema, platformRules,
@@ -1800,7 +1803,8 @@ export class ArchitectureDesigner {
         record.review = null; record.issues = checks.issues;
         record.status = "evaluating"; record.summary = "正在独立检查方案";
         const reviewRepair = objectFields(record.revisionSource?.reviewRepair);
-        if (reviewRepair.candidateHash === record.candidateHash) {
+        if (reviewRepair.candidateHash === record.candidateHash
+          || objectFields(record.revisionSource?.fidelityRouting).baseCandidateHash === record.candidateHash) {
           const repair = reviewRepair;
           record.reviewProgressCheckpoint = createReviewProgressCheckpoint(record, null, repair.modelCalls);
           if (!record.reviewProgressCheckpoint) throw new InputError("原候选已用评审额度不能恢复");

@@ -181,9 +181,14 @@ export function architectureRevisionSeed(previous: StoredArchitectureRecord | nu
 export function fidelityArchitectureRevisionSeed(previous: StoredArchitectureRecord | null | undefined, records: StoredArchitectureRecord[], definition: Definition, context: RevisionContext): RevisionSeed | null {
   if (!previous) return null;
   const reference = objectFields(previous?.revisionSource), repair = objectFields(reference.reviewRepair);
-  const continued = repair?.reason === "requirement_fidelity_rejected"
+  if (previous.mainReviewCheckpoint?.fidelityStatus !== "not_preserved" && ["failed", "cancelled"].includes(previous.status)
+    && (reference.kind === "requirement-fidelity-revision" || Object.hasOwn(reference, "fidelityRouting"))
+    && repair.reason !== "requirement_fidelity_rejected")
+    throw new InputError("范围修订来源标记不完整，不能跳过原分派或重置次数");
+  const continued = previous.mainReviewCheckpoint?.fidelityStatus !== "not_preserved"
+    && repair?.reason === "requirement_fidelity_rejected"
     && ["failed", "cancelled"].includes(previous?.status)
-    && (previous.candidateHash === null || previous.candidateHash === repair.candidateHash);
+    && previous.review === null;
   const original = continued ? [...records].find((record) => record.agentId === definition.id && record.version === reference.version) : previous;
   if (continued && !architectureRevisionBindingsMatch(previous, definition, context, { allowUnsubmitted: true })) return null;
   const materials = architectureMaterialSeed(original, definition, context);
@@ -199,9 +204,47 @@ export function fidelityArchitectureRevisionSeed(previous: StoredArchitectureRec
   if (!fidelityRevision || continued && (designHash(reference.fidelitySource) !== designHash(fidelityRevision.source)
     || repair.candidateHash !== original!.candidateHash || repair.modelCalls !== fidelityRevision.modelCalls))
     throw new InputError("范围否定的原始来源或已用额度无效，不能换用新评审预算");
-  const { evidenceContext, ...seed } = materials;
-  return { ...seed, issues: structuredClone(original!.issues), fidelityRevision,
+  const issues = [...structuredClone(original!.issues), ...fidelityRevision.issues];
+  let base = original!, baseMaterials = materials;
+  let routing = { version: 1, baseVersion: base.version, baseCandidateHash: base.candidateHash!, replacesRevisionHash: null as string | null };
+  if (continued && Object.hasOwn(reference, "fidelityRouting")) {
+    const saved = objectFields(reference.fidelityRouting);
+    if (saved.version !== 1 || Object.keys(saved).length !== 4 || !isInteger(saved.baseVersion)
+      || saved.baseVersion < original!.version || saved.baseVersion >= previous.version
+      || typeof saved.baseCandidateHash !== "string" || !(saved.replacesRevisionHash === null || typeof saved.replacesRevisionHash === "string"))
+      throw new InputError("范围修订分派的原始基底无效，不能重开修订");
+    const storedBase = records.find(record => record.agentId === definition.id && record.version === saved.baseVersion);
+    const storedMaterials = architectureMaterialSeed(storedBase, definition, context);
+    if (!storedBase || !storedMaterials || storedBase.candidateHash !== saved.baseCandidateHash)
+      throw new InputError("范围修订分派的原始基底不可恢复，不能重开修订");
+    base = storedBase; baseMaterials = storedMaterials;
+    routing = { version: 1, baseVersion: base.version, baseCandidateHash: base.candidateHash!, replacesRevisionHash: saved.replacesRevisionHash };
+  } else if (continued && previous.candidateHash !== null && previous.candidateHash !== original!.candidateHash) {
+    const current = architectureMaterialSeed(previous, definition, context);
+    if (!current) throw new InputError("范围修订后的候选不可恢复，不能继续评审");
+    base = previous; baseMaterials = current;
+    routing = { version: 1, baseVersion: base.version, baseCandidateHash: base.candidateHash!,
+      replacesRevisionHash: designHash({ candidate: materials.design, issues: original!.issues }) };
+  }
+  if (routing.replacesRevisionHash !== null) {
+    const before = objectFields(original!.designProgressCheckpoint), after = objectFields(base.designProgressCheckpoint);
+    if (routing.replacesRevisionHash !== designHash({ candidate: materials.design, issues: original!.issues })
+      || after.revisionHash !== routing.replacesRevisionHash || after.pipelineId !== before.pipelineId
+      || !objectFields(after.integration).result || designHash(after.blueprint) !== designHash(before.blueprint)
+      || designHash(after.modules) !== designHash(before.modules))
+      throw new InputError("旧范围修订不是仅整合的原始停点，不能替换已有模块修订");
+  } else if (base.version !== original!.version) throw new InputError("范围修订基底未绑定原复核，不能跳过原分派");
+  const revision = { candidate: baseMaterials.design, issues,
+    ...(routing.replacesRevisionHash ? { replacesRevisionHash: routing.replacesRevisionHash } : {}) };
+  if (continued && reference.fidelityRouting && previous.candidateHash !== null && previous.candidateHash !== base.candidateHash) {
+    if (objectFields(previous.designProgressCheckpoint).revisionHash !== designHash(revision))
+      throw new InputError("范围修订候选未绑定原分派，不能跳过模块修订");
+    return null;
+  }
+  const { evidenceContext, ...seed } = baseMaterials;
+  return { ...seed, issues, fidelityRevision,
     source: { ...materials.source, kind: "requirement-fidelity-revision", fidelitySource: fidelityRevision.source,
+      fidelityRouting: routing,
       candidateTrust: "unreviewed-reference", reviewRepair: { candidateHash: original!.candidateHash,
         modelCalls: fidelityRevision.modelCalls, reason: "requirement_fidelity_rejected" } } };
 }

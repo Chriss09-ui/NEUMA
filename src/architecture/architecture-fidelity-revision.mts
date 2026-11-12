@@ -1,5 +1,6 @@
 import { metersReviewRequests } from "./architecture-review-binding.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
+import type { ArchitectureIssue } from "../contracts/architecture.mjs";
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
 import { designHash, validateReview } from "./architecture-contract.mjs";
 import { copyArchitectureReviewJson as jsonCopy, architectureReviewRecordBinding as recordBinding,
@@ -56,8 +57,16 @@ export function readArchitectureFidelityRevision(record: unknown, evidenceInput:
       || fidelity.state.diagnostic.modelCalls !== fidelity.state.calls)) return null;
     const modelCalls = Math.max(checkpoint.modelCalls, progress?.modelCalls ?? 0, fidelity?.parentModelCalls ?? 0);
     if (modelCalls < evidence.modelCalls) return null;
+    const issues: ArchitectureIssue[] = [];
+    for (const restriction of Array.isArray(evidence.restrictions) ? evidence.restrictions : []) {
+      const row = objectFields(restriction);
+      if (typeof row.candidatePath !== "string" || typeof row.reason !== "string") return null;
+      issues.push({ id: `scope_${designHash({ source: binding.source, restriction }).slice(0, 24)}`, blocking: true,
+        source: "requirement-fidelity", candidatePaths: [row.candidatePath], description: row.reason,
+        remedy: "按原确认需求核对并修订负责模块的实际规则、验收和关联说明；原意见是技术修订依据，不能新增需求或仅改总说明。修改后仍须完整独立评审及范围复核。" });
+    }
     return { trust: "untrusted-technical-reference", source: { ...binding.source, bindingHash: binding.bindingHash,
       reviewHash: checkpoint.reviewHash, contextHash: checked.contextHash, schemaHash: checked.schemaHash, evidenceHash: designHash(evidence) },
-      modelCalls, evidence };
+      modelCalls, evidence, issues };
   } catch { return null; }
 }
