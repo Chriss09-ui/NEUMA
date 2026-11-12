@@ -78,7 +78,7 @@ export function sealArchitectureReviewEvidence(context: ArchitectureEvidenceCont
   return { ...body, hash: designHash(body) };
 }
 
-function historicalArchitectureReviewEvidence(previous: StoredArchitectureRecord, options: { design: ArchitectureDesign; requirements: RequirementItem[]; runtimeCapabilities: unknown; evidence: EvidenceItem[]; confirmedRequirementContext?: unknown; deferredVerifications?: unknown; evidenceHistory?: StoredArchitectureRecord[] | undefined }) {
+export function historicalArchitectureReviewEvidence(previous: StoredArchitectureRecord, options: { design: ArchitectureDesign; requirements: RequirementItem[]; runtimeCapabilities: unknown; evidence: EvidenceItem[]; confirmedRequirementContext?: unknown; deferredVerifications?: unknown; evidenceHistory?: StoredArchitectureRecord[] | undefined }) {
   const snapshotInput = previous.reviewEvidence?.snapshot, snapshot = objectFields(snapshotInput);
   if (snapshotInput === undefined) {
     if ((previous.reviewEvidence?.version as number) >= 2) throw new InputError("历史评审缺少已绑定的说明快照");

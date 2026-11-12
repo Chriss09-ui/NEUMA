@@ -1,6 +1,6 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import { runRepairAgent } from "../runtime/repair-agent.mjs";
-import { runArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "./architecture-review-dispatch.mjs";
+import { runArchitectureReviewDispatch, revalidateArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "./architecture-review-dispatch.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import { feedbackLedger } from "./architecture-feedback-port.mjs";
 import type { ArchitectureOptions, ArchitectureRoleOptions, ArchitectureDesignOptions, StoredArchitectureRecord, Definition, ModuleConsultation, ArchitectureDiagnostic, ArchitectureRoleDiagnostic, HandoffResult } from "./architecture-controller-port.mjs";
@@ -30,7 +30,7 @@ import { architectureVerificationContext, architectureConfirmedContext } from ".
 export { architectureVerificationContext, architectureConfirmedContext };
 import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, reviewedArchitectureSeed, architectureRevisionSeed, fidelityArchitectureRevisionSeed,
   rejectedFidelityArchitectureRevisionSeed, developmentArchitectureRevisionSeed, continuedDevelopmentRevisionSeed, interruptedArchitectureRevisionSeed,
-  interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback, inheritedFidelityReviewDispatch } from "./architecture-revision-source.mjs";
+  interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback, inheritedFidelityReviewDispatch, historicalArchitectureReviewEvidence } from "./architecture-revision-source.mjs";
 import type { RevisionContext } from "./architecture-revision-source.mjs";
 import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, modelReadRecoveryResult, MODEL_FORMAT_REJECTION_LIMIT } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
@@ -320,6 +320,20 @@ export class ArchitectureDesigner {
         }
       } catch { /* A read-only compatibility probe never grants new calls or replaces a blocked result. */ }
     }
+    let dispatchRecovery: { kind: string; status: string; message: string; stage?: string; stageKey?: string; actionLabel?: string; modelCalls?: number } | null
+      = historicalDispatch ? null : architectureReviewDispatchRecovery(record);
+    if (record?.design && record.candidateHash && record.platformHash && dispatchRecovery?.status === "blocked") {
+      try {
+        const context = historicalArchitectureReviewEvidence(record, { design: record.design, requirements: record.requirements,
+          runtimeCapabilities: record.runtimeCapabilities, evidence: record.evidence,
+          confirmedRequirementContext: record.confirmedRequirementContext, deferredVerifications: record.deferredVerifications });
+        const replay = await revalidateArchitectureReviewDispatch({ record, candidateHash: record.candidateHash, platformHash: record.platformHash,
+          context, priorFindings: record.priorFindings, schema: reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: Boolean(record.priorFindings) }),
+          model: this.config.model ?? null, readHistory: input => this.readReviewSliceHistory(record, input) });
+        if (replay) dispatchRecovery = { ...dispatchRecovery, status: "continuing", actionLabel: "复核原报告并继续",
+          message: "原会话最后一份被拒报告已通过资料一致性及本组完整检查；继续时保存接收凭据，保留原失败、用量和已收分项，不新增该组请求。" };
+      } catch { /* A failed read-only probe leaves the original stop and counts intact. */ }
+    }
     const recovery = missingDispatch ? { kind: "review_specialists", status: "blocked", actionLabel: "检查分组评审材料",
       message: "本方案已分派独立评审，但当前检查点缺失；不能重新领取子任务额度。" }
       : missingRetry ? { kind: "review_retry", status: "blocked", actionLabel: "检查续评材料",
@@ -327,7 +341,7 @@ export class ArchitectureDesigner {
       : missingRevision ? { kind: "review_revision", status: "blocked", actionLabel: "检查修订材料",
       message: "同一次设计已使用评审修订授权，但当前进度缺失；不能重开额度，请保留材料检查。" }
       : stalledReview ? { kind: "independent_review", status: "blocked", actionLabel: "查看评审阻断", message: "同一份评审结果连续三次因同一问题被退回，已保留进度。" }
-      : (historicalDispatch ? null : architectureReviewDispatchRecovery(record))
+      : dispatchRecovery
         ?? architectureReviewRevisionRecovery(record, true) ?? designRecovery ?? counterUpgrade
         ?? (historicalDispatch ? { kind: "design_revision", status: "continuing", stageKey: "integration",
           message: "旧分组评审已核实属于修订基底，继续当前设计修订；原报告、会话和累计次数保留。" } : null);
@@ -434,6 +448,16 @@ export class ArchitectureDesigner {
       storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }));
   }
 
+  private async readReviewSliceHistory(record: StoredArchitectureRecord,
+    input: Parameters<Parameters<typeof revalidateArchitectureReviewDispatch>[0]["readHistory"]>[0], signal?: AbortSignal) {
+    const { group, baseHash, dispatchHash } = input;
+    if (!group.sessionFile) throw new InputError("原评审会话缺失，不能复核提交。");
+    return readExecutionHistory({ cwd: this.cwd, ...(signal ? { signal } : {}), storage: {
+      directory: await this.storage.directory(record.agentId, "architecture-review-dispatch/sessions", { create: false }), file: group.sessionFile,
+      binding: { version: 1, role: "architecture-review-slice", agentId: record.agentId, candidateHash: record.candidateHash,
+        dispatchHash, groupId: group.id, baseHash } } });
+  }
+
   async stagedDesign({ record, context, binding, tools, platformRules, researchRules, revision, signal, onProgress, repair, forceIntegration }: StagedOptions) {
     const sessionDirectory = await this.storage.directory(record.agentId, "architecture-design/sessions", { create: true });
     try {
@@ -513,7 +537,7 @@ export class ArchitectureDesigner {
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T> & {allowHandoff?:false}):Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T>): Promise<T | HandoffResult>;
-  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, legacyReviewParameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, recoverReviewReferences, onFidelity, onDiagnostics, editableDesign,
+  async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, legacyReviewParameters, previousReviewParameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, recoverReviewReferences, onFidelity, onDiagnostics, editableDesign,
     onMainReviewValidated, onMainReviewBudget, resumeMainReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = role === "reviewer" || payload.pipelineStage === "review_slice" ? null : ARCHITECTURE_ROLE_TURN_LIMIT, previousRejection, onSliceRejection, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
@@ -611,6 +635,7 @@ export class ArchitectureDesigner {
       candidateHash: payload.candidateHash, candidateSchema: payload.candidateSchema, priorFindings: payload.priorFindings, role }) : null;
     if (evidenceReader) {
       legacyReviewParameters = evidenceReader.submissionSchema(legacyReviewSchema(parameters), { legacy: true });
+      previousReviewParameters = evidenceReader.submissionSchema(parameters, { strictLocations: true });
       parameters = evidenceReader.submissionSchema(parameters);
     }
     const singleReviewIssue = role === "reviewer" && Boolean(parameters.properties?.issues?.items && parameters.properties?.verdict);
@@ -625,6 +650,7 @@ export class ArchitectureDesigner {
       };
       parameters = addSingleIssue(parameters);
       if (legacyReviewParameters) legacyReviewParameters = addSingleIssue(legacyReviewParameters);
+      if (previousReviewParameters) previousReviewParameters = addSingleIssue(previousReviewParameters);
     }
     const payloadSchemaVersion = objectFields(payload.design).schemaVersion;
     const platformContractTool = (role === "designer" && canonicalParameters.properties?.platformClaims || role === "reviewer" && typeof payloadSchemaVersion === "number" && payloadSchemaVersion >= 3)
@@ -681,9 +707,9 @@ export class ArchitectureDesigner {
     const previousFailure = previousRejection ?? resumeReviewProgress?.diagnostic?.repeatedFailure;
     const compatibleContractHashes = [modelContractHash];
     if (role === "reviewer") compatibleContractHashes.push(designHash({ model: this.config.model ?? null, schema: parameters, protocolVersion: 2 }));
-    if (legacyReviewParameters) {
+    for (const previousParameters of [legacyReviewParameters, previousReviewParameters]) if (previousParameters) {
       for (const requireFacts of [false, true]) {
-        const schema = structuredClone(legacyReviewParameters);
+        const schema = structuredClone(previousParameters);
         if (requireFacts) for (const issue of [schema.properties?.issues?.items, schema.properties?.issue])
           if (issue?.required?.includes("kind") && !issue.required.includes("factClaims")) issue.required.push("factClaims");
         compatibleContractHashes.push(designHash({ model: this.config.model ?? null, schema,
@@ -2014,6 +2040,7 @@ export class ArchitectureDesigner {
           try {
             const dispatched = await runArchitectureReviewDispatch({ record, candidateHash: record.candidateHash!, platformHash: platformContext.platformHash,
               context: evidenceContext, priorFindings, schema, signal,
+              model: this.config.model ?? null, readHistory: input => this.readReviewSliceHistory(record, input, signal),
               save: async checkpoint => {
                 const before = { checkpoint: record.reviewDispatchCheckpoint, source: record.reviewDispatchSource };
                 record.reviewDispatchCheckpoint = checkpoint; record.reviewDispatchSource = checkpoint.bindingHash;
@@ -2029,7 +2056,7 @@ export class ArchitectureDesigner {
                 return this.role({ role: "specialist", agentId: definition.id,
                   systemPrompt: "你是独立评审子Agent，只核对本组指定分项，引用本次冻结证据。结果供主评审核对，不改设计，不代交最终结论。",
                   payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
-                  parameters: node.parameters, prepareSubmission: node.prepareArguments, legacyReviewParameters: node.legacyParameters, tools: node.tools, validate: node.validate,
+                  parameters: node.parameters, prepareSubmission: node.prepareArguments, legacyReviewParameters: node.legacyParameters, previousReviewParameters: node.previousParameters, tools: node.tools, validate: node.validate,
                   recoverReviewReferences: node.recoverReviewReferences,
                   modelCallLimit: worker.callLimit, initialModelCalls: worker.group.calls, previousRejection: worker.group.rejection,
                   onSliceRejection: value => worker.onRejection!(value),

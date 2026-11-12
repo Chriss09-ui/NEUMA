@@ -1,21 +1,24 @@
+import type { readExecutionHistory } from "../runtime/execution-history.mjs";
 import type { ReviewParts } from "../contracts/architecture.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { NeumaTool, SessionMessage } from "../runtime/execution-port.mjs";
-import type { RepairCheckpoint, RepairWorker } from "../runtime/repair-scheduler.mjs";
-import { createReviewTaskCheckpoint, readReviewTaskCheckpoint, repairHash, runReviewTaskSchedule } from "../runtime/repair-scheduler.mjs";
+import type { RepairCheckpoint, RepairWorker, RepairGroup, ReviewSubmissionReplay } from "../runtime/repair-scheduler.mjs";
+import { createReviewTaskCheckpoint, readReviewTaskCheckpoint, repairHash, runReviewTaskSchedule, validateRepairResult, applyRepairUpdates } from "../runtime/repair-scheduler.mjs";
 import { modelSubmissionArguments } from "../runtime/model-submission-arguments.mjs";
 import { objectFields, isPlainRecord } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import { createArchitectureEvidenceReader } from "./architecture-evidence-reader.mjs";
 import { legacyReviewSchema, prepareReviewArguments } from "./architecture-review-evidence.mjs";
 import { canonicalArchitectureReviewParts } from "./architecture-review-parts.mjs";
+import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
+import { nextReviewRejection } from "./architecture-review-protocol.mjs";
 
 type SliceField = "checks" | "acceptanceScopeChecks" | "priorFindingDecisions";
 interface Assignment { id: string; field: SliceField; ids: string[] }
 interface SliceResult { summary: string; parts: ReviewParts }
 export interface ReviewDispatchCheckpoint { version: 1; candidateHash: string; bindingHash: string; dispatch: RepairCheckpoint<null> }
-export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; legacyParameters: ToolSchema; tools: NeumaTool[];
+export interface ReviewSliceRole { assignment: Assignment; worker: RepairWorker<null>; parameters: ToolSchema; legacyParameters: ToolSchema; previousParameters: ToolSchema; tools: NeumaTool[];
   payload: UnknownRecord; prepareArguments(input: unknown): unknown; recoverReviewReferences(messages: readonly SessionMessage[]): UnknownRecord | undefined;
   validate(value: unknown): SliceResult }
 const rowId = { checks: "id", acceptanceScopeChecks: "acceptanceId", priorFindingDecisions: "findingId" } as const;
@@ -59,10 +62,12 @@ export function architectureReviewDispatchRecovery(record: UnknownRecord | null 
   } catch { return { kind: "review_specialists", status: "blocked", message: "分组评审进度无法核验，已停止恢复。" }; }
 }
 
-/** Disjoint review slices share a durable dispatcher; only the main reviewer can submit the final verdict. */
-export async function runArchitectureReviewDispatch(options: { record: UnknownRecord; candidateHash: string; platformHash: string;
-  context: unknown; priorFindings?: unknown; schema: ToolSchema; signal?: AbortSignal | undefined;
-  save(checkpoint: ReviewDispatchCheckpoint): Promise<void>; runRole(node: ReviewSliceRole): Promise<unknown> }) {
+interface DispatchInputs { record: UnknownRecord; candidateHash: string; platformHash: string;
+  context: unknown; priorFindings?: unknown; schema: ToolSchema; signal?: AbortSignal | undefined }
+interface ReplayInputs { model: string | null;
+  readHistory(input: { group: RepairGroup; baseHash: string; dispatchHash: string }): ReturnType<typeof readExecutionHistory> }
+
+function prepareDispatch(options: DispatchInputs) {
   const { record, candidateHash, schema, context, priorFindings, signal } = options;
   const plan = assignments(schema, context, priorFindings);
   let binding = { version: 1, candidateHash, platformHash: options.platformHash, contextHash: repairHash(context),
@@ -92,12 +97,6 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
     if (record.reviewDispatchSource !== undefined) fail("已分派评审的检查点缺失，不能重新领取额度。");
     checkpoint = { version: 1, candidateHash, bindingHash, dispatch: createReviewTaskCheckpoint(binding, base, issues) };
   }
-  const save = async (dispatch: RepairCheckpoint<null>) => {
-    signal?.throwIfAborted();
-    const next = { version: 1 as const, candidateHash, bindingHash, dispatch };
-    await options.save(next); checkpoint = next;
-    record.reviewDispatchCheckpoint = structuredClone(next); record.reviewDispatchSource = bindingHash;
-  };
   const checked = (value: unknown, assignment: Assignment): SliceResult => {
     const raw = objectFields(value);
     if (Object.keys(raw).sort().join() !== "parts,summary" || typeof raw.summary !== "string" || !raw.summary.trim() || raw.summary.length > 1500)
@@ -118,13 +117,13 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
     for (const assignment of plan) if (slices[assignment.id] !== null) checked(slices[assignment.id], assignment);
     return slices;
   };
-  const result = await runReviewTaskSchedule({ checkpoint: checkpoint.dispatch, base, binding, signal, save, validateCandidate: ledger,
-    run: async worker => {
+  const roleFor = (worker: Pick<RepairWorker<null>, "group" | "base" | "baseHash">): Omit<ReviewSliceRole, "worker"> => {
       const assignment = plan.find(item => worker.group.issueIds.includes(item.id));
       if (!assignment) fail("评审责任分组不存在。");
       const reader = createArchitectureEvidenceReader({ context, candidateHash, priorFindings, role: "reviewer" });
       const wire = reader.submissionSchema(schema);
       const legacyWire = reader.submissionSchema(boundSchema, { legacy: true });
+      const previousWire = reader.submissionSchema(boundSchema, { strictLocations: true });
       const properties: Record<string, ToolSchema> = { summary: { type: "string", minLength: 1, maxLength: 1500 } };
       for (const field of [assignment.field, "issues"] as const) {
         const selected = structuredClone(wire.properties![field]!);
@@ -155,9 +154,12 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
       };
       const parameters: ToolSchema = { type: "object", additionalProperties: false, properties, required: Object.keys(properties) };
       const legacyParameters = structuredClone(parameters);
+      const previousParameters = structuredClone(parameters);
       for (const field of [assignment.field, "issues"] as const) legacyParameters.properties![field] = {
         ...legacyWire.properties![field]!, minItems: parameters.properties![field]!.minItems!, maxItems: parameters.properties![field]!.maxItems! };
-      await options.runRole({ assignment: assignment!, worker, parameters, legacyParameters, tools: [reader.tool], prepareArguments, validate: normalize,
+      for (const field of [assignment.field, "issues"] as const) previousParameters.properties![field] = {
+        ...previousWire.properties![field]!, minItems: parameters.properties![field]!.minItems!, maxItems: parameters.properties![field]!.maxItems! };
+      return { assignment: assignment!, parameters, legacyParameters, previousParameters, tools: [reader.tool], prepareArguments, validate: normalize,
         recoverReviewReferences: messages => reader.recoverHistory(messages, "submit_architecture_review_slice",
           draft => prepareArguments(modelSubmissionArguments(draft, parameters))),
         payload: { ...objectFields(context), assignment, candidateHash, reviewEvidenceIndex: reader.index,
@@ -165,8 +167,92 @@ export async function runArchitectureReviewDispatch(options: { record: UnknownRe
           design: objectFields(context).candidate,
           priorFindings: assignment!.field === "priorFindingDecisions" ? { ...objectFields(priorFindings),
             findings: rows(objectFields(priorFindings).findings).filter(row => assignment!.ids.includes(String(row.findingId))) } : null,
-          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，发现相关问题写入本组 issues 并引用原文，由主评审统筹；其他组负责的结果留给对应组提交。引用由 read_architecture_evidence 核对，摘要说明阻断或不确定项。主评审完成总评后才形成整体结论。` } });
-    } });
+          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，发现相关问题写入本组 issues 并附资料文件位置，由主评审统筹；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；摘要说明阻断或不确定项。主评审完成总评后才形成整体结论。` } };
+  };
+  return { checkpoint, binding, base, plan, checked, ledger, roleFor };
+}
+
+/** A compatibility repair rechecks the actual final rejected submission without generating another answer. */
+export async function revalidateArchitectureReviewDispatch(options: DispatchInputs & ReplayInputs) {
+  return replayRejectedSlices(prepareDispatch(options), options);
+}
+
+async function replayRejectedSlices(prepared: ReturnType<typeof prepareDispatch>, options: ReplayInputs) {
+  const snapshot = structuredClone(prepared.checkpoint), dispatch = snapshot.dispatch;
+  const blocked = dispatch.groups.filter(group => !group.result && group.rejection?.count === 3);
+  if (!blocked.length) return null;
+  let base: unknown = structuredClone(prepared.base), recovered = 0;
+  for (let wave = 1; wave <= Math.max(...dispatch.groups.map(group => group.wave)); wave++) {
+    const groups = dispatch.groups.filter(group => group.wave === wave), baseHash = repairHash(base);
+    if (!groups.length || groups.some(group => group.inputHash !== baseHash)) fail("原评审小组的输入版本无法核验。");
+    for (const group of groups) {
+      if (group.result) {
+        validateRepairResult(group.result, group, base);
+        prepared.ledger(applyRepairUpdates(base, group.result.updates));
+        continue;
+      }
+      if (group.rejection?.count !== 3) continue;
+      const role = prepared.roleFor({ group, base, baseHash });
+      const contract = repairHash({ model: options.model, schema: role.previousParameters });
+      if (group.rejection.modelContractHash !== contract) fail("原评审提交契约无法核验，不能重算退回次数。");
+      const native = await options.readHistory({ group, baseHash, dispatchHash: snapshot.bindingHash });
+      const messages = native.entries.map(entry => entry.message);
+      let end = messages.length - 1;
+      const last = messages[end];
+      if (last?.role === "assistant" && last.stopReason === "error" && last.usage?.output === 0 && Array.isArray(last.content) && !last.content.length) end--;
+      const feedback = messages[end], assistant = messages[end - 1];
+      const calls = assistant?.role === "assistant" && assistant.stopReason === "toolUse" && Array.isArray(assistant.content)
+        ? assistant.content.filter(part => part.type === "toolCall") : [];
+      if (calls.length !== 1 || calls[0]!.name !== "submit_architecture_review_slice"
+        || feedback?.role !== "toolResult" || feedback.toolName !== calls[0]!.name || feedback.toolCallId !== calls[0]!.id || feedback.isError !== true)
+        fail("原会话末次正式评审提交及退回回执无法对应，不能回退取旧稿。");
+      const call = calls[0]!;
+      const recovery = Array.isArray(feedback.content) ? feedback.content.flatMap(part => {
+        if (part.type !== "text") return [];
+        try { return [objectFields(objectFields(JSON.parse(part.text)).formatRecovery)]; } catch { return []; }
+      }).find(item => item.category === "format" && item.attempt === 3 && item.limit === 3 && item.retry === false) : undefined;
+      const args = role.prepareArguments(modelSubmissionArguments(call.arguments, role.parameters));
+      const oldFeedback = architectureToolValidation(args, role.previousParameters, { root: "review_slice" });
+      if (!recovery || oldFeedback.valid || nextReviewRejection(null, contract, oldFeedback.issues).fingerprint !== group.rejection.fingerprint
+        || !architectureToolValidation(args, role.parameters, { root: "review_slice" }).valid)
+        fail("原稿不是本次可核验的格式兼容问题，保留三次退回停点。");
+      const value = role.validate(args);
+      const result = validateRepairResult({ baseHash, issueIds: group.issueIds, summary: "独立评审分项，等待完整主评审",
+        updates: [{ path: group.paths[0], value }] }, group, base);
+      prepared.ledger(applyRepairUpdates(base, result.updates));
+      const receipt: ReviewSubmissionReplay = { version: 1, sourceCheckpointHash: prepared.checkpoint.dispatch.hash,
+        sessionHash: native.sessionHash, bindingHash: native.bindingHash, toolCallId: call.id,
+        rawHash: repairHash(call.arguments), resultHash: repairHash(result), rejectionHash: repairHash(group.rejection) };
+      group.result = result; group.submissionReplay = receipt; recovered++;
+    }
+    if (groups.some(group => !group.result)) break;
+    base = applyRepairUpdates(base, groups.flatMap(group => group.result!.updates));
+    prepared.ledger(base);
+  }
+  if (recovered !== blocked.length) fail("存在未能核验的评审停点，不能启动其他小组。");
+  const { hash: _hash, ...body } = dispatch;
+  snapshot.dispatch = readReviewTaskCheckpoint({ ...body, hash: repairHash(body) });
+  return snapshot;
+}
+
+/** Disjoint review slices share a durable dispatcher; only the main reviewer can submit the final verdict. */
+export async function runArchitectureReviewDispatch(options: DispatchInputs & Partial<ReplayInputs> & {
+  save(checkpoint: ReviewDispatchCheckpoint): Promise<void>; runRole(node: ReviewSliceRole): Promise<unknown> }) {
+  const { candidateHash, context, schema, priorFindings, signal, record } = options;
+  const prepared = prepareDispatch(options), { base, binding, plan, checked, ledger, roleFor } = prepared;
+  let checkpoint = prepared.checkpoint;
+  const save = async (dispatch: RepairCheckpoint<null>) => {
+    signal?.throwIfAborted();
+    const next = { version: 1 as const, candidateHash, bindingHash: checkpoint.bindingHash, dispatch };
+    await options.save(next); checkpoint = next;
+    record.reviewDispatchCheckpoint = structuredClone(next); record.reviewDispatchSource = next.bindingHash;
+  };
+  if (options.readHistory && options.model !== undefined) {
+    const replay = await replayRejectedSlices(prepared, { model: options.model, readHistory: options.readHistory });
+    if (replay) await save(replay.dispatch);
+  }
+  const result = await runReviewTaskSchedule({ checkpoint: checkpoint.dispatch, base, binding, signal, save, validateCandidate: ledger,
+    run: worker => options.runRole({ ...roleFor(worker), worker }) });
   const slices = ledger(result), parts: ReviewParts = { candidateHash, checks: [], issues: [], acceptanceScopeChecks: [], priorFindingDecisions: [] };
   for (const assignment of plan) {
     const slice = checked(slices[assignment.id], assignment);

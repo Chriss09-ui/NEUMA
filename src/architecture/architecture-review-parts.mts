@@ -71,7 +71,8 @@ function partialSchema(schema: ToolSchema) {
 function shortScopeItems(items: ToolSchema | undefined) {
   const branch = (field: string) => items?.anyOf?.find((value) => value.additionalProperties === false
     && ["acceptanceId", field, "sufficient", "reason"].every((key) => Object.hasOwn(value.properties ?? {}, key))
-    && Object.keys(value.properties ?? {}).length === 4 && value.required?.length === 4 && new Set(value.required).size === 4
+    && Object.keys(value.properties ?? {}).every(key => ["acceptanceId", field, "sufficient", "reason", ...(field === "adapterRulePath" ? ["adapterId", "scope", "criterionQuote", "adapterQuote"] : [])].includes(key))
+    && value.required?.length === 4 && new Set(value.required).size === 4
     && value.required.every((key) => ["acceptanceId", field, "sufficient", "reason"].includes(key)));
   const selector = branch("adapterRulePath"), receipt = branch("scopeReceiptId");
   return selector && receipt ? { anyOf: [structuredClone(selector), structuredClone(receipt)] } : items;

@@ -19,7 +19,9 @@ import { designHash, reviewSubmissionSchema, validateReview } from "../../src/ar
 import { legacyReviewSchema, architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { createArchitectureEvidenceReader } from "../../src/architecture/architecture-evidence-reader.mjs";
 import { createArchitectureReviewParts, canonicalArchitectureReviewParts } from "../../src/architecture/architecture-review-parts.mjs";
-import { runArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "../../src/architecture/architecture-review-dispatch.mjs";
+import { runArchitectureReviewDispatch, revalidateArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "../../src/architecture/architecture-review-dispatch.mjs";
+import { nextReviewRejection } from "../../src/architecture/architecture-review-protocol.mjs";
+import type { SessionMessage } from "../../src/runtime/execution-port.mjs";
 import type { ReviewSliceRole, ReviewDispatchCheckpoint } from "../../src/architecture/architecture-review-dispatch.mjs";
 import { createReviewProgressCheckpoint, readReviewProgressCheckpoint, reviewProgressCheckpointMatches,
   advanceReviewProgressCheckpoint } from "../../src/architecture/architecture-review-progress.mjs";
@@ -41,11 +43,104 @@ function material() {
   return { design, candidateHash, context, schema, reader, options, review: passingReview(candidateHash, design) };
 }
 
-test("旧引用契约与v2退回记录升级后保留两次失败，第三次格式拒交停止", async t => {
+async function pausedMixedScope() {
+  const f = material(), record: Record<string, unknown> = { candidateHash: f.candidateHash, status: "failed" };
+  const native: SessionMessage[] = [], requests: string[] = [], model = "fixture-model";
+  const raw = (node: ReviewSliceRole) => ({ summary: "本组已核对", issues: [], [node.assignment.field]: node.assignment.field === "checks"
+    ? f.review.checks.filter(row => node.assignment.ids.includes(row.id))
+    : f.review.acceptanceScopeChecks!.filter(row => node.assignment.ids.includes(String(objectFields(row).acceptanceId)))
+      .map(row => ({ ...row, adapterRulePath: `/adapters/${objectFields(row).adapterId}/proves` })) });
+  const runRole = async (node: ReviewSliceRole) => {
+    requests.push(node.worker.group.id);
+    await node.worker.onSession(node.worker.group.sessionFile ?? `${node.assignment.id}.jsonl`); await node.worker.onCall();
+    const result = node.validate(raw(node));
+    await node.worker.submit({ baseHash: node.worker.baseHash, issueIds: node.worker.group.issueIds, summary: result.summary,
+      updates: [{ path: node.worker.group.paths[0]!, value: result }] });
+  };
+  const options = { record, candidateHash: f.candidateHash, platformHash: "a".repeat(64), context: f.context, schema: f.schema,
+    model, save: async (_value: ReviewDispatchCheckpoint) => {}, runRole };
+  await assert.rejects(runArchitectureReviewDispatch({ ...options, runRole: async node => {
+    if (node.assignment.field === "checks" && node.assignment.ids.includes("acceptance_quality")) {
+      await node.worker.onSession(`${node.assignment.id}.jsonl`); await node.worker.onCall(); throw new Error("其他组连接中断");
+    }
+    if (node.assignment.field !== "acceptanceScopeChecks") return runRole(node);
+    await node.worker.onSession(`${node.assignment.id}.jsonl`);
+    const args = raw(node), feedback = architectureToolValidation(args, node.previousParameters, { root: "review_slice" });
+    assert.equal(feedback.valid, false, "原互斥契约确实拒绝混合写法");
+    let rejection = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await node.worker.onCall();
+      rejection = nextReviewRejection(rejection, designHash({ model, schema: node.previousParameters }), feedback.issues);
+      await node.worker.onRejection!(rejection);
+      const id = `scope_${attempt}`;
+      native.push({ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id, name: "submit_architecture_review_slice", arguments: structuredClone(args) }] },
+        { role: "toolResult", toolCallId: id, toolName: "submit_architecture_review_slice", isError: true,
+          content: [{ type: "text", text: JSON.stringify({ ...feedback, formatRecovery: { category: "format", attempt, limit: 3, retry: attempt < 3 } }) }] });
+    }
+    native.push({ role: "assistant", stopReason: "error", usage: { output: 0 }, content: [] });
+    throw new Error("原格式三次停点");
+  } }));
+  const checkpoint = structuredClone(record.reviewDispatchCheckpoint) as ReviewDispatchCheckpoint;
+  const stopped = checkpoint.dispatch.groups.find(group => group.rejection?.count === 3)!;
+  const readHistory: Parameters<typeof revalidateArchitectureReviewDispatch>[0]["readHistory"] = async input => {
+    assert.equal(input.group.sessionFile, stopped.sessionFile); assert.equal(input.baseHash, stopped.inputHash);
+    assert.equal(input.dispatchHash, checkpoint.bindingHash);
+    return { entries: native.map((message, i) => ({ type: "message" as const, id: `m${i}`, message })),
+      sessionHash: designHash(native), bindingHash: designHash({ file: input.group.sessionFile, baseHash: input.baseHash }), leafId: "last" };
+  };
+  return { ...f, options, record, checkpoint, stopped, native, requests, readHistory };
+}
+
+test("格式兼容重验原会话末稿，原子接收且保留三次退回、已收结果和未完成组会话", async () => {
+  const f = await pausedMixedScope(), oldRecord = structuredClone(f.record), native = structuredClone(f.native), calls = f.requests.length;
+  const replay = await revalidateArchitectureReviewDispatch({ ...f.options, readHistory: f.readHistory });
+  assert.ok(replay); assert.deepEqual(f.record, oldRecord); assert.deepEqual(f.native, native);
+  const recovered = replay.dispatch.groups.find(group => group.id === f.stopped.id)!;
+  assert.ok(recovered.result); assert.deepEqual(recovered.rejection, f.stopped.rejection); assert.equal(recovered.calls, f.stopped.calls);
+  assert.equal(recovered.submissionReplay!.sourceCheckpointHash, f.checkpoint.dispatch.hash);
+  assert.equal(recovered.submissionReplay!.toolCallId, "scope_3");
+  await assert.rejects(runArchitectureReviewDispatch({ ...f.options, readHistory: f.readHistory,
+    save: async checkpoint => { if (checkpoint.dispatch.groups.some(group => group.submissionReplay)) throw new Error("落盘失败"); } }), /落盘失败/);
+  assert.deepEqual(f.record, oldRecord); assert.equal(f.requests.length, calls);
+  const result = await runArchitectureReviewDispatch({ ...f.options, readHistory: f.readHistory });
+  const saved = f.record.reviewDispatchCheckpoint as ReviewDispatchCheckpoint;
+  assert.equal(saved.dispatch.calls, f.checkpoint.dispatch.calls + 1, "只有另一未完成组新增一次请求");
+  assert.ok(!f.requests.slice(calls).includes(f.stopped.id));
+  for (const previous of f.checkpoint.dispatch.groups) {
+    const next = saved.dispatch.groups.find(group => group.id === previous.id)!;
+    assert.equal(next.sessionFile, previous.sessionFile);
+    if (previous.result) assert.deepEqual(next, previous);
+  }
+  assert.equal(architectureReviewDispatchRecovery(f.record), null);
+  assert.equal(result.parts.acceptanceScopeChecks.length, f.design.acceptance.length);
+  assert.deepEqual(f.native, native);
+});
+
+test("原评审报告的错误摘录、最新响应或退回绑定无法核对时，保留停点且不启动任何小组", async () => {
+  for (const damage of ["quote", "latest", "receipt", "contract", "missing"]) {
+    const f = await pausedMixedScope(), calls = f.requests.length;
+    const assistant = f.native.at(-3)!;
+    assert.ok(Array.isArray(assistant.content) && assistant.content[0]!.type === "toolCall");
+    if (damage === "quote") recordArray(objectFields(assistant.content[0]!.arguments).acceptanceScopeChecks)[0]!.adapterQuote = "不属于当前材料的原文";
+    if (damage === "latest") f.native.push({ role: "assistant", stopReason: "length", content: [{ type: "text", text: "未完成的新回复" }] });
+    if (damage === "receipt") f.native.at(-2)!.toolCallId = "unrelated";
+    if (damage === "contract") {
+      const cp = f.record.reviewDispatchCheckpoint as ReviewDispatchCheckpoint;
+      cp.dispatch.groups.find(group => group.id === f.stopped.id)!.rejection!.modelContractHash = "c".repeat(64);
+      const { hash: _hash, ...body } = cp.dispatch; cp.dispatch.hash = designHash(body);
+    }
+    const before = structuredClone(f.record);
+    await assert.rejects(runArchitectureReviewDispatch({ ...f.options,
+      readHistory: damage === "missing" ? async () => { throw new Error("原会话缺失"); } : f.readHistory }));
+    assert.equal(f.requests.length, calls, damage); assert.deepEqual(f.record, before, damage);
+  }
+});
+
+for (const previousFormat of ["legacy", "location"]) test(`${previousFormat}引用契约升级后保留两次失败，第三次格式拒交停止`, async t => {
   const directory = await mkdtemp(join(tmpdir(), "neuma-review-location-counter-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const f = material(), parameters = f.reader.submissionSchema(f.schema);
-  const legacyParameters = f.reader.submissionSchema(f.schema, { legacy: true });
+  const legacyParameters = f.reader.submissionSchema(f.schema, previousFormat === "legacy" ? { legacy: true } : { strictLocations: true });
   const invalid = { ...f.review, issues: false };
   const originalIssue = architectureToolValidation(invalid, legacyParameters, { root: "review_slice" }).issues;
   const legacyHash = designHash({ model: "fixture-model", schema: legacyParameters });
@@ -65,7 +160,8 @@ test("旧引用契约与v2退回记录升级后保留两次失败，第三次格
       } }) });
   await designer.ready;
   await assert.rejects(designer.role({ role: "specialist", systemPrompt: "固定评审协议测试", submitName: "submit_architecture_review_slice",
-    payload: { pipelineStage: "review_slice", candidateHash: f.candidateHash }, parameters, legacyReviewParameters: legacyParameters,
+    payload: { pipelineStage: "review_slice", candidateHash: f.candidateHash }, parameters,
+    ...(previousFormat === "legacy" ? { legacyReviewParameters: legacyParameters } : { previousReviewParameters: legacyParameters }),
     modelCallLimit: null, initialModelCalls: 2, previousRejection: previous, onSliceRejection: async value => { rejected = value; },
     onStageModelCall: () => { calls++; }, validate: () => assert.fail("拒交不能进入正式验收") }));
   assert.equal(verified, true); assert.equal(calls, 1); assert.equal(rejected?.count, 3);

@@ -102,13 +102,13 @@ test("旧详细行的坏逐字引文与旧CAS均保留已有成果", async () =>
   assert.equal(parts.rejectedSnapshot!()!.acceptanceScopeChecks[1]!.criterionQuote, "不存在的逐字引用");
 });
 
-test("宿主batch仅派发两种四字段短行，保存为canonical且旧完整提交保持兼容", async () => {
+test("宿主batch只要求四字段，兼容一致摘录且保存为位置，旧完整提交保持兼容", async () => {
   const f = material(), writes: ReviewParts[] = [], parts = createArchitectureReviewParts({ ...f.options, remainingModelCalls: () => 12,
     onSave: value => writes.push(value) });
   for (const schema of [parts.saveParameters, parts.submitParameters]) {
     const branches = fixtureSchema(schema).properties!.acceptanceScopeChecks!.items!.anyOf!;
     assert.equal(branches.length, 2);
-    assert.deepEqual(branches.map((branch) => Object.keys(branch.properties!).sort()), [
+    assert.deepEqual(branches.map((branch) => [...branch.required!].sort()), [
       ["acceptanceId", "adapterRulePath", "reason", "sufficient"], ["acceptanceId", "reason", "scopeReceiptId", "sufficient"],
     ]);
     assert.ok(branches.every((branch) => branch.required!.length === 4 && branch.additionalProperties === false));
@@ -119,7 +119,9 @@ test("宿主batch仅派发两种四字段短行，保存为canonical且旧完整
   assert.deepEqual(parts.snapshot(), before); assert.equal(writes.length, 0);
   const short = { acceptanceId: detailed!.acceptanceId!, adapterRulePath: `/adapters/${detailed!.adapterId!}/proves`,
     sufficient: detailed!.sufficient!, reason: detailed!.reason! };
-  await parts.save(input(parts, { acceptanceScopeChecks: [short] }));
+  const mixed = { ...detailed, ...short };
+  assert.equal(architectureToolValidation(input(parts, { acceptanceScopeChecks: [mixed] }), parts.saveParameters).valid, true);
+  await parts.save(input(parts, { acceptanceScopeChecks: [mixed] }));
   const { criterionQuote: _criterion, adapterQuote: _adapter, ...position } = detailed;
   assert.deepEqual(parts.snapshot().acceptanceScopeChecks[0], { ...position, adapterRulePath: short.adapterRulePath });
   const second = f.review!.acceptanceScopeChecks![1]!; assert.ok("adapterId" in second);

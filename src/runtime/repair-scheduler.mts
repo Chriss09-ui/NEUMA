@@ -6,10 +6,13 @@ export interface RepairIssue { id: string; description: string; remedy: string; 
 export interface RepairUpdate { path: string; value: unknown }
 export interface RepairResult { baseHash: string; issueIds: string[]; summary: string; updates: RepairUpdate[] }
 interface RepairHistory { wave: number; calls: number; sessionFile: string | null; inputHash: string | null;
-  result: RepairResult | null; reason: string }
+  result: RepairResult | null; reason: string; submissionReplay?: ReviewSubmissionReplay }
+export interface ReviewSubmissionReplay { version: 1; sourceCheckpointHash: string; sessionHash: string; bindingHash: string;
+  toolCallId: string; rawHash: string; resultHash: string; rejectionHash: string }
 export interface TaskRejection { fingerprint: string; modelContractHash: string; protocolVersion?: number; count: number }
 export interface RepairGroup { id: string; issueIds: string[]; paths: string[]; wave: number; calls: number;
-  dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null; history?: RepairHistory[]; rejection?: TaskRejection }
+  dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null; history?: RepairHistory[]; rejection?: TaskRejection;
+  submissionReplay?: ReviewSubmissionReplay }
 export interface RepairCheckpoint<Limit extends number | null = number> { version: 1 | 2 | 3; bindingHash: string; baseHash: string; issues: RepairIssue[];
   calls: number; callLimit: Limit; groupCallLimit: Limit; concurrency: number; groups: RepairGroup[]; hash: string }
 export interface RepairWorker<Limit extends number | null = number> { group: RepairGroup; issues: RepairIssue[]; base: unknown; baseHash: string;
@@ -140,6 +143,16 @@ function readCheckpoint(input: unknown, review: boolean): RepairCheckpoint<numbe
   if (ids.length !== state.issues.length || new Set(ids).size !== ids.length
     || state.issues.some(issue => !ids.includes(issue.id))) fail();
   for (const group of state.groups) {
+    const checkReplay = (receipt: ReviewSubmissionReplay | undefined, result: RepairResult | null) => {
+      if (receipt === undefined) return;
+      if (!review || !result || Object.keys(receipt).sort().join() !== "bindingHash,rawHash,rejectionHash,resultHash,sessionHash,sourceCheckpointHash,toolCallId,version"
+        || receipt.version !== 1 || typeof receipt.toolCallId !== "string" || !receipt.toolCallId || receipt.toolCallId.length > 256
+        || [receipt.bindingHash, receipt.rawHash, receipt.rejectionHash, receipt.resultHash, receipt.sessionHash, receipt.sourceCheckpointHash]
+          .some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value))
+        || receipt.resultHash !== repairHash(result)) fail();
+    };
+    checkReplay(group.submissionReplay, group.result);
+    if (group.submissionReplay && (!group.rejection || group.submissionReplay.rejectionHash !== repairHash(group.rejection))) fail();
     if (group.rejection !== undefined) {
       const rejection = group.rejection;
       if (!review || !rejection || !group.calls || !Number.isSafeInteger(rejection.count) || rejection.count < 1 || rejection.count > 3
@@ -148,6 +161,7 @@ function readCheckpoint(input: unknown, review: boolean): RepairCheckpoint<numbe
     }
     const owned = state.issues.filter(issue => group.issueIds.includes(issue.id));
     const history = group.history ?? [];
+    if (Array.isArray(history)) for (const entry of history) checkReplay(entry.submissionReplay, entry.result);
     if (!Array.isArray(history) || history.length > 12 || history.some((entry, index) => !Number.isSafeInteger(entry.calls)
       || entry.calls < 1 || entry.calls > group.calls || index > 0 && entry.calls < history[index - 1]!.calls
       || !Number.isSafeInteger(entry.wave) || entry.wave < 1 || typeof entry.inputHash !== "string"
@@ -201,9 +215,11 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
       if (group.calls && group.sessionFile) {
         if ((group.history?.length ?? 0) >= 12) fail("修复退回次数已达到保存上限。");
         (group.history ??= []).push({ wave: group.wave, calls: group.calls, sessionFile: group.sessionFile,
-          inputHash: group.inputHash, result: clone(group.result), reason });
+          inputHash: group.inputHash, result: clone(group.result), reason,
+          ...(group.submissionReplay ? { submissionReplay: clone(group.submissionReplay) } : {}) });
       }
       group.result = null;
+      delete group.submissionReplay;
       // Later waves consumed the rejected base. Keep their history and usage, but bind a new session to the corrected base.
       if (group.wave > wave) { group.wave = 0; group.inputHash = null; group.sessionFile = null; }
     }

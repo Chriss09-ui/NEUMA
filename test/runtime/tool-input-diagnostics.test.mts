@@ -64,6 +64,17 @@ test("数组内复用同一联合schema时，各项独立选分支，不能相�
   ]);
 });
 
+test("联合分支沿用父层字段时指出必填与互斥字段，不返回两个空选项", () => {
+  const schema = { type: "object", properties: { id: { type: "string" }, location: { type: "string" }, quote: { type: "string" } }, required: ["id"],
+    anyOf: [{ required: ["location"], not: { required: ["quote"] } }, { required: ["quote"], not: { required: ["location"] } }] };
+  const feedback = toolInputValidation({ id: "PRIVATE_ID", location: "PRIVATE_LOCATION", quote: "PRIVATE_TEXT" }, schema);
+  assert.equal(feedback.valid, false);
+  assert.deepEqual(feedback.issues[0]!.alternatives!.map(option => ({ required: option.requiredFields, forbidden: option.forbiddenFields })), [
+    { required: ["id", "location"], forbidden: ["quote"] }, { required: ["id", "quote"], forbidden: ["location"] },
+  ]);
+  assert.doesNotMatch(JSON.stringify(feedback), /PRIVATE_/);
+});
+
 test("没有匹配的鉴别字段时，替代结构列出各分支的固定值与对应字段类型", () => {
   const branch = (kind: string, type: string) => ({ type: "object", properties: { kind: { const: kind }, value: { type } },
     required: ["kind", "value"], additionalProperties: false });

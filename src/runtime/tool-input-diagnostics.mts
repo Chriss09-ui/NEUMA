@@ -1,6 +1,7 @@
 import { Ajv } from "ajv";
 import type { ErrorObject, ValidateFunction } from "ajv";
 import type { ToolSchema, DiagnosticHint, ToolInputIssue, ToolInputValidation } from "../contracts/tools.mjs";
+import { objectFields } from "./type-boundary.mjs";
 type DiagnosticError = Omit<ErrorObject<string, Record<string, unknown>>, "parentSchema"> & { parentSchema: ToolSchema };
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false, verbose: true });
@@ -81,6 +82,20 @@ function choiceHint(schema: ToolSchema | undefined, detailed = false): Diagnosti
     ...(values.length ? { allowedValues: values.slice(0, 16), ...(values.length > 16 ? { allowedValuesTruncated: true } : {}) } : {}) };
 }
 
+function branchHint(branch: ToolSchema, parent: ToolSchema): DiagnosticHint {
+  const properties = branch.properties ?? parent.properties;
+  const hint = choiceHint({ ...branch, required: [...new Set([...parent.required ?? [], ...branch.required ?? []])],
+    ...(properties ? { properties } : {}) }, true);
+  const not = objectFields(branch.not), excludes = Array.isArray(not.anyOf) ? not.anyOf : [not];
+  const forbidden = excludes.flatMap(input => {
+    const required = objectFields(input).required;
+    return Array.isArray(required) && required.length === 1 && safeField(required[0]) && Object.hasOwn(properties ?? {}, required[0]) ? [required[0]] : [];
+  });
+  return { ...hint, ...(forbidden.length ? { forbiddenFields: [...new Set(forbidden)].slice(0, 32),
+    ...(hint.allowedFields ? { allowedFields: hint.allowedFields.filter(field => !forbidden.includes(field)) } : {}),
+    ...(hint.fields ? { fields: hint.fields.filter(field => !forbidden.includes(field.field)) } : {}) } : {}) };
+}
+
 // AJV reports every failed alternative. Prefer the branch matching the submitted shape,
 // so a malformed short reference is not told to add fields from the detailed format.
 function relevantErrors(errors: DiagnosticError[]) {
@@ -114,7 +129,7 @@ function relevantErrors(errors: DiagnosticError[]) {
       for (const error of errors) if (within(error) && scored.some(option => option !== selected[0] && error.schemaPath.startsWith(option.prefix))) omitted.add(error);
     } else {
       for (const error of errors) if (within(error) && scored.some(option => error.schemaPath.startsWith(option.prefix))) omitted.add(error);
-      hints.set(union, selected.slice(0, 4).map(option => choiceHint(option.schema, true)));
+      hints.set(union, selected.slice(0, 4).map(option => branchHint(option.schema, union.parentSchema)));
     }
   }
   return { errors: errors.filter(error => !omitted.has(error) && error.keyword !== "if"), hints };
@@ -148,7 +163,7 @@ export function toolInputValidation(value: unknown, schema: ToolSchema, { root =
     // Leave room for the controller's budget and domain-specific hints below Pi's 16k ceiling.
     const compact = () => {
       const trim = (hint: DiagnosticHint) => {
-        for (const key of ["allowedFields", "requiredFields", "fields", "allowedValues"] as const)
+        for (const key of ["allowedFields", "requiredFields", "forbiddenFields", "fields", "allowedValues"] as const)
           if ((hint[key]?.length ?? 0) > 4) {
             // All four fields are arrays, but their element types differ.
             Object.assign(hint, { [key]: hint[key]!.slice(0, 4), [`${key}Truncated`]: true });

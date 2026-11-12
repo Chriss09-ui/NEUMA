@@ -42,6 +42,34 @@ function scopeFixture() {
     current: createArchitectureEvidenceReader({ context, candidateHash, candidateSchema: designSubmissionSchema(draft, { requirements }) }) };
 }
 
+test("资料位置附带一致摘录时整理为位置，错误摘录、错适配器及版本仍逐项拒绝", () => {
+  const f = scopeFixture(), official = reviewSubmissionSchema({ evidenceRequired: true });
+  const review = passingReview(f.candidateHash, f.candidate);
+  const mixed = { ...review, acceptanceScopeChecks: review.acceptanceScopeChecks!.map(row => ({ ...row,
+    adapterRulePath: `/adapters/${objectFields(row).adapterId}/proves` })) };
+  const valid = new Ajv({ strict: false }).compile(f.current.submissionSchema(official));
+  assert.equal(new Ajv({ strict: false }).compile(f.current.submissionSchema(official, { strictLocations: true }))(mixed), false);
+  assert.equal(valid(mixed), true);
+  const before = structuredClone(mixed), resolved = f.current.resolveSubmission(mixed);
+  assert.deepEqual(mixed, before);
+  assert.ok(resolved.acceptanceScopeChecks.every(row => row.adapterRulePath && !Object.hasOwn(row, "criterionQuote") && !Object.hasOwn(row, "adapterQuote")));
+  assert.doesNotThrow(() => validateReview(resolved, { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context }));
+  for (const field of ["criterionQuote", "adapterQuote"] as const) {
+    const wrong = structuredClone(mixed); Object.assign(wrong.acceptanceScopeChecks[0]!, { [field]: "不属于该位置的原文" });
+    assert.throws(() => f.current.resolveSubmission(wrong), error => {
+      const issue = objectFields(objectFields(error).validationIssue);
+      assert.equal(issue.path, `review.acceptanceScopeChecks[0].${field}`); assert.equal(issue.reason, "reference_quote_mismatch"); return true;
+    });
+  }
+  const wrongRule = structuredClone(mixed); wrongRule.acceptanceScopeChecks[0]!.adapterRulePath = "/missing";
+  assert.throws(() => f.current.resolveSubmission(wrongRule), error => failureFields(error).validationIssue?.reason === "scope_rule_invalid");
+  assert.throws(() => f.current.resolveSubmission({ ...mixed, candidateHash: "b".repeat(64) }), error => failureFields(error).validationIssue?.reason === "candidate_mismatch");
+  const withReference = { candidateHash: f.candidateHash, issues: [{ references: [{ file: "candidate.json", path: "/instructions", quote: f.candidate.instructions }] }] };
+  assert.deepEqual(f.current.resolveSubmission(withReference).issues[0]!.references, [{ source: "candidate", path: "/instructions" }]);
+  withReference.issues[0]!.references[0]!.quote = "错误摘录";
+  assert.throws(() => f.current.resolveSubmission(withReference), error => failureFields(error).validationIssue?.path === "review.issues[0].references[0].quote");
+});
+
 test("历史关闭缺项按合并草稿的问题编号提供原文，输入换序不误指其他说明", () => {
   const f = scopeFixture(), issueId = "finding_missing_evidence";
   const canonical = { issues: [{ id: "other", references: [] }, { id: issueId, references: [] }] };
@@ -143,7 +171,8 @@ test("规则选择只解释完整当前材料，拒绝越界、混合、旧候�
     const bad = structuredClone(review); Object.assign(bad.acceptanceScopeChecks![0]!, change);
     assert.throws(() => current.resolveSubmission(bad), (error) => {
       assert.doesNotMatch(failureFields(error).message!, /PRIVATE|scope_0{64}/u);
-      assert.ok(["invalid_selector", "invalid_reference", "scope_rule_invalid", "invalid_receipt"].includes(failureFields(error).validationIssue!.reason!));
+      if ("criterionQuote" in change || "adapterQuote" in change) assert.equal(failureFields(error).validationIssue!.reason, "reference_quote_mismatch");
+      else assert.ok(["invalid_selector", "invalid_reference", "scope_rule_invalid", "invalid_receipt"].includes(failureFields(error).validationIssue!.reason!));
       if (failureFields(error).validationIssue!.reason === "scope_rule_invalid") {
         const diagnostic = JSON.parse(failureFields(error).message!.slice(failureFields(error).message!.indexOf("{")));
         assert.deepEqual(diagnostic.allowedAdapterRulePaths, current.index.acceptanceScope![0]!.adapterRulePaths);

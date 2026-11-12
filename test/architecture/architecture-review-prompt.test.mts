@@ -67,7 +67,7 @@ test("完整与分批评审要求逐条关闭依据，并支持用未通过草�
     assert.match(prompt, /仅重交需要修正的行/u);
     assert.match(prompt, /未重交的草稿行会一起重验/u);
     assert.match(prompt, /进度保存失败时停止并保留原稿/u);
-    assert.match(prompt, /报告references优先用\{file:/u);
+    assert.match(prompt, /报告references使用\{file:/u);
     assert.match(prompt, /以findingRef代替findingId/u);
     assert.match(prompt, /blocking:true只能关联passed:false/u);
     assert.match(prompt, /空列表\[\]表示未额外指定操作，不等于候选布尔字段operations=false/u);
@@ -83,9 +83,9 @@ test("保存阶段只处理已派发编号，关联检查延后而不代填", ()
   assert.match(batch, /尚未派发的checks不提前代填/);
   assert.match(batch, /本批先保存sufficient:false及指向该条真实路径的blocking问题/);
   assert.match(batch, /缺失的检查行须等其派发批提交真实判断/);
-  assert.match(batch, /本批save_architecture_review_parts与submit_architecture_review_parts的范围行只接收/);
-  assert.match(batch, /不接收criterionQuote、adapterQuote等详细行/);
-  assert.match(batch, /确需提交旧详细格式时使用原完整submit_architecture_review/);
+  assert.match(batch, /本批save_architecture_review_parts与submit_architecture_review_parts按当前编号提交\{acceptanceId,adapterRulePath,sufficient,reason\}/);
+  assert.match(batch, /旧记录继续保留，由程序处理兼容/);
+  assert.doesNotMatch(batch, /不接收criterionQuote|选择旧详细格式时|确需提交旧详细格式/);
   assert.match(batch, /仅当本批priorFindingDecisions含编号时/);
   assert.match(batch, /仅当本批checks含编号时/);
   assert.match(batch, /同编号替换，其他行保留，删除已有问题须removeIssueIds/);

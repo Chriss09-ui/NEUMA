@@ -9,7 +9,7 @@ export interface ToolSchema {
 export interface ToolResult { content: ({ type: "text"; text: string } | { type: "image"; mimeType: string; data: string })[]; details: unknown; terminate?: boolean }
 export interface DiagnosticHint {
   expectedType?: string | undefined; expectedTypes?: string[];
-  allowedFields?: string[]; requiredFields?: string[]; allowedValues?: unknown[];
+  allowedFields?: string[]; requiredFields?: string[]; forbiddenFields?: string[]; allowedValues?: unknown[];
   fields?: (DiagnosticHint & { field: string })[]; alternatives?: DiagnosticHint[];
   allowedFieldsTruncated?: boolean; requiredFieldsTruncated?: boolean; allowedValuesTruncated?: boolean;
   fieldsTruncated?: boolean; alternativesTruncated?: boolean;

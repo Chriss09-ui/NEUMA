@@ -84,9 +84,9 @@ async function fixture(t: test.TestContext, { count = 22, initialModelCalls = 0,
         for (const name of ["save_architecture_review_parts", "submit_architecture_review_parts"]) {
           const schema = body.tools.find((tool: { function: { name: string; }; }) => tool.function.name === name).function.parameters;
           const branches = schema.properties.acceptanceScopeChecks.items.anyOf;
-          assert.equal(branches.length, 2, "真实Pi请求的分批工具不能继续派发详细引文格式");
-          assert.ok(branches.every((branch: { properties: object; }) => Object.keys(branch.properties).length === 4
-            && !Object.hasOwn(branch.properties, "criterionQuote") && !Object.hasOwn(branch.properties, "adapterQuote")));
+          assert.equal(branches.length, 2, "分批工具保持位置或原读取回执入口");
+          assert.ok(branches.every((branch: { required: string[]; }) => branch.required.length === 4
+            && !branch.required.includes("criterionQuote") && !branch.required.includes("adapterQuote")));
         }
         const full = body.tools.find((tool: { function: { name: string; }; }) => tool.function.name === "submit_architecture_review").function.parameters;
         assert.ok(full.properties.acceptanceScopeChecks.items.anyOf.some((branch: { properties: { criterionQuote: unknown; }; }) => branch.properties.criterionQuote), "原完整提交保留详细格式");
@@ -96,6 +96,11 @@ async function fixture(t: test.TestContext, { count = 22, initialModelCalls = 0,
         const name = final ? "submit_architecture_review_parts" : "save_architecture_review_parts";
         const args = { candidateHash: f.candidateHash, progressHash: reference.progressHash, ...rows(f, reference), factClaims: "[]",
           ...(final ? { verdict: "pass", summary: "本地协议夹具已逐项核对，非真实业务验收" } : {}) };
+        const scopeRows = recordArray(objectFields(args).acceptanceScopeChecks);
+        if (scopeRows.length) {
+          const original = f.review.acceptanceScopeChecks!.find(row => objectFields(row).acceptanceId === scopeRows[0]!.acceptanceId)!;
+          Object.assign(scopeRows[0]!, { criterionQuote: objectFields(original).criterionQuote, adapterQuote: objectFields(original).adapterQuote });
+        }
         const interrupted = requests.length === 2 && nativeStop, asText = !interrupted && requests.length % 2 === 0;
         const delta = asText ? { content: JSON.stringify({ submission: { name, arguments: args } }) }
           : { tool_calls: [{ index: 0, id: `batch_${requests.length}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] };

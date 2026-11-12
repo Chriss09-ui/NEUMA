@@ -58,7 +58,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
   acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, autoCorrectSlice = false, mixedFormatSlice = false,
   readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
-  interruptIntegration = false, encodedIntegrationValue = false } = {}) {
+  interruptIntegration = false, encodedIntegrationValue = false, mixedScopeReferences = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, formatModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false, formatSliceCalls: 0,
@@ -196,6 +196,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
           acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
           priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };
+        if (mixedScopeReferences && assignment.field === "acceptanceScopeChecks")
+          args.acceptanceScopeChecks = args.acceptanceScopeChecks.map(row => ({ ...row, adapterRulePath: `/adapters/${objectFields(row).adapterId}/proves` }));
         if (rejectReview && !state.reviewRejected && ids.includes("verification")) {
           args.checks.find(row => row.id === "verification")!.passed = false;
           args = { ...args, issues: [{ id: "review_scope", blocking: false, kind: "context", checkId: "verification",
@@ -408,6 +410,24 @@ test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选
   assert.deepEqual(recordArray(objectFields(checkpoint.integration.result).updates)[0]!.value, built.design!.acceptance[0]);
   assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(built.designProgressCheckpoint!.submissionPolicy), "integration"), { content: 0, format: 0 });
   await f.reload(); assert.equal((await f.designer.get(f.definition.id))!.candidateHash, built.candidateHash);
+});
+
+test("真实子组收到唯一位置写法示例，兼容一致摘录后主评审和范围复核仍实际执行", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, mixedScopeReferences: true }), built = await f.run();
+  assert.equal(built.status, "passed", built.summary); assert.deepEqual(f.errors, []);
+  const request = f.requests.find(row => row.kind === "review_slice" && users(row.body).some(value => objectFields(value.assignment).field === "acceptanceScopeChecks"))!;
+  const prompt = text(request.body.messages.find(row => ["developer", "system"].includes(row.role))!.content);
+  assert.match(prompt, /acceptanceScopeChecks每项填acceptanceId、adapterRulePath、sufficient、reason/);
+  assert.match(prompt, /结构示例/); assert.doesNotMatch(prompt, /选择旧详细格式时|不能混填/);
+  const dispatch = objectFields(objectFields(built.reviewDispatchCheckpoint).dispatch);
+  for (const group of recordArray(dispatch.groups)) {
+    assert.equal(group.calls, 1); assert.equal(group.rejection, undefined);
+    const parts = objectFields(objectFields(recordArray(objectFields(group.result).updates)[0]!.value).parts);
+    for (const row of recordArray(parts.acceptanceScopeChecks)) {
+      assert.equal(typeof row.adapterRulePath, "string"); assert.equal(Object.hasOwn(row, "criterionQuote"), false); assert.equal(Object.hasOwn(row, "adapterQuote"), false);
+    }
+  }
+  assert.ok(f.requests.some(row => row.kind === "reviewer")); assert.ok(f.requests.some(row => row.kind === "fidelity"));
 });
 
 test("整合首次派发和原会话恢复都给出本轮验收修改范围与空补丁写法", { timeout: 30000 }, async t => {

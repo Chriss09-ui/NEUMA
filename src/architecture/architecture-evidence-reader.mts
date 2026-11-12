@@ -30,7 +30,7 @@ type ResolvedIssue<T> = ResolvedFinding<{ [K in keyof T]: K extends "references"
 type ResolvedIssues<T> = T extends unknown[] ? ResolvedIssue<T[number]>[] : T;
 type ResolvedFindings<T> = T extends unknown[] ? ResolvedFinding<T[number], "findingId">[] : T;
 type ResolvedScope<T> = T extends { adapterRulePath: string } | { scopeReceiptId: string }
-  ? Omit<T, "adapterRulePath" | "scopeReceiptId"> & { adapterId: string; scope: string; adapterRulePath: string; criterionQuote?: never; adapterQuote?: never } : T;
+  ? Omit<T, "adapterRulePath" | "scopeReceiptId" | "criterionQuote" | "adapterQuote"> & { adapterId: string; scope: string; adapterRulePath: string; criterionQuote?: never; adapterQuote?: never } : T;
 type ResolvedScopes<T> = T extends unknown[] ? ResolvedScope<T[number]>[] : T;
 export type ResolvedReviewSubmission<T> = { [K in keyof T]: K extends "issues" ? ResolvedIssues<T[K]>
   : K extends "priorFindingDecisions" ? ResolvedFindings<T[K]> : K extends "acceptanceScopeChecks" ? ResolvedScopes<T[K]> : T[K] };
@@ -46,7 +46,7 @@ const SOURCES: EvidenceSource[] = ["candidate", "requirements", "runtimeCapabili
 const CANDIDATE_SECTIONS = { 能力清单: "capabilities", 组件清单: "components", 执行步骤: "steps",
   需求覆盖: "coverage", 验收用例: "acceptance", 设计决策: "decisions" };
 const CANDIDATE_ARRAY_FIELDS = [...Object.values(CANDIDATE_SECTIONS), "connections", "failureHandling", "unknowns", "platformClaims"];
-const object = (properties: Record<string, ToolSchema>): ToolSchema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
+const object = (properties: Record<string, ToolSchema>, required = Object.keys(properties)): ToolSchema => ({ type: "object", properties, required, additionalProperties: false });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const RECEIPT_SCHEMA = object({ receiptId: { type: "string", pattern: "^ref_[a-f0-9]{64}$" } });
 const REFERENCE_SELECTOR_SCHEMA = object({ source: { type: "string", enum: SOURCES }, path: { type: "string", maxLength: 500 } });
@@ -491,21 +491,27 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
       }
       return hints;
     },
-    submissionSchema(schema: ToolSchema, { legacy = false } = {}) {
+    submissionSchema(schema: ToolSchema, { legacy = false, strictLocations = false } = {}) {
       const result = legacy ? legacyReviewSchema(schema) : structuredClone(schema), references = result.properties?.issues?.items?.properties?.references;
+      const optionalQuote = { type: "string", minLength: 1, maxLength: 256 * 1024 };
       if (references) {
-        references.items = { anyOf: [...(legacy ? [] : [object({ file: { type: "string", enum: SOURCES.map(source => `${source}.json`) }, path: { type: "string", maxLength: 500 } })]), REFERENCE_SELECTOR_SCHEMA, RECEIPT_SCHEMA, references.items!] };
+        references.items = { anyOf: [...(legacy ? [] : [object({ file: { type: "string", enum: SOURCES.map(source => `${source}.json`) }, path: { type: "string", maxLength: 500 },
+          ...(!strictLocations ? { quote: optionalQuote } : {}) }, ["file", "path"])]), REFERENCE_SELECTOR_SCHEMA, RECEIPT_SCHEMA, references.items!] };
         references.description = legacy ? "优先只交{source,path}，由宿主从本轮完整原文填入quote；长字段先细化路径或读取receiptId。含quote的写法仅兼容精确旧引用，不能改写原文。"
-          : "提交文件位置{file,path}，file从materialFiles选择，path可为空表示整份文件。兼容{source,path}及旧回执；无需复制原文，位置有效不代表结论成立。";
+          : strictLocations ? "提交文件位置{file,path}，file从materialFiles选择，path可为空表示整份文件。兼容{source,path}及旧回执；无需复制原文，位置有效不代表结论成立。"
+            : "提交文件位置{file,path}，file从materialFiles选择，path可为空表示整份文件。无需复制原文；若额外附上quote，程序核对与该位置一致后仅保存位置，不一致则明确退回。位置有效不代表结论成立。";
       }
       const paths = result.properties?.issues?.items?.properties?.candidatePaths;
       if (paths) paths.items = { anyOf: [paths.items!, RECEIPT_SCHEMA] };
       const scope = result.properties?.acceptanceScopeChecks;
       if (scope && !legacy) scope.description = "每项验收恰好一行。读取完整验收与实际规则后，提交acceptanceId、adapterRulePath、sufficient、reason；无需复制原文。范围不足须有对应阻断。";
+      if (scope && !legacy && !strictLocations) scope.description += "额外摘录必须与本项验收和所选规则位置一致；宿主核对后仅保存位置，判断与理由仍由评审负责。";
       if (scope?.items?.properties) scope.items = { anyOf: [object({
         acceptanceId: scope.items.properties.acceptanceId!, adapterRulePath: { type: "string", minLength: 1, maxLength: 500 },
         sufficient: scope.items.properties.sufficient!, reason: scope.items.properties.reason!,
-      }), object({
+        ...(!legacy && !strictLocations ? { adapterId: scope.items.properties.adapterId!, scope: scope.items.properties.scope!,
+          criterionQuote: optionalQuote, adapterQuote: optionalQuote } : {}),
+      }, ["acceptanceId", "adapterRulePath", "sufficient", "reason"]), object({
         acceptanceId: scope.items.properties.acceptanceId!, scopeReceiptId: SCOPE_RECEIPT_SCHEMA,
         sufficient: scope.items.properties.sufficient!, reason: scope.items.properties.reason!,
       }), scope.items] };
@@ -543,14 +549,23 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
         if (Object.hasOwn(row, "adapterRulePath") && !Object.hasOwn(row, "scopeReceiptId")) {
           const path = `review.acceptanceScopeChecks[${index}].adapterRulePath`;
           const entries = scopeEntries.filter((entry) => entry.acceptanceId === row.acceptanceId), entry = entries[0]!;
-          if (![4, 6].includes(Object.keys(row).length) || !["acceptanceId", "adapterRulePath", "sufficient", "reason"].every((key) => Object.hasOwn(row, key))
-            || Object.keys(row).some(key => !["acceptanceId", "adapterRulePath", "sufficient", "reason", "adapterId", "scope"].includes(key))
+          if (!["acceptanceId", "adapterRulePath", "sufficient", "reason"].every((key) => Object.hasOwn(row, key))
+            || Object.keys(row).some(key => !["acceptanceId", "adapterRulePath", "sufficient", "reason", "adapterId", "scope", "criterionQuote", "adapterQuote"].includes(key))
             || row.adapterId !== undefined && row.adapterId !== entry?.adapterId || row.scope !== undefined && row.scope !== entry?.scope)
             throw selectorError(path, "invalid_selector", entries.length === 1 ? entry : null);
           if (!fullScopeSources) throw selectorError(path, "context_not_full");
           if (result.candidateHash !== candidateHash) throw selectorError("review.candidateHash", "candidate_mismatch");
           if (entries.length !== 1) throw selectorError(path, "invalid_reference");
           if (typeof row.adapterRulePath !== "string" || !entry.adapterRulePaths.includes(row.adapterRulePath)) throw selectorError(path, "scope_rule_invalid", entry);
+          for (const [field, source, pointer] of [["criterionQuote", "candidate", entry.criterionPath], ["adapterQuote", "acceptanceAdapterGuide", row.adapterRulePath]] as const) {
+            if (!Object.hasOwn(row, field)) continue;
+            const original = at(frozen[source], pointer).value;
+            if (typeof row[field] !== "string" || !row[field].trim() || typeof original !== "string" || !original.includes(row[field]))
+              throw Object.assign(new InputError(`review.acceptanceScopeChecks[${index}].${field}：附带原文与 ${source}.json 的 ${pointer} 不一致，请重新读取该位置并核对。`), {
+                validationIssue: { path: `review.acceptanceScopeChecks[${index}].${field}`, reason: "reference_quote_mismatch",
+                  remedy: `附带原文与 ${source}.json 的 ${pointer} 不一致；重新读取该位置，纠正引用。` },
+              });
+          }
           return { acceptanceId: row.acceptanceId, adapterId: entry.adapterId, scope: entry.scope,
             adapterRulePath: row.adapterRulePath,
             sufficient: row.sufficient, reason: row.reason };
@@ -587,14 +602,15 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
           if (!input || typeof input !== "object") return input;
           let reference = objectFields(input);
           const path = `review.issues[${index}].references[${position}]`;
+          const fileLocation = Object.hasOwn(reference, "file");
           if (Object.hasOwn(reference, "file")) {
-            if (Object.keys(reference).sort().join() !== "file,path" || typeof reference.file !== "string"
+            if (Object.keys(reference).some(key => !["file", "path", "quote"].includes(key)) || !Object.hasOwn(reference, "path") || typeof reference.file !== "string"
               || !SOURCES.some(source => `${source}.json` === reference.file)) throw referenceSelectorError(path, "invalid_selector");
-            reference = { source: reference.file.slice(0, -5), path: reference.path };
+            reference = { source: reference.file.slice(0, -5), path: reference.path, ...(Object.hasOwn(reference, "quote") ? { quote: reference.quote } : {}) };
           }
           if (Object.hasOwn(reference, "receiptId")) return structuredClone(resolveReceipt(reference, path));
-          if (Object.hasOwn(reference, "quote")) return reference;
-          if (Object.keys(reference).length !== 2 || !sourceName(reference.source) || typeof reference.path !== "string"
+          if (!fileLocation && Object.hasOwn(reference, "quote")) return reference;
+          if (Object.keys(reference).some(key => !["source", "path", "quote"].includes(key)) || !sourceName(reference.source) || typeof reference.path !== "string"
             || reference.path.length > 500) throw referenceSelectorError(path, "invalid_selector");
           if (result.candidateHash !== candidateHash) throw referenceSelectorError("review.candidateHash", "candidate_mismatch");
           if (!fullSource(reference.source)) throw referenceSelectorError(path, "context_not_full");
@@ -602,6 +618,10 @@ export function createArchitectureEvidenceReader({ context, candidateHash, candi
           if (!current.found) throw referenceSelectorError(path, current.reason);
           const quote = typeof current.value === "string" ? current.value : JSON.stringify(current.value);
           if (typeof quote !== "string" || !quote.trim()) throw referenceSelectorError(path, "reference_path_missing");
+          if (Object.hasOwn(reference, "quote") && (typeof reference.quote !== "string" || !reference.quote.trim() || !quote.includes(reference.quote)))
+            throw Object.assign(new InputError(`${path}.quote：附带原文与 ${reference.source}.json 的 ${current.pointer} 不一致，请重新读取该位置并核对。`), {
+              validationIssue: { path: `${path}.quote`, reason: "reference_quote_mismatch", remedy: "附带原文与所指位置不一致；重新读取该位置，纠正引用。" },
+            });
           const selector = { source: reference.source, path: current.pointer };
           return selector;
         }));
