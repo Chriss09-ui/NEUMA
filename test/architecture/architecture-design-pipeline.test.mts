@@ -15,7 +15,7 @@ import { architectureToolValidation } from "../../src/architecture/architecture-
 import type { ArchitectureAcceptance,ArchitectureComponent,ArchitectureStep,ArchitectureDecision } from "../../src/contracts/architecture.mjs";
 import type { AcceptanceVerification } from "../../src/contracts/verification.mjs";
 import { blueprintConsultationSchemas, type BlueprintConsultationResult } from "../../src/architecture/architecture-blueprint-consultation.mjs";
-import { recoverDesignSubmissionPolicy } from "../../src/architecture/architecture-design-rejections.mjs";
+import { recoverDesignSubmissionPolicy, designSubmissionCounts, assertDesignSubmissionHistory } from "../../src/architecture/architecture-design-rejections.mjs";
 import type { SessionMessage } from "../../src/runtime/execution-port.mjs";
 
 
@@ -1064,7 +1064,8 @@ test("设计任务按正式退回计数时，正常请求可超过原节点及�
   }) }));
   assert.ok(result.instructions);
   assert.equal(f.record.designProgressCheckpoint!.modelCalls, 32);
-  assert.deepEqual(f.record.designProgressCheckpoint!.submissionPolicy!.receipts, {});
+  const policy = f.record.designProgressCheckpoint!.submissionPolicy!;
+  for (const key of ["blueprint", "module_0", "module_1", "integration"]) assert.deepEqual(designSubmissionCounts(policy, key), { content: 0, format: 0 });
 });
 
 test("旧设计按原会话拒交回执恢复次数，读资料和成功提交不算退回，缺历史不能补零", async () => {
@@ -1083,10 +1084,38 @@ test("旧设计按原会话拒交回执恢复次数，读资料和成功提交�
     "/tmp/neuma-design-pipeline-fixture", async storage => ({ entries: (objectFields(storage.binding).stage === "integration" ? messages : [])
       .map(message => ({ message })) })) });
   const policy = f.record.designProgressCheckpoint!.submissionPolicy!;
-  assert.equal(policy.receipts.integration!.length, 1);
+  assert.deepEqual(designSubmissionCounts(policy, "integration"), { content: 1, format: 0 });
   assert.equal(f.record.designProgressCheckpoint!.modelCalls, original.modelCalls);
   assert.equal(f.calls.length, stages, "核对旧回执不应请求模型");
   assert.equal(designHash(original), before);
+});
+
+test("旧混合五次退回恢复为两次内容和三次格式，原回执不丢且三次格式仍在调用前阻断", async () => {
+  const f = fixture();
+  await assert.rejects(f.run({ runRole: f.mockRole(async ({ options, send, value }) => {
+    if (options.stage !== "integration") { await send(); await options.onResult(value); return value; }
+    for (let index = 0; index < 5; index++) await send();
+    throw new Error("legacy rejection stop");
+  }) }), /legacy rejection stop/);
+  const cp = f.record.designProgressCheckpoint!, file = cp.integration.sessionRef!.file;
+  const ids = Array.from({ length: 5 }, (_, index) => designHash({ file, toolCallId: `old_${index}`, modelCalls: index + 1 }));
+  cp.submissionPolicy = { version: 1, limit: 5, receipts: { integration: ids } };
+  const { hash: _hash, ...body } = cp; cp.hash = designHash(body);
+  const before = structuredClone(cp), calls = f.calls.length;
+  const read = async (storage: SessionStorage) => ({ entries: (storage.file === file ? ids.map((_, index): SessionMessage => ({
+    role: "toolResult", toolName: "submit_architecture_integration", toolCallId: `old_${index}`, isError: true,
+    content: [{ type: "text", text: index < 2 ? "整合不能修改冻结的模块内容" : '完整候选结构错误：{"valid":false,"issues":[{"path":"candidate.acceptance[9]","reason":"invalid_type","expectedType":"object","receivedType":"string"}]}' }],
+  })) : []).map(message => ({ message })) });
+  await assert.rejects(f.run({ submissionPolicy: true, recoverSubmissionPolicy: checkpoint => recoverDesignSubmissionPolicy(checkpoint, [before],
+    "/tmp/neuma-design-pipeline-fixture", read) }), error => failureFields(error).diagnostic?.reason === "design_format_stalled");
+  const policy = f.record.designProgressCheckpoint!.submissionPolicy!;
+  assert.deepEqual(designSubmissionCounts(policy, "integration"), { content: 2, format: 3 });
+  assert.doesNotThrow(() => assertDesignSubmissionHistory(policy, [before.submissionPolicy]));
+  assert.equal(f.calls.length, calls); assert.equal(f.record.designProgressCheckpoint!.modelCalls, before.modelCalls);
+  assert.equal(before.submissionPolicy!.version, 1);
+  const tampered = structuredClone(policy);
+  if (tampered.version === 2) tampered.events.integration!.pop();
+  assert.throws(() => assertDesignSubmissionHistory(tampered, [policy]), /原退回记录缺失/);
 });
 
 test("独立评审修订只退回命中模块及整合，共享累计额度和新代会话不重置", async () => {

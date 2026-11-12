@@ -5,8 +5,10 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { StoredArchitectureRecord } from "./architecture-controller-port.mjs";
 import type { NeumaTool, Progress, SessionStorage } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
-import { DESIGN_SUBMISSION_REJECTION_LIMIT, readDesignSubmissionPolicy, designSubmissionRejections,
-  recordDesignSubmissionRejection } from "./architecture-design-rejections.mjs";
+import { DESIGN_SUBMISSION_REJECTION_LIMIT, readDesignSubmissionPolicy, designSubmissionRejections, designFormatRejections,
+  emptyDesignSubmissionPolicy, recordDesignSubmissionRejection, recordDesignSubmissionAccepted } from "./architecture-design-rejections.mjs";
+import type { DesignRejectionKind, DesignSubmissionCounts } from "./architecture-design-rejections.mjs";
+import { MODEL_FORMAT_REJECTION_LIMIT } from "../runtime/model-submission-arguments.mjs";
 import type { DesignSubmissionPolicy } from "./architecture-design-rejections.mjs";
 type DesignStage = "blueprint" | "module" | "integration" | "consultation";
 interface DesignStageState { key: string; modelCalls: number; sessionStartCalls: number; generation: number; sessionRef: { file: string } | null;
@@ -26,7 +28,7 @@ interface DesignRevision { candidate: ArchitectureDesign | CandidateDraft; issue
 export interface DesignStageRole {
   stage: DesignStage; key: string; role: string; stageInstruction: string; submitName: string; payload: UnknownRecord; parameters: ToolSchema;
   validate(value: unknown): unknown; modelCalls: number; modelCallLimit: number | null; sessionStorage: SessionStorage;
-  submissionRejections?: number; onSubmissionRejected?: (callId: string) => Promise<number>;
+  submissionRejections?: number; formatRejections?: number; onSubmissionRejected?: (callId: string, kind: DesignRejectionKind) => Promise<DesignSubmissionCounts>;
   onSessionRef(value: unknown): Promise<void>; onModelCall(event?: unknown): Promise<void>; onResult(value: unknown): Promise<void>;
   integrationContext?: Parameters<typeof applyArchitectureIntegration>[1];
   tools?: NeumaTool[];
@@ -323,16 +325,21 @@ function programIntegration(checkpoint: DesignCheckpoint, context: DesignPipelin
 }
 
 /** Presentation only: granting still requires the full frozen-input and native-session checks. */
-export function architectureDesignRecovery(record: Partial<StoredArchitectureRecord> | null | undefined) {
+export function architectureDesignRecovery(record: Partial<StoredArchitectureRecord> | null | undefined, recoveredPolicy?: DesignSubmissionPolicy) {
   if (!["failed", "cancelled"].includes(record?.status ?? "") || !record?.designProgressCheckpoint) return null;
   try {
     const checkpoint = copy(record.designProgressCheckpoint); checkpointState(checkpoint);
     if (checkpoint.submissionPolicy) {
-      const target = recoveryStages(checkpoint).find(({ entry }) => designSubmissionRejections(checkpoint.submissionPolicy, entry.key) >= DESIGN_SUBMISSION_REJECTION_LIMIT);
-      return target ? { kind: "design_rejections", status: "blocked", stage: target.stage, stageKey: target.entry.key, request: undefined,
-        rejectionCount: designSubmissionRejections(checkpoint.submissionPolicy, target.entry.key), rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+      const policy = recoveredPolicy ?? checkpoint.submissionPolicy;
+      const target = recoveryStages(checkpoint).find(({ entry }) => designSubmissionRejections(policy, entry.key) >= DESIGN_SUBMISSION_REJECTION_LIMIT
+        || designFormatRejections(policy, entry.key) >= MODEL_FORMAT_REJECTION_LIMIT);
+      const format = target && designFormatRejections(policy, target.entry.key) >= MODEL_FORMAT_REJECTION_LIMIT;
+      return target ? { kind: format ? "design_format" : "design_rejections", status: "blocked", stage: target.stage, stageKey: target.entry.key, request: undefined,
+        rejectionCount: designSubmissionRejections(policy, target.entry.key), rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+        formatRejectionCount: designFormatRejections(policy, target.entry.key), formatRejectionLimit: MODEL_FORMAT_REJECTION_LIMIT,
         modelCalls: target.entry.modelCalls, modelCallLimit: null, pipelineModelCalls: checkpoint.modelCalls, pipelineModelCallLimit: null,
-        message: "同一设计任务已被正式退回五轮，已有成果、原会话和用量保留，请检查尚未修正的问题。" } : null;
+        message: format ? "模型输出格式连续三次未通过，已暂停；格式错误单独计数，不占用五次方案退回次数。"
+          : "同一设计任务因内容问题被退回五轮，已有成果、原会话和用量保留。" } : null;
     }
     const validation = validationRecovery(record, checkpoint);
     if (validation) return validation;
@@ -517,15 +524,23 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     writes = task.catch(() => {});
     return task;
   };
-  if (submissionPolicy && !checkpoint.submissionPolicy) {
-    if (checkpoint.modelCalls > 0 && !recoverSubmissionPolicy) throw invalid("design_history_unavailable");
-    const policy = checkpoint.modelCalls > 0 ? await recoverSubmissionPolicy!(copy(checkpoint))
-      : { version: 1 as const, limit: DESIGN_SUBMISSION_REJECTION_LIMIT, receipts: {} };
+  if (submissionPolicy && checkpoint.submissionPolicy?.version !== 2) {
+    const needsHistory = checkpoint.modelCalls > 0 || Boolean(checkpoint.submissionPolicy);
+    if (needsHistory && !recoverSubmissionPolicy) throw invalid("design_history_unavailable");
+    const policy = needsHistory ? await recoverSubmissionPolicy!(copy(checkpoint))
+      : emptyDesignSubmissionPolicy();
+    if (policy.version !== 2) throw invalid("design_history_unavailable");
     await update(next => { next.submissionPolicy = readDesignSubmissionPolicy(policy); });
   }
   const rejectionLimit = (keys: string[]) => {
+    const formatKey = keys.find(key => designFormatRejections(checkpoint.submissionPolicy, key) >= MODEL_FORMAT_REJECTION_LIMIT);
+    if (formatKey) throw new ProviderError("模型输出格式连续三次未通过，停止自动重交；不占用方案退回次数。", {
+      stage: "architecture", reason: "design_format_stalled", role: "designer", phase: "designing", stageKey: formatKey,
+      rejectionCount: designSubmissionRejections(checkpoint.submissionPolicy, formatKey), rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+      formatRejectionCount: designFormatRejections(checkpoint.submissionPolicy, formatKey), formatRejectionLimit: MODEL_FORMAT_REJECTION_LIMIT,
+      modelCalls: checkpoint.modelCalls });
     const key = keys.find(key => designSubmissionRejections(checkpoint.submissionPolicy, key) >= DESIGN_SUBMISSION_REJECTION_LIMIT);
-    if (key) throw new ProviderError("同一设计任务已被正式退回五轮，停止重试；读取和模型请求只记录用量。", {
+    if (key) throw new ProviderError("同一设计任务因方案内容被退回五轮，停止重试；格式错误单独计数，读取和模型请求只记录用量。", {
       stage: "architecture", reason: "design_repair_stalled", role: "designer", phase: "designing", stageKey: key,
       rejectionCount: designSubmissionRejections(checkpoint.submissionPolicy, key), rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
       modelCalls: checkpoint.modelCalls });
@@ -690,6 +705,8 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         if (entry.result !== null) { if (entry.resultHash !== resultHash) throw invalid(); return; }
         if (entry.modelCalls <= entry.sessionStartCalls || !entry.sessionRef) throw invalid("design_history_unavailable");
         entry.result = result; entry.resultHash = resultHash;
+        if (next.submissionPolicy) recordDesignSubmissionAccepted(next.submissionPolicy, key,
+          { file: entry.sessionRef.file, modelCalls: entry.modelCalls, resultHash });
         if (stage === "blueprint") {
           if ((next.consultations ?? []).some(item => !complete(item))) throw new InputError("专项分析尚未完成，不能跳过已分派问题提交蓝图。");
           const assignmentHash = designHash(objectFields(result).modules);
@@ -708,7 +725,8 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       payload: { ...payload, stageSchema: parameters, stageContract: { submitName, fields: Object.keys(parameters.properties ?? {}), source: "tool_parameters" }, blueprintProtocol: context.textHandoffs ? "module-handoff-v3" : context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: checkpoint.submissionPolicy ? null : architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
         remaining: checkpoint.submissionPolicy ? null : architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls, stageLimit: modelCallLimit,
         ...(checkpoint.submissionPolicy ? { policy: "task_rejections", rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
-          rejections: designSubmissionRejections(checkpoint.submissionPolicy, key) } : {}) },
+          rejections: designSubmissionRejections(checkpoint.submissionPolicy, key), formatRejections: designFormatRejections(checkpoint.submissionPolicy, key),
+          formatRejectionLimit: MODEL_FORMAT_REJECTION_LIMIT } : {}) },
       ...(!checkpoint.submissionPolicy && checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? { stageRepair: {
         additionalCalls: ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT,
         instruction: "用户已显式授权一次局部修复。继续原会话，先修正上次提交被拒的结构与引用；不要重写已完成模块。每个声明组件都必须有实际执行步骤，保持模块职责、接口及业务范围，按当前蓝图协议处理内部编号。" } } : {}),
@@ -730,15 +748,16 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       },
       modelCalls: existing.modelCalls, modelCallLimit, sessionStorage, onSessionRef, onModelCall, onResult,
       ...(checkpoint.submissionPolicy ? { submissionRejections: designSubmissionRejections(checkpoint.submissionPolicy, key),
-        onSubmissionRejected: async (callId: string) => {
-          let count = 0;
+        formatRejections: designFormatRejections(checkpoint.submissionPolicy, key),
+        onSubmissionRejected: async (callId: string, kind: DesignRejectionKind) => {
+          let counts: DesignSubmissionCounts = { content: 0, format: 0 };
           await update(next => {
             const entry = entryAt(next, stage, key);
             if (!entry.sessionRef || complete(entry)) throw invalid();
-            count = recordDesignSubmissionRejection(next.submissionPolicy!, key,
-              { file: entry.sessionRef.file, toolCallId: callId, modelCalls: entry.modelCalls });
+            counts = recordDesignSubmissionRejection(next.submissionPolicy!, key,
+              { file: entry.sessionRef.file, toolCallId: callId, modelCalls: entry.modelCalls }, kind);
           });
-          return count;
+          return counts;
         } } : {}),
       ...(integrationContext ? { integrationContext } : {}) });
     if (stage === "blueprint" && objectFields(value).needsInput) return value;

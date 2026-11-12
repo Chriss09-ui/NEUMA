@@ -13,6 +13,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
+import { designSubmissionCounts, readDesignSubmissionPolicy } from "../../src/architecture/architecture-design-rejections.mjs";
 import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
 import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
 import { networkAllowed } from "../../src/runtime/web-capabilities.mjs";
@@ -52,14 +53,14 @@ function nativeCheckpoint(value: unknown): NativeCheckpoint {
 function fixtureNumber(value: unknown): number { assert.ok(typeof value === "number"); return value; }
 const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit_architecture_module", integration: "submit_architecture_integration" };
 
-async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
+async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, formatModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
   acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, autoCorrectSlice = false, mixedFormatSlice = false,
   readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
   interruptIntegration = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
-  const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
+  const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, formatModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false, formatSliceCalls: 0,
     blueprintDraft: null as Record<string, unknown> | null, blueprintAllocation: null as Record<string, unknown> | null, blueprintPatched: false,
     blueprintRawRejected: false, blueprintRawFeedback: "",
@@ -164,10 +165,12 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           }
           if (stage === "integration" && state.rejectIntegrationCalls > 0) {
             state.rejectIntegrationCalls--;
-            Reflect.set(args!, "updates", [{ path: "/components", value: [{ ...candidate.components[0]!, id: "forbidden_rewrite" }] }]);
+            args = { baseHash: objectFields(args).baseHash, updates: [{ path: "/acceptance/0/expected", value: "删除原有验收义务，只检查部分结果" }] };
           }
           if (stage === "module" && state.rejectModuleCalls > 0) {
             state.rejectModuleCalls--; recordArray(objectFields(args).steps)[0]!.componentId = "fixture_missing_component";
+          } else if (stage === "module" && state.formatModuleCalls > 0) {
+            state.formatModuleCalls--; args = {};
           } else if (stage === "module" && payloads.at(-1)?.rejectedSubmission) {
             name = "revise_architecture_submission";
             args = { submissionHash: payloads.at(-1)!.rejectedSubmission!.submissionHash,
@@ -702,8 +705,7 @@ test("整合正式提交退回五轮后停止，不能用程序空补丁冒充�
   assert.equal(failed!.designRecovery!.status, "blocked");
   assert.equal(objectFields(failed!.designProgressCheckpoint!.integration).result, null);
   assert.equal(failed!.review, null);
-  const receipts = objectFields(objectFields(failed!.designProgressCheckpoint!.submissionPolicy).receipts);
-  assert.equal((receipts.integration as unknown[]).length, 5);
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(failed!.designProgressCheckpoint!.submissionPolicy), "integration"), { content: 5, format: 0 });
   await f.reload(); await assert.rejects(f.run(), /五轮/u);
   assert.equal(f.requests.length, start);
   assert.deepEqual((await f.designer.get(f.definition.id))!.designProgressCheckpoint, failed!.designProgressCheckpoint);
@@ -727,6 +729,40 @@ for (const damage of ["missing", "invalid"]) test(`旧设计升级计数前核�
   assert.equal(saved!.designProgressCheckpoint!.modelCalls, failed!.designProgressCheckpoint!.modelCalls);
 });
 
+test("旧记录混合五次但两类均未达上限时，真实原会话继续而不被旧总数再次拦住", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { rejectModuleCalls: 4, formatModuleCalls: 1 });
+  f.state.controller = new AbortController();
+  const factory = f.designer.sessionFactory;
+  f.designer.sessionFactory = async options => {
+    const session = await factory(options);
+    if (objectFields(options.sessionStorage?.binding).stage === "module") {
+      let rejected = 0;
+      session.subscribe?.(event => {
+        if (event.type === "message_end" && event.message?.role === "toolResult" && event.message.isError && ++rejected === 5)
+          f.state.controller!.abort(new Error("保留五次混合回执的旧停点"));
+      });
+    }
+    return session;
+  };
+  await assert.rejects(f.run());
+  const stopped = (await f.designer.get(f.definition.id))!, cp = stopped.designProgressCheckpoint!;
+  const policy = readDesignSubmissionPolicy(cp.submissionPolicy);
+  assert.deepEqual(designSubmissionCounts(policy, "core"), { content: 4, format: 1 });
+  assert.equal(policy.version, 2);
+  if (policy.version !== 2) assert.fail("需要新分类记录");
+  const receipts = Object.fromEntries(Object.entries(policy.events).map(([key, events]) => [key, events.filter(e => e.kind !== "accepted").map(e => e.id)]));
+  cp.submissionPolicy = { version: 1, limit: 5, receipts };
+  const { hash: _hash, ...body } = cp; cp.hash = designHash(body);
+  await f.designer.save(stopped); await f.reload(); f.state.controller = null;
+  assert.equal((await f.designer.get(f.definition.id))!.designRecovery!.status, "continuing");
+  const passed = await f.run();
+  assert.equal(passed.status, "passed");
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(passed.designProgressCheckpoint!.submissionPolicy), "core"), { content: 4, format: 0 });
+  assert.equal(objectFields(objectFields(recordArray(passed.designProgressCheckpoint!.modules)[0]).sessionRef).file,
+    objectFields(objectFields(recordArray(cp.modules)[0]).sessionRef).file);
+  assert.deepEqual(f.errors, []);
+});
+
 test("原生模块正式退回第五轮后保留会话和计数，不能再申请两次调用来绕过", { timeout: 30000 }, async t => {
   const f = await fixture(t, { rejectModuleCalls: 5 });
   await assert.rejects(f.run(), (error: TestFailure) => error.diagnostic?.reason === "design_repair_stalled");
@@ -734,7 +770,7 @@ test("原生模块正式退回第五轮后保留会话和计数，不能再申�
   const cp = failed.designProgressCheckpoint!, module = recordArray(cp.modules)[0]!;
   assert.equal(failed.designRecovery!.status, "blocked");
   assert.equal(module.modelCalls, 5);
-  assert.equal((objectFields(objectFields(cp.submissionPolicy).receipts).core as unknown[]).length, 5);
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(cp.submissionPolicy), "core"), { content: 5, format: 0 });
   assert.ok(objectFields(module.sessionRef).file);
   await f.reload(); f.state.rejectModuleCalls = 0;
   await assert.rejects(f.run({ architectureRepair: { version: failed.version, checkpointHash: cp.hash, stageKey: "core" } }), /授权/u);

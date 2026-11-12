@@ -27,6 +27,7 @@ import { validDraft, validDesign, passingReview } from "../helpers/architecture.
 import { fidelityResult } from "../helpers/fidelity.mjs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createReviewTaskCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
+import { designSubmissionCounts, readDesignSubmissionPolicy } from "../../src/architecture/architecture-design-rejections.mjs";
 import { architectureStageSubmission, createArchitectureStageSessionFactory } from "../helpers/architecture-stages.mjs";
 import type { RequirementItem } from "../../src/contracts/architecture.mjs";
 import type { StoredArchitectureRecord } from "../../src/architecture/architecture-controller-port.mjs";
@@ -46,7 +47,7 @@ async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), "neuma-main-review-checkpoint-")), calls: { role: string; payload: CheckpointPayload }[] = [], stageCalls: { role: string; payload: CheckpointPayload }[] = [], countsBeforeFidelity: unknown[] = [];
   const state = { fidelity: "interrupt", fidelityPath: "/instructions", acceptanceExpected: "", main: "valid", mainCalls: 1,
     controller: null as AbortController | null, designSuffix: "", interruptDesigner: false, extraIntegrationCalls: 0,
-    moduleReads: 0, moduleRejections: 0, moduleTextRejection: false };
+    moduleReads: 0, moduleRejections: 0, moduleTextRejection: false, moduleMalformedText: false, moduleFailures: [] as ("format" | "content")[] };
   const draft = validDraft();
   draft.taskSpec = { version: 1, items: [{ id: "complete", dimension: "processing", content: "完整核对全部记录", applicability: "applies",
     critical: true, source: { kind: "user", evidence: [{ messageId: "source", quote: "完整核对全部记录" }] } }] };
@@ -72,11 +73,22 @@ async function fixture(t: test.TestContext) {
           await tools.read_model_context!.execute(`read_${index}`, { requests: [{ section: "requirements", pointer: "/0" }] });
           await options.onModelCall!();
         }
-        for (let index = 0; index < state.moduleRejections; index++) {
-          const call = { toolName: "submit_architecture_module", toolCallId: `bad_${index}`, args: {} };
-          const feedback = await options.rawInputValidators!.submit_architecture_module!(call);
-          assert.equal(feedback.valid, false);
-          await options.toolErrorResult!(call); // SDK reports the same rejected call again; count it once.
+        const failures = state.moduleFailures.length ? state.moduleFailures : Array.from({ length: state.moduleRejections }, () => "content" as const);
+        for (const [index, kind] of failures.entries()) {
+          await tools.read_model_context!.execute(`between_${index}`, { requests: [{ section: "requirements", pointer: "/0" }] });
+          if (kind === "format") {
+            const call = { toolName: "submit_architecture_module", toolCallId: `bad_${index}`, args: {} };
+            const feedback = await options.rawInputValidators!.submit_architecture_module!(call);
+            assert.equal(feedback.valid, false);
+            const output = JSON.parse(toolText(await options.toolErrorResult!(call)));
+            assert.equal(output.submissionRecovery, undefined);
+            assert.equal(output.formatRecovery.limit, 3);
+          } else {
+            const submission = architectureStageSubmission({ tools: options.customTools!, payload, candidate: makeCandidate(payload) })!;
+            objectFields(recordArray(objectFields(submission.args).steps)[0]).componentId = "missing_component";
+            await assert.rejects(tools.submit_architecture_module!.execute(`bad_${index}`, submission.args), error =>
+              failureFields(error).validationIssue?.reason === "invalid_reference");
+          }
           await options.onModelCall!();
         }
       }
@@ -85,7 +97,7 @@ async function fixture(t: test.TestContext) {
     },
   });
   const sessionFactory = async (options: PiSessionOptions) => {
-    if (state.moduleTextRejection && objectFields(options.sessionStorage?.binding).stage === "module") {
+    if ((state.moduleTextRejection || state.moduleMalformedText) && objectFields(options.sessionStorage?.binding).stage === "module") {
       const messages: SessionMessage[] = [];
       let payload: CheckpointPayload;
       return { messages, modelCallAccounting: true, sessionFile: join(options.sessionStorage!.directory, "rejected-text.jsonl"),
@@ -96,7 +108,7 @@ async function fixture(t: test.TestContext) {
           const submission = architectureStageSubmission({ tools: options.customTools!, payload: payload!, candidate: makeCandidate(payload!) })!;
           objectFields(recordArray(objectFields(submission.args).steps)[0]).componentId = "missing_component";
           messages.push({ role: "assistant", stopReason: "stop", content: [{ type: "text",
-            text: JSON.stringify({ submission: { name: submission.name, arguments: submission.args } }) }] });
+            text: state.moduleMalformedText ? '{"steps": ]}' : JSON.stringify({ submission: { name: submission.name, arguments: submission.args } }) }] });
         } };
     }
     const staged = await stageSessions(options); if (staged) return staged;
@@ -470,7 +482,7 @@ test("设计正式提交前可多次读取，四次退回后可提交，第五�
     if (rejected === 4) assert.equal((await f.run()).status, "passed");
     else await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "design_repair_stalled");
     const saved = (await f.designer.get(f.definition.id))!, cp = saved.designProgressCheckpoint!;
-    assert.equal((objectFields(objectFields(cp.submissionPolicy).receipts).core as unknown[]).length, rejected);
+    assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(cp.submissionPolicy), "core"), { content: rejected, format: 0 });
     assert.equal(objectFields(recordArray(cp.modules)[0]).modelCalls, 11);
     if (rejected === 5) {
       const before = designHash(cp), stageCalls = f.stageCalls.length;
@@ -497,17 +509,44 @@ test("五次历史请求不等于五轮退回，范围修订继续实际任务�
   assert.equal(result.design!.acceptance[0]!.expected, f.state.acceptanceExpected);
   assert.equal(objectFields(result.designProgressCheckpoint!.integration).modelCalls, 6);
   assert.equal(result.designProgressCheckpoint!.modelCalls, Number(oldCheckpoint!.modelCalls) + 2);
-  const receipts = objectFields(objectFields(result.designProgressCheckpoint!.submissionPolicy).receipts);
-  assert.equal((receipts.core as unknown[]).length, 1, "一批范围负评退回负责模块只算一轮");
-  assert.equal(receipts.integration, undefined, "正常调用和下游重新整合不算退回");
+  const policy = readDesignSubmissionPolicy(result.designProgressCheckpoint!.submissionPolicy);
+  assert.equal(designSubmissionCounts(policy, "core").content, 1, "一批范围负评退回负责模块只算一轮");
+  assert.deepEqual(designSubmissionCounts(policy, "integration"), { content: 0, format: 0 }, "正常调用和下游重新整合不算退回");
 });
 
 test("完整JSON正文提交被拒也按五轮续交，不在第二轮当成未提交提前停止", async t => {
   const f = await fixture(t); f.state.moduleTextRejection = true;
   await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "design_repair_stalled");
   const checkpoint = (await f.designer.get(f.definition.id))!.designProgressCheckpoint!;
-  assert.equal((objectFields(objectFields(checkpoint.submissionPolicy).receipts).core as unknown[]).length, 5);
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(checkpoint.submissionPolicy), "core"), { content: 5, format: 0 });
   assert.equal(objectFields(recordArray(checkpoint.modules)[0]).modelCalls, 5);
+});
+
+test("格式纠错与方案退回分开：正常读取不清格式次数，正文有效后的内容退回开始新的格式纠错", async t => {
+  const f = await fixture(t); f.state.fidelity = "pass";
+  f.state.moduleFailures = ["content", "format", "format", "content", "format", "format", "content", "content"];
+  assert.equal((await f.run()).status, "passed");
+  const policy = readDesignSubmissionPolicy((await f.designer.get(f.definition.id))!.designProgressCheckpoint!.submissionPolicy);
+  assert.deepEqual(designSubmissionCounts(policy, "core"), { content: 4, format: 0 });
+  assert.equal(policy.version, 2);
+  if (policy.version === 2) assert.equal(policy.events.core!.filter(row => row.kind === "format").length, 4, "格式错误原记录仍保留");
+  const stalled = await fixture(t); stalled.state.moduleFailures = ["content", "format", "format", "format"];
+  await assert.rejects(stalled.run(), error => failureFields(error).diagnostic?.reason === "design_format_stalled");
+  const stopped = (await stalled.designer.get(stalled.definition.id))!, calls = stalled.stageCalls.length;
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(stopped.designProgressCheckpoint!.submissionPolicy), "core"), { content: 1, format: 3 });
+  assert.equal(objectFields(stopped.designRecovery).kind, "design_format");
+  await stalled.reload(); stalled.state.moduleFailures = [];
+  await assert.rejects(stalled.run(), /格式连续三次/);
+  assert.equal(stalled.stageCalls.length, calls);
+  assert.deepEqual((await stalled.designer.get(stalled.definition.id))!.designProgressCheckpoint, stopped.designProgressCheckpoint);
+});
+
+test("无法解析的JSON正文按独立三次格式纠错停止，不扣方案退回次数", async t => {
+  const f = await fixture(t); f.state.moduleMalformedText = true;
+  await assert.rejects(f.run(), error => failureFields(error).diagnostic?.reason === "design_format_stalled");
+  const cp = (await f.designer.get(f.definition.id))!.designProgressCheckpoint!;
+  assert.deepEqual(designSubmissionCounts(readDesignSubmissionPolicy(cp.submissionPolicy), "core"), { content: 0, format: 3 });
+  assert.equal(objectFields(recordArray(cp.modules)[0]).modelCalls, 3);
 });
 
 test("已有有效范围否定的相同候选不能换新评审预算，多次重启仍保留实际spent", async (t) => {

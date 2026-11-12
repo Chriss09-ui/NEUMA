@@ -24,14 +24,14 @@ import { createArchitectureRoundContext } from "./architecture-round-context.mjs
 import { architectureMaterialPointer } from "./architecture-material-path.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
 import { architectureModelContext, architectureRepairModelContext, architectureNodePrompt } from "./architecture-model-context.mjs";
-import { DESIGN_SUBMISSION_REJECTION_LIMIT, recoverDesignSubmissionPolicy, assertDesignSubmissionHistory } from "./architecture-design-rejections.mjs";
+import { DESIGN_SUBMISSION_REJECTION_LIMIT, designRejectionKind, recoverDesignSubmissionPolicy, assertDesignSubmissionHistory } from "./architecture-design-rejections.mjs";
 import { architectureVerificationContext, architectureConfirmedContext } from "./architecture-input-context.mjs";
 export { architectureVerificationContext, architectureConfirmedContext };
 import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, reviewedArchitectureSeed, architectureRevisionSeed, fidelityArchitectureRevisionSeed,
   rejectedFidelityArchitectureRevisionSeed, developmentArchitectureRevisionSeed, continuedDevelopmentRevisionSeed, interruptedArchitectureRevisionSeed,
   interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback, inheritedFidelityReviewDispatch } from "./architecture-revision-source.mjs";
 import type { RevisionContext } from "./architecture-revision-source.mjs";
-import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, modelReadRecoveryResult } from "../runtime/model-submission-arguments.mjs";
+import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, modelReadRecoveryResult, MODEL_FORMAT_REJECTION_LIMIT } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
@@ -195,7 +195,8 @@ function failure(reason = "request_failed", details: UnknownRecord = {}) {
     scope_not_preserved: "范围复核已有有效否定结论，原候选与依据已保留；请修订技术方案后重新独立评审，不能缩减用户承诺",
     submission_incomplete: "本阶段尚未正式提交完整结果，系统已提醒继续提交；已有有效定义保留，请重试",
     review_repair_stalled: "评审连续三次遇到相同提交问题，已保留草稿并停止继续请求；请检查提交协议或更换模型后继续",
-    design_repair_stalled: "同一设计任务正式提交已被退回五轮，已保留原会话、成果及用量，停止继续请求",
+    design_repair_stalled: "同一设计任务因方案内容被退回五轮，已保留原会话、成果及用量，停止继续请求",
+    design_format_stalled: "模型输出格式连续三次未通过，已保留原会话；格式错误不占用五次方案退回次数",
     process_interrupted: "上次评审因后端退出而中断，已保存的草稿和累计额度可继续核对",
   };
   return new ArchitectureError(messages[reason as keyof typeof messages], { stage: "architecture", reason, ...details });
@@ -285,6 +286,17 @@ export class ArchitectureDesigner {
       && (architectureReviewFailureStalled(readReviewProgressCheckpoint(record)?.diagnostic)
         || architectureReviewFailureStalled(readArchitectureFidelityProgress(record)?.state.diagnostic));
     const historicalDispatch = inheritedFidelityReviewDispatch(record, [...this.records.values()]);
+    let designRecovery = architectureDesignRecovery(record);
+    let counterUpgrade: { kind: string; status: string; stageKey: string; message: string } | undefined;
+    if (record && objectFields(record.designProgressCheckpoint?.submissionPolicy).version === 1 && ["failed", "cancelled"].includes(record.status)) {
+      try {
+        designRecovery = architectureDesignRecovery(record, await this.recoverDesignPolicy(record.agentId, record.designProgressCheckpoint));
+        if (!designRecovery) counterUpgrade = { kind: "design_counter_upgrade", status: "continuing", stageKey: "history",
+          message: "已核对原回执，格式纠错与内容退回均未达对应上限；继续原任务并保存分开的计数。" };
+      }
+      catch { record.designRecovery = { kind: "design_counter_history", status: "blocked", stageKey: "history",
+        message: "原退回记录的格式与内容分类尚不能核验，已停止恢复；不能清零或猜测次数。" }; return record; }
+    }
     const recovery = missingDispatch ? { kind: "review_specialists", status: "blocked", actionLabel: "检查分组评审材料",
       message: "本方案已分派独立评审，但当前检查点缺失；不能重新领取子任务额度。" }
       : missingRetry ? { kind: "review_retry", status: "blocked", actionLabel: "检查续评材料",
@@ -293,7 +305,7 @@ export class ArchitectureDesigner {
       message: "同一次设计已使用评审修订授权，但当前进度缺失；不能重开额度，请保留材料检查。" }
       : stalledReview ? { kind: "independent_review", status: "blocked", actionLabel: "查看评审阻断", message: "同一份评审结果连续三次因同一问题被退回，已保留进度。" }
       : (historicalDispatch ? null : architectureReviewDispatchRecovery(record))
-        ?? architectureReviewRevisionRecovery(record, true) ?? architectureDesignRecovery(record)
+        ?? architectureReviewRevisionRecovery(record, true) ?? designRecovery ?? counterUpgrade
         ?? (historicalDispatch ? { kind: "design_revision", status: "continuing", stageKey: "integration",
           message: "旧分组评审已核实属于修订基底，继续当前设计修订；原报告、会话和累计次数保留。" } : null);
     if (recovery && record) {
@@ -302,7 +314,7 @@ export class ArchitectureDesigner {
       if (typeof stageKey !== "string") throw new InputError("设计恢复阶段无效");
       if (!record.designProgressCheckpoint?.submissionPolicy && record.draft.taskSpec) {
         record.designRecovery = { ...recovery, status: "continuing", request: undefined, modelCallLimit: null, pipelineModelCallLimit: null,
-          message: "继续原设计任务，先从原会话核对正式退回次数；模型请求只记用量，五轮正式退回仍保留。" };
+          message: "继续原设计任务，先从原会话核对格式与内容退回；两者分别按三次、五次控制，模型请求只记用量。" };
         return record;
       }
       const checkpoint = objectFields(record.designProgressCheckpoint);
@@ -392,14 +404,19 @@ export class ArchitectureDesigner {
     this.persistence = task.catch(() => {}); return task;
   }
 
+  private async recoverDesignPolicy(id: string, checkpoint: unknown, signal?: AbortSignal) {
+    const directory = await this.storage.directory(id, "architecture-design/sessions", { create: true });
+    return recoverDesignSubmissionPolicy(checkpoint, [...this.records.values()].filter(value => value.agentId === id)
+      .sort((a, b) => a.version - b.version).map(value => value.designProgressCheckpoint), directory,
+      storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }));
+  }
+
   async stagedDesign({ record, context, binding, tools, platformRules, researchRules, revision, signal, onProgress, repair, forceIntegration }: StagedOptions) {
     const sessionDirectory = await this.storage.directory(record.agentId, "architecture-design/sessions", { create: true });
     try {
       return await runArchitectureDesignPipeline({ record, context, binding, revision, repair, forceIntegration, signal, onProgress, sessionDirectory,
         submissionPolicy: true,
-        recoverSubmissionPolicy: checkpoint => recoverDesignSubmissionPolicy(checkpoint,
-          [...this.records.values()].filter(value => value.agentId === record.agentId).map(value => value.designProgressCheckpoint),
-          sessionDirectory, storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) })),
+        recoverSubmissionPolicy: checkpoint => this.recoverDesignPolicy(record.agentId, checkpoint, signal),
         validateHistory: storage => readExecutionHistory({ cwd: this.cwd, storage, ...(signal ? { signal } : {}) }),
         validateAssembledCandidate: candidate => validateDesign(candidate, context),
         validateProgramCandidate: async (candidate, { sessionStorage }) => {
@@ -445,7 +462,7 @@ export class ArchitectureDesigner {
               : node.stage === "module" || node.stage === "consultation" ? [createPlatformContractTool(context)] : [])],
             modelCallLimit: node.modelCallLimit,
             initialModelCalls: node.modelCalls, onStageModelCall: node.onModelCall, onStageResult: node.onResult,
-            ...(node.onSubmissionRejected ? { initialSubmissionRejections: node.submissionRejections,
+            ...(node.onSubmissionRejected ? { initialSubmissionRejections: node.submissionRejections, initialFormatRejections: node.formatRejections,
               onStageSubmissionRejected: node.onSubmissionRejected } : {}),
             onDiagnostics: async diagnostic => {
               const lastSubmissionIssue = diagnostic.lastSubmissionIssue;
@@ -477,7 +494,7 @@ export class ArchitectureDesigner {
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = role === "reviewer" || payload.pipelineStage === "review_slice" ? null : ARCHITECTURE_ROLE_TURN_LIMIT, previousRejection, onSliceRejection, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
     stageReasoningMode, maxOutputTokens, formatSubmissionLimit, resumeSubmissionIssue, reviewRetry = false,
-    initialSubmissionRejections = 0, onStageSubmissionRejected }: ArchitectureRoleOptions<T>): Promise<T | HandoffResult> {
+    initialSubmissionRejections = 0, initialFormatRejections = 0, onStageSubmissionRejected }: ArchitectureRoleOptions<T>): Promise<T | HandoffResult> {
     const validationRepair = payload.validationRepair !== undefined;
     const meteredReview = modelCallLimit === null && (role === "reviewer" || payload.pipelineStage === "review_slice");
     const meteredStage = modelCallLimit === null && Boolean(onStageModelCall && onStageSubmissionRejected);
@@ -663,10 +680,10 @@ export class ArchitectureDesigner {
       catch (error) { progressPersistenceError = error; throw error; }
       signal?.throwIfAborted(); rejectedInput = saved;
     };
-    let stageRejections = initialSubmissionRejections;
-    if (!Number.isSafeInteger(stageRejections) || stageRejections < 0) throw new InputError("设计退回次数无效");
-    const stalled = () => meteredStage ? stageRejections >= DESIGN_SUBMISSION_REJECTION_LIMIT : (repeatedFailure?.count ?? 0) >= 3;
-    const stalledReason = () => meteredStage ? "design_repair_stalled" : "review_repair_stalled";
+    let stageRejections = initialSubmissionRejections, stageFormatRejections = initialFormatRejections;
+    if ([stageRejections, stageFormatRejections].some(count => !Number.isSafeInteger(count) || count < 0)) throw new InputError("设计退回次数无效");
+    const stalled = () => meteredStage ? stageRejections >= DESIGN_SUBMISSION_REJECTION_LIMIT || stageFormatRejections >= MODEL_FORMAT_REJECTION_LIMIT : (repeatedFailure?.count ?? 0) >= 3;
+    const stalledReason = () => meteredStage ? stageFormatRejections >= MODEL_FORMAT_REJECTION_LIMIT ? "design_format_stalled" : "design_repair_stalled" : "review_repair_stalled";
     const stageRejectionWrites = new Map<string, Promise<void>>();
     const noteSubmissionFailure = async (callId: string, issues: ReviewDiagnosticIssue[]) => {
       if (meteredStage && typeof callId === "string") {
@@ -675,7 +692,10 @@ export class ArchitectureDesigner {
         if (!write) {
           rejectedCalls.add(callId);
           write = (async () => {
-            try { stageRejections = await onStageSubmissionRejected!(callId); }
+            try {
+              const counts = await onStageSubmissionRejected!(callId, designRejectionKind(issues));
+              stageRejections = counts.content; stageFormatRejections = counts.format;
+            }
             catch (error) { progressPersistenceError = error; throw error; }
           })();
           stageRejectionWrites.set(key, write);
@@ -726,13 +746,14 @@ export class ArchitectureDesigner {
     const modelBudget = () => {
       const limit = submissionCallLimit();
       return limit === null ? { policy: "task_rejections", limit: null, used: turns,
-        ...(meteredStage ? { rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT, rejections: stageRejections } : {}) }
+        ...(meteredStage ? { rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT, rejections: stageRejections,
+          formatRejectionLimit: MODEL_FORMAT_REJECTION_LIMIT, formatRejections: stageFormatRejections } : {}) }
         : { limit, used: turns, remaining: Math.max(0, limit - turns) };
     };
     const requestsSpent = () => { const limit = submissionCallLimit(); return limit !== null && turns >= limit; };
     const submissionRecovery = () => ({ category: "submission", attempt: stageRejections,
       limit: DESIGN_SUBMISSION_REJECTION_LIMIT, retry: stageRejections < DESIGN_SUBMISSION_REJECTION_LIMIT,
-      instruction: "按本次诊断在原会话重新正式提交；读取和模型调用只记录用量，同一任务正式退回累计五轮后停止。" });
+      instruction: "按本次诊断修改方案后重新正式提交；同一任务内容退回累计五轮后停止，格式错误另按连续三次纠错，不计入这五轮。读取和模型调用只记录用量。" });
     const withBudget = (output: ToolResult): ToolResult => ({ ...output, content: [...output.content, { type: "text", text: JSON.stringify({ hostModelBudget: modelBudget(),
       ...(reviewParts ? { reviewParts: reviewParts.reference() } : {}),
       ...(evidenceReader ? { reviewReadProgress: { ...readProgress } } : {}) }) }] });
@@ -750,7 +771,8 @@ export class ArchitectureDesigner {
       return validationIssue;
     };
     const details = () => ({ role, phase, retries, submissionAttempts, submissionContinuations, stagedDrafts, draftSubmissions, structuredSubmissions,
-      ...(meteredStage ? { submissionRejections: stageRejections, rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT } : {}),
+      ...(meteredStage ? { submissionRejections: stageRejections, rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+        formatRejections: stageFormatRejections, formatRejectionLimit: MODEL_FORMAT_REJECTION_LIMIT } : {}),
       ...(unsubmittedDraftDiagnostics.length ? { unsubmittedDraftDiagnostics: structuredClone(unsubmittedDraftDiagnostics) } : {}),
       ...(lastSubmissionError ? { lastSubmissionError, lastSubmissionIssue }
         : isArchitectureFormatSubmissionIssue(lastSubmissionIssue)
@@ -1048,7 +1070,7 @@ export class ArchitectureDesigner {
         if (stalled()) throw failure(stalledReason(), details());
         reviewParts?.assertActive();
         if (delegatedFailure) throw failure(typeof objectFields(delegatedFailure.diagnostic).reason === "string" ? String(objectFields(delegatedFailure.diagnostic).reason) : "module_failed", details());
-        const readInput = (role === "reviewer" || payload.pipelineStage === "review_slice")
+        const readInput = (meteredStage || role === "reviewer" || payload.pipelineStage === "review_slice")
           && [contextReader, fileMaterials?.tool, evidenceReader?.tool, platformContractTool].includes(tool);
         let output;
         try { output = await tool.execute(...args); }
@@ -1081,9 +1103,10 @@ export class ArchitectureDesigner {
                 && (!meteredStage || error instanceof InputError)) await noteSubmissionFailure(args[0], supplied);
               await retainRejectedProgress();
               if (meteredStage && error instanceof InputError && rejectedCalls.has(args[0])) {
-                const recovery = submissionRecovery();
-                Object.assign(error, { submissionRecovery: recovery });
-                error.message += "\n" + JSON.stringify({ submitted: false, submissionRecovery: recovery });
+                const formatRecovery = modelSubmissionFormatRecovery(supplied, stageFormatRejections);
+                const feedback = formatRecovery ? { formatRecovery, issues: supplied } : { submissionRecovery: submissionRecovery() };
+                Object.assign(error, feedback);
+                error.message += "\n" + JSON.stringify({ submitted: false, ...feedback });
               }
             }
             throw error;
@@ -1095,7 +1118,7 @@ export class ArchitectureDesigner {
           await noteSubmissionFailure(args[0], readIssues);
           rejected(null, false, readIssues[0]);
           await retainRejectedProgress();
-          output = modelReadRecoveryResult(output, readIssues, repeatedFailure?.count);
+          output = modelReadRecoveryResult(output, readIssues, meteredStage ? stageFormatRejections : repeatedFailure?.count);
         }
         if (tool === evidenceReader?.tool) {
           const text = output.content.find((item) => item.type === "text");
@@ -1129,7 +1152,7 @@ export class ArchitectureDesigner {
       const schema = toolSchemas.get(toolName);
       if (!schema) return undefined;
       const feedback = architectureToolValidation(args, schema, { root: toolRoot(toolName) });
-      const formatFailure = !feedback.valid && (role === "reviewer" || payload.pipelineStage === "review_slice")
+      const formatFailure = !feedback.valid && (meteredStage || role === "reviewer" || payload.pipelineStage === "review_slice")
         && feedback.issues.length > 0 && feedback.issues.every(isModelSubmissionFormatIssue);
       if ([submitName, "request_requirements", "revise_architecture_submission"].includes(toolName)
         || toolName === "submit_architecture_draft" && !feedback.valid) unsubmittedDraft.clear();
@@ -1148,9 +1171,9 @@ export class ArchitectureDesigner {
       if (formatFailure && toolName !== submitName) rejected(null, false, feedback.issues[0]);
       const allocation = !feedback.valid && payload.pipelineStage === "blueprint" && toolName === submitName
         ? diagnoseBlueprintAssignments(args, payload.requirements ?? [], typeof payload.moduleLimit === "number" ? payload.moduleLimit : undefined) : null;
-      const formatRecovery = rejectedCalls.has(toolCallId) ? modelSubmissionFormatRecovery(feedback.issues, repeatedFailure?.count) : undefined;
+      const formatRecovery = rejectedCalls.has(toolCallId) ? modelSubmissionFormatRecovery(feedback.issues, meteredStage ? stageFormatRejections : repeatedFailure?.count) : undefined;
       return { ...feedback, ...(allocation ? { blueprintAllocation: allocation } : {}),
-        ...(meteredStage && rejectedCalls.has(toolCallId) ? { submissionRecovery: submissionRecovery() } : {}),
+        ...(meteredStage && rejectedCalls.has(toolCallId) && !formatRecovery ? { submissionRecovery: submissionRecovery() } : {}),
         ...(formatRecovery ? { formatRecovery } : {}),
         ...(rejectedContainer ? { rejectedSubmission: rejectedContainer } : {}) };
     };
@@ -1214,7 +1237,7 @@ export class ArchitectureDesigner {
         },
         systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName, blueprintProtocol: payload.blueprintProtocol,
           flatHandoffs: Boolean(parameters.properties?.handoffText) })
-          + (meteredStage ? "\n本设计任务按正式退回次数限制为五轮，首次被拒算第一轮；模型请求、正常读取和成功提交只记用量，不占退回轮数。submissionRecovery给出累计次数，前四轮按反馈修正后重新提交，不用为了节省请求跳过读取。" : "")
+          + (meteredStage ? "\n本设计任务使用两套计数：格式、字段类型等输出或工具参数错误按formatRecovery连续三次停止，前两次修正重交；缺少需求、方案不成立等内容问题按submissionRecovery累计五次停止，前四次修改方案。格式错误不占用五次内容退回。换字段、换工具或重启不能清零；有效正式提交结束格式纠错，正常读取及模型请求只记用量。" : "")
           + (validationRepair ? "\n这是历史阶段局部修复。validationRepair.previousResult是待修原稿；repairPreparation存在时提供已核验的平台事实。保留有效内容，优先用editableSubmission的submissionHash调用局部修订工具，仍须完整校验。按当前modelBudget执行：task_rejections允许按需读取，只按正式退回轮数停止；数字调用额度的旧模式在末次请求仅开放正式提交。确有不能解决的问题须在结果中如实保留，不能声称已通过。" : "")
           + (platformContractTool && role === "designer" ? "\n" + PLATFORM_CLAIMS_PROMPT : "") + "\n" + renderPiSubmissionContract({ role, submitName, tools: roleTools,
           alternativeTools: [submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), ...(submitReviewParts ? [submitReviewParts] : []), ...(allowHandoff ? [requestRequirements] : [])]
@@ -1351,6 +1374,13 @@ export class ArchitectureDesigner {
             structuredFeedback = error.message;
           }
           if (result !== undefined) return result;
+          if (stalled()) throw failure(stalledReason(), details());
+        }
+        if (meteredStage && !structured && last?.stopReason === "stop") {
+          const issues = [{ path: submitName, reason: "invalid_contract", remedy: "输出未能解析为正式提交。请调用提交工具，或返回其完整合法JSON参数；不要添加围栏或额外正文。" }];
+          await noteSubmissionFailure(`unsubmitted_response_${turns}`, issues);
+          rejected(null, false, issues[0]);
+          structuredFeedback = JSON.stringify({ issues, formatRecovery: modelSubmissionFormatRecovery(issues, stageFormatRejections) });
           if (stalled()) throw failure(stalledReason(), details());
         }
         if (reviewParts?.reference().batch && savedPartChanges > changesBeforePrompt && !structuredFeedback) {
