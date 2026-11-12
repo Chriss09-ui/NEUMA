@@ -102,6 +102,7 @@ export function createArchitectureSubmissionRepair({ schema }: { schema: ToolSch
       required: ["path", "value"], properties: { path: { type: "string", minLength: 1, maxLength: 500 }, value: {} } } },
   }, description: "仅局部修订本轮宿主明确提供的可编辑基底或正式语义检查拒绝的完整草稿。只改一项时提供submissionHash、path、value；多项仍可提交最多24个updates；不增删字段，不替换根，允许替换整个已有数组。完整JSON及更新材料各限256KiB、32层、100000节点；仍须完整通过原结构、语义和独立评审。" };
   return { parameters: singleUpdateSchema(parameters), reference,
+    snapshot() { return draft === null ? null : cloneJson(draft); },
     capture(value: unknown, { signal, allowContainerText = false }: { signal?: AbortSignal | undefined; allowContainerText?: boolean } = {}) {
       const candidate = cloneJson(value, { signal });
       const checked = architectureToolValidation(candidate, frozenSchema, { root: "submission" });

@@ -26,6 +26,7 @@ import { createMainReviewCheckpoint, readMainReviewCheckpoint } from "../../src/
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
 import { fidelityResult } from "../helpers/fidelity.mjs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createReviewTaskCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
 import { architectureStageSubmission, createArchitectureStageSessionFactory } from "../helpers/architecture-stages.mjs";
 import type { RequirementItem } from "../../src/contracts/architecture.mjs";
 import type { StoredArchitectureRecord } from "../../src/architecture/architecture-controller-port.mjs";
@@ -403,11 +404,39 @@ test("旧版只改总说明的范围修订停点补派原模块，保留用量�
   };
   f.state.designSuffix = "\n总说明接受3.0。"; f.state.main = "late-cancel"; f.state.controller = new AbortController();
   await assert.rejects(f.run());
-  const legacy = (await f.designer.get(f.definition.id))!, legacyHash = designHash(legacy);
+  const legacy = (await f.designer.get(f.definition.id))!;
   assert.notEqual(legacy.candidateHash, original.candidateHash);
   assert.equal(legacy.design!.acceptance[0]!.expected, original.design!.acceptance[0]!.expected);
   assert.deepEqual(legacy.designProgressCheckpoint!.modules, original.designProgressCheckpoint!.modules);
   assert.equal(legacy.revisionSource!.fidelityRouting, undefined);
+
+  const dispatch = createReviewTaskCheckpoint({ candidateHash: legacy.candidateHash }, { slices: { pending: null } },
+    [{ id: "pending", owner: "pending", paths: ["/slices/pending"], description: "继续核对原候选", remedy: "保留原会话" }]);
+  legacy.reviewDispatchSource = dispatch.bindingHash;
+  legacy.reviewDispatchCheckpoint = { version: 1, candidateHash: legacy.candidateHash, bindingHash: dispatch.bindingHash, dispatch };
+  await f.designer.save(legacy);
+  const legacyHash = designHash(await f.designer.getVersion(f.definition.id, legacy.version));
+  await f.reload(); f.state.controller = new AbortController();
+  const resumeDesign = f.designer.stagedDesign.bind(f.designer);
+  f.designer.stagedDesign = async () => { throw new Error("interrupt before revision starts"); };
+  await assert.rejects(f.run());
+  const unsubmitted = (await f.designer.get(f.definition.id))!;
+  assert.equal(unsubmitted.design, null);
+  assert.equal(unsubmitted.reviewDispatchCheckpoint, undefined, "新设计尚未提交时不挂载基底版本的评审");
+  assert.deepEqual(unsubmitted.designProgressCheckpoint, legacy.designProgressCheckpoint);
+  // Reproduce the old writer's accidental copy without rewriting the base version.
+  unsubmitted.reviewDispatchSource = legacy.reviewDispatchSource;
+  unsubmitted.reviewDispatchCheckpoint = structuredClone(legacy.reviewDispatchCheckpoint);
+  await f.designer.save(unsubmitted); await f.reload();
+  assert.equal(objectFields((await f.designer.get(f.definition.id))!.designRecovery).status, "continuing");
+  const corrupt = structuredClone(unsubmitted);
+  objectFields(corrupt.reviewDispatchCheckpoint).bindingHash = "b".repeat(64);
+  await f.designer.save(corrupt); await f.reload();
+  const callsBeforeCorruption = f.calls.length;
+  await assert.rejects(f.run(), /分组评审进度/);
+  assert.equal(f.calls.length, callsBeforeCorruption);
+  await f.designer.save(unsubmitted);
+  f.designer.stagedDesign = resumeDesign;
 
   await f.reload(); f.state.controller = new AbortController();
   f.state.acceptanceExpected = "接受数值为整数的3.0，与3得到相同结果";

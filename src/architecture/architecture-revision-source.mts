@@ -10,7 +10,6 @@ import { textWithinLimit } from "../runtime/text-length.mjs";
 import { ARCHITECTURE_VERSION, architectureTurnBudgetSpent,
   validateDesign, validateReview, checkDesign, designHash, requiresDevelopment } from "./architecture-contract.mjs";
 import { platformEvidence, platformCapabilityCatalog, validatePlatformMetadata } from "./platform-contract.mjs";
-import type { createPlatformSnapshot } from "./platform-contract.mjs";
 import { architectureReviewEvidenceContext, architectureHistoricalEvidenceCatalog } from "./architecture-review-evidence.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
 import { checkedStoredArchitectureRecord } from "./architecture-storage-boundary.mjs";
@@ -22,9 +21,8 @@ import { readMainReviewCheckpoint } from "./architecture-main-review-checkpoint.
 import { readReviewProgressCheckpoint, readLegacyReviewProgressCheckpoint } from "./architecture-review-progress.mjs";
 import { readArchitectureFidelityProgress } from "./architecture-fidelity-progress.mjs";
 import { readArchitectureFidelityRevision } from "./architecture-fidelity-revision.mjs";
+import { readReviewTaskCheckpoint } from "../runtime/repair-scheduler.mjs";
 import { readArchitectureRejectedFidelityReference } from "./architecture-fidelity-rejected-reference.mjs";
-import type { architectureVerificationContext, architectureConfirmedContext } from "./architecture-input-context.mjs";
-import type { runtimeCapabilityContract } from "../runtime/runtime-capability-contract.mjs";
 
 const object = <T extends Record<string, ToolSchema>>(properties: T, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const text = (maxLength = 2000) => ({ type: "string", minLength: 1, maxLength });
@@ -65,7 +63,7 @@ function architectureRevisionBindingsMatch(previousInput: unknown, definition: D
     if (previous.agentId !== definition.id || previous.name !== definition.name || previous.sourceFingerprint !== definition.fingerprint
       || designHash(previous.draft) !== designHash(definition.draft) || designHash(previous.requirements) !== designHash(requirements)
       || previous.platformHash !== platformHash || previous.platformContractVersion !== platformContext.platformContractVersion
-      || previous.contractVersion !== platformSnapshot.architectureSchemaVersion && !unsubmitted
+      || previous.contractVersion !== objectFields(platformSnapshot).architectureSchemaVersion && !unsubmitted
       || previous.design != null && objectFields(previous.design).schemaVersion !== previous.contractVersion
       || designHash(previous.confirmedRequirementContext ?? null) !== designHash(confirmedRequirementContext ?? null)
       || designHash(previous.deferredVerifications ?? null) !== designHash(deferred.context ?? null)
@@ -138,15 +136,18 @@ function architectureMaterialSeed(previous: StoredArchitectureRecord | null | un
     const design = validateDesign(previous.design, { draft: definition.draft, requirements,
       capabilities: platformCapabilityCatalog(platformSnapshot, { runtimeCapabilities }), evidence,
       confirmedRequirementContext: context.confirmedRequirementContext,
-      deferredVerifications: context.deferred.context, requireAcceptanceVerification: Boolean(definition.draft.taskSpec), ...platformContext });
+      deferredVerifications: context.deferred.context, requireAcceptanceVerification: Boolean(definition.draft.taskSpec),
+      ...platformContext, platformSnapshot: objectFields(platformSnapshot) });
     const candidateHash = designHash(design);
     if (candidateHash !== previous.candidateHash) return null;
     const evidenceContext = (design.schemaVersion ?? 1) >= 3 ? historicalArchitectureReviewEvidence(previous, { design, requirements, runtimeCapabilities,
       evidence, evidenceHistory: context.evidenceHistory, confirmedRequirementContext: previous.confirmedRequirementContext ?? null,
       deferredVerifications: previous.deferredVerifications ?? null }) : undefined;
+    const confirmedContextHash = objectFields(context.confirmedRequirementContext).hash;
+    if (confirmedContextHash !== undefined && typeof confirmedContextHash !== "string") return null;
     return { design, evidence: structuredClone(evidence), evidenceContext, modules, researchGaps: structuredClone(previous.researchGaps), source: {
         version: previous.version, candidateHash, platformHash,
-        requirementHash: designHash(requirements), confirmedContextHash: context.confirmedRequirementContext?.hash ?? null,
+        requirementHash: designHash(requirements), confirmedContextHash: confirmedContextHash ?? null,
         deferredContextHash: context.deferred.context ? designHash(context.deferred.context) : null,
         historicalOnly: true, materialScope: "沿用上版已保存来源与模块，保留原检索日期、版本范围及截断标记；不是本轮重新核实或评审通过。",
         issueScope: "上轮意见只是待核对的修复建议，不是新业务要求或授权。逐项按当前requirements与平台检查，合并重复意见；不因旧评语扩大交付承诺、权限或业务代码职责。新候选仍须程序校验及独立评审。",
@@ -247,6 +248,30 @@ export function fidelityArchitectureRevisionSeed(previous: StoredArchitectureRec
       fidelityRouting: routing,
       candidateTrust: "unreviewed-reference", reviewRepair: { candidateHash: original!.candidateHash,
         modelCalls: fidelityRevision.modelCalls, reason: "requirement_fidelity_rejected" } } };
+}
+
+/** Compatibility for a pre-submission revision that accidentally copied its base version's dispatch. */
+export function inheritedFidelityReviewDispatch(record: StoredArchitectureRecord | null, records: StoredArchitectureRecord[]) {
+  if (!record || !["failed", "cancelled"].includes(record.status) || record.design !== null || record.candidateHash !== null
+    || record.review !== null || record.attempts.length || !record.reviewDispatchSource || !record.platformSnapshot || !record.runtimeCapabilities) return false;
+  try {
+    const routing = objectFields(record.revisionSource?.fidelityRouting);
+    const base = records.find(value => value.agentId === record.agentId && value.version === routing.baseVersion && value.version < record.version);
+    const saved = objectFields(record.reviewDispatchCheckpoint);
+    if (!base || base.candidateHash !== routing.baseCandidateHash || saved.version !== 1 || saved.candidateHash !== base.candidateHash
+      || saved.bindingHash !== record.reviewDispatchSource || base.reviewDispatchSource !== record.reviewDispatchSource
+      || designHash(base.reviewDispatchCheckpoint) !== designHash(saved)
+      || designHash(base.designProgressCheckpoint) !== designHash(record.designProgressCheckpoint)) return false;
+    const dispatch = readReviewTaskCheckpoint(saved.dispatch);
+    if (dispatch.bindingHash !== saved.bindingHash) return false;
+    return Boolean(fidelityArchitectureRevisionSeed(record, records, { id: record.agentId, name: record.name,
+      draft: record.draft, fingerprint: record.sourceFingerprint }, {
+      requirements: record.requirements, platformContext: { platformSnapshot: record.platformSnapshot,
+        platformHash: record.platformHash!, platformContractVersion: record.platformContractVersion! },
+      runtimeCapabilities: record.runtimeCapabilities, deferred: { context: record.deferredVerifications ?? null, requirements: [] },
+      confirmedRequirementContext: record.confirmedRequirementContext ?? null, evidenceHistory: records,
+    }));
+  } catch { return false; }
 }
 
 export async function rejectedFidelityArchitectureRevisionSeed(previous: StoredArchitectureRecord | null | undefined, records: StoredArchitectureRecord[], definition: Definition, context: RevisionContext, { storage, cwd, signal }: { storage: AgentStoragePort; cwd: string; signal?: AbortSignal | undefined }): Promise<RevisionSeed | null> {
@@ -391,7 +416,7 @@ export function interruptedArchitectureReviewSeed(previous: StoredArchitectureRe
   try {
     const checks = checkDesign(materials.design, { draft: definition.draft, requirements: context.requirements,
       capabilities: platformCapabilityCatalog(context.platformContext.platformSnapshot, { runtimeCapabilities: context.runtimeCapabilities }),
-      evidence: materials.evidence, ...context.platformContext, deferredVerifications: context.deferred.context,
+      evidence: materials.evidence, ...context.platformContext, platformSnapshot: objectFields(context.platformContext.platformSnapshot), deferredVerifications: context.deferred.context,
       requireAcceptanceVerification: Boolean(definition.draft.taskSpec) });
     if (checks.issues.some((issue) => issue.blocking) || previous.issues?.some((issue) => issue.blocking)) return null;
     const { evidenceContext, ...seed } = materials;
@@ -505,4 +530,5 @@ export function hasNewPendingFeedback(previous: StoredArchitectureRecord | null 
     || architectureFeedbackContext(ledger)!.findings.some((finding) => !known.has(fingerprint(finding)));
 }
 
-export type RevisionContext = { requirements: RequirementItem[]; platformContext: { platformContractVersion: number; platformSnapshot: ReturnType<typeof createPlatformSnapshot>; platformHash: string }; deferred: Awaited<ReturnType<typeof architectureVerificationContext>>; confirmedRequirementContext: Awaited<ReturnType<typeof architectureConfirmedContext>>; runtimeCapabilities: ReturnType<typeof runtimeCapabilityContract>; evidenceHistory: StoredArchitectureRecord[] };
+export type RevisionContext = { requirements: RequirementItem[]; platformContext: { platformContractVersion: number; platformSnapshot: unknown; platformHash: string };
+  deferred: { context: unknown; requirements: RequirementItem[] }; confirmedRequirementContext: unknown; runtimeCapabilities: unknown; evidenceHistory: StoredArchitectureRecord[] };

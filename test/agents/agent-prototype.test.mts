@@ -123,7 +123,7 @@ test("构建保留原始需求、原子持久化，等价需求复用定义，�
   const first = await agents.build(input());
   assert.equal(first.agent!.mode, "designed"); assert.equal(first.agent!.status, "ready"); assert.equal(first.agent!.revision, 1);
   assert.deepEqual(first.agent!.draft, draft()); assert.equal(Reflect.get(first.agent!, "fingerprint"), undefined);
-  assert.deepEqual(records[0]!.options.customTools!.map((tool: { name: unknown; }) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
+  assert.deepEqual(records[0]!.options.customTools!.map((tool: { name: unknown; }) => tool.name), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "read_architecture_file", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
   assert.deepEqual(records.reviews![0]!.options.customTools!.map((tool: { name: unknown; }) => tool.name), ["read_model_context", "read_architecture_file", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.equal(first.architecture!.status, "passed"); assert.equal(first.architecture!.delivery, "ready");
   assert.deepEqual(first.agent!.architectureRef, { version: first.architecture!.version, candidateHash: designHash(first.architecture!.design) });
@@ -544,7 +544,7 @@ test("真实 Pi SDK 独立设计与评估后调用专属文件工具，回复可
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(String(Buffer.concat(chunks))); requests.push(body);
     const names = body.tools.map((tool: { function: { name: unknown; }; }) => tool.function.name), builder = names.includes("submit_architecture"), reviewer = names.includes("submit_architecture_review");
-    const expectedTools = builder ? ["delegate_module", "read_model_context", "request_requirements", "revise_architecture_submission", "search_technical_sources", "submit_architecture", "submit_architecture_draft", "web_fetch", "web_search"]
+    const expectedTools = builder ? ["delegate_module", "read_architecture_file", "read_model_context", "request_requirements", "revise_architecture_submission", "search_technical_sources", "submit_architecture", "submit_architecture_draft", "web_fetch", "web_search"]
       : reviewer ? ["read_architecture_file", "read_model_context", "request_requirements", "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review"] : ["list_materials", "list_workspace_files", "read_material", "read_material_image", "read_workspace_file", "web_fetch", "web_search", "write_workspace_file"];
     assert.deepEqual(names.sort(), expectedTools);
     response.writeHead(200, { "content-type": "text/event-stream" });

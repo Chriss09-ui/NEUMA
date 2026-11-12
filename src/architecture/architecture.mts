@@ -20,16 +20,16 @@ import { createExecutionSession as createPiSession, classifyModelFailure } from 
 import { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { architectureModelOutputBudget } from "../runtime/model-limits.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
-import { createArchitectureMaterialFiles } from "./architecture-material-files.mjs";
+import { createArchitectureRoundContext } from "./architecture-round-context.mjs";
 import { architectureMaterialPointer } from "./architecture-material-path.mjs";
 import { createModelContextReader } from "../runtime/model-context.mjs";
-import { projectArchitectureMessages, architectureRepairModelContext, architectureNodePrompt } from "./architecture-model-context.mjs";
+import { architectureModelContext, architectureRepairModelContext, architectureNodePrompt } from "./architecture-model-context.mjs";
 import { DESIGN_SUBMISSION_REJECTION_LIMIT, recoverDesignSubmissionPolicy, assertDesignSubmissionHistory } from "./architecture-design-rejections.mjs";
 import { architectureVerificationContext, architectureConfirmedContext } from "./architecture-input-context.mjs";
 export { architectureVerificationContext, architectureConfirmedContext };
 import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, reviewedArchitectureSeed, architectureRevisionSeed, fidelityArchitectureRevisionSeed,
   rejectedFidelityArchitectureRevisionSeed, developmentArchitectureRevisionSeed, continuedDevelopmentRevisionSeed, interruptedArchitectureRevisionSeed,
-  interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback } from "./architecture-revision-source.mjs";
+  interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback, inheritedFidelityReviewDispatch } from "./architecture-revision-source.mjs";
 import type { RevisionContext } from "./architecture-revision-source.mjs";
 import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, modelReadRecoveryResult } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
@@ -284,6 +284,7 @@ export class ArchitectureDesigner {
     const stalledReview = record && ["failed", "cancelled"].includes(record.status) && !record.review
       && (architectureReviewFailureStalled(readReviewProgressCheckpoint(record)?.diagnostic)
         || architectureReviewFailureStalled(readArchitectureFidelityProgress(record)?.state.diagnostic));
+    const historicalDispatch = inheritedFidelityReviewDispatch(record, [...this.records.values()]);
     const recovery = missingDispatch ? { kind: "review_specialists", status: "blocked", actionLabel: "检查分组评审材料",
       message: "本方案已分派独立评审，但当前检查点缺失；不能重新领取子任务额度。" }
       : missingRetry ? { kind: "review_retry", status: "blocked", actionLabel: "检查续评材料",
@@ -291,7 +292,10 @@ export class ArchitectureDesigner {
       : missingRevision ? { kind: "review_revision", status: "blocked", actionLabel: "检查修订材料",
       message: "同一次设计已使用评审修订授权，但当前进度缺失；不能重开额度，请保留材料检查。" }
       : stalledReview ? { kind: "independent_review", status: "blocked", actionLabel: "查看评审阻断", message: "同一份评审结果连续三次因同一问题被退回，已保留进度。" }
-      : architectureReviewDispatchRecovery(record) ?? architectureReviewRevisionRecovery(record, true) ?? architectureDesignRecovery(record);
+      : (historicalDispatch ? null : architectureReviewDispatchRecovery(record))
+        ?? architectureReviewRevisionRecovery(record, true) ?? architectureDesignRecovery(record)
+        ?? (historicalDispatch ? { kind: "design_revision", status: "continuing", stageKey: "integration",
+          message: "旧分组评审已核实属于修订基底，继续当前设计修订；原报告、会话和累计次数保留。" } : null);
     if (recovery && record) {
       if (["review_revision", "review_retry", "review_specialists", "independent_review"].includes(String(objectFields(recovery).kind))) { record.designRecovery = recovery; return record; }
       const stageKey = objectFields(recovery).stageKey;
@@ -489,17 +493,30 @@ export class ArchitectureDesigner {
         stage: "architecture", reason: "repair_materials_incomplete", role, requiredModelCalls: preparation.minimumCalls, remainingModelCalls: modelCallLimit - initialModelCalls });
       payload = { ...payload, repairPreparation: preparation };
     }
-    let modelMaterials: UnknownRecord = { ...payload, roleGuide: systemPrompt };
+    const versions = [...this.records.values()].filter(record => record.agentId === id);
+    const currentVersion = Math.max(0, ...versions.map(record => record.version));
+    const architectureHistory = versions.filter(record => record.version < currentVersion).map(record => ({
+      version: record.version, status: record.status, candidateHash: record.candidateHash, design: record.design,
+      review: record.review, issues: record.issues, revisionSource: record.revisionSource,
+      designProgressCheckpoint: record.designProgressCheckpoint, reviewDispatchCheckpoint: record.reviewDispatchCheckpoint,
+      mainReviewCheckpoint: record.mainReviewCheckpoint, feedbackLedger: record.feedbackLedger,
+    }));
+    let modelMaterials: UnknownRecord = { ...payload, roleGuide: systemPrompt, ...(architectureHistory.length ? { architectureHistory } : {}) };
     const currentMaterials = () => ({ ...modelMaterials,
+      ...(submissionRepair?.reference() ? { editableDraft: { ...submissionRepair.reference(), value: submissionRepair.snapshot(), trust: "untrusted-reference" } } : {}),
+      modelBudget: modelBudget(),
       ...(reviewParts ? { reviewParts: { ...reviewParts.reference(), saved: reviewParts.snapshot(), rejectedDraft: reviewParts.rejectedSnapshot() } } : {}),
       ...(rejectedInput !== undefined ? { latestRejectedInput: rejectedInput } : {}) });
-    const contextReader = createModelContextReader(currentMaterials, { resolvePointer: architectureMaterialPointer });
-    const fileMaterials = role === "reviewer" || ["review_slice", "review_revision"].includes(String(payload.pipelineStage))
-      ? createArchitectureMaterialFiles(id ? await this.storage.directory(id, "", { create: true }) : this.dataDir) : null;
-    const publishMaterials = () => fileMaterials?.publish({ ...currentMaterials(),
-      ...(modelMaterials.design !== undefined ? { candidate: modelMaterials.design }
-        : modelMaterials.baseCandidate !== undefined ? { candidate: modelMaterials.baseCandidate } : {}),
-      ...objectFields(reviewEvidenceContext) });
+    const roundContext = createArchitectureRoundContext({
+      directory: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
+      submissions: [submitName, "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review_parts", "save_architecture_review_parts", "request_requirements"],
+      materials: () => ({ ...currentMaterials(),
+        ...(modelMaterials.design !== undefined ? { candidate: modelMaterials.design }
+          : modelMaterials.baseCandidate !== undefined ? { candidate: modelMaterials.baseCandidate } : {}), ...objectFields(reviewEvidenceContext) }),
+      packet: (source, materialFiles) => architectureModelContext(source, { role, materialFiles }),
+    });
+    const contextReader = createModelContextReader(roundContext.source, { resolvePointer: architectureMaterialPointer });
+    const fileMaterials = roundContext;
     const modelPrompt = (value: UnknownRecord, continuation = false) => {
       if (continuation && payload.pipelineStage === "integration" && payload.integrationPolicy) {
         value = { ...value, pipelineStage: payload.pipelineStage, baseHash: payload.baseHash,
@@ -1190,10 +1207,10 @@ export class ArchitectureDesigner {
         reasoningMode: stageReasoningMode ?? (role === "reviewer" || role === "designer" && editableDesign
           || role === "specialist" && technicalRevision ? "off" : "auto"),
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
-        transformContext: async messages => projectArchitectureMessages(messages, { role, roleGuide: systemPrompt, materialFiles: await publishMaterials() }),
+        transformContext: roundContext.transformContext,
         preparePrompt: async text => {
-          const projected = projectArchitectureMessages([{ role: "user", content: text, timestamp: 0 }], { role, roleGuide: systemPrompt, materialFiles: await publishMaterials() })[0];
-          return projected?.role === "user" && typeof projected.content === "string" ? projected.content : text;
+          modelMaterials = { ...modelMaterials, ...objectFields(JSON.parse(text)) };
+          return roundContext.preparePrompt();
         },
         systemPrompt: architectureNodePrompt({ role, pipelineStage: payload.pipelineStage, submitName, blueprintProtocol: payload.blueprintProtocol,
           flatHandoffs: Boolean(parameters.properties?.handoffText) })
@@ -1217,7 +1234,7 @@ export class ArchitectureDesigner {
         onModelCall: chargeRequest,
         ...(sessionStorage ? { sessionStorage } : {}),
         maxOutputTokens: requestedMaxOutputTokens });
-      if (boundedStage || meteredStage || payload.pipelineStage === "review_slice") session.setAutoCompactionEnabled?.(false);
+      session.setAutoCompactionEnabled?.(false);
       if (onSessionRef && session.sessionFile) await onSessionRef({ file: basename(session.sessionFile) });
       signal?.throwIfAborted();
       if (recoverReviewReferences && sessionStorage?.file && session.sessionBindingHash && session.sessionFile
@@ -1531,8 +1548,6 @@ export class ArchitectureDesigner {
         designProgressEvidenceHash: designProgressSource.designProgressEvidenceHash,
         ...(designProgressSource.designStageDiagnostics ? { designStageDiagnostics: structuredClone(designProgressSource.designStageDiagnostics) } : {}) } : {}),
       ...(savedReviewRevision ? { reviewRevisionCheckpoint: structuredClone(savedReviewRevision) } : {}),
-      ...(designProgressSource?.reviewDispatchSource ? { reviewDispatchSource: designProgressSource.reviewDispatchSource,
-        ...(designProgressSource.reviewDispatchCheckpoint !== undefined ? { reviewDispatchCheckpoint: structuredClone(designProgressSource.reviewDispatchCheckpoint) } : {}) } : {}),
       ...(reviewRevision && previous?.reviewRevisionSource ? { reviewRevisionSource: previous.reviewRevisionSource } : {}),
       ...(definition.draft.taskSpec ? { designResearchCalls: designProgressSource?.designResearchCalls ?? 0 } : {}),
       ...(revisionSeed ? { revisionSource: revisionSeed.source } : {}),
@@ -1766,10 +1781,15 @@ export class ArchitectureDesigner {
             sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),
             maxOutputTokens: architectureModelOutputBudget(this.config, "specialist"), signal,
             prepareMaterials: async sources => {
-              const files = createArchitectureMaterialFiles(await this.storage.directory(record.agentId, "", { create: true }));
-              const catalog = await files.publish({ ...sources, candidate: sources.base });
+              let assignment: UnknownRecord = {};
+              const files = createArchitectureRoundContext({
+                directory: await this.storage.directory(record.agentId, "", { create: true }), submissions: ["submit_repair_patch"],
+                materials: () => ({ ...sources, candidate: sources.base, repairAssignment: assignment }),
+                packet: (input, catalog) => architectureRepairModelContext(input, catalog, sources.acceptanceAdapterGuide),
+              });
               return { tool: files.tool, resolvePointer: architectureMaterialPointer,
-                project: input => architectureRepairModelContext(input, catalog, sources.acceptanceAdapterGuide) };
+                transformContext: files.transformContext,
+                project: async input => { assignment = objectFields(input.repairAssignment); return objectFields(JSON.parse(await files.preparePrompt())); } };
             },
             tools: [createPlatformContractTool(context())] }),
           sessionDirectory: await this.storage.directory(record.agentId, "architecture-review-revision/sessions", { create: true }),
@@ -1821,6 +1841,16 @@ export class ArchitectureDesigner {
         }
         checks.issues = checks.issues.map(programIssue);
         record.design = design; record.contractVersion = design.schemaVersion ?? 1; record.candidateHash = designHash(design);
+        if (record.reviewDispatchCheckpoint && objectFields(record.reviewDispatchCheckpoint).candidateHash !== record.candidateHash) {
+          delete record.reviewDispatchCheckpoint; delete record.reviewDispatchSource;
+        }
+        // Attach review progress only after the exact candidate exists, never to an unsubmitted revision.
+        const dispatchSource = [...attemptHistory].sort((a, b) => b.version - a.version).find(value => value.candidateHash === record.candidateHash
+          && value.sourceFingerprint === record.sourceFingerprint && value.reviewDispatchSource);
+        if (dispatchSource?.reviewDispatchSource) {
+          record.reviewDispatchSource = dispatchSource.reviewDispatchSource;
+          if (dispatchSource.reviewDispatchCheckpoint !== undefined) record.reviewDispatchCheckpoint = structuredClone(dispatchSource.reviewDispatchCheckpoint);
+        }
         const feedbackRepair = objectFields(record.revisionSource?.feedbackRepair);
         const feedbackModelCalls = feedbackRepair.candidateHash === record.candidateHash ? feedbackRepair.modelCalls : 0;
         if (typeof feedbackModelCalls !== "number") throw feedbackRepairError("原候选已用评审额度无效，不能重置预算。");
@@ -1922,9 +1952,6 @@ export class ArchitectureDesigner {
           await this.save(record);
         }
         let distributedReview: UnknownRecord | undefined;
-        if (record.reviewDispatchCheckpoint && objectFields(record.reviewDispatchCheckpoint).candidateHash !== record.candidateHash) {
-          delete record.reviewDispatchCheckpoint; delete record.reviewDispatchSource;
-        }
         if (evidenceContext && !resumeMainReview && !(resumeReviewProgress?.modelCalls ?? 0)
           && (record.reviewDispatchSource || !resumeReview && shouldDistributeArchitectureReview(evidenceContext, priorFindings))) {
           const schema = reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: Boolean(priorFindings) });

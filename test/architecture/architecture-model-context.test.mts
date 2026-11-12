@@ -1,16 +1,106 @@
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import type { EvidenceMessage } from "../../src/contracts/requirements.mjs";
 import { fixtureString } from "../helpers/http-model.mjs";
-import { callFixture, recordArray, toolText } from "../helpers/m7-test-boundaries.mjs";
+import { recordArray, toolText } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { architectureModelContext, architectureNodePrompt, verificationModelContext, projectArchitectureMessages } from "../../src/architecture/architecture-model-context.mjs";
+import { architectureModelContext, architectureNodePrompt, verificationModelContext } from "../../src/architecture/architecture-model-context.mjs";
 import { createModelContextReader } from "../../src/runtime/model-context.mjs";
 import { requirementMessageContext } from "../../src/requirements/providers.mjs";
 import { createArchitectureMaterialFiles } from "../../src/architecture/architecture-material-files.mjs";
+import { createArchitectureRoundContext } from "../../src/architecture/architecture-round-context.mjs";
+import { createArchitectureSubmissionRepair } from "../../src/architecture/architecture-submission-repair.mjs";
+import type { ContextEvent } from "../../src/runtime/execution-port.mjs";
 import { mkdtemp, readFile, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+test("第五轮只投递第四轮提交及反馈，本轮分页不丢，旧交互可读取且重启不改原记录", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-round-context-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const messages: ContextEvent["messages"] = [{ role: "user", content: JSON.stringify({ modelBudget: { used: 0 }, oldTask: "obsolete" }) }];
+  for (let round = 1; round <= 4; round++) messages.push(
+    { role: "assistant", content: [{ type: "thinking", thinking: "private-reasoning" },
+      { type: "toolCall", id: `s${round}`, name: "submit", arguments: { draft: `draft-${round}`, detail: "完整原文".repeat(3000) } }], stopReason: "toolUse" },
+    { role: "toolResult", toolCallId: `s${round}`, toolName: "submit", isError: true, content: [{ type: "text", text: `feedback-${round}` }] },
+  );
+  messages.push({ role: "assistant", content: [{ type: "toolCall", id: "read", name: "read_architecture_file", arguments: {} }], stopReason: "toolUse" },
+    { role: "toolResult", toolCallId: "read", toolName: "read_architecture_file", content: [{ type: "text", text: "本轮第一页" }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "page2", name: "read_architecture_file", arguments: {} }], stopReason: "toolUse" },
+    { role: "toolResult", toolCallId: "page2", toolName: "read_architecture_file", content: [{ type: "text", text: "本轮第二页" }] });
+  const original = structuredClone(messages);
+  const make = () => createArchitectureRoundContext({ directory, submissions: ["submit"],
+    materials: () => ({ baseCandidate: { approved: "latest-base" }, revisionFeedback: { findings: [{ id: "open-old-issue" }] }, modelBudget: { submissionRejections: 4 } }),
+    packet: (source, materialFiles) => architectureModelContext(source, { role: "designer", materialFiles }) });
+  const round = make(), result = await round.transformContext(messages), output = JSON.stringify(result);
+  assert.doesNotMatch(output, /draft-[123]|feedback-[123]|obsolete/);
+  assert.match(output, /draft-4/); assert.match(output, /feedback-4/);
+  assert.match(output, /本轮第一页/); assert.match(output, /本轮第二页/);
+  assert.match(output, /latest-base/); assert.match(output, /open-old-issue/);
+  assert.deepEqual(result.slice(1), messages.slice(7));
+  assert.ok(result.slice(1).every(message => messages.includes(message)), "原生提交和工具回执不得伪造或改写");
+  let request: Record<string, unknown> = { file: "conversationHistory.json", path: "/1/content/0/arguments/detail" }, complete = "", pages = 0;
+  do {
+    const read = JSON.parse(toolText(await round.tool.execute("history", { requests: [request] }))).results[0];
+    assert.equal(read.error, undefined); complete += read.text; pages++; request = read.nextRequest;
+  } while (request);
+  assert.equal(JSON.parse(complete), "完整原文".repeat(3000)); assert.ok(pages > 1);
+  assert.doesNotMatch(JSON.stringify(round.source().conversationHistory), /private-reasoning|thinking/);
+  assert.deepEqual(await make().transformContext(messages), result);
+  assert.deepEqual(messages, original);
+});
+
+test("正文提交只保留最近一稿，混合工具批次完整保留，未完成调用不能被拆开", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-round-text-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const view = createArchitectureRoundContext({ directory, submissions: ["submit"], materials: () => ({ candidate: "latest" }),
+    packet: source => ({ candidate: source.candidate }) });
+  const messages: ContextEvent["messages"] = [
+    { role: "assistant", stopReason: "stop", content: [{ type: "text", text: '{"draft":"old"}' }] },
+    { role: "user", content: "old feedback" },
+    { role: "assistant", stopReason: "stop", content: [{ type: "text", text: '{"draft":"latest"}' }] },
+    { role: "user", content: "latest feedback" },
+  ];
+  assert.deepEqual((await view.transformContext(messages)).slice(1), messages.slice(2));
+  messages.push({ role: "assistant", stopReason: "toolUse", content: [
+    { type: "toolCall", id: "a", name: "read_architecture_file", arguments: {} },
+    { type: "toolCall", id: "b", name: "submit", arguments: { draft: "next" } },
+  ] }, { role: "toolResult", toolCallId: "b", toolName: "submit", isError: true, content: [{ type: "text", text: "rejected" }] });
+  assert.deepEqual((await view.transformContext(messages)).slice(1), messages.slice(2), "等待同批读取回执时不推进轮次边界");
+  messages.push({ role: "toolResult", toolCallId: "a", toolName: "read_architecture_file", content: [{ type: "text", text: "material" }] });
+  assert.deepEqual((await view.transformContext(messages)).slice(1), messages.slice(4));
+});
+
+test("裁掉旧完整提交后，最近局部补丁对应的完整可编辑稿仍可读取", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "neuma-round-patch-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const repair = createArchitectureSubmissionRepair({ schema: { type: "object", required: ["rule", "obligation"],
+    properties: { rule: { type: "string" }, obligation: { type: "string" } }, additionalProperties: false } });
+  repair.capture({ rule: "旧规则", obligation: "保留原义务" });
+  const patch = { ...repair.reference(), path: "/rule", value: "修正后的规则" };
+  repair.capture(repair.apply(patch));
+  const view = createArchitectureRoundContext({ directory, submissions: ["revise_architecture_submission"],
+    materials: () => ({ editableDraft: { ...repair.reference(), value: repair.snapshot(), trust: "untrusted-reference" } }),
+    packet: (source, materialFiles) => architectureModelContext(source, { role: "designer", materialFiles }) });
+  const result = await view.transformContext([
+    { role: "user", content: JSON.stringify({ modelBudget: {}, oldDraft: "旧规则" }) },
+    { role: "assistant", content: [{ type: "toolCall", id: "patch", name: "revise_architecture_submission", arguments: patch }], stopReason: "toolUse" },
+    { role: "toolResult", toolCallId: "patch", toolName: "revise_architecture_submission", isError: true, content: [{ type: "text", text: "另有一项待修" }] },
+  ]);
+  const location = JSON.parse(fixtureString(result[0]!.content)).currentDraft;
+  assert.equal(location.trust, "untrusted-reference");
+  const row = JSON.parse(toolText(await view.tool.execute("draft", { requests: [{ file: location.file, path: "/value" }] }))).results[0];
+  assert.deepEqual(JSON.parse(row.text), { rule: "修正后的规则", obligation: "保留原义务" });
+  assert.doesNotMatch(JSON.stringify(result), /旧规则/);
+});
+
+test("整合当前稿件指向本次完整方案，不能将上一版补丁标作当前完整稿", () => {
+  const packet = architectureModelContext({ pipelineStage: "integration", baseCandidate: { instructions: "本次模块已修正" },
+    latestStageDraft: { baseHash: "old", updates: [{ path: "/instructions", value: "旧说明" }] },
+    revisionCandidate: { instructions: "修订前的旧方案" } }, { role: "designer", materialFiles: [] });
+  assert.equal(objectFields(packet.currentDraft).file, "candidate.json");
+  assert.deepEqual(packet.baseCandidate, { instructions: "本次模块已修正" });
+});
 
 test("评审只投递位置，真实资料文件分页可读；旧报告原文保留，错路径与文件变更拒绝", async t => {
   const directory = await mkdtemp(join(tmpdir(), "neuma-review-materials-"));
@@ -141,17 +231,4 @@ test("需求消息去重只去掉已存在的副本，保留同文不同ID的证
   assert.equal(context.latestUserMessage, undefined); assert.deepEqual(context.userMessages, ["额外事实"]);
   assert.equal(evidenceMessages.length, 3);
   assert.equal(requirementMessageContext({ message: "新消息", lastQuestion: "范围？", userMessages: [], evidenceMessages }).latestUserMessage, "新消息");
-});
-
-test("旧绑定会话在请求前精简，原消息与工具调用顺序保持且投影可重复", () => {
-  const messages = [{ role: "user", content: JSON.stringify({ modelBudget: { limit: 5 }, requirements: [{ id: "r", text: "完整要求" }], candidateSchema: { large: "x".repeat(10000) } }) },
-    { role: "assistant", content: [{ type: "toolCall", name: "save", id: "c", arguments: {} }] },
-    { role: "toolResult", toolCallId: "c", content: [{ type: "text", text: "原始错误" }] },
-    { role: "user", content: [{ type: "text", text: JSON.stringify({ type: "review_batch", modelBudget: { limit: 5 }, reviewParts: { progressHash: "p", saved: { checks: "old".repeat(5000) } } }) }] }];
-  const before = structuredClone(messages), options = { role: "reviewer", roleGuide: "规则" }, projected = callFixture(projectArchitectureMessages, undefined, [messages, options]);
-  assert.deepEqual(messages, before);
-  assert.equal(JSON.parse(fixtureString(objectFields(projected[0]).content)).candidateSchema, undefined);
-  assert.equal(JSON.parse(toolText(projected[3]!)).reviewParts.saved, undefined);
-  assert.equal(projected[1], messages[1]); assert.equal(projected[2], messages[2]);
-  assert.deepEqual(projectArchitectureMessages(projected, options), projected);
 });

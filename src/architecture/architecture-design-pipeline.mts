@@ -20,7 +20,7 @@ export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7; modul
   validationContinuation?: { version: 1; authorization: "explicit-user-test-retry"; sourceVersion: number; source: DesignCheckpoint;
     stage: "blueprint" | "module" | "integration"; key: string; additionalCalls: 1 };
   repair?: { stage: DesignStage; key: string; additionalCalls: number; sourceVersion: number; sourceHash: string } }
-export type DesignPipelineContext = Omit<ArchitectureContext, "draft"> & StageSchemaOptions & { requirements: RequirementItem[]; draft?: unknown; requirement?: unknown; previousDesign?: unknown };
+export type DesignPipelineContext = Omit<ArchitectureContext, "draft"> & StageSchemaOptions & { requirements: RequirementItem[]; draft?: unknown; requirement?: unknown; previousDesign?: unknown; revisionFeedback?: unknown };
 interface RevisionIssue { blocking?: boolean; candidatePaths?: string[]; candidateFields?: string[] }
 interface DesignRevision { candidate: ArchitectureDesign | CandidateDraft; issues: RevisionIssue[]; candidateHash?: unknown }
 export interface DesignStageRole {
@@ -718,7 +718,10 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         issues: architectureStageRepairPlan(checkpoint.validationRepair.source, context)?.issues[key] ?? [],
         blueprintChanged: stage !== "blueprint" && checkpoint.validationRepair.source.blueprint.resultHash !== checkpoint.blueprint.resultHash,
         instruction: "原稿是待复核材料。只修复列出的问题并核对当前蓝图和已更新上游接口，保留其余有效内容与稳定编号；必须正式提交完整本阶段结果，不能仅更新blueprintHash冒充复核。遵循当前designModelBudget：task_rejections按正式退回次数控制，可按需读取；旧数字调用额度已为其他责任节点预留提交。已有充分资料时直接提交。" } } : {}),
-      ...(revision ? { revisionFeedback: copy(objectFields(revision).issues ?? []) } : {}) }, parameters,
+      ...(revision ? { revisionFeedback: copy(objectFields(revision).issues ?? []), revisionCandidate: copy(objectFields(revision).candidate),
+        ...(context.revisionFeedback ? { unresolvedIssues: copy(context.revisionFeedback) } : {}),
+        ...(saved && ["blueprint", "module"].includes(stage) && entryAt(saved, stage, key).result
+          ? { latestStageDraft: copy(entryAt(saved, stage, key).result) } : {}) } : {}) }, parameters,
       validate: value => {
         const result = validate(value);
         if (stage === "blueprint" && checkpoint.assignmentHash !== null && designHash(objectFields(result).modules) !== checkpoint.assignmentHash)

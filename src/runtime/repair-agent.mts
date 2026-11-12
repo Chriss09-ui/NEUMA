@@ -26,7 +26,8 @@ const prompt = `你是本次修复调度中的独立子Agent，仅负责repairAs
 export async function runRepairAgent(options: { worker: RepairWorker; context: Record<string, unknown>; binding: unknown;
   config: ModelConfig; cwd: string; dataDir: string; sessionDirectory: string; sessionFactory: SessionFactory;
   maxOutputTokens: number; signal?: AbortSignal | undefined; tools?: NeumaTool[];
-  prepareMaterials?: (sources: UnknownRecord) => Promise<{ tool: NeumaTool; project: (input: UnknownRecord) => UnknownRecord; resolvePointer?: ModelContextPointerResolver }> }): Promise<void> {
+  prepareMaterials?: (sources: UnknownRecord) => Promise<{ tool: NeumaTool; project: (input: UnknownRecord) => UnknownRecord | Promise<UnknownRecord>;
+    transformContext?: (messages: ContextEvent["messages"]) => Promise<ContextEvent["messages"]>; resolvePointer?: ModelContextPointerResolver }> }): Promise<void> {
   const { worker, signal } = options;
   let submitted = false, accepting = true, calls = worker.group.calls, session: ExecutionSession | undefined;
   const active = () => { signal?.throwIfAborted(); if (!accepting || submitted) throw new InputError("修复子任务已结束。"); };
@@ -38,19 +39,20 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
       return { content: [{ type: "text", text: '{"submitted":true}' }], details: {}, terminate: true };
     } });
   const sources: Record<string, unknown> = { base: worker.base, ...options.context,
+    ...(options.prepareMaterials && worker.group.history?.length ? { repairHistory: worker.group.history } : {}),
     ...(worker.group.history?.length ? { rejectedRepair: worker.group.history.at(-1) } : {}) };
   const fileDelivery = await options.prepareMaterials?.(sources);
-  const projectMessage = (text: string) => {
+  const projectMessage = async (text: string) => {
     if (!fileDelivery) return text;
     let input: unknown;
     try { input = JSON.parse(text); } catch { return text; }
-    return objectFields(input).repairAssignment ? JSON.stringify(fileDelivery.project(objectFields(input))) : text;
+    return objectFields(input).repairAssignment ? JSON.stringify(await fileDelivery.project(objectFields(input))) : text;
   };
-  const projectHistory = (messages: ContextEvent["messages"]) => messages.map(message => {
+  const projectHistory = (messages: ContextEvent["messages"]) => Promise.all(messages.map(async message => {
     if (message.role !== "user") return message;
-    if (typeof message.content === "string") return { ...message, content: projectMessage(message.content) };
-    return { ...message, content: (message.content ?? []).map(block => block.type === "text" ? { ...block, text: projectMessage(block.text) } : block) };
-  });
+    if (typeof message.content === "string") return { ...message, content: await projectMessage(message.content) };
+    return { ...message, content: await Promise.all((message.content ?? []).map(async block => block.type === "text" ? { ...block, text: await projectMessage(block.text) } : block)) };
+  }));
   const preparedContext: Record<string, unknown> = {}, baseFields: Record<string, unknown> = {};
   let bytes = 0;
   const include = (target: Record<string, unknown>, key: string, value: unknown) => {
@@ -90,7 +92,7 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
   try {
     session = await options.sessionFactory({ config: options.config, cwd: options.cwd, dataDir: options.dataDir, reasoningMode: "off",
       maxOutputTokens: options.maxOutputTokens, systemPrompt: (fileDelivery ? prompt.replace("preparedContext直接提供本组已有字段和必要材料，未内联材料才用read_repair_context读取", "materialFiles提供本组资料文件目录，先用read_architecture_file读取需要的原文；旧read_repair_context同样可用") : prompt) + "\n" + renderPiSubmissionContract({ role: "repair", submitName: submit.name, tools, structuredResponse: true }),
-      ...(fileDelivery ? { preparePrompt: projectMessage, transformContext: projectHistory } : {}),
+      ...(fileDelivery ? { preparePrompt: projectMessage, transformContext: fileDelivery.transformContext ?? projectHistory } : {}),
       customTools: tools, sessionStorage: { directory: options.sessionDirectory,
         binding: { version: 1, role: "repair", bindingHash: repairHash(options.binding), groupId: worker.group.id, baseHash: worker.baseHash },
         ...(worker.group.sessionFile ? { file: join(options.sessionDirectory, worker.group.sessionFile) } : {}) },

@@ -332,7 +332,9 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
     ...(stallModule ? { llmIdleTimeoutMs: 150 } : {}) };
   const sessionFactory = async (options: PiSessionOptions) => {
     const session = await createPiSession({ ...options,
-      ...(legacyModuleContext && objectFields(options.sessionStorage?.binding).stage === "module" ? { preparePrompt: async (raw: string) => {
+      ...(legacyModuleContext && objectFields(options.sessionStorage?.binding).stage === "module" ? {
+        ...(!options.sessionStorage?.file ? { transformContext: (messages: Parameters<NonNullable<PiSessionOptions["transformContext"]>>[0]) => messages } : {}),
+        preparePrompt: async (raw: string) => {
         const payload = JSON.parse(await options.preparePrompt?.(raw) ?? raw);
         if (payload.type !== "resume_architecture_stage") { delete payload.requirementScope; delete payload.moduleObligations; }
         return JSON.stringify(payload);
@@ -421,7 +423,8 @@ test("整合首次派发和原会话恢复都给出本轮验收修改范围与�
     assert.match(policy, /追加/);
     assert.match(policy, /updates\s*:\s*\[\]/);
   }
-  assert.equal(Object.hasOwn(packets[1]!, "baseCandidate"), false);
+  assert.equal(designHash(packets[1]!.baseCandidate), integrated.baseHash);
+  assert.equal(users(requests[1]!.body).length, 1, "恢复只投递当前完整材料包，不再重复携带旧首包");
   const prompt = requests[1]!.body.messages.filter(row => ["system", "developer"].includes(row.role)).map(row => text(row.content)).join("\n");
   assert.match(prompt, /verification/);
   assert.doesNotMatch(prompt, /正式重查可修正技术验收与证据分工/);
@@ -773,7 +776,9 @@ test("真实原生节点length后重建控制器，仅恢复模块与整合并�
   assert.equal(objectFields(resumed!.moduleObligations).moduleId, assignment.id);
   assert.deepEqual(objectFields(resumed!.moduleObligations).acceptanceKinds, ["success", "missing_input", "boundary"]);
   assert.deepEqual(objectFields(resumed!.moduleObligations).conditionalAcceptanceKinds, ["tool_failure"]);
-  assert.equal(Object.hasOwn(resumed!, "requirements"), false); assert.equal(Object.hasOwn(resumed!, "draft"), false);
+  assert.deepEqual(recordArray(resumed!.requirements).map(row => row.id), assignment.requirementIds);
+  assert.equal(users(f.requests[start]!.body).length, 1);
+  assert.equal(Object.hasOwn(resumed!, "draft"), false);
   assert.ok(text(recordArray(objectFields(f.requests[start]!.body).messages).find((message) => message.role === "user")!.content).includes('"assignment"'));
 });
 

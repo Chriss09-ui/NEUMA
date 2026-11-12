@@ -161,7 +161,7 @@ test("默认只创建两个隔离角色，不搜索或委派；评估通过仍�
   assert.deepEqual(sessions[0]!.payload!.candidateSchema, sessions[0]!.tools.submit_architecture!.parameters);
   assert.deepEqual(sessions[1]!.payload!.candidateSchema, sessions[0]!.tools.submit_architecture!.parameters);
   for (const session of sessions) assert.deepEqual(session.payload!.acceptanceAdapterGuide, ACCEPTANCE_ADAPTER_GUIDE);
-  assert.deepEqual(Object.keys(sessions[0]!.tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
+  assert.deepEqual(Object.keys(sessions[0]!.tools), ["search_technical_sources", "delegate_module", "web_search", "web_fetch", "read_model_context", "read_architecture_file", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture"]);
   assert.deepEqual(Object.keys(sessions[1]!.tools), ["read_model_context", "read_architecture_file", "request_requirements", "submit_architecture_draft", "revise_architecture_submission", "submit_architecture_review"]);
   assert.deepEqual(researchCalls, []); assert.deepEqual(result.modules, []);
   assert.ok(sessions.every((item) => item.disposed));
@@ -694,7 +694,7 @@ test("仅按需委派最多三个局部模块，专员没有搜索或递归委�
     { question: "如何核对交付边界", boundary: "只分析已确认输入和结果", benefit: "避免扩大承诺" }];
   const { designer, sessions } = await fixture(t, { onPrompt: async ({ record, submit }) => {
     if (record.role === "specialist") {
-      assert.deepEqual(Object.keys(record.tools), ["read_model_context", "submit_architecture_draft", "submit_module_design"]);
+      assert.deepEqual(Object.keys(record.tools), ["read_model_context", "read_architecture_file", "submit_architecture_draft", "submit_module_design"]);
       return submit({ proposal: "只保留任务状态", interfaces: "文本输入和摘要输出", tradeoffs: "不保留跨任务状态",
         evidenceIds: [`neuma-runtime-v${record.payload!.platformContractVersion}`], unknowns: [] });
     }

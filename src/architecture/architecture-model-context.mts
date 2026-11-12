@@ -13,7 +13,7 @@ const pick = (value: unknown, fields: string[]) => { const record = objectFields
 const metadata = ["type", "pipelineStage", "blueprintProtocol", "submitName", "candidateHash", "baseHash", "blueprintHash", "allowedRoots", "integrationPolicy", "revisionSource",
   "stageContract", "moduleReturnInstruction", "consultations", "moduleCapacity", "moduleLimit", "requirementScope", "moduleObligations",
   "modelBudget", "designModelBudget", "remaining", "stageRepair", "editableSubmission", "rejectedSubmission", "lastSubmissionIssue",
-  "unsubmittedDraft", "unsubmittedDraftDiagnostic", "structuredSubmissionFeedback", "repairInstruction", "instruction"];
+  "unsubmittedDraft", "unsubmittedDraftDiagnostic", "structuredSubmissionFeedback", "repairInstruction", "instruction", "userRevisionInstruction", "unresolvedIssues"];
 
 export function deferredObligations(value: unknown, { includeResolution = false } = {}) {
   const issues = objectFields(value).issues;
@@ -86,8 +86,15 @@ function filePacket(source: UnknownRecord, fields: string[], materialFiles?: Arc
   }
   if (source.reviewEvidenceIndex) packet.reviewEvidenceIndex = reviewIndex(source.reviewEvidenceIndex);
   const projected = objectFields(positionReport(packet, source.acceptanceAdapterGuide));
-  return { ...projected, materialDelivery: "files-v1", ...(materialFiles ? { materialFiles } : {}),
+  return { ...projected, ...draftLocation(source), materialDelivery: "files-v1", ...(materialFiles ? { materialFiles } : {}),
     materialInstruction: "materialFiles是本节点只读资料目录。先读取本次判断需要的候选、原要求和规则；file用目录文件名，path从文件内部开始，空path表示整份文件。报告只交位置，不复制原文。nextRequest非空须继续读取所需内容。" };
+}
+
+function draftLocation(source: UnknownRecord) {
+  const file = source.editableDraft ? "editableDraft.json" : source.baseCandidate ? "candidate.json" : source.latestStageDraft ? "latestStageDraft.json"
+    : source.revisionCandidate ? "revisionCandidate.json" : null;
+  return file ? { currentDraft: { file, path: "", trust: "untrusted-reference",
+    instruction: "当前可修订完整稿；最近一次被拒提交及反馈仍须核对，不代表已经接受。" } } : {};
 }
 
 export function architectureModelContext(source: UnknownRecord, { role, continuation = false, materialFiles }: { role?: string | undefined; continuation?: boolean; materialFiles?: ArchitectureMaterialFile[] | undefined } = {}) {
@@ -153,7 +160,7 @@ export function architectureModelContext(source: UnknownRecord, { role, continua
   // The frozen manifest describes storage; it must not claim omitted text was delivered to the model.
   if (source.contextManifest && !continuation) packet.sourceManifest = Object.fromEntries(Object.entries(objectFields(source.contextManifest)).map(([key, value]) =>
     [key, pick(value, ["characters", "sha256"])]));
-  return packet;
+  return { ...packet, ...(materialFiles ? { materialFiles, ...draftLocation(source) } : {}) };
 }
 
 export function architectureRepairModelContext(input: UnknownRecord, materialFiles: ArchitectureMaterialFile[], guide: unknown) {
@@ -171,7 +178,7 @@ export function legacyVerificationModelContext(source: UnknownRecord) {
 }
 
 export function verificationModelContext(source: UnknownRecord, materialFiles?: ArchitectureMaterialFile[] | undefined) {
-  return filePacket(source, ["contextHash", "budget", "fidelityContextVersion", "acceptanceAdapterGuideSource"], materialFiles);
+  return filePacket(source, ["contextHash", "budget", "fidelityContextVersion", "acceptanceAdapterGuideSource", "lastSubmission"], materialFiles);
 }
 
 function projectUserMessages(messages: ContextEvent["messages"], project: (value: unknown) => unknown): ContextEvent["messages"] {
@@ -186,20 +193,6 @@ function projectUserMessages(messages: ContextEvent["messages"], project: (value
     if (!projected) return message;
     const content = JSON.stringify(projected);
     return { ...message, content: typeof message.content === "string" ? content : [{ type: "text" as const, text: content }] };
-  });
-}
-
-/** Request-only projection also handles existing bound sessions; persisted history stays intact. */
-export function projectArchitectureMessages(messages: ContextEvent["messages"], { role, roleGuide, materialFiles }: { role: string; roleGuide: string; materialFiles?: ArchitectureMaterialFile[] | undefined }) {
-  return projectUserMessages(messages, input => {
-    const value = objectFields(input);
-    const budget = objectFields(value.modelBudget);
-    if (value.materialDelivery === "files-v1") return materialFiles ? { ...value, materialFiles } : null;
-    if (value.contextIndex && (role === "reviewer" || ["review_slice", "review_revision"].includes(String(value.pipelineStage))))
-      return architectureModelContext({ ...value, roleGuide }, { role, materialFiles });
-    if (!input || !(Number.isSafeInteger(budget.limit) || budget.policy === "task_rejections" && budget.limit === null) || value.contextIndex) return null;
-    const continuation = ["resume_architecture_stage", "review_batch", "submission_required"].some(type => type === value.type);
-    return architectureModelContext({ ...value, roleGuide }, { role, continuation, materialFiles });
   });
 }
 
