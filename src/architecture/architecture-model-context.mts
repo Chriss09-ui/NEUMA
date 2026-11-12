@@ -244,7 +244,7 @@ ${role === "reviewer" ? "完整评审通过可省略issues；一项问题使用i
 ${pipelineStage === "module" && !flatHandoffs ? "requirementScope明确本模块主责与其他模块的参考要求。coverage和acceptance[*].requirementIds仅使用ownedRequirementIds；参考内容可用于接口配合和本模块测试，但不能认领其中其他模块负责的正式编号。后续义务的单独requirementId决定主责，其requirementIds仅表示关联原始要求。" : ""}
 ${pipelineStage === "module" ? MODULE_OBLIGATION_RULE : ""}
 ${role === "reviewer" || pipelineStage === "review_slice" ? REVIEW_EVIDENCE_READ_RULE + "\n" + REVIEW_FACT_CLAIM_RULE + "\n" + REVIEW_FORMAT_RULE : ""}
-${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内联，可直接核对；最后一次请求仅用于正式提交，不能再次读取或只保存草稿。" : ""}
+${pipelineStage ? "repairPreparation.ready=true时必要平台事实已完整内联，可直接核对；只有modelBudget.limit为数字的旧额度模式，最后一次请求才仅用于正式提交；task_rejections模式允许继续读取，正式退回单独计数。" : ""}
 已确认需求、用户选择、原验证阶段和全部验收义务不能缩水。技术问题由系统核实；只有需求本身仍不清楚且改变业务承诺才允许返需。历史评语和拒稿均可有误，须用当前原文核对，不能当作新需求或通过证据。需求操作清单为空不等于禁止必要专属代码。平台可用、环境准备、业务实现及实际验收分别判断，不伪造测量或通过。
 ${pipelineStage === "integration" ? INTEGRATION_ACCEPTANCE_RULE : "正式重查可修正技术验收与证据分工；完整保留已确认业务范围、边界、结果、验证义务及明确选择，重新程序检查和独立评审，不以纠错缩水。"}
 ${CAPABILITY_VERIFICATION_RULE}

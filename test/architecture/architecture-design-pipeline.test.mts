@@ -15,6 +15,8 @@ import { architectureToolValidation } from "../../src/architecture/architecture-
 import type { ArchitectureAcceptance,ArchitectureComponent,ArchitectureStep,ArchitectureDecision } from "../../src/contracts/architecture.mjs";
 import type { AcceptanceVerification } from "../../src/contracts/verification.mjs";
 import { blueprintConsultationSchemas, type BlueprintConsultationResult } from "../../src/architecture/architecture-blueprint-consultation.mjs";
+import { recoverDesignSubmissionPolicy } from "../../src/architecture/architecture-design-rejections.mjs";
+import type { SessionMessage } from "../../src/runtime/execution-port.mjs";
 
 
 
@@ -169,7 +171,7 @@ test("旧蓝图与模块语义问题按归属复核，五个原剩余调用完�
   await f.run({ repair: recovery.request, validateHistory: async storage => { histories.push(structuredClone(storage)); },
     runRole: f.mockRole(async ({ options, send, value }) => {
       assert.ok(objectFields(options.payload).validationRepair);
-      assert.equal(options.modelCallLimit - options.modelCalls, 1, "模型看到的额度扣除其他待完成责任节点的预留");
+      assert.equal(options.modelCallLimit! - options.modelCalls, 1, "模型看到的额度扣除其他待完成责任节点的预留");
       await send(); await options.onResult(value); return value;
     }) });
   assert.deepEqual(f.calls.slice(before).map(item => item.key), ["blueprint", "module_0", "module_1", "module_2", "integration"]);
@@ -530,8 +532,8 @@ test("专项消耗预算后模块得到实际可用次数，受限节点仍有�
       await send(); await send(); await send();
     } else if (options.stage === "consultation") { await send(); await send(); await send(); }
     else {
-      limits[options.key] = options.modelCallLimit - options.modelCalls;
-      for (let i = options.modelCalls; i < options.modelCallLimit; i++) await send();
+      limits[options.key] = options.modelCallLimit! - options.modelCalls;
+      for (let i = options.modelCalls; i < options.modelCallLimit!; i++) await send();
     }
     await options.onResult(value); return value;
   }) });
@@ -1051,6 +1053,40 @@ test("显式取消拒绝迟到阶段提交，保留已发生轮次与原会话",
   assert.equal(checkpoint.blueprint.result, null); assert.equal(checkpoint.modelCalls, 1); assert.ok(checkpoint.blueprint.sessionRef);
   await f.run();
   assert.equal(f.record.designProgressCheckpoint!.modelCalls, 5);
+});
+
+test("设计任务按正式退回计数时，正常请求可超过原节点及总调用上限", async () => {
+  const f = fixture();
+  const result = candidateResult(await f.run({ submissionPolicy: true, runRole: f.mockRole(async ({ options, send, value }) => {
+    assert.equal(options.modelCallLimit, null);
+    for (let index = 0; index < 8; index++) await send();
+    await options.onResult(value); return value;
+  }) }));
+  assert.ok(result.instructions);
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, 32);
+  assert.deepEqual(f.record.designProgressCheckpoint!.submissionPolicy!.receipts, {});
+});
+
+test("旧设计按原会话拒交回执恢复次数，读资料和成功提交不算退回，缺历史不能补零", async () => {
+  const f = fixture(); await f.run();
+  const original = structuredClone(f.record.designProgressCheckpoint!), before = designHash(original), stages = f.calls.length;
+  const messages: SessionMessage[] = [
+    { role: "toolResult", toolName: "read_model_context", toolCallId: "read", isError: true, content: [{ type: "text", text: "位置无效" }] },
+    { role: "toolResult", toolName: "submit_architecture_integration", toolCallId: "failed", isError: true, content: [{ type: "text", text: "验收不允许修改" }] },
+    { role: "toolResult", toolName: "submit_architecture_integration", toolCallId: "failed", isError: true, content: [{ type: "text", text: "同一回执" }] },
+    { role: "toolResult", toolName: "submit_architecture_integration", toolCallId: "accepted", isError: false, content: [{ type: "text", text: "{\"submitted\":true}" }] },
+  ];
+  await assert.rejects(f.run({ submissionPolicy: true, recoverSubmissionPolicy: cp => recoverDesignSubmissionPolicy(cp, [],
+    "/tmp/neuma-design-pipeline-fixture", async () => { throw new Error("原会话缺失"); }) }), /原会话缺失/u);
+  assert.equal(designHash(f.record.designProgressCheckpoint), before);
+  await f.run({ submissionPolicy: true, recoverSubmissionPolicy: cp => recoverDesignSubmissionPolicy(cp, f.saved,
+    "/tmp/neuma-design-pipeline-fixture", async storage => ({ entries: (objectFields(storage.binding).stage === "integration" ? messages : [])
+      .map(message => ({ message })) })) });
+  const policy = f.record.designProgressCheckpoint!.submissionPolicy!;
+  assert.equal(policy.receipts.integration!.length, 1);
+  assert.equal(f.record.designProgressCheckpoint!.modelCalls, original.modelCalls);
+  assert.equal(f.calls.length, stages, "核对旧回执不应请求模型");
+  assert.equal(designHash(original), before);
 });
 
 test("独立评审修订只退回命中模块及整合，共享累计额度和新代会话不重置", async () => {

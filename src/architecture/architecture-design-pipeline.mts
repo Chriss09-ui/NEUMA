@@ -5,6 +5,9 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { StoredArchitectureRecord } from "./architecture-controller-port.mjs";
 import type { NeumaTool, Progress, SessionStorage } from "../runtime/execution-port.mjs";
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
+import { DESIGN_SUBMISSION_REJECTION_LIMIT, readDesignSubmissionPolicy, designSubmissionRejections,
+  recordDesignSubmissionRejection } from "./architecture-design-rejections.mjs";
+import type { DesignSubmissionPolicy } from "./architecture-design-rejections.mjs";
 type DesignStage = "blueprint" | "module" | "integration" | "consultation";
 interface DesignStageState { key: string; modelCalls: number; sessionStartCalls: number; generation: number; sessionRef: { file: string } | null;
   result: unknown; resultHash: string | null; completedBy?: "program" }
@@ -12,6 +15,7 @@ interface ConsultationState extends DesignStageState { assignment: BlueprintCons
 export type DesignCheckpoint = { schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7; moduleLimit?: number; pipelineId: string; bindingHash: unknown; schemaHash: unknown; modelCalls: number;
   revisionHash: string | null; assignmentHash: string | null; assemblyVersion?: 2; blueprint: DesignStageState; modules: DesignStageState[]; integration: DesignStageState; hash: string;
   consultations?: ConsultationState[];
+  submissionPolicy?: DesignSubmissionPolicy;
   validationRepair?: { version: 1; sourceVersion: number; source: DesignCheckpoint; targets: string[] };
   validationContinuation?: { version: 1; authorization: "explicit-user-test-retry"; sourceVersion: number; source: DesignCheckpoint;
     stage: "blueprint" | "module" | "integration"; key: string; additionalCalls: 1 };
@@ -21,7 +25,8 @@ interface RevisionIssue { blocking?: boolean; candidatePaths?: string[]; candida
 interface DesignRevision { candidate: ArchitectureDesign | CandidateDraft; issues: RevisionIssue[]; candidateHash?: unknown }
 export interface DesignStageRole {
   stage: DesignStage; key: string; role: string; stageInstruction: string; submitName: string; payload: UnknownRecord; parameters: ToolSchema;
-  validate(value: unknown): unknown; modelCalls: number; modelCallLimit: number; sessionStorage: SessionStorage;
+  validate(value: unknown): unknown; modelCalls: number; modelCallLimit: number | null; sessionStorage: SessionStorage;
+  submissionRejections?: number; onSubmissionRejected?: (callId: string) => Promise<number>;
   onSessionRef(value: unknown): Promise<void>; onModelCall(event?: unknown): Promise<void>; onResult(value: unknown): Promise<void>;
   integrationContext?: Parameters<typeof applyArchitectureIntegration>[1];
   tools?: NeumaTool[];
@@ -31,6 +36,7 @@ const handoff = (value: unknown): value is PipelineHandoff => Boolean(objectFiel
 interface PipelineOptions { record: Pick<StoredArchitectureRecord, "version"> & Partial<StoredArchitectureRecord>; context: DesignPipelineContext; binding: unknown;
   runRole(node: DesignStageRole): Promise<unknown>; onSave(checkpoint: DesignCheckpoint): Promise<unknown>; signal?: AbortSignal | undefined; onProgress?: Progress | undefined;
   sessionDirectory: string; revision?: unknown; repair?: unknown; forceIntegration?: boolean | undefined;
+  submissionPolicy?: boolean; recoverSubmissionPolicy?: (checkpoint: DesignCheckpoint) => Promise<DesignSubmissionPolicy>;
   validateProgramCandidate?: (candidate: CandidateDraft, options: { sessionStorage: SessionStorage }) => unknown | Promise<unknown>;
   validateAssembledCandidate?: (candidate: CandidateDraft) => unknown | Promise<unknown>;
   validateHistory?: (storage: SessionStorage) => unknown | Promise<unknown> }
@@ -80,6 +86,10 @@ function stageOptions(checkpoint: Pick<DesignCheckpoint, "schemaVersion" | "modu
 // Limits belong to a persisted attempt; deploying new defaults must not refill old attempts.
 export function architectureDesignCallLimits(input: unknown) {
   const checkpoint = objectFields(input);
+  if (checkpoint.submissionPolicy !== undefined) {
+    readDesignSubmissionPolicy(checkpoint.submissionPolicy);
+    return { stage: Infinity, pipeline: Infinity };
+  }
   const continuation = objectFields(checkpoint.validationContinuation);
   if (checkpoint.validationContinuation !== undefined && (continuation.version !== 1 || continuation.additionalCalls !== 1
     || continuation.authorization !== "explicit-user-test-retry")) throw invalid();
@@ -106,10 +116,10 @@ function stopped(checkpoint: DesignCheckpoint, stage: DesignStage, reason = "tur
   });
 }
 
-const stageLimit = (checkpoint: DesignCheckpoint, stage: DesignStage, key: unknown) => (stage === "consultation" ? BLUEPRINT_CONSULTATION_CALL_LIMIT : architectureDesignCallLimits(checkpoint).stage)
+const stageLimit = (checkpoint: DesignCheckpoint, stage: DesignStage, key: unknown) => checkpoint.submissionPolicy ? Infinity : (stage === "consultation" ? BLUEPRINT_CONSULTATION_CALL_LIMIT : architectureDesignCallLimits(checkpoint).stage)
   + (checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT : 0)
   + (checkpoint.validationContinuation?.stage === stage && checkpoint.validationContinuation.key === key ? 1 : 0);
-const integrationReserve = (checkpoint: DesignCheckpoint) => complete(checkpoint.integration) ? 0
+const integrationReserve = (checkpoint: DesignCheckpoint) => checkpoint.submissionPolicy || complete(checkpoint.integration) ? 0
   : checkpoint.validationRepair ? 1 : Math.max(0, stageLimit(checkpoint, "integration", "integration") - checkpoint.integration.modelCalls);
 const stages = (checkpoint: DesignCheckpoint): { stage: Exclude<DesignStage, "consultation">; entry: DesignStageState }[] => [
   { stage: "blueprint", entry: checkpoint.blueprint },
@@ -127,7 +137,7 @@ function stageState(value: unknown, limit = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT
     || typeof value.key !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,99}$/u.test(value.key)
     || !isInteger(value.modelCalls) || value.modelCalls < 0 || value.modelCalls > limit
     || !isInteger(value.sessionStartCalls) || value.sessionStartCalls < 0 || value.sessionStartCalls > value.modelCalls
-    || !isInteger(value.generation) || value.generation < 0 || value.generation > 1
+    || !isInteger(value.generation) || value.generation < 0 || Number.isFinite(limit) && value.generation > 1
     || value.generation === 0 && value.sessionStartCalls !== 0)
     throw invalid();
   if (value.sessionRef !== null && (!exact(value.sessionRef, ["file"])
@@ -141,7 +151,7 @@ function stageState(value: unknown, limit = ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT
 function checkpointState(input: unknown): asserts input is DesignCheckpoint {
   const checkpoint = objectFields(input);
   const keys = [...checkpointKeys, ...(Number(checkpoint.schemaVersion) >= 4 ? ["consultations"] : []),
-    ...(Number(checkpoint.schemaVersion) >= 5 ? ["moduleLimit"] : []), ...["repair", "assemblyVersion", "validationRepair", "validationContinuation"].filter(key => Object.hasOwn(checkpoint, key))];
+    ...(Number(checkpoint.schemaVersion) >= 5 ? ["moduleLimit"] : []), ...["repair", "assemblyVersion", "validationRepair", "validationContinuation", "submissionPolicy"].filter(key => Object.hasOwn(checkpoint, key))];
   if (!exact(checkpoint, keys) || Object.hasOwn(checkpoint, "assemblyVersion") && checkpoint.assemblyVersion !== 2
     || ![1, 2, 3, 4, 5, 6, 7].some(version => version === checkpoint.schemaVersion) || typeof checkpoint.pipelineId !== "string" || !/^[a-f0-9-]{36}$/u.test(checkpoint.pipelineId)
     || !hash(checkpoint.hash) || checkpoint.hash !== sealed(checkpoint).hash
@@ -156,7 +166,7 @@ function checkpointState(input: unknown): asserts input is DesignCheckpoint {
     if (!exact(item, [...stageKeys, "assignment"])) throw invalid();
     const { assignment, ...entry } = item;
     validateBlueprintConsultationAssignment(assignment, undefined, blueprintConsultationSchemas(Number(checkpoint.schemaVersion) >= 6).assignment);
-    stageState(entry, BLUEPRINT_CONSULTATION_CALL_LIMIT + (objectFields(checkpoint.repair).stage === "consultation"
+    stageState(entry, checkpoint.submissionPolicy ? Infinity : BLUEPRINT_CONSULTATION_CALL_LIMIT + (objectFields(checkpoint.repair).stage === "consultation"
       && objectFields(checkpoint.repair).key === entry.key ? ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT : 0));
     if (entry.key !== `advice_${designHash(assignment).slice(0, 24)}` || entry.generation !== 0 || entry.sessionStartCalls !== 0) throw invalid();
   }
@@ -171,7 +181,7 @@ function checkpointState(input: unknown): asserts input is DesignCheckpoint {
       || !isInteger(repair.sourceVersion) || repair.sourceVersion < 1 || !hash(repair.sourceHash)
       || !(repair.stage === "consultation" ? consultations.some(entry => entry.key === repair.key && entry.modelCalls >= BLUEPRINT_CONSULTATION_CALL_LIMIT)
         : rawStages.some((entry, index) => (index === 0 ? "blueprint" : index === rawStages.length - 1 ? "integration" : "module") === repair.stage && entry.key === repair.key
-          && Number(entry.modelCalls) >= architectureDesignCallLimits(checkpoint).stage))) throw invalid();
+          && Number(entry.modelCalls) >= (checkpoint.submissionPolicy ? ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT : architectureDesignCallLimits(checkpoint).stage)))) throw invalid();
   }
   const repair = objectFields(checkpoint.repair), continuation = objectFields(checkpoint.validationContinuation), baseLimit = architectureDesignCallLimits(checkpoint).stage;
   const checkedEntry = (value: unknown, stage: DesignStage) => stageState(value, baseLimit
@@ -238,6 +248,7 @@ function continuationTarget(checkpoint: DesignCheckpoint) {
 export function architectureDesignTestContinuation(record: Partial<StoredArchitectureRecord> | null | undefined): NonNullable<DesignCheckpoint["validationContinuation"]> | null {
   if (!record || !["failed", "cancelled"].includes(record.status ?? "") || !isInteger(record.version) || !record.designProgressCheckpoint) return null;
   const checkpoint = copy(record.designProgressCheckpoint); checkpointState(checkpoint);
+  if (checkpoint.submissionPolicy) return null;
   const target = continuationTarget(checkpoint);
   return target ? { version: 1, authorization: "explicit-user-test-retry", sourceVersion: record.version, source: checkpoint,
     stage: target.stage, key: target.entry.key, additionalCalls: 1 } : null;
@@ -316,6 +327,13 @@ export function architectureDesignRecovery(record: Partial<StoredArchitectureRec
   if (!["failed", "cancelled"].includes(record?.status ?? "") || !record?.designProgressCheckpoint) return null;
   try {
     const checkpoint = copy(record.designProgressCheckpoint); checkpointState(checkpoint);
+    if (checkpoint.submissionPolicy) {
+      const target = recoveryStages(checkpoint).find(({ entry }) => designSubmissionRejections(checkpoint.submissionPolicy, entry.key) >= DESIGN_SUBMISSION_REJECTION_LIMIT);
+      return target ? { kind: "design_rejections", status: "blocked", stage: target.stage, stageKey: target.entry.key, request: undefined,
+        rejectionCount: designSubmissionRejections(checkpoint.submissionPolicy, target.entry.key), rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+        modelCalls: target.entry.modelCalls, modelCallLimit: null, pipelineModelCalls: checkpoint.modelCalls, pipelineModelCallLimit: null,
+        message: "同一设计任务已被正式退回五轮，已有成果、原会话和用量保留，请检查尚未修正的问题。" } : null;
+    }
     const validation = validationRecovery(record, checkpoint);
     if (validation) return validation;
     const exhausted = recoveryStages(checkpoint).find(({ stage, entry }) => !complete(entry)
@@ -470,7 +488,7 @@ function revisionOwners(revision: DesignRevision, blueprint: ArchitectureBluepri
 }
 
 /** Runs only the new design path. Its caller retains the final full validation and independent review. */
-export async function runArchitectureDesignPipeline({ record, context, binding, runRole, onSave, signal, onProgress, sessionDirectory, revision, repair,
+export async function runArchitectureDesignPipeline({ record, context, binding, runRole, onSave, signal, onProgress, sessionDirectory, revision, repair, submissionPolicy = false, recoverSubmissionPolicy,
   forceIntegration = false, validateProgramCandidate = value => value, validateAssembledCandidate, validateHistory }: PipelineOptions): Promise<CandidateDraft | PipelineHandoff> {
   if (typeof runRole !== "function" || typeof onSave !== "function" || typeof sessionDirectory !== "string" || !isAbsolute(sessionDirectory)) throw invalid();
   const saved = readArchitectureDesignProgress(record, { context, binding });
@@ -499,6 +517,19 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     writes = task.catch(() => {});
     return task;
   };
+  if (submissionPolicy && !checkpoint.submissionPolicy) {
+    if (checkpoint.modelCalls > 0 && !recoverSubmissionPolicy) throw invalid("design_history_unavailable");
+    const policy = checkpoint.modelCalls > 0 ? await recoverSubmissionPolicy!(copy(checkpoint))
+      : { version: 1 as const, limit: DESIGN_SUBMISSION_REJECTION_LIMIT, receipts: {} };
+    await update(next => { next.submissionPolicy = readDesignSubmissionPolicy(policy); });
+  }
+  const rejectionLimit = (keys: string[]) => {
+    const key = keys.find(key => designSubmissionRejections(checkpoint.submissionPolicy, key) >= DESIGN_SUBMISSION_REJECTION_LIMIT);
+    if (key) throw new ProviderError("同一设计任务已被正式退回五轮，停止重试；读取和模型请求只记录用量。", {
+      stage: "architecture", reason: "design_repair_stalled", role: "designer", phase: "designing", stageKey: key,
+      rejectionCount: designSubmissionRejections(checkpoint.submissionPolicy, key), rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+      modelCalls: checkpoint.modelCalls });
+  };
   const entryAt = (value: DesignCheckpoint, stage: DesignStage, key: string): DesignStageState => stage === "consultation"
     ? value.consultations!.find(entry => entry.key === key)! : stage === "module" ? value.modules.find(entry => entry.key === key)! : value[stage];
   const repairSource = copy(checkpoint);
@@ -523,7 +554,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
   if (validationPlan) {
     const targets = stages(checkpoint).filter(item => validationPlan.targets.includes(item.entry.key));
     if (checkpoint.modelCalls + targets.length > architectureDesignCallLimits(checkpoint).pipeline
-      || targets.some(({ stage, entry }) => entry.generation > 0 || entry.modelCalls >= stageLimit(checkpoint, stage, entry.key)))
+      || targets.some(({ stage, entry }) => !checkpoint.submissionPolicy && entry.generation > 0 || entry.modelCalls >= stageLimit(checkpoint, stage, entry.key)))
       throw new ProviderError("阶段校验修复所需节点没有足够的原剩余额度；原成果保留。", {
         stage: "architecture", reason: "validation_repair_budget_exhausted", issues: validationPlan.issues, targets: validationPlan.targets,
         modelCalls: checkpoint.modelCalls, modelCallLimit: architectureDesignCallLimits(checkpoint).pipeline });
@@ -533,6 +564,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         parentBindingHash: bindingHash, blueprintHash: stage === "blueprint" ? null : repairSource.blueprint.resultHash,
         schemaHash, generation: entry.generation }, file: entry.sessionRef.file });
     active();
+    rejectionLimit(targets.map(({ entry }) => entry.key));
     await update(next => {
       next.validationRepair = { version: 1, sourceVersion: Math.max(1, record.version - 1), source: repairSource, targets: validationPlan.targets };
       for (const { entry } of stages(next)) if (validationPlan.targets.includes(entry.key)) {
@@ -550,7 +582,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       if (replacement !== undefined && (!hash(replacement) || replacement !== checkpoint.revisionHash
         || routing.version !== 1 || routing.replacesRevisionHash !== replacement
         || routing.baseCandidateHash !== designHash(revisionValue.candidate))) throw invalid();
-      if (checkpoint.revisionHash !== null && replacement === undefined || !complete(checkpoint.blueprint) || !complete(checkpoint.integration)
+      if (checkpoint.revisionHash !== null && replacement === undefined && !checkpoint.submissionPolicy || !complete(checkpoint.blueprint) || !complete(checkpoint.integration)
         || !checkpoint.modules.every(complete) || !revisionValue.candidate || !Array.isArray(revisionValue.issues)) throw invalid();
       const blueprint = validateArchitectureBlueprint(checkpoint.blueprint.result, context), modules = checkedModules(checkpoint, blueprint, context);
       const mergeCapabilityReasons = checkpoint.assemblyVersion === 2;
@@ -562,6 +594,14 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       if (!hasBlockingIssues && !forceIntegration) return candidate;
       const targets = stages(checkpoint).filter(({ stage, entry }) => stage === "integration"
         || stage === "blueprint" && reviseBlueprint || stage === "module" && (reviseBlueprint || owners.has(entry.key)));
+      if (checkpoint.submissionPolicy && hasBlockingIssues) {
+        const returned = reviseBlueprint ? ["blueprint"] : owners.size ? [...owners] : ["integration"];
+        await update(next => {
+          for (const key of returned) recordDesignSubmissionRejection(next.submissionPolicy!, key,
+            { kind: "review_return", revisionHash });
+        });
+      }
+      rejectionLimit(targets.map(({ entry }) => entry.key));
       const requiredStages = targets.map(({ stage, entry }) => ({ stage, key: entry.key,
         modelCalls: entry.modelCalls, modelCallLimit: stageLimit(checkpoint, stage, entry.key) }));
       const exhaustedStages = requiredStages.filter(entry => entry.modelCalls >= entry.modelCallLimit);
@@ -591,6 +631,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       schemaHash, generation: entry.generation }, ...(entry.sessionRef ? { file: entry.sessionRef.file } : {}) });
   const allocations = new Map<string, number>();
   const allocate = (stage: "module" | "consultation", entries: DesignStageState[], reserved: number) => {
+    if (checkpoint.submissionPolicy) return;
     const pending = entries.filter(entry => !complete(entry));
     if (!pending.length) return;
     let remaining = architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls - reserved;
@@ -612,11 +653,12 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     active();
     const existing = entryAt(checkpoint, stage, key);
     if (complete(existing)) return copy(existing.result);
+    rejectionLimit([key]);
     const otherPending = checkpoint.validationRepair ? stages(checkpoint).filter(item => item.entry.key !== key && !complete(item.entry)).length
       : stage === "blueprint" ? integrationReserve(checkpoint) + (checkpoint.modules.length ? checkpoint.modules.filter(entry => !complete(entry)).length : checkpoint.moduleLimit ?? 3) : 0;
-    const modelCallLimit = allocations.get(`${stage}:${key}`) ?? Math.min(stageLimit(checkpoint, stage, key), existing.modelCalls
+    const modelCallLimit = checkpoint.submissionPolicy ? null : allocations.get(`${stage}:${key}`) ?? Math.min(stageLimit(checkpoint, stage, key), existing.modelCalls
       + Math.max(0, architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls - otherPending));
-    if (existing.modelCalls >= modelCallLimit) throw stopped(checkpoint, stage);
+    if (modelCallLimit !== null && existing.modelCalls >= modelCallLimit) throw stopped(checkpoint, stage);
     if (existing.modelCalls > existing.sessionStartCalls && !existing.sessionRef) throw invalid("design_history_unavailable");
     const role = stage === "module" || stage === "consultation" ? "specialist" : "designer";
     const sessionStorage = sessionStorageFor(stage, key, existing);
@@ -635,7 +677,8 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         const entry = entryAt(next, stage, key);
         if (!entry.sessionRef) throw invalid("design_history_unavailable");
         const reserved = allocations.has(`${stage}:${key}`) ? 0 : otherPending;
-        if (complete(entry) || entry.modelCalls >= modelCallLimit
+        rejectionLimit([key]);
+        if (complete(entry) || modelCallLimit !== null && entry.modelCalls >= modelCallLimit
           || next.modelCalls >= architectureDesignCallLimits(next).pipeline - reserved) throw stopped(next, stage);
         entry.modelCalls++; next.modelCalls++;
       });
@@ -662,9 +705,11 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
       ? "只分析assignment中的一个专项问题及责任需求，按提供的平台事实给出建议、依据位置和未知。不能编写完整蓝图、改需求、执行外部操作或继续委派；建议不是已验证结论。"
       : (context.legacyBlueprint && (stage !== "integration" && legacyInstructions[stage]) || instructions[stage]).replace("1至3", `1至${checkpoint.moduleLimit ?? 3}`),
       submitName, ...(stage === "blueprint" && checkpoint.schemaVersion >= 4 ? { tools: [consultationTool] } : {}),
-      payload: { ...payload, stageSchema: parameters, stageContract: { submitName, fields: Object.keys(parameters.properties ?? {}), source: "tool_parameters" }, blueprintProtocol: context.textHandoffs ? "module-handoff-v3" : context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
-        remaining: architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls, stageLimit: modelCallLimit },
-      ...(checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? { stageRepair: {
+      payload: { ...payload, stageSchema: parameters, stageContract: { submitName, fields: Object.keys(parameters.properties ?? {}), source: "tool_parameters" }, blueprintProtocol: context.textHandoffs ? "module-handoff-v3" : context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: checkpoint.submissionPolicy ? null : architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
+        remaining: checkpoint.submissionPolicy ? null : architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls, stageLimit: modelCallLimit,
+        ...(checkpoint.submissionPolicy ? { policy: "task_rejections", rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
+          rejections: designSubmissionRejections(checkpoint.submissionPolicy, key) } : {}) },
+      ...(!checkpoint.submissionPolicy && checkpoint.repair?.stage === stage && checkpoint.repair.key === key ? { stageRepair: {
         additionalCalls: ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT,
         instruction: "用户已显式授权一次局部修复。继续原会话，先修正上次提交被拒的结构与引用；不要重写已完成模块。每个声明组件都必须有实际执行步骤，保持模块职责、接口及业务范围，按当前蓝图协议处理内部编号。" } } : {}),
       ...(checkpoint.validationRepair?.targets.includes(key) ? { validationRepair: {
@@ -672,7 +717,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         previousResult: copy(entryAt(checkpoint.validationRepair.source, stage, key).result),
         issues: architectureStageRepairPlan(checkpoint.validationRepair.source, context)?.issues[key] ?? [],
         blueprintChanged: stage !== "blueprint" && checkpoint.validationRepair.source.blueprint.resultHash !== checkpoint.blueprint.resultHash,
-        instruction: "原稿是待复核材料。只修复列出的问题并核对当前蓝图和已更新上游接口，保留其余有效内容与稳定编号；必须正式提交完整本阶段结果，不能仅更新blueprintHash冒充复核。剩余额度已为其他责任节点各预留至少一次，已有充分资料时直接提交。" } } : {}),
+        instruction: "原稿是待复核材料。只修复列出的问题并核对当前蓝图和已更新上游接口，保留其余有效内容与稳定编号；必须正式提交完整本阶段结果，不能仅更新blueprintHash冒充复核。遵循当前designModelBudget：task_rejections按正式退回次数控制，可按需读取；旧数字调用额度已为其他责任节点预留提交。已有充分资料时直接提交。" } } : {}),
       ...(revision ? { revisionFeedback: copy(objectFields(revision).issues ?? []) } : {}) }, parameters,
       validate: value => {
         const result = validate(value);
@@ -681,6 +726,17 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
         return result;
       },
       modelCalls: existing.modelCalls, modelCallLimit, sessionStorage, onSessionRef, onModelCall, onResult,
+      ...(checkpoint.submissionPolicy ? { submissionRejections: designSubmissionRejections(checkpoint.submissionPolicy, key),
+        onSubmissionRejected: async (callId: string) => {
+          let count = 0;
+          await update(next => {
+            const entry = entryAt(next, stage, key);
+            if (!entry.sessionRef || complete(entry)) throw invalid();
+            count = recordDesignSubmissionRejection(next.submissionPolicy!, key,
+              { file: entry.sessionRef.file, toolCallId: callId, modelCalls: entry.modelCalls });
+          });
+          return count;
+        } } : {}),
       ...(integrationContext ? { integrationContext } : {}) });
     if (stage === "blueprint" && objectFields(value).needsInput) return value;
     active();

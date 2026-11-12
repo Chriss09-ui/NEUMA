@@ -49,5 +49,6 @@ export interface ArchitectureRoleOptions<T = unknown> { role: string; agentId?: 
   technicalRevision?: boolean; modelCallLimit?: number | null;
   previousRejection?: import("../contracts/architecture.mjs").ReviewDiagnostic["repeatedFailure"];
   onSliceRejection?: (value: NonNullable<import("../contracts/architecture.mjs").ReviewDiagnostic["repeatedFailure"]>) => Promise<void>; onStageModelCall?: (value: { retryAttempt?: number; purpose?: string; formatSubmission?: boolean }) => unknown | Promise<unknown>; onStageResult?: (value: unknown) => unknown | Promise<unknown>;
+  initialSubmissionRejections?: number | undefined; onStageSubmissionRejected?: (callId: string) => Promise<number>;
   sessionStorage?: SessionStorage; onSessionRef?: (value: { file: string }) => unknown | Promise<unknown>; resumeStage?: boolean; stageReasoningMode?: "off" | "auto"; maxOutputTokens?: number;
   formatSubmissionLimit?: number | undefined; resumeSubmissionIssue?: unknown; reviewRetry?: import("./architecture-review-revision.mjs").ReviewRetryCheckpoint | false | undefined }

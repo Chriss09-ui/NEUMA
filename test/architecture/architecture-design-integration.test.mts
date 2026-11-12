@@ -691,31 +691,29 @@ test("显式重开只准备待启动记录，手动运行从新蓝图开始且�
   assert.deepEqual(f.errors, []);
 });
 
-test("整合耗尽后程序只完成可确定的拼装，保留原用量且仍需独立评审和范围复核", { timeout: 30000 }, async t => {
+test("整合正式提交退回五轮后停止，不能用程序空补丁冒充完成或继续评审", { timeout: 30000 }, async t => {
   const f = await fixture(t, { rejectIntegrationCalls: 5 });
-  await assert.rejects(f.run());
+  await assert.rejects(f.run(), (error: TestFailure) => error.diagnostic?.reason === "design_repair_stalled");
   const failed = await f.designer.get(f.definition.id), start = f.requests.length;
   assert.equal(objectFields(failed!.designProgressCheckpoint!.integration).modelCalls, 5);
-  assert.equal(failed!.designRecovery!.localCompletion, true);
-  assert.equal(failed!.review!, null);
-  const integrationRequest = f.requests.find(row => row.kind === "integration");
-  assert.equal(recordArray(objectFields(integrationRequest!.body).tools).some((row) => objectFields(row.function).name === "revise_architecture_submission"), false);
-  const schema = objectFields(recordArray(objectFields(integrationRequest!.body).tools).find((row) => objectFields(row.function).name === "submit_architecture_integration")!.function).parameters;
-  assert.ok(objectFields(objectFields(objectFields(objectFields(objectFields(objectFields(schema).properties).updates).items).properties).path).pattern);
-  await f.reload(); const passed = await f.run();
-  assert.equal(passed.status, "passed");
-  assert.deepEqual(f.requests.slice(start).map(row => row.kind), ["reviewer", "fidelity"]);
-  assert.equal(objectFields(passed.designProgressCheckpoint!.integration).completedBy, "program");
-  assert.equal(passed.designProgressCheckpoint!.modelCalls, failed!.designProgressCheckpoint!.modelCalls);
-  assert.equal(objectFields(objectFields(passed.designProgressCheckpoint!.integration).sessionRef).file, objectFields(objectFields(failed!.designProgressCheckpoint!.integration).sessionRef).file);
-  assert.deepEqual(passed.designProgressCheckpoint!.modules, failed!.designProgressCheckpoint!.modules);
-  assert.equal(passed.design!.components.some((row) => row.id === "forbidden_rewrite"), false);
+  assert.equal(failed!.designRecovery!.status, "blocked");
+  assert.equal(objectFields(failed!.designProgressCheckpoint!.integration).result, null);
+  assert.equal(failed!.review, null);
+  const receipts = objectFields(objectFields(failed!.designProgressCheckpoint!.submissionPolicy).receipts);
+  assert.equal((receipts.integration as unknown[]).length, 5);
+  await f.reload(); await assert.rejects(f.run(), /五轮/u);
+  assert.equal(f.requests.length, start);
+  assert.deepEqual((await f.designer.get(f.definition.id))!.designProgressCheckpoint, failed!.designProgressCheckpoint);
   assert.deepEqual(f.errors, []);
 });
 
-for (const damage of ["missing", "invalid"]) test(`程序恢复前仍核验原生历史，${damage}会话不创建替代历史或调用评审`, { timeout: 30000 }, async t => {
-  const f = await fixture(t, { rejectIntegrationCalls: 5 }); await assert.rejects(f.run());
+for (const damage of ["missing", "invalid"]) test(`旧设计升级计数前核验原生历史，${damage}会话不能当作零次退回`, { timeout: 30000 }, async t => {
+  const f = await fixture(t, { interruptIntegration: true }); await assert.rejects(f.run());
   const failed = await f.designer.get(f.definition.id), start = f.requests.length;
+  // The original format had the same native bindings and counters, without this policy field.
+  const { hash: _hash, submissionPolicy: _policy, ...body } = failed!.designProgressCheckpoint!;
+  failed!.designProgressCheckpoint = { ...body, hash: designHash(body) };
+  await f.designer.save(failed!);
   const path = f.sessionPath(objectFields(objectFields(failed!.designProgressCheckpoint!.integration).sessionRef).file);
   if (damage === "missing") await rm(path);
   else await writeFile(path, "invalid native history\n", { mode: 0o600 });
@@ -726,46 +724,20 @@ for (const damage of ["missing", "invalid"]) test(`程序恢复前仍核验原�
   assert.equal(saved!.designProgressCheckpoint!.modelCalls, failed!.designProgressCheckpoint!.modelCalls);
 });
 
-for (const outcome of ["success", "exhausted"]) test(`原生模块五轮提交被拒后显式局部修复${outcome}，不重跑蓝图且授权不能重领`, { timeout: 30000 }, async t => {
+test("原生模块正式退回第五轮后保留会话和计数，不能再申请两次调用来绕过", { timeout: 30000 }, async t => {
   const f = await fixture(t, { rejectModuleCalls: 5 });
-  await assert.rejects(f.run(), (error: TestFailure) => error.diagnostic?.reason === "turn_limit");
-  const failed = await f.designer.get(f.definition.id), before = f.requests.length;
-  const request = failed!.designRecovery!.request, moduleFile = objectFields(objectFields(objectFields(failed!.designProgressCheckpoint!.modules)[0]).sessionRef).file;
-  assert.equal(failed!.designRecovery!.status, "available");
-  assert.match(fixtureString(failed!.designRecovery!.message), /结构|引用|步骤/u);
-  assert.equal(objectFields(objectFields(failed!.designProgressCheckpoint!.modules)[0]).modelCalls, 5);
-  await assert.rejects(f.run(), /手动授权/u);
-  assert.equal((await f.designer.get(f.definition.id))!.version!, failed!.version!, "无效重试不新增失败版本");
-  await assert.rejects(f.run({ architectureRepair: { ...objectFields(request), version: 99 } }), /授权/u);
+  await assert.rejects(f.run(), (error: TestFailure) => error.diagnostic?.reason === "design_repair_stalled");
+  const failed = (await f.designer.get(f.definition.id))!, before = f.requests.length;
+  const cp = failed.designProgressCheckpoint!, module = recordArray(cp.modules)[0]!;
+  assert.equal(failed.designRecovery!.status, "blocked");
+  assert.equal(module.modelCalls, 5);
+  assert.equal((objectFields(objectFields(cp.submissionPolicy).receipts).core as unknown[]).length, 5);
+  assert.ok(objectFields(module.sessionRef).file);
+  await f.reload(); f.state.rejectModuleCalls = 0;
+  await assert.rejects(f.run({ architectureRepair: { version: failed.version, checkpointHash: cp.hash, stageKey: "core" } }), /授权/u);
+  await assert.rejects(f.run(), /五轮/u);
   assert.equal(f.requests.length, before);
-  await f.reload();
-  if (outcome === "exhausted") f.state.rejectModuleCalls = 2;
-  if (outcome === "success") {
-    const passed = await f.run({ architectureRepair: request });
-    assert.equal(passed.status, "passed");
-    assert.deepEqual(f.requests.slice(before).map(row => row.kind), ["module", "integration", "reviewer", "fidelity"]);
-    assert.equal(passed.designProgressCheckpoint!.modelCalls, 8);
-    assert.deepEqual(passed.designProgressCheckpoint!.blueprint, failed!.designProgressCheckpoint!.blueprint);
-  } else {
-    await assert.rejects(f.run({ architectureRepair: request }), (error: TestFailure) => error.diagnostic?.reason === "turn_limit");
-    const stopped = await f.designer.get(f.definition.id);
-    assert.equal(stopped!.designRecovery!.status, "blocked");
-    assert.equal(objectFields(objectFields(stopped!.designProgressCheckpoint!.modules)[0]).modelCalls, 7);
-    assert.equal(stopped!.design!, null); assert.equal(stopped!.review!, null);
-    const count = f.requests.length;
-    await assert.rejects(f.run({ architectureRepair: request }), /授权/u);
-    await assert.rejects(f.run(), /耗尽/u);
-    assert.equal(f.requests.length, count);
-  }
-  const latest = await f.designer.get(f.definition.id);
-  assert.equal(objectFields(objectFields(objectFields(latest!.designProgressCheckpoint!.modules)[0]).sessionRef).file, moduleFile);
-  const resumed = users(f.requests[before]!.body).at(-1);
-  assert.equal(resumed!.type, "resume_architecture_stage");
-  assert.equal(resumed!.modelBudget!.used, 5); assert.equal(resumed!.modelBudget!.limit, 7);
-  assert.equal(resumed!.stageRepair!.additionalCalls, 2);
-  assert.ok(resumed!.rejectedSubmission?.submissionHash, "宿主从原生历史恢复被拒模块，支持仅提交局部字段");
-  assert.ok(resumed!.lastSubmissionIssue);
-  assert.equal(f.sessions.findLast(row => objectFields(row.options.sessionStorage?.binding).stage === "module")!.options.reasoningMode, "off");
+  assert.deepEqual((await f.designer.get(f.definition.id))!.designProgressCheckpoint, cp);
   assert.deepEqual(f.errors, []);
 });
 
