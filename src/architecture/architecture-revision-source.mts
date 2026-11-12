@@ -335,10 +335,11 @@ function architectureInterruptionReason(reason: unknown) {
 }
 
 export function interruptedArchitectureReviewSeed(previous: StoredArchitectureRecord | null | undefined, definition: Definition, context: RevisionContext, revisionSeed: RevisionSeed | null | undefined): RevisionSeed | null {
-  if (!previous) return null;
+  if (!previous || objectFields(revisionSeed?.source).candidateTrust === "unreviewed-reference") return null;
   const diagnostic = previous?.diagnostic;
   if (!["failed", "cancelled"].includes(previous?.status) || diagnostic?.stage !== "architecture"
-    || diagnostic.role !== "reviewer" || diagnostic.phase !== "evaluating" || !architectureInterruptionReason(diagnostic.reason)
+    || diagnostic.role !== "reviewer" || diagnostic.phase !== "evaluating"
+    || !(architectureInterruptionReason(diagnostic.reason) || diagnostic.reason === "api_error" && !Object.hasOwn(previous, "developmentRevision"))
     || previous.review !== null || !previous.runtimeCapabilities || previous.reviewEvidence?.version !== 2
     || !previous.reviewEvidence.snapshot || !Array.isArray(previous.attempts) || !Array.isArray(previous.issues)
     || previous.attempts.some((attempt) => attempt?.review && attempt.candidateHash === previous.candidateHash)) return null;

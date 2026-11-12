@@ -18,7 +18,6 @@ import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { designHash, reviewSubmissionSchema, validateReview } from "../../src/architecture/architecture-contract.mjs";
 import { legacyReviewSchema, architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { createArchitectureEvidenceReader } from "../../src/architecture/architecture-evidence-reader.mjs";
-import { nextReviewRejection } from "../../src/architecture/architecture-review-protocol.mjs";
 import { createArchitectureReviewParts, canonicalArchitectureReviewParts } from "../../src/architecture/architecture-review-parts.mjs";
 import { runArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "../../src/architecture/architecture-review-dispatch.mjs";
 import type { ReviewSliceRole, ReviewDispatchCheckpoint } from "../../src/architecture/architecture-review-dispatch.mjs";
@@ -42,7 +41,7 @@ function material() {
   return { design, candidateHash, context, schema, reader, options, review: passingReview(candidateHash, design) };
 }
 
-test("引用格式升级延续原任务的两次退回，第三次同因拒交后不再请求模型", async t => {
+test("旧引用契约与v2退回记录升级后保留两次失败，第三次格式拒交停止", async t => {
   const directory = await mkdtemp(join(tmpdir(), "neuma-review-location-counter-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const f = material(), parameters = f.reader.submissionSchema(f.schema);
@@ -50,7 +49,9 @@ test("引用格式升级延续原任务的两次退回，第三次同因拒交�
   const invalid = { ...f.review, issues: false };
   const originalIssue = architectureToolValidation(invalid, legacyParameters, { root: "review_slice" }).issues;
   const legacyHash = designHash({ model: "fixture-model", schema: legacyParameters });
-  const previous = nextReviewRejection(nextReviewRejection(null, legacyHash, originalIssue), legacyHash, originalIssue);
+  assert.equal(originalIssue[0]!.path, "review_slice.issues");
+  const previous = { modelContractHash: legacyHash, protocolVersion: 2, count: 2,
+    fingerprint: "a54e109fb143d31289d672e3feed37b2a660c1f548408aa1662f6bd0eb8dead3" };
   let calls = 0, rejected: ReviewDiagnostic["repeatedFailure"], verified = false;
   const designer = new ArchitectureDesigner({ config: { model: "fixture-model" }, cwd: directory, dataDir: directory,
     sessionFactory: async options => ({ modelCallAccounting: true, messages: [], subscribe: () => () => {}, dispose() {}, async abort() {},
@@ -68,7 +69,7 @@ test("引用格式升级延续原任务的两次退回，第三次同因拒交�
     modelCallLimit: null, initialModelCalls: 2, previousRejection: previous, onSliceRejection: async value => { rejected = value; },
     onStageModelCall: () => { calls++; }, validate: () => assert.fail("拒交不能进入正式验收") }));
   assert.equal(verified, true); assert.equal(calls, 1); assert.equal(rejected?.count, 3);
-  assert.equal(rejected?.fingerprint, previous.fingerprint);
+  assert.equal(rejected?.protocolVersion, 3);
 });
 
 test("复杂评审按主题与验收分组，独立会话最多三并发，中断只续未完成组", async () => {

@@ -285,7 +285,7 @@ test("检查点篡改或未知中断原因不得跳过新的主评审", async (t
       source!.mainReviewCheckpoint = createMainReviewCheckpoint(source, invalid, source!.mainReviewCheckpoint!.modelCalls);
       assert.ok(readMainReviewCheckpoint(source), "完整结构和hash本身不代替review语义校验");
     }
-    else source!.diagnostic!.reason = "api_error";
+    else source!.diagnostic!.reason = "unrecognized_failure";
     await f.designer.save(source!); f.state.fidelity = "pass";
     const count = f.calls.length; assert.equal((await f.run()).status, "passed");
     assert.ok(f.calls.slice(count).some(({ role }) => role === "reviewer"));

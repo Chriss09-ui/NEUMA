@@ -60,6 +60,12 @@ async function fixture(t: test.TestContext, { initial = "submission_incomplete",
           if (initial === "revise_then_api_error") return tools.submit_architecture_review!.execute("initial-revise", revise(payload));
           if (initial === "cancelled") { controller.abort(); throw new Error("cancelled fixture"); }
           if (initial === "api_connection") throw new Error("fetch failed");
+          if (initial === "api_error") {
+            const invalid = passingReview(payload.candidateHash, payload.design); Reflect.deleteProperty(invalid, "summary");
+            const feedback = await options.rawInputValidators!.submit_architecture_review!({ toolName: "submit_architecture_review", toolCallId: "bad-before-interruption", args: invalid });
+            assert.equal(feedback.valid, false);
+            throw new Error("unclassified fixture failure");
+          }
           if (initial === "json_then_valid") {
             if (initialReviews === 3) throw new Error("fetch failed after the rejected draft");
             initialReview ??= passingReview(payload.candidateHash, payload.design);
@@ -107,7 +113,7 @@ async function fixture(t: test.TestContext, { initial = "submission_incomplete",
   } };
 }
 
-for (const reason of ["submission_incomplete", "api_connection", "cancelled"]) {
+for (const reason of ["submission_incomplete", "api_connection", "api_error", "cancelled"]) {
   test(`完整候选在${reason}后直接续评，不重抄候选或继承通过，已用预算继续累计`, async (t) => {
     const f = await fixture(t, { initial: reason }), before = designHash(f.source);
     assert.equal(f.source!.review, null); assert.deepEqual(f.source!.attempts, []);
@@ -123,6 +129,10 @@ for (const reason of ["submission_incomplete", "api_connection", "cancelled"]) {
     const previousCalls = f.source!.reviewProgressCheckpoint!.modelCalls;
     assert.equal(previousCalls, reason === "submission_incomplete" ? 2 : 1);
     assert.deepEqual(objectFields(calls[0]!.payload).modelBudget, { policy: "task_rejections", limit: null, used: previousCalls + 1 });
+    if (reason === "api_error") {
+      assert.equal(objectFields(objectFields(f.source!.reviewProgressCheckpoint!.diagnostic).repeatedFailure).count, 1);
+      assert.equal(objectFields(objectFields(result.reviewProgressCheckpoint!.diagnostic).repeatedFailure).count, 1);
+    }
     assert.equal(result.diagnostic, undefined);
     assert.equal(designHash(await f.designer.getVersion(f.definition.id, f.source!.version)), before);
   });
@@ -187,7 +197,7 @@ test("待评候选只能续接当前同来源完整材料，损坏绑定或不�
     ["modules", (record: { modules: { assignment: { question: string; boundary: string; benefit: string; }; result: { proposal: string; interfaces: string; tradeoffs: string; evidenceIds: string[]; unknowns: never[]; }; }[]; }) => { record.modules = [{ assignment: { question: "q", boundary: "b", benefit: "b" },
       result: { proposal: "p", interfaces: "i", tradeoffs: "t", evidenceIds: ["missing"], unknowns: [] } }]; }],
     ["already reviewed", (record: StoredArchitectureRecord) => { Reflect.set(record, "review", passingReview(record.candidateHash!, record.design!)); }],
-    ["unknown reason", (record: { diagnostic: { reason: string; }; }) => { record.diagnostic.reason = "api_error"; }],
+    ["unknown reason", (record: { diagnostic: { reason: string; }; }) => { record.diagnostic.reason = "unrecognized_failure"; }],
     ["wrong phase", (record: { diagnostic: { phase: string; }; }) => { record.diagnostic.phase = "designing"; }],
     ["program blocker", (record: { issues: { blocking: boolean; }[]; }) => { record.issues = [{ blocking: true }]; }],
   ] as const;

@@ -14,6 +14,7 @@ const reasons = Object.freeze({ required: "required_field", additionalProperties
   minItems: "size_limit", maxItems: "size_limit", minimum: "size_limit", maximum: "size_limit", exclusiveMinimum: "size_limit",
   exclusiveMaximum: "size_limit", minProperties: "size_limit", maxProperties: "size_limit", multipleOf: "size_limit", uniqueItems: "invalid_reference" });
 export const ARCHITECTURE_FORMAT_SUBMISSION_LIMIT = 10;
+// Historical design-revision allowances retain their original container-only classification.
 const formatReasons = new Set(["required_field", "unknown_field", "invalid_type", "invalid_contract"]);
 export function isArchitectureFormatSubmissionIssue(issue: unknown) {
   const reason = objectFields(issue).reason;

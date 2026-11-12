@@ -55,11 +55,12 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
+  acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, autoCorrectSlice = false, mixedFormatSlice = false,
+  readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
   interruptIntegration = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
   const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
-    programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false,
+    programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false, formatSliceCalls: 0,
     blueprintDraft: null as Record<string, unknown> | null, blueprintAllocation: null as Record<string, unknown> | null, blueprintPatched: false,
     blueprintRawRejected: false, blueprintRawFeedback: "",
     cancelStage: null as "blueprint" | "module" | "integration" | "research" | null, controller: null as AbortController | null }, dataDir = join(root, "data");
@@ -79,6 +80,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         : names.includes("submit_requirement_fidelity") ? "fidelity" : "reviewer");
       const firstSlice = kind === "review_slice" && objectFields(payloads.findLast(row => row.pipelineStage === "review_slice")?.assignment).id === "review_checks_0";
       requests.push({ kind, body });
+      if (firstSlice && mixedFormatSlice) assert.ok(++state.formatSliceCalls <= 3, "三轮格式失败后不能再请求模型");
       if (stage === "module" && stallModule) {
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.write(`data: ${JSON.stringify({ id: "native-stalled-stream", choices: [{ index: 0,
@@ -87,7 +89,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
       }
       let name, args;
       if (stage === "integration" && interruptIntegration || firstSlice && failReviewSlice && rejectedSlice || kind === "consultation" && failConsultation
-        || firstSlice && malformedReviewSlice && state.malformedSliceSubmitted && !state.malformedSliceInterrupted
+        || firstSlice && malformedReviewSlice && !autoCorrectSlice && state.malformedSliceSubmitted && !state.malformedSliceInterrupted
         || kind === "review_revision" && state.failRevisionCalls-- > 0
         || kind === "repair" && failRepairCalls-- > 0
         || kind === "reviewer" && state.reviewRejected && state.failRevisedReview-- > 0) {
@@ -226,6 +228,11 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
             args = { ...args, checks, issues };
           }
         }
+        if (firstSlice && mixedFormatSlice) {
+          if (state.formatSliceCalls === 1) { name = "read_architecture_file"; args = { requests: "列表不能写成普通文字" }; }
+          if (state.formatSliceCalls === 2) args = { ...args, issues: '[{"description":"缺少括号"}' };
+          if (state.formatSliceCalls === 3) args = { ...args, checks: false };
+        }
       } else if (kind === "repair") {
         const assignment = payloads.findLast(row => row.repairAssignment)!.repairAssignment!;
         name = "submit_repair_patch";
@@ -264,6 +271,9 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         assert.ok(payload); name = "submit_requirement_fidelity"; args = fidelityResult(payload);
       }
       const reviewNode = ["review_slice", "reviewer", "fidelity"].includes(kind);
+      if (kind === "fidelity" && autoCorrectSlice && !body.messages.some(row => row.role === "tool")) {
+        name = "read_model_context"; args = { requests: [{ section: "candidate", cursor: "mc1.AA" }] };
+      }
       if (reviewNode && readReviewPages && body.messages.filter(row => row.role === "tool").length < 4) {
         const page = body.messages.filter(row => row.role === "tool").length;
         const pointer = `/components/${candidate.components[0]!.id}/purpose`;
@@ -473,6 +483,32 @@ test("原生评审列表文字损坏后逐字段回填诊断，重启原会话�
   const prompt = request.body.messages.filter(row => ["system", "developer"].includes(row.role)).map(row => text(row.content)).join("\n");
   assert.match(prompt, /列表直接提交原生数组/);
   assert.deepEqual(result.designProgressCheckpoint, before.designProgressCheckpoint);
+});
+
+test("格式错误在原会话自动重交，第二轮修好后继续主评审和范围复核", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, malformedReviewSlice: true, autoCorrectSlice: true });
+  const result = await f.run();
+  assert.equal(result.status, "passed"); assert.deepEqual(f.errors, []);
+  const first = readReviewTaskCheckpoint(objectFields(result.reviewDispatchCheckpoint).dispatch).groups[0]!;
+  assert.equal(first.calls, 2); assert.equal(first.rejection?.count, 1); assert.ok(first.result);
+  const fidelity = objectFields(objectFields(result.requirementFidelityProgress!.state).diagnostic);
+  assert.equal(fidelity.schemaRejections, 1); assert.equal(fidelity.submissionAttempts, 1);
+  const feedback = f.requests.flatMap(entry => entry.body.messages.filter(row => row.role === "tool")
+    .flatMap(row => text(row.content).split("\n").flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } })));
+  assert.ok(feedback.some(row => row.formatRecovery?.attempt === 1 && row.formatRecovery?.retry === true));
+});
+
+test("格式错误换字段仍累计三轮，第三轮停止且重启不再请求", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { acceptanceCount: 13, mixedFormatSlice: true });
+  await assert.rejects(f.run());
+  await f.reload();
+  const record = (await f.designer.get(f.definition.id))!;
+  const first = readReviewTaskCheckpoint(objectFields(record.reviewDispatchCheckpoint).dispatch).groups[0]!;
+  assert.equal(first.calls, 3); assert.equal(first.rejection?.count, 3); assert.equal(first.result, null);
+  assert.deepEqual(f.errors, []);
+  const requests = f.requests.length;
+  await assert.rejects(f.run(), /连续三次/);
+  assert.equal(f.requests.length, requests);
 });
 
 test("子组、主评审和范围复核都能在四次读取后提交，累计用量可重新载入", { timeout: 30000 }, async t => {

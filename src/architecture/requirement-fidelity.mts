@@ -37,7 +37,7 @@ import { createModelContextReader, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime
 import { legacyVerificationModelContext, verificationModelContext, projectVerificationMessages } from "./architecture-model-context.mjs";
 import { createExecutionSession as createPiSession } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget, reasoningModelOutputBudget } from "../runtime/model-limits.mjs";
-import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
+import { modelSubmissionTool, modelSubmissionFormatRecovery, modelReadInputIssues, modelReadRecoveryResult } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
@@ -376,8 +376,9 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
   let schemaRejections = progress?.diagnostic?.schemaRejections as number ?? 0, semanticRejections = progress?.diagnostic?.semanticRejections as number ?? 0;
   const attempted = (id: string) => { attempts.add(id); };
   const diagnose = (value: unknown, schemaOnly = false) => diagnoseFidelity(value, { ...contract, schemaOnly, historical: historicalReceipt });
-  const rejected = async (feedback: FidelityFeedback, id: string) => {
-    attempted(id); lastSubmission = structuredClone(feedback);
+  const rejected = async (feedback: FidelityFeedback, id: string, formal = true) => {
+    if (formal) attempted(id);
+    lastSubmission = structuredClone(feedback);
     if (!rejections.has(id)) {
       rejections.add(id);
       if (feedback.stage === "schema") schemaRejections++; else semanticRejections++;
@@ -399,7 +400,12 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
     await onProgress({ contextHash, schemaHash, sessionFile: basename(persistent.file!),
       sessionBindingHash: persistent.bindingHash!, calls, diagnostic: diagnostic(), ...(contextVersion ? { contextVersion } : {}) });
   };
-  const feedbackResult = (feedback: FidelityFeedback) => ({ content: [{ type: "text" as const, text: JSON.stringify({ submitted: false, ...feedback, ...(meterRequests ? {} : { remainingModelCalls: Math.max(0, 2 - calls) }) }) }], details: {} });
+  const feedbackPayload = (feedback: FidelityFeedback) => {
+    const formatRecovery = meterRequests ? modelSubmissionFormatRecovery(feedback.issues, repeatedFailure?.count) : undefined;
+    return { submitted: false, ...feedback, ...(formatRecovery ? { formatRecovery } : {}),
+      ...(meterRequests ? {} : { remainingModelCalls: Math.max(0, 2 - calls) }) };
+  };
+  const feedbackResult = (feedback: FidelityFeedback) => ({ content: [{ type: "text" as const, text: JSON.stringify(feedbackPayload(feedback)) }], details: {} });
   const account = async (event: Partial<Parameters<NonNullable<PiSessionOptions["onModelCall"]>>[0]> = {}) => {
     signal?.throwIfAborted();
     if (stalled()) { stopReason = "review_repair_stalled"; throw new InputError("范围复核连续三次提交因同一问题被退回"); }
@@ -419,7 +425,7 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
       const feedback = diagnose(value);
       if (!feedback.valid) {
         await rejected(feedback, _id);
-        throw Object.assign(new InputError("范围复核提交未通过当前校验：" + JSON.stringify(feedback)), {
+        throw Object.assign(new InputError("范围复核提交未通过当前校验：" + JSON.stringify(feedbackPayload(feedback))), {
           validationIssue: feedback.issues[0], validationIssues: feedback.issues, validationIssueTotal: feedback.total,
           validationIssuesTruncated: feedback.truncated,
         });
@@ -447,7 +453,22 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
     const contextReader = createModelContextReader(() => current, { resolvePointer: architectureMaterialPointer });
     const files = createArchitectureMaterialFiles(dataDir);
     const materialFiles = await files.publish(current);
-    session = await sessionFactory({ config, cwd, dataDir, customTools: [tool, contextReader, files.tool], onModelCall: account,
+    const readTools = [contextReader, files.tool].map(reader => ({ ...reader, execute: async (...args: Parameters<NeumaTool["execute"]>) => {
+      let output;
+      try { output = await reader.execute(...args); }
+      catch (error) {
+        signal?.throwIfAborted();
+        if (!(error instanceof InputError)) throw error;
+        output = { content: [{ type: "text" as const, text: JSON.stringify({ results: [{ error: { reason: "invalid_request", message: error.message } }] }) }], details: {} };
+      }
+      const issues = modelReadInputIssues(output, reader.name);
+      if (!issues.length) return output;
+      const feedback: FidelityFeedback = { valid: false, stage: "schema", issues, total: issues.length, truncated: false };
+      await rejected(feedback, args[0], false);
+      return modelReadRecoveryResult(output, issues, meterRequests ? repeatedFailure?.count : undefined);
+    } }));
+    const tools = [tool, ...readTools];
+    session = await sessionFactory({ config, cwd, dataDir, customTools: tools, onModelCall: account,
       transformContext: messages => projectVerificationMessages(messages, contextHash, materialFiles),
       preparePrompt: text => objectFields(projectVerificationMessages([{ role: "user", content: text, timestamp: 0 }], contextHash, materialFiles)[0]).content as string,
       ...(nativeStorage ? { sessionStorage: nativeStorage } : {}), reasoningMode: "off", maxOutputTokens,
@@ -461,15 +482,20 @@ export async function verifyRequirementFidelity({ context, sessionFactory = crea
 
         + "\n" + MODEL_CONTEXT_INSTRUCTIONS
         + "\n" + ARCHITECTURE_ID_READ_RULE
-        + "\n" + renderPiSubmissionContract({ role: "requirement-fidelity", submitName: tool.name, tools: [tool, contextReader, files.tool], structuredResponse: true }),
-      rawInputValidators: { [tool.name]: async ({ args, toolCallId }) => {
+        + "\n" + renderPiSubmissionContract({ role: "requirement-fidelity", submitName: tool.name, tools, structuredResponse: true }),
+      rawInputValidators: Object.fromEntries(tools.map(currentTool => [currentTool.name, async ({ args, toolCallId }: { args: unknown; toolCallId: string }) => {
         if (stalled()) throw new InputError("范围复核连续三次因同一问题提交失败");
-        attempted(toolCallId);
-        const feedback = diagnose(args, true);
+        const formal = currentTool === tool;
+        let feedback: FidelityFeedback;
+        if (formal) { attempted(toolCallId); feedback = diagnose(args, true); }
+        else {
+          const input = toolInputValidation(args, currentTool.parameters, { root: currentTool.name });
+          feedback = { ...input, stage: "schema", total: input.valid ? 0 : input.total, truncated: input.valid ? false : input.truncated };
+        }
         if (feedback.valid) return { valid: true };
-        await rejected(feedback, toolCallId);
-        return { valid: false, reason: JSON.stringify({ submitted: false, ...feedback }) };
-      } },
+        await rejected(feedback, toolCallId, formal);
+        return { valid: false, reason: JSON.stringify(feedbackPayload(feedback)) };
+      }])),
       toolErrorResult: async ({ toolName, args, toolCallId }) => {
         if (toolName && toolName !== tool.name) return undefined;
         let feedback = diagnose(args);

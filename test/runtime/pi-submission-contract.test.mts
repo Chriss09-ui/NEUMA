@@ -2,6 +2,31 @@ import { callFixture } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../../src/runtime/pi-submission-contract.mjs";
+import { modelSubmissionFormatRecovery, modelReadInputIssues, modelReadRecoveryResult } from "../../src/runtime/model-submission-arguments.mjs";
+
+test("格式重交反馈只接受程序识别的格式诊断，三轮停止且内容错误不能混入", () => {
+  const issues = [{ path: "review.checks", reason: "invalid_type" }, { path: "review.issues", reason: "unknown_field" },
+    { path: "read.requests", reason: "maxItems" }, { path: "check.expected", reason: "invalid_value" }];
+  assert.equal(modelSubmissionFormatRecovery(issues, 1)?.retry, true);
+  assert.equal(modelSubmissionFormatRecovery(issues, 2)?.retry, true);
+  const exhausted = modelSubmissionFormatRecovery(issues, 3)!;
+  assert.equal(exhausted.attempt, 3); assert.equal(exhausted.limit, 3); assert.equal(exhausted.retry, false);
+  for (const reason of ["missing_coverage", "reference_quote_mismatch", "platform_claim_mismatch", "insufficient_evidence", "api_connection"])
+    assert.equal(modelSubmissionFormatRecovery([...issues, { path: "review", reason }], 1), undefined);
+  assert.equal(modelSubmissionFormatRecovery([], 1), undefined);
+  for (const count of [undefined, 0, 4, 1.5]) assert.equal(modelSubmissionFormatRecovery(issues, count), undefined);
+  const output = { content: [{ type: "text" as const, text: JSON.stringify({ results: [
+    { text: '{"error":{"reason":"invalid_request"}}' }, { error: { reason: "invalid_request", message: "续读来源不一致" } },
+  ] }) }], details: {} };
+  const reads = modelReadInputIssues(output, "read_model_context");
+  assert.deepEqual(reads, [{ path: "read_model_context.requests[1]", reason: "invalid_request", remedy: "续读来源不一致" }]);
+  assert.equal(modelSubmissionFormatRecovery(reads, 2)?.retry, true);
+  const recovered = modelReadRecoveryResult(output, reads, 2);
+  assert.equal(recovered.content.length, 1);
+  const body = JSON.parse((recovered.content[0] as { text: string }).text);
+  assert.equal(body.results[0].text, '{"error":{"reason":"invalid_request"}}');
+  assert.equal(body.formatRecovery.retry, true);
+});
 
 test("显式提交契约只广告真实注册的主工具和调用方允许的终止出口，不按前缀猜测", () => {
   const tools = [{ name: "finish_plan" }, { name: "report_blocker" }, { name: "submit_unrelated" }, { name: "read_context" }];

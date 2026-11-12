@@ -30,7 +30,7 @@ import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, revi
   rejectedFidelityArchitectureRevisionSeed, developmentArchitectureRevisionSeed, continuedDevelopmentRevisionSeed, interruptedArchitectureRevisionSeed,
   interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback } from "./architecture-revision-source.mjs";
 import type { RevisionContext } from "./architecture-revision-source.mjs";
-import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
+import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, modelReadRecoveryResult } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
@@ -606,6 +606,7 @@ export class ArchitectureDesigner {
       ...(role === "reviewer" ? { protocolVersion: ARCHITECTURE_REVIEW_PROTOCOL_VERSION } : {}) });
     const previousFailure = previousRejection ?? resumeReviewProgress?.diagnostic?.repeatedFailure;
     const compatibleContractHashes = [modelContractHash];
+    if (role === "reviewer") compatibleContractHashes.push(designHash({ model: this.config.model ?? null, schema: parameters, protocolVersion: 2 }));
     if (legacyReviewParameters) {
       for (const requireFacts of [false, true]) {
         const schema = structuredClone(legacyReviewParameters);
@@ -613,6 +614,7 @@ export class ArchitectureDesigner {
           if (issue?.required?.includes("kind") && !issue.required.includes("factClaims")) issue.required.push("factClaims");
         compatibleContractHashes.push(designHash({ model: this.config.model ?? null, schema,
           ...(role === "reviewer" ? { protocolVersion: ARCHITECTURE_REVIEW_PROTOCOL_VERSION } : {}) }));
+        if (role === "reviewer") compatibleContractHashes.push(designHash({ model: this.config.model ?? null, schema, protocolVersion: 2 }));
       }
     }
     let repeatedFailure = previousFailure && compatibleContractHashes.includes(previousFailure.modelContractHash)
@@ -990,35 +992,49 @@ export class ArchitectureDesigner {
         if (stalled()) throw failure("review_repair_stalled", details());
         reviewParts?.assertActive();
         if (delegatedFailure) throw failure(typeof objectFields(delegatedFailure.diagnostic).reason === "string" ? String(objectFields(delegatedFailure.diagnostic).reason) : "module_failed", details());
+        const readInput = (role === "reviewer" || payload.pipelineStage === "review_slice")
+          && [contextReader, fileMaterials?.tool, evidenceReader?.tool, platformContractTool].includes(tool);
         let output;
         try { output = await tool.execute(...args); }
         catch (error) {
-          if (tool.name === "delegate_module" && error instanceof ArchitectureError && objectFields(error.diagnostic).delegation) {
-            delegatedFailure ??= error;
-            onProgress?.({ type: "status", phase, label: error.message, delegationFailure: structuredClone(objectFields(error.diagnostic).delegation) });
-          }
-          if ([submitName, "revise_architecture_submission", "submit_architecture_draft", "save_architecture_review_parts", "submit_architecture_review_parts"].includes(tool.name)) {
-            const metadata = objectFields(error);
-            const supplied = diagnosticIssues(metadata.validationIssues ?? (metadata.validationIssue ? [metadata.validationIssue] : []));
-            if (supplied.length && ["save_architecture_review_parts", "submit_architecture_review_parts"].includes(tool.name)
-              && !submissions.has(args[0])) {
-              await retainRejectedInput(tool.name, args[1]);
-              rejected(error, false, supplied[0]);
-              lastSubmissionDiagnostics = { total: metadata.validationIssueTotal ?? supplied.length,
-                truncated: metadata.validationIssuesTruncated === true || supplied.length > 64, issues: supplied.slice(0, 64) };
-              const draft = metadata.referenceSelection ? args[1] : reviewParts?.rejectedSnapshot() ?? args[1];
-              if (draft) {
-                const hints = evidenceReader?.referenceHints(draft, supplied) ?? [];
-                if (hints.length && error instanceof Error) error.message += "；以下仅提供当前真实原文的可选引用回执，请独立判断能否支持问题后选择，不会替换或批准提交："
-                  + JSON.stringify({ referenceHints: hints });
-              }
+          signal?.throwIfAborted();
+          if (readInput && error instanceof InputError) {
+            output = toolResult({ results: [{ error: { reason: "invalid_request", message: error.message } }] });
+          } else {
+            if (tool.name === "delegate_module" && error instanceof ArchitectureError && objectFields(error.diagnostic).delegation) {
+              delegatedFailure ??= error;
+              onProgress?.({ type: "status", phase, label: error.message, delegationFailure: structuredClone(objectFields(error.diagnostic).delegation) });
             }
-            if (tool.name !== "save_architecture_review_parts" && !scopeFailure && !handoffFailure) noteSubmissionFailure(args[0], supplied);
-            await retainRejectedProgress();
+            if ([submitName, "revise_architecture_submission", "submit_architecture_draft", "save_architecture_review_parts", "submit_architecture_review_parts"].includes(tool.name)) {
+              const metadata = objectFields(error);
+              const supplied = diagnosticIssues(metadata.validationIssues ?? (metadata.validationIssue ? [metadata.validationIssue] : []));
+              if (supplied.length && ["save_architecture_review_parts", "submit_architecture_review_parts"].includes(tool.name)
+                && !submissions.has(args[0])) {
+                await retainRejectedInput(tool.name, args[1]);
+                rejected(error, false, supplied[0]);
+                lastSubmissionDiagnostics = { total: metadata.validationIssueTotal ?? supplied.length,
+                  truncated: metadata.validationIssuesTruncated === true || supplied.length > 64, issues: supplied.slice(0, 64) };
+                const draft = metadata.referenceSelection ? args[1] : reviewParts?.rejectedSnapshot() ?? args[1];
+                if (draft) {
+                  const hints = evidenceReader?.referenceHints(draft, supplied) ?? [];
+                  if (hints.length && error instanceof Error) error.message += "；以下仅提供当前真实原文的可选引用回执，请独立判断能否支持问题后选择，不会替换或批准提交："
+                    + JSON.stringify({ referenceHints: hints });
+                }
+              }
+              if (tool.name !== "save_architecture_review_parts" && !scopeFailure && !handoffFailure) noteSubmissionFailure(args[0], supplied);
+              await retainRejectedProgress();
+            }
+            throw error;
           }
-          throw error;
         }
         signal?.throwIfAborted();
+        const readIssues = readInput ? modelReadInputIssues(output, tool.name) : [];
+        if (readIssues.length) {
+          noteSubmissionFailure(args[0], readIssues);
+          rejected(null, false, readIssues[0]);
+          await retainRejectedProgress();
+          output = modelReadRecoveryResult(output, readIssues, repeatedFailure?.count);
+        }
         if (tool === evidenceReader?.tool) {
           const text = output.content.find((item) => item.type === "text");
           if (!text) throw new InputError("评审材料读取缺少文本结果");
@@ -1051,6 +1067,8 @@ export class ArchitectureDesigner {
       const schema = toolSchemas.get(toolName);
       if (!schema) return undefined;
       const feedback = architectureToolValidation(args, schema, { root: toolRoot(toolName) });
+      const formatFailure = !feedback.valid && (role === "reviewer" || payload.pipelineStage === "review_slice")
+        && feedback.issues.length > 0 && feedback.issues.every(isModelSubmissionFormatIssue);
       if ([submitName, "request_requirements", "revise_architecture_submission"].includes(toolName)
         || toolName === "submit_architecture_draft" && !feedback.valid) unsubmittedDraft.clear();
       let rejectedContainer;
@@ -1063,11 +1081,14 @@ export class ArchitectureDesigner {
           catch (error) { if (!(error instanceof InputError)) throw error; }
         }
       }
-      if (!feedback.valid && [submitName, "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review_parts"].includes(toolName))
+      if (!feedback.valid && (formatFailure || [submitName, "revise_architecture_submission", "submit_architecture_draft", "submit_architecture_review_parts"].includes(toolName)))
         noteSubmissionFailure(toolCallId, feedback.issues);
+      if (formatFailure && toolName !== submitName) rejected(null, false, feedback.issues[0]);
       const allocation = !feedback.valid && payload.pipelineStage === "blueprint" && toolName === submitName
         ? diagnoseBlueprintAssignments(args, payload.requirements ?? [], typeof payload.moduleLimit === "number" ? payload.moduleLimit : undefined) : null;
+      const formatRecovery = rejectedCalls.has(toolCallId) ? modelSubmissionFormatRecovery(feedback.issues, repeatedFailure?.count) : undefined;
       return { ...feedback, ...(allocation ? { blueprintAllocation: allocation } : {}),
+        ...(formatRecovery ? { formatRecovery } : {}),
         ...(rejectedContainer ? { rejectedSubmission: rejectedContainer } : {}) };
     };
     try {
