@@ -421,14 +421,14 @@ test("两个任务使用独立会话，交接保留结果，评审均为全新�
   assert.deepEqual(result.tasks.map((item) => item.status), ["verified", "verified"]);
 });
 
-test("思考模型研发按角色选择公共策略，保留原输出额度和调用次数规则", async (t) => {
+test("思考模型研发各角色实际使用模型最高输出额度，原思考模式和计数规则继续适用", async (t) => {
   const { controller, architecture, sessions } = await fixture(t);
   controller.config = { llmConfigured: true, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions",
     model: "mimo-v2.6-pro", apiKey: "fixture-only" };
   assert.equal((await controller.run(architecture)).status, "completed");
   assert.deepEqual(new Set(sessions.map((item) => item.role)), new Set(["planner", "developer", "reviewer"]));
   for (const item of sessions) {
-    assert.equal(item.options.maxOutputTokens, { planner: 32768, developer: 65536, reviewer: 16384 }[item.role]);
+    assert.equal(item.options.maxOutputTokens, 131072);
     assert.equal(item.options.reasoningMode, item.role === "reviewer" ? "off" : "auto");
   }
 });

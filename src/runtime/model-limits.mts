@@ -26,5 +26,6 @@ export function architectureModelOutputBudget(config: ModelConfig, role: string)
 export function developmentModelOutputBudget(config: ModelConfig, role: string) {
   const budgets: Record<string, number> = { planner: 8192, developer: 16384, reviewer: 4096 };
   if (!Object.hasOwn(budgets, role)) throw new TypeError("研发角色无效");
-  return reasoningModelOutputBudget(config, budgets[role]!);
+  const profile = resolvedModelProfile(config);
+  return profile.source.kind === "fallback" ? reasoningModelOutputBudget(config, budgets[role]!) : profile.maxOutputTokens;
 }

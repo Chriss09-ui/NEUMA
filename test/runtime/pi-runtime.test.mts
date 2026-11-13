@@ -41,15 +41,15 @@ async function capturePiPayload(session: NeumaPiSession) {
   return payloads[0];
 }
 
-test("研发按职责选择工作输出预算，模型最大能力不冒充每轮预算", () => {
-  const known = { planner: 32768, developer: 65536, reviewer: 16384 }, fallback = { planner: 8192, developer: 16384, reviewer: 4096 };
-  for (const config of [mimoConfig, flashConfig]) for (const role of (Object.keys(known) as (keyof typeof known)[])) {
-    assert.equal(developmentModelOutputBudget(config, role), known[role]);
-    assert.ok(developmentModelOutputBudget(config, role) < knownModelLimits!(config)!.maxOutputTokens);
-    assert.equal(developmentModelOutputBudget({ ...config, model: "unknown" }, role), fallback[role]);
+test("研发各角色的模型最高输出额度实际进入SDK请求，不再发送旧角色上限", async t => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-development-output-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const config of [mimoConfig, flashConfig]) for (const role of ["planner", "developer", "reviewer"]) {
+    const session = await createPiSession({ config, cwd: root, dataDir: root, customTools: [],
+      maxOutputTokens: developmentModelOutputBudget(config, role) });
+    try { assert.equal((await capturePiPayload(session))!.maxTokens, 131072); }
+    finally { await session.dispose(); }
   }
-  assert.equal(modelOutputBudget(mimoConfig), 4096);
-  assert.throws(() => developmentModelOutputBudget(mimoConfig, "__proto__"));
 });
 
 test("模型错误分类区分连接、流协议、上下文和输出上限且不回传原始响应", () => {
