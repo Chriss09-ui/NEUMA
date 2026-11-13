@@ -235,7 +235,12 @@ test("动态修复实际请求内联本组原文，批读使用同源游标且�
   const f = await actualPi(t, (body, turn) => {
     const payload = requestPayload(body), assignment = objectFields(payload.repairAssignment);
     assert.equal(objectFields(objectFields(payload.preparedContext).baseFields)["/instructions"], base.instructions);
-    if (turn < 3) return { name: "read_repair_context", args: { requests: [{ section: "base", pointer: "/instructions" }] } };
+    if (turn === 2) {
+      assert.doesNotMatch(feedbackText(body), /sdk_validation|不符合本组公开契约/);
+      assert.match(feedbackText(body), /nextRequest/);
+    }
+    if (turn < 3) return { name: "read_repair_context", args: {
+      requests: turn === 1 ? JSON.stringify([{ section: "base", pointer: "/instructions" }]) : [{ section: "base", pointer: "/instructions" }] } };
     assert.deepEqual(body.tools!.map(tool => tool.function.name), ["submit_repair_patch"]);
     assert.match(feedbackText(body), /nextRequest/u);
     return { name: "submit_repair_patch", args: { baseHash: assignment.baseHash, issueIds: ["boundary"], summary: "保留事实与缺失提示",

@@ -1,6 +1,7 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import { runRepairAgent } from "../runtime/repair-agent.mjs";
 import { runArchitectureReviewDispatch, revalidateArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "./architecture-review-dispatch.mjs";
+import { architectureGroupJevEnabled, judgeArchitectureReviewGroups, judgmentApprovesReview } from "./architecture-review-judgment.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import { feedbackLedger } from "./architecture-feedback-port.mjs";
 import type { ArchitectureOptions, ArchitectureRoleOptions, ArchitectureDesignOptions, StoredArchitectureRecord, Definition, ModuleConsultation, ArchitectureDiagnostic, ArchitectureRoleDiagnostic, HandoffResult } from "./architecture-controller-port.mjs";
@@ -55,7 +56,7 @@ import { verifyRequirementFidelity } from "./requirement-fidelity.mjs";
 import { createArchitectureSubmissionRepair, createArchitectureUnsubmittedDraft } from "./architecture-submission-repair.mjs";
 import { architecturePriorFindings, validateArchitecturePriorFindings, architectureReviewTransitions } from "./architecture-prior-findings.mjs";
 import { createArchitectureFeedbackLedger, architectureFeedbackContext, validateArchitectureFeedbackCoverage,
-  recordArchitectureFeedbackReview } from "./architecture-feedback-ledger.mjs";
+  recordArchitectureFeedbackReview, closeArchitectureFeedbackByJudgment } from "./architecture-feedback-ledger.mjs";
 import { readHistoricalDevelopmentRun, savedDevelopmentRevisionSource,
   developmentRevisionReference, developmentRevisionContext, developmentRevisionReadTool } from "./architecture-development-revision.mjs";
 import { readDevelopmentPlanningToolFailures } from "../development/development-sessions.mjs";
@@ -70,6 +71,7 @@ import { architectureDesignRecovery, readArchitectureIntegrationReplay, runArchi
   ARCHITECTURE_DESIGN_STAGE_CALL_LIMIT, ARCHITECTURE_DESIGN_REPAIR_CALL_LIMIT } from "./architecture-design-pipeline.mjs";
 import { applyArchitectureIntegration, diagnoseBlueprintAssignments } from "./architecture-design-stages.mjs";
 import { architectureReviewRevisionRecovery, createArchitectureReviewRevision, readArchitectureReviewRevision, runArchitectureReviewRevision,
+  completeArchitectureReviewWaiver,
   createArchitectureReviewRetry, createArchitectureReviewTestRetry, createArchitectureReviewContinuation, readArchitectureReviewRetry,
   architectureReviewRetryCallLimit, ARCHITECTURE_REVIEW_TEST_RETRY_CALL_LIMIT } from "./architecture-review-revision.mjs";
 import { ARCHITECTURE_FORMAT_SUBMISSION_LIMIT, isArchitectureFormatSubmissionIssue } from "./architecture-tool-diagnostics.mjs";
@@ -534,11 +536,40 @@ export class ArchitectureDesigner {
     }
   }
 
+  async adjudicateReviewGroups(record: StoredArchitectureRecord, subject: StoredArchitectureRecord,
+    dispatched: Awaited<ReturnType<typeof runArchitectureReviewDispatch>>, evidenceContext: unknown, priorFindings: unknown,
+    key: "reviewJudgmentCheckpoint" | "reviewRevisionJudgment", signal?: AbortSignal, onProgress?: Progress) {
+    return judgeArchitectureReviewGroups({ config: this.config, candidateHash: subject.candidateHash!, context: evidenceContext,
+      priorFindings, groups: dispatched.groups, checkpoint: record[key], signal,
+      validate: (group, parts) => dispatched.validateGroup(group.id, parts),
+      save: async checkpoint => { record[key] = checkpoint; await this.save(record); },
+      recheck: async request => {
+        const node = dispatched.recheckRole(request.group.id);
+        onProgress?.({ type: "status", phase: "evaluating", label: "本组正在补查有争议的意见…" });
+        await this.role({ role: "specialist", agentId: record.agentId,
+          systemPrompt: "你是原评审小组。本组JEV对所列意见尚不能作出判定，请读取对应原文，只补查这些争议。保留本组其他有效检查。意见不成立或仅属改进时可通过本组；真实缺陷须有依据。混合主张分别列明，不要求整个设计先返工。",
+          payload: { ...node.payload, pipelineStage: "review_slice", previousReport: request.parts, disputedObjections: request.objections },
+          submitName: "submit_architecture_review_slice", parameters: node.parameters,
+          legacyReviewParameters: node.legacyParameters, previousReviewParameters: node.previousParameters,
+          prepareSubmission: node.prepareArguments, tools: node.tools, validate: node.validate,
+          recoverReviewReferences: node.recoverReviewReferences, modelCallLimit: null,
+          initialModelCalls: node.group.calls + request.calls, previousRejection: request.rejection,
+          onSliceRejection: request.onRejection, onStageModelCall: event => event.retryAttempt ? undefined : request.onCall(),
+          onStageResult: value => request.onResult(dispatched.validateGroup(request.group.id, objectFields(value).parts as import("../contracts/architecture.mjs").ReviewParts)),
+          sessionStorage: { directory: await this.storage.directory(record.agentId, "architecture-review-dispatch/sessions", { create: true }),
+            binding: { version: 1, role: "architecture-review-slice", agentId: record.agentId, candidateHash: subject.candidateHash,
+              dispatchHash: subject.reviewDispatchSource, groupId: node.group.id, baseHash: node.baseHash },
+            ...(request.sessionFile || node.group.sessionFile ? { file: request.sessionFile ?? node.group.sessionFile! } : {}) },
+          onSessionRef: reference => request.onSession(reference.file), stageReasoningMode: "off",
+          maxOutputTokens: architectureModelOutputBudget(this.config, "reviewer"), signal, onProgress });
+      } });
+  }
+
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T> & {allowHandoff?:false}):Promise<T>;
   async role<T>(options: ArchitectureRoleOptions<T>): Promise<T | HandoffResult>;
   async role<T>({ role, agentId: id, systemPrompt, payload, submitName, parameters, legacyReviewParameters, previousReviewParameters, prepareSubmission, validate, tools = [], signal, onProgress, allowHandoff = false, reviewEvidenceContext, recoverReviewReferences, onFidelity, onDiagnostics, editableDesign,
-    onMainReviewValidated, onMainReviewBudget, resumeMainReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
+    onMainReviewValidated, onMainReviewBudget, resumeMainReview, assembledReview, initialModelCalls = 0, resumeReviewProgress, onReviewProgress,
     getFidelitySessionStorage, resumeFidelityProgress, onFidelityProgress, technicalRevision = false,
     modelCallLimit = role === "reviewer" || payload.pipelineStage === "review_slice" ? null : ARCHITECTURE_ROLE_TURN_LIMIT, previousRejection, onSliceRejection, onStageModelCall, onStageResult, sessionStorage, onSessionRef, resumeStage = false,
     stageReasoningMode, maxOutputTokens, formatSubmissionLimit, resumeSubmissionIssue, reviewRetry = false,
@@ -1234,9 +1265,20 @@ export class ArchitectureDesigner {
         throw new InputError("主评审检查点预算无效");
       if (resumeReviewProgress?.parts && (!reviewParts || resumeReviewProgress.modelCalls !== initialModelCalls))
         throw new InputError("评审分项与当前角色或累计预算不一致");
+      if (assembledReview !== undefined) {
+        if (role !== "reviewer" || submitName !== "submit_architecture_review") throw new InputError("分组汇总只能用于架构评审。");
+        const checked = validate(assembledReview);
+        if (reviewedFields(checked)?.verdict === "pass") {
+          await onMainReviewValidated?.(checked, turns);
+          if (payload.requireAcceptanceVerification) await checkFidelity();
+        }
+        result = checked;
+        return result;
+      }
       if (resumeMainReview) {
         if (role !== "reviewer" || submitName !== "submit_architecture_review" || !payload.requireAcceptanceVerification
-          || !Number.isSafeInteger(resumeMainReview.modelCalls) || resumeMainReview.modelCalls < 1 || !meteredReview && resumeMainReview.modelCalls > storedReviewCallLimit)
+          || !Number.isSafeInteger(resumeMainReview.modelCalls) || resumeMainReview.modelCalls < 0
+          || resumeMainReview.modelCalls === 0 && payload.groupJudgmentApproved !== true || !meteredReview && resumeMainReview.modelCalls > storedReviewCallLimit)
           throw new InputError("主评审检查点不适用于本阶段");
         const checked = validate(resumeMainReview.review);
         if (reviewedFields(checked)?.verdict !== "pass") throw new InputError("主评审检查点不是已验证的通过意见");
@@ -1628,6 +1670,7 @@ export class ArchitectureDesigner {
         designProgressEvidenceHash: designProgressSource.designProgressEvidenceHash,
         ...(designProgressSource.designStageDiagnostics ? { designStageDiagnostics: structuredClone(designProgressSource.designStageDiagnostics) } : {}) } : {}),
       ...(savedReviewRevision ? { reviewRevisionCheckpoint: structuredClone(savedReviewRevision) } : {}),
+      ...(savedReviewRevision && previous?.reviewRevisionJudgment !== undefined ? { reviewRevisionJudgment: structuredClone(previous.reviewRevisionJudgment) } : {}),
       ...(reviewRevision && previous?.reviewRevisionSource ? { reviewRevisionSource: previous.reviewRevisionSource } : {}),
       ...(definition.draft.taskSpec ? { designResearchCalls: designProgressSource?.designResearchCalls ?? 0 } : {}),
       ...(revisionSeed ? { revisionSource: revisionSeed.source } : {}),
@@ -1814,6 +1857,36 @@ export class ArchitectureDesigner {
       } };
     try {
       validateArchitectureFeedbackCoverage(feedbackLedger(record.feedbackLedger));
+      let revisionAssessment: Awaited<ReturnType<typeof judgeArchitectureReviewGroups>> | undefined;
+      let revisionAssessmentContext: unknown;
+      if (reviewRevision && !reviewRetry && reviewRevisionSource?.reviewDispatchCheckpoint
+        && (!savedReviewRevision || !savedReviewRevision.result && !savedReviewRevision.dispatch?.groups.some(group => group.result))
+        && (architectureGroupJevEnabled(this.config) || record.reviewRevisionJudgment !== undefined)) {
+        const subject = structuredClone(reviewRevisionSource);
+        revisionAssessmentContext = historicalArchitectureReviewEvidence(subject, { design: subject.design!, requirements: subject.requirements,
+          runtimeCapabilities: subject.runtimeCapabilities, evidence: subject.evidence,
+          confirmedRequirementContext: subject.confirmedRequirementContext, deferredVerifications: subject.deferredVerifications });
+        onProgress({ type: "status", phase: "evaluating", label: "先由各组 JEV 复核旧打回意见，再继续原修订…" });
+        const dispatched = await runArchitectureReviewDispatch({ record: subject, candidateHash: subject.candidateHash!, platformHash: subject.platformHash!,
+          context: revisionAssessmentContext, priorFindings: subject.priorFindings,
+          schema: reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: Boolean(subject.priorFindings) }), signal,
+          save: async checkpoint => {
+            if (designHash(checkpoint) !== designHash(reviewRevisionSource.reviewDispatchCheckpoint))
+              throw new InputError("旧评审分派尚未完整保存，不能在修订阶段改写或重新分派。");
+          }, runRole: async () => { throw new InputError("旧修订来源仍有未完成的评审小组，须先定位来源。"); } });
+        revisionAssessment = await this.adjudicateReviewGroups(record, subject, dispatched, revisionAssessmentContext,
+          subject.priorFindings, "reviewRevisionJudgment", signal, onProgress);
+        if (revisionAssessment.review.verdict === "pass") {
+          if (subject.issues.some(issue => issue.blocking && issue.source !== "model"))
+            throw new InputError("小组通过后仍有程序确认的缺陷，不能撤销原修订。");
+          record.feedbackLedger = closeArchitectureFeedbackByJudgment(feedbackLedger(record.feedbackLedger), subject,
+            revisionAssessment.review, revisionAssessment.checkpoint, feedbackContext);
+          record.reviewRevisionCheckpoint = completeArchitectureReviewWaiver(record, subject.design!, revisionAssessment.review);
+          record.reviewRevisionWaiver = { sourceVersion: subject.version, candidateHash: subject.candidateHash,
+            judgmentHash: revisionAssessment.checkpoint.hash, instruction: "各组已撤销全部原阻塞，保留原稿及修订会话和用量；未提交空补丁或宣称完成代码修复。" };
+          await this.save(record);
+        }
+      }
       for (let attempt = 0; attempt < 2; attempt++) {
         signal?.throwIfAborted();
         const resumeReview = attempt === 0 && revisionSeed?.reviewPending;
@@ -1852,9 +1925,15 @@ export class ArchitectureDesigner {
               issues: record.design ? record.issues : revisionSeed?.issues ?? record.issues,
               ...(objectFields(record.revisionSource?.fidelityRouting).replacesRevisionHash
                 ? { replacesRevisionHash: objectFields(record.revisionSource?.fidelityRouting).replacesRevisionHash } : {}) } } : {}) }) : null;
-        const revisedCandidate = !resumeReview && reviewRevision ? await runArchitectureReviewRevision({ record, source: reviewRevisionSource,
+        const revisedCandidate = !resumeReview && reviewRevision ? revisionAssessment?.review.verdict === "pass"
+          ? validateDesign(reviewRevisionSource!.design, context()) : await runArchitectureReviewRevision({ record, source: reviewRevisionSource,
           candidateSchema, validate: value => validateDesign(value, context()), signal,
-          runWorker: async worker => runRepairAgent({ worker, context: { requirements, candidateSchema, platformRules,
+          runWorker: async worker => runRepairAgent({ worker: revisionAssessment ? { ...worker, issues: worker.issues.map(item => {
+            const original = reviewRevisionSource!.issues.filter(issue => issue.blocking)[Number(item.id.replace("issue_", "")) - 1];
+            const decision = original && revisionAssessment.review.issues.find(issue => issue.id === original.id);
+            return decision && !decision.blocking ? { ...item, description: `本组 JEV 已撤销原打回：${item.description}`,
+              remedy: "保留原正确内容，不为该意见修改设计；在提交说明中记录撤销依据，仍须覆盖原任务编号。" } : item;
+          }) } : worker, context: { requirements, candidateSchema, platformRules,
             runtimeCapabilities: runtimeCapabilities ?? null, acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE },
             binding: { agentId: record.agentId, source: record.reviewRevisionSource }, config: this.config,
             cwd: this.cwd, dataDir: this.dataDir, sessionFactory: this.sessionFactory,
@@ -1923,6 +2002,7 @@ export class ArchitectureDesigner {
         record.design = design; record.contractVersion = design.schemaVersion ?? 1; record.candidateHash = designHash(design);
         if (record.reviewDispatchCheckpoint && objectFields(record.reviewDispatchCheckpoint).candidateHash !== record.candidateHash) {
           delete record.reviewDispatchCheckpoint; delete record.reviewDispatchSource;
+          delete record.reviewJudgmentCheckpoint;
         }
         // Attach review progress only after the exact candidate exists, never to an unsubmitted revision.
         const dispatchSource = [...attemptHistory].sort((a, b) => b.version - a.version).find(value => value.candidateHash === record.candidateHash
@@ -1930,18 +2010,21 @@ export class ArchitectureDesigner {
         if (dispatchSource?.reviewDispatchSource) {
           record.reviewDispatchSource = dispatchSource.reviewDispatchSource;
           if (dispatchSource.reviewDispatchCheckpoint !== undefined) record.reviewDispatchCheckpoint = structuredClone(dispatchSource.reviewDispatchCheckpoint);
+          if (dispatchSource.reviewJudgmentCheckpoint !== undefined) record.reviewJudgmentCheckpoint = structuredClone(dispatchSource.reviewJudgmentCheckpoint);
         }
         const feedbackRepair = objectFields(record.revisionSource?.feedbackRepair);
         const feedbackModelCalls = feedbackRepair.candidateHash === record.candidateHash ? feedbackRepair.modelCalls : 0;
         if (typeof feedbackModelCalls !== "number") throw feedbackRepairError("原候选已用评审额度无效，不能重置预算。");
+        const revisionWaived = revisionAssessment?.review.verdict === "pass" && record.candidateHash === reviewRevisionSource?.candidateHash;
         const resumedModelCalls = Math.max(feedbackModelCalls, resumeReview ? Math.max(revisionSeed!.mainReviewCheckpoint?.modelCalls ?? 0,
-          revisionSeed!.reviewProgressCheckpoint?.modelCalls ?? 0) : 0);
+          revisionSeed!.reviewProgressCheckpoint?.modelCalls ?? 0) : 0, revisionWaived ? Number(reviewRevisionSource?.reviewProgressCheckpoint?.modelCalls ?? 0) : 0);
         const evidenceContext = design.schemaVersion === 3 ? architectureReviewEvidenceContext({ design, requirements, runtimeCapabilities,
           acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE,
           evidence: record.evidence, confirmedRequirementContext: record.confirmedRequirementContext ?? null,
           deferredVerifications: record.deferredVerifications ?? null }) : null;
         const previousAttempt = record.attempts.at(-1);
-        const priorFindings = reviewRetry ? structuredClone(previous!.priorFindings) : evidenceContext ? architecturePriorFindings(previousAttempt
+        const priorFindings = revisionWaived ? structuredClone(reviewRevisionSource!.priorFindings ?? null)
+          : reviewRetry ? structuredClone(previous!.priorFindings) : evidenceContext ? architecturePriorFindings(previousAttempt
           ? { version: record.version, ...previousAttempt } : revisionSeed?.previousReview,
         { candidateHash: record.candidateHash, guideHash: evidenceContext.contextManifest.acceptanceAdapterGuide!.sha256,
           contextManifestHash: designHash(evidenceContext.contextManifest) }, { developmentRevision: record.developmentRevision, candidate: design,
@@ -2032,10 +2115,18 @@ export class ArchitectureDesigner {
           await this.save(record);
         }
         let distributedReview: UnknownRecord | undefined;
-        if (evidenceContext && !resumeMainReview && !(resumeReviewProgress?.modelCalls ?? 0)
-          && (record.reviewDispatchSource || !resumeReview && shouldDistributeArchitectureReview(evidenceContext, priorFindings))) {
+        let assembledReview: ArchitectureReview | undefined;
+        if (revisionWaived) {
+          if (designHash(evidenceContext) !== designHash(revisionAssessmentContext)) throw new InputError("旧打回复核的冻结材料已变化，不能沿用通过结论。");
+          assembledReview = revisionAssessment!.review;
+          record.reviewJudgmentCheckpoint = structuredClone(revisionAssessment!.checkpoint);
+        }
+        const groupedJudgment = architectureGroupJevEnabled(this.config) || record.reviewJudgmentCheckpoint !== undefined;
+        if (evidenceContext && !resumeMainReview && !assembledReview && (groupedJudgment || !(resumeReviewProgress?.modelCalls ?? 0))
+          && (record.reviewDispatchSource || groupedJudgment || !resumeReview && shouldDistributeArchitectureReview(evidenceContext, priorFindings))) {
           const schema = reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: Boolean(priorFindings) });
-          record.reviewProgressCheckpoint = createReviewProgressCheckpoint(record, null, 0);
+          const retainedCalls = Math.max(resumedModelCalls, resumeReviewProgress?.modelCalls ?? 0);
+          record.reviewProgressCheckpoint = createReviewProgressCheckpoint(record, null, retainedCalls);
           if (!record.reviewProgressCheckpoint) throw new InputError("分组评审前无法保存主评审零调用进度。");
           try {
             const dispatched = await runArchitectureReviewDispatch({ record, candidateHash: record.candidateHash!, platformHash: platformContext.platformHash,
@@ -2054,7 +2145,7 @@ export class ArchitectureDesigner {
                 const { worker, assignment } = node;
                 onProgress({ type: "status", phase: "evaluating", label: `正在分组独立评审（本组${assignment.ids.length}项）…` });
                 return this.role({ role: "specialist", agentId: definition.id,
-                  systemPrompt: "你是独立评审子Agent，只核对本组指定分项，引用本次冻结证据。结果供主评审核对，不改设计，不代交最终结论。",
+                  systemPrompt: "你是独立评审小组，只核对本组指定分项，引用本次冻结证据。你有本组通过权；只把明确影响已确认需求且当前必须改的问题设为阻塞。表达偏好、等价可行方案和已有安排的后续验证不阻塞。每条意见只描述一个可独立处理的问题。interfaces检查同时负责跨组接口一致性。你不修改设计，也不能代表其他组通过。",
                   payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
                   parameters: node.parameters, prepareSubmission: node.prepareArguments, legacyReviewParameters: node.legacyParameters, previousReviewParameters: node.previousParameters, tools: node.tools, validate: node.validate,
                   recoverReviewReferences: node.recoverReviewReferences,
@@ -2070,18 +2161,27 @@ export class ArchitectureDesigner {
                   onSessionRef: reference => worker.onSession(reference.file), stageReasoningMode: "off",
                   maxOutputTokens: architectureModelOutputBudget(this.config, "reviewer"), signal, onProgress });
               } });
-            const progress = createReviewProgressCheckpoint(record, null, 0, { parts: dispatched.parts });
+            let acceptedParts = dispatched.parts;
+            if (groupedJudgment) {
+              const judged = await this.adjudicateReviewGroups(record, record, dispatched, evidenceContext, priorFindings,
+                "reviewJudgmentCheckpoint", signal, onProgress);
+              acceptedParts = judged.parts; assembledReview = judged.review;
+              distributedReview = { approvals: judged.approvals, instruction: "各组已有最终结论，程序只汇总，不重审或覆盖各组通过权。" };
+            }
+            const progress = createReviewProgressCheckpoint(record, null, retainedCalls, { parts: acceptedParts });
             if (!progress) throw new InputError("独立评审分项不能保存为主评审待核对进度。");
-            record.reviewProgressCheckpoint = progress; resumeReviewProgress = progress; distributedReview = dispatched.summary;
+            record.reviewProgressCheckpoint = progress; resumeReviewProgress = progress; distributedReview ??= dispatched.summary;
             await this.save(record);
           } catch (error) {
             throw new ArchitectureError(error instanceof Error ? error.message : "分组独立评审未完成。", {
-              ...objectFields(objectFields(error).diagnostic), stage: "architecture", reason: "review_slice_incomplete", role: "reviewer",
+              ...objectFields(objectFields(error).diagnostic), stage: "architecture", reason: "review_slice_incomplete",
+              causeReason: objectFields(objectFields(error).diagnostic).reason ?? null, role: "reviewer",
               phase: "evaluating", modelCalls: 0 });
           }
         }
         const batchMode = Boolean(evidenceContext && definition.draft.taskSpec && !resumeReviewProgress?.review && !resumeMainReview);
         const review = await this.role({ role: "reviewer", agentId: definition.id,
+          assembledReview,
           systemPrompt: `${renderArchitectureReviewPrompt({ batchMode })}\n${platformRules}`,
           modelCallLimit: null, reviewRetry: reviewRetryCheckpoint ?? false,
           resumeMainReview,
@@ -2140,6 +2240,7 @@ export class ArchitectureDesigner {
             record.reviewDiagnostics = record.reviewDiagnostics.slice(-2); await this.save(record);
           },
           payload: { requirement: definition.draft, ...context(), candidateHash: record.candidateHash,
+            groupJudgmentApproved: savedMainReview ? judgmentApprovesReview(record, savedMainReview.review) : false,
             ...(distributedReview ? { distributedReview } : {}),
             ...(reviewRetry ? { reviewRetry: { originalCalls: reviewRetryCheckpoint!.source.modelCalls,
               lastSubmissionIssue: previous!.diagnostic?.lastSubmissionIssue ?? null,

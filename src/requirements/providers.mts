@@ -396,13 +396,15 @@ async function pauseBeforeRetry(attempt: number, signal: AbortSignal, response?:
   }
 }
 
-async function postJson(url: string, body: unknown, apiKey: string, timeoutMs: number, fetchImpl: FetchPort<ModelResponseTransport>, label: string, retryTransient = false, externalSignal?: AbortSignal): Promise<unknown> {
+async function postJson(url: string, body: unknown, apiKey: string, timeoutMs: number, fetchImpl: FetchPort<ModelResponseTransport>, label: string, retryTransient = false, externalSignal?: AbortSignal, onAttempt?: (attempt: number) => Promise<void>): Promise<unknown> {
   const signal = externalSignal ?? new AbortController().signal;
   const request = withModelIdleTimeout(fetchImpl, { idleTimeoutMs: timeoutMs });
   if (externalSignal?.aborted) throw new DOMException("操作已取消", "AbortError");
   const maxAttempts = retryTransient ? 3 : 1;
   const requestBody = JSON.stringify(body);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    signal.throwIfAborted();
+    await onAttempt?.(attempt);
     let response;
     try {
       response = await request(url, {
@@ -445,6 +447,15 @@ async function postJson(url: string, body: unknown, apiKey: string, timeoutMs: n
         { attempts: attempt });
     }
   }
+}
+
+/** Typed decisions share the existing transport; each actual request is recorded before sending. */
+export async function requestJevDecision(options: { config: { jevApiKey?: unknown; jevModel?: unknown }; state: unknown; questions: unknown;
+  signal?: AbortSignal | undefined; onAttempt: (attempt: number) => Promise<void>; fetchImpl?: FetchPort<ModelResponseTransport> }) {
+  const key = typeof options.config.jevApiKey === "string" ? options.config.jevApiKey.trim() : "";
+  if (!key) throw providerError("架构小组的 JEV 尚未连接，请配置 TypeSafe API Key 后继续原任务。", "Jev", "not_configured");
+  return postJson("https://api.typesafe.ai/v1/systemone", { model: options.config.jevModel || "jev-1.14.0", state: options.state,
+    questions: options.questions }, key, 45_000, options.fetchImpl ?? globalThis.fetch, "Jev", true, options.signal, options.onAttempt);
 }
 
 function parseModelContent(payload: unknown): UnknownRecord {

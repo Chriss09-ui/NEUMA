@@ -7,7 +7,7 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { SessionFactory, NeumaTool, ExecutionSession } from "./execution-port.mjs";
 import { objectFields } from "./type-boundary.mjs";
 import { toolInputValidation } from "./tool-input-diagnostics.mjs";
-import { modelSubmissionTool, modelUpdateBatch, singleUpdateSchema } from "./model-submission-arguments.mjs";
+import { modelSubmissionTool, modelSubmissionArguments, modelUpdateBatch, singleUpdateSchema } from "./model-submission-arguments.mjs";
 import { readPiStructuredSubmission, renderPiSubmissionContract } from "./pi-submission-contract.mjs";
 import { repairHash, type RepairWorker } from "./repair-scheduler.mjs";
 import { createModelContextReader, modelContextValue, type ModelContextPointerResolver } from "./model-context.mjs";
@@ -69,7 +69,8 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
     && ["requirements", "candidateSchema"].every(section => sources[section] === undefined || Object.hasOwn(preparedContext, section));
   if (!ready && worker.callLimit - calls < 2) throw new InputError("本组必要原文未完整内联，剩余次数不足以读取并正式提交；未新增模型调用。");
   const reader = createModelContextReader(() => sources, { resolvePointer: fileDelivery?.resolvePointer });
-  const read: NeumaTool = { name: "read_repair_context", label: "读取修复原文", description: "按requests批量读取本组固定原文，每项最多10000字符，按nextRequest续读；兼容旧section/pointer读取。",
+  const read: NeumaTool = modelSubmissionTool({ name: "read_repair_context", label: "读取修复原文", description: "按requests批量读取本组固定原文，每项最多10000字符，按nextRequest续读；兼容旧section/pointer读取。",
+    prepareArguments: input => modelSubmissionArguments(input, reader.parameters),
     executionMode: "sequential", parameters: { type: "object", anyOf: [reader.parameters, { type: "object", additionalProperties: false, required: ["section"], properties: {
       section: { type: "string" }, pointer: { type: "string" }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 24000 } } },
     ] },
@@ -83,7 +84,7 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
       const row = objectFields((JSON.parse(text!.text) as { results: unknown[] }).results[0]);
       if (row.error) throw new InputError(String(objectFields(row.error).message));
       return { content: [{ type: "text", text: JSON.stringify({ ...row, totalChars: row.totalCharacters, baseHash: worker.baseHash }) }], details: {} };
-    } };
+    } });
   const tools = [read, ...[...(fileDelivery ? [fileDelivery.tool] : []), ...(options.tools ?? [])].map(tool => ({ ...tool, execute: async (...args: Parameters<NeumaTool["execute"]>) => {
     readable(); const value = await tool.execute(...args); active(); return value;
   } })), submit];
@@ -97,8 +98,8 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
         binding: { version: 1, role: "repair", bindingHash: repairHash(options.binding), groupId: worker.group.id, baseHash: worker.baseHash },
         ...(worker.group.sessionFile ? { file: join(options.sessionDirectory, worker.group.sessionFile) } : {}) },
       rawInputValidators: Object.fromEntries(tools.map(tool => [tool.name, ({ args }) => {
-        active(); const result = toolInputValidation(args, tool.parameters);
-        return result.valid ? { valid: true } : { valid: false, reason: "工具参数不符合本组公开契约。" };
+        active(); const result = toolInputValidation(tool.prepareArguments ? tool.prepareArguments(args) : args, tool.parameters);
+        return result.valid ? { valid: true } : { valid: false, reason: "工具参数不符合本组公开契约：" + JSON.stringify(result.issues) };
       }])),
       toolAvailability: ({ retryAttempt }) => calls - (retryAttempt > 0 ? 1 : 0) >= worker.callLimit - 1 ? [submit.name] : tools.map(tool => tool.name),
       onModelCall: async (event = {}) => { active(); await worker.onCall(event.retryAttempt); if (!event.retryAttempt) calls++; } });

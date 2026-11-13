@@ -7,6 +7,7 @@ import { InputError } from "../requirements/core.mjs";
 import { designHash } from "./architecture-contract.mjs";
 import { developmentReviewFeedback } from "./architecture-development-revision.mjs";
 import { historicalRepairSnapshot } from "./architecture-repair-evidence.mjs";
+import { judgmentApprovesReview } from "./architecture-review-judgment.mjs";
 
 const MAX_BYTES = 512 * 1024;
 const MAX_OPEN = 80;
@@ -118,6 +119,32 @@ export function architectureFeedbackFindings(ledger: FeedbackLedger | null | und
 export function validateArchitectureFeedbackCoverage(ledger: FeedbackLedger | null | undefined) {
   if (ledger && ledger.coverage.status !== "available")
     fail("feedback_coverage_incomplete", "历史反馈覆盖不完整或来源不可用，不能将遗漏意见当作已解决并通过；核实原绑定记录及明确省略原因。");
+}
+
+/** A legacy pending repair can be cancelled by the newly authorized group judgments, never by an empty patch. */
+export function closeArchitectureFeedbackByJudgment(ledger: FeedbackLedger | null | undefined, source: UnknownRecord,
+  review: ArchitectureReview, checkpoint: unknown, context: UnknownRecord) {
+  if (!ledger || !judgmentApprovesReview({ ...source, reviewJudgmentCheckpoint: checkpoint }, review))
+    fail("feedback_judgment_missing", "撤销旧修订需要同一候选各组的完整通过判定。");
+  const original = objectFields(source.review), findings = structuredClone(ledger.findings);
+  for (const finding of findings.filter(row => !row.closure)) {
+    const old = (isArray(original.issues) ? original.issues : []).find(item => designHash(item) === designHash(finding.issue));
+    const originalIssue = objectFields(old);
+    const retained = old && Object.values(objectFields(objectFields(checkpoint).groups)).some(group => {
+      const rounds = objectFields(group).rounds;
+      return isArray(rounds) && isArray(objectFields(objectFields(rounds[0]).parts).issues)
+        && (objectFields(objectFields(rounds[0]).parts).issues as unknown[]).some(issue => designHash(issue) === designHash(old));
+    });
+    const decision = old ? review.issues.find(issue => issue.id === originalIssue.id)
+      ?? (retained ? { ...finding.issue, blocking: false, remedy: "原小组补查后已通过；原问题与补查报告均保留在小组判定记录。" } : undefined) : undefined;
+    if (!decision || decision.blocking) fail("feedback_judgment_uncovered", "仍有未被本次小组判定覆盖的历史问题，不能撤销整个修订任务。");
+    const snapshot = historicalRepairSnapshot(source.design, decision.candidatePaths ?? []);
+    if (!snapshot.anchors.length) fail("feedback_judgment_uncovered", "原问题缺少可绑定的当前正文，不能只凭分数关闭。");
+    finding.closure = { status: "unsupported", candidateHash: review.candidateHash, reviewHash: designHash(review),
+      factsHash: factsHash(context), reason: `本组 JEV 撤销原打回；未宣称设计已修改。${decision.remedy}`, anchors: snapshot.anchors };
+  }
+  const { hash: _hash, ...body } = ledger;
+  return seal({ ...body, findings });
 }
 
 /** Call only after the full independent review has passed all existing validators. */

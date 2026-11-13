@@ -7,7 +7,8 @@ import { objectFields, isInteger, isArray, isRecord } from "../runtime/type-boun
 import { createRepairCheckpoint, readRepairCheckpoint, runRepairSchedule, repairHash } from "../runtime/repair-scheduler.mjs";
 import type { RepairCheckpoint, RepairWorker, RepairIssue } from "../runtime/repair-scheduler.mjs";
 interface RevisionSource { version: number; candidateHash: string; reviewHash: string; issuesHash: string; progressHash: string; pipelineId: string; modelCalls: number }
-export type ReviewRevisionCheckpoint = { schemaVersion: 1 | 2; schemaHash: string; bindingHash: string; source: RevisionSource;
+export type ReviewRevisionCheckpoint = { schemaVersion: 1 | 2 | 3; schemaHash: string; bindingHash: string; source: RevisionSource;
+  previousCheckpoint?: unknown; judgmentHash?: string; waiverReview?: unknown;
   dispatch?: RepairCheckpoint; modelCalls: number; sessionRef: { file: string } | null; result: unknown; resultHash: string | null; hash: string }
 interface RetrySource { version: number; candidateHash: string; progressHash: string; modelCalls: number }
 type RevisionIssue = UnknownRecord & { blocking: unknown; candidatePaths?: string[]; candidateFields?: string[] };
@@ -34,6 +35,7 @@ import { createArchitectureSubmissionRepair } from "./architecture-submission-re
 import { readMainReviewCheckpoint } from "./architecture-main-review-checkpoint.mjs";
 import { readArchitectureFidelityProgress } from "./architecture-fidelity-progress.mjs";
 import { readReviewProgressCheckpoint } from "./architecture-review-progress.mjs";
+import { judgmentApprovesReview } from "./architecture-review-judgment.mjs";
 import { architectureReviewFailureStalled, architectureReviewProtocolRepairAvailable } from "./architecture-review-protocol.mjs";
 import { ARCHITECTURE_FORMAT_SUBMISSION_LIMIT, isArchitectureFormatSubmissionIssue } from "./architecture-tool-diagnostics.mjs";
 
@@ -77,7 +79,7 @@ export function hasReviewedArchitectureCandidate(input: unknown) {
 
 function revisionShape(input: unknown): ReviewRevisionCheckpoint {
   const checkpoint = objectFields(input), source = objectFields(checkpoint.source), session = objectFields(checkpoint.sessionRef);
-  if (!isRecord(input) || !isRecord(checkpoint.source) || ![1, 2].includes(Number(checkpoint.schemaVersion)) || !isInteger(checkpoint.modelCalls)
+  if (!isRecord(input) || !isRecord(checkpoint.source) || ![1, 2, 3].includes(Number(checkpoint.schemaVersion)) || !isInteger(checkpoint.modelCalls)
     || [checkpoint.schemaHash, checkpoint.bindingHash, checkpoint.hash, source.candidateHash, source.reviewHash, source.issuesHash, source.progressHash, source.pipelineId].some(value => typeof value !== "string")
     || !isInteger(source.version) || !isInteger(source.modelCalls)
     || checkpoint.sessionRef !== null && (!isRecord(checkpoint.sessionRef) || typeof session.file !== "string")
@@ -103,6 +105,18 @@ export function readArchitectureReviewRevision(input: unknown): ReviewRevisionCh
   if (!Object.hasOwn(record, "reviewRevisionCheckpoint")) return null;
   try {
     const checkpoint = revisionShape(copy(record.reviewRevisionCheckpoint));
+    if (checkpoint.schemaVersion === 3) {
+      if (![1, 2].includes(Number(objectFields(checkpoint.previousCheckpoint).schemaVersion))) throw invalid();
+      const original = readArchitectureReviewRevision({ ...record, reviewRevisionCheckpoint: checkpoint.previousCheckpoint });
+      if (!original || original.result || original.dispatch?.groups.some(group => group.result)
+        || checkpoint.resultHash !== original.source.candidateHash || designHash(checkpoint.result) !== checkpoint.resultHash
+        || checkpoint.judgmentHash !== objectFields(record.reviewRevisionJudgment).hash
+        || !judgmentApprovesReview({ candidateHash: checkpoint.resultHash, reviewJudgmentCheckpoint: record.reviewRevisionJudgment }, checkpoint.waiverReview)) throw invalid();
+      const expected = seal({ ...original, schemaVersion: 3 as const, previousCheckpoint: original,
+        result: checkpoint.result, resultHash: checkpoint.resultHash, judgmentHash: checkpoint.judgmentHash, waiverReview: checkpoint.waiverReview });
+      if (designHash(expected) !== designHash(checkpoint)) throw invalid();
+      return checkpoint;
+    }
     const distributed = checkpoint.schemaVersion === 2;
     const dispatch = distributed ? readRepairCheckpoint(checkpoint.dispatch) : null;
     if (Object.keys(checkpoint).sort().join() !== (distributed ? "bindingHash,dispatch,hash,modelCalls,result,resultHash,schemaHash,schemaVersion,sessionRef,source" : "bindingHash,hash,modelCalls,result,resultHash,schemaHash,schemaVersion,sessionRef,source")
@@ -123,6 +137,14 @@ export function readArchitectureReviewRevision(input: unknown): ReviewRevisionCh
         || dispatch && dispatch.groups.some(group => !group.result))) throw invalid();
     return checkpoint;
   } catch { throw invalid(); }
+}
+
+export function completeArchitectureReviewWaiver(record: UnknownRecord, candidate: ArchitectureDesign, review: unknown) {
+  const original = readArchitectureReviewRevision(record);
+  if (!original || original.schemaVersion === 3) throw invalid();
+  const checkpoint = seal({ ...original, schemaVersion: 3 as const, previousCheckpoint: original,
+    result: copy(candidate), resultHash: designHash(candidate), judgmentHash: String(objectFields(record.reviewRevisionJudgment).hash), waiverReview: copy(review) });
+  return readArchitectureReviewRevision({ ...record, reviewRevisionCheckpoint: checkpoint })!;
 }
 
 const reviewRetryBinding = (input: unknown) => { const record = objectFields(input); return designHash({ materialHash: materialHash(record), candidateHash: record.candidateHash,
@@ -382,7 +404,7 @@ export async function runArchitectureReviewRevision({ record, source: sourceInpu
     }
     return candidate;
   };
-  if (checkpoint!.result) return validateCandidate(checkpoint!.result);
+  if (checkpoint!.result) return validateCandidate(checkpoint!.result, checkpoint!.schemaVersion !== 3);
   if (checkpoint!.schemaVersion === 2) {
     if (!runWorker) throw invalid();
     if (repairHash(checkpoint!.dispatch!.issues) !== repairHash(repairIssues(source))) throw invalid();

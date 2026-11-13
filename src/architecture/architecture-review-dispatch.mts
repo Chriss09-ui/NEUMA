@@ -143,12 +143,13 @@ function prepareDispatch(options: DispatchInputs) {
         return prepared;
       };
       const knownFindings = new Set(rows(objectFields(priorFindings).findings).map(row => String(row.findingId)));
+      const retainedIssueIds = new Set(rows(objectFields(objectFields(worker.group.result?.updates[0]?.value).parts).issues).map(row => String(row.id)));
       const normalize = (input: unknown) => {
         const raw = objectFields(prepareArguments(input));
         const resolved = objectFields(reader.resolveSubmission({ checks: [], acceptanceScopeChecks: [], priorFindingDecisions: [], ...raw, candidateHash }));
         const { summary: _summary, ...resolvedParts } = resolved;
         const scoped = { ...resolvedParts, candidateHash, issues: rows(resolved.issues).map(issue => ({ ...issue,
-          id: assignment!.field === "priorFindingDecisions" && assignment!.ids.includes(String(issue.id)) && knownFindings.has(String(issue.id))
+          id: retainedIssueIds.has(String(issue.id)) || assignment!.field === "priorFindingDecisions" && assignment!.ids.includes(String(issue.id)) && knownFindings.has(String(issue.id))
             ? issue.id : `${assignment!.id}_${repairHash(issue.id).slice(0, 16)}` })) };
         return checked({ summary: raw.summary, parts: scoped }, assignment!);
       };
@@ -167,7 +168,7 @@ function prepareDispatch(options: DispatchInputs) {
           design: objectFields(context).candidate,
           priorFindings: assignment!.field === "priorFindingDecisions" ? { ...objectFields(priorFindings),
             findings: rows(objectFields(priorFindings).findings).filter(row => assignment!.ids.includes(String(row.findingId))) } : null,
-          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，发现相关问题写入本组 issues 并附资料文件位置，由主评审统筹；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；摘要说明阻断或不确定项。主评审完成总评后才形成整体结论。` } };
+          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，相关问题写入本组 issues 并附资料文件位置；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；只有当前必须整改的真实缺陷才阻塞。补查时保留已有问题编号，撤销意见标blocking=false并说明原因。各组完成后再汇总并作独立范围复核。` } };
   };
   return { checkpoint, binding, base, plan, checked, ledger, roleFor };
 }
@@ -235,7 +236,7 @@ async function replayRejectedSlices(prepared: ReturnType<typeof prepareDispatch>
   return snapshot;
 }
 
-/** Disjoint review slices share a durable dispatcher; only the main reviewer can submit the final verdict. */
+/** Original slice results remain immutable; a separate group judgment may adjudicate their objections. */
 export async function runArchitectureReviewDispatch(options: DispatchInputs & Partial<ReplayInputs> & {
   save(checkpoint: ReviewDispatchCheckpoint): Promise<void>; runRole(node: ReviewSliceRole): Promise<unknown> }) {
   const { candidateHash, context, schema, priorFindings, signal, record } = options;
@@ -260,7 +261,19 @@ export async function runArchitectureReviewDispatch(options: DispatchInputs & Pa
     parts.acceptanceScopeChecks.push(...slice.parts.acceptanceScopeChecks); parts.priorFindingDecisions.push(...slice.parts.priorFindingDecisions);
   }
   const verified = canonicalArchitectureReviewParts(parts, { schema, candidateHash, context, priorFindings, signal });
-  return { parts: verified, summary: { modelCalls: checkpoint.dispatch.calls, modelCallLimit: checkpoint.dispatch.callLimit,
+  return { parts: verified,
+    groups: plan.map(assignment => ({ id: assignment.id, assignment, parts: checked(slices[assignment.id], assignment).parts })),
+    validateGroup: (id: string, parts: ReviewParts) => {
+      const assignment = plan.find(row => row.id === id);
+      if (!assignment) fail("补查的小组不存在。");
+      return checked({ summary: "本组判定复核", parts }, assignment).parts;
+    },
+    recheckRole: (id: string) => {
+      const group = checkpoint.dispatch.groups.find(row => row.issueIds.includes(id));
+      if (!group?.result || !group.inputHash) fail("补查缺少原小组的完整结果和会话绑定。");
+      return { ...roleFor({ group, base, baseHash: group.inputHash }), group, baseHash: group.inputHash };
+    },
+    summary: { modelCalls: checkpoint.dispatch.calls, modelCallLimit: checkpoint.dispatch.callLimit,
     groups: plan.map(assignment => ({ assignment, summary: checked(slices[assignment.id], assignment).summary })),
     issues: verified.issues, failedChecks: verified.checks.filter(item => !item.passed),
     insufficientAcceptance: verified.acceptanceScopeChecks.filter(item => !item.sufficient),

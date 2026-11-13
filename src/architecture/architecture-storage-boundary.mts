@@ -72,7 +72,7 @@ export function checkedStoredArchitectureRecord(input: unknown): StoredArchitect
   for (const key of ["platformContractVersion", "capabilityCatalogVersion", "designResearchCalls"]) if (value[key] !== undefined && !isInteger(value[key])) invalid();
   if (value.reviewContext !== undefined && value.reviewContext !== null && !isRecord(value.reviewContext)) invalid();
   for (const key of ["reviewEvidence", "revisionSource", "requirementFidelity", "designRecovery"]) if (value[key] !== undefined && !isRecord(value[key])) invalid();
-  for (const key of ["designProgressCheckpoint", "reviewProgressCheckpoint", "mainReviewCheckpoint", "requirementFidelityProgress", "reviewRevisionCheckpoint", "reviewRetryCheckpoint", "reviewDispatchCheckpoint"])
+  for (const key of ["designProgressCheckpoint", "reviewProgressCheckpoint", "mainReviewCheckpoint", "requirementFidelityProgress", "reviewRevisionCheckpoint", "reviewRetryCheckpoint", "reviewDispatchCheckpoint", "reviewJudgmentCheckpoint", "reviewRevisionJudgment", "reviewRevisionWaiver"])
     if (value[key] !== undefined && value[key] !== null && !isRecord(value[key])) invalid();
   if (value.diagnostic !== undefined) diagnostic(value.diagnostic, true);
   if (value.reviewDiagnostics !== undefined) { if (!isArray(value.reviewDiagnostics)) invalid(); value.reviewDiagnostics.forEach(entry => diagnostic(entry, false)); }

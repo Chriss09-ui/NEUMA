@@ -233,15 +233,23 @@ test("评审子组不能代交其他组，分项未通过也不能在主评审�
   const result = await runArchitectureReviewDispatch({ record, candidateHash: f.candidateHash, platformHash: "a".repeat(64), context: f.context,
     schema: f.schema, save: async () => {}, runRole: async node => {
       await node.worker.onSession(`${node.assignment.id}.jsonl`); await node.worker.onCall();
-      const input = { summary: "独立核对本组", issues: [], priorFindingDecisions: [],
+      const input = { summary: "独立核对本组", issues: node.assignment.ids.includes("requirements") ? [{ id: "scope_gap", blocking: true,
+        checkId: "requirements", kind: "design", description: "需要核对完整输入范围", remedy: "核对原文对应条目",
+        candidatePaths: ["/instructions"], references: [{ source: "candidate", path: "/instructions" }] }] : [], priorFindingDecisions: [],
         checks: node.assignment.field === "checks" ? f.review.checks.filter(row => node.assignment.ids.includes(row.id)).map(row => ({ ...row, passed: row.id !== "requirements" })) : [],
         acceptanceScopeChecks: node.assignment.field === "acceptanceScopeChecks" ? f.review.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && node.assignment.ids.includes(row.acceptanceId)) : [] };
-      if (node.assignment.field === "checks") assert.throws(() => node.validate({ ...input, checks: f.review.checks }), /本组编号/u);
+      if (node.assignment.field === "checks") assert.throws(() => node.validate({ ...input,
+        checks: f.review.checks.map(row => ({ ...row, passed: row.id !== "requirements" })) }), /本组编号/u);
       const parts = node.validate(input);
       await node.worker.submit({ baseHash: node.worker.baseHash, issueIds: node.worker.group.issueIds, summary: parts.summary,
         updates: [{ path: node.worker.group.paths[0]!, value: parts }] });
     } });
   assert.equal(result.summary.failedChecks.length, 1);
+  const original = structuredClone(record), assigned = result.groups.find(group => group.assignment.ids.includes("requirements"))!;
+  const recheck = result.recheckRole(assigned.id);
+  const repeated = recheck.validate({ summary: "继续同一组核对原意见", checks: assigned.parts.checks, issues: assigned.parts.issues });
+  assert.equal(repeated.parts.issues[0]!.id, assigned.parts.issues[0]!.id, "同一意见的编号在原组补查时保持");
+  assert.deepEqual(record, original, "取得补查任务不修改原报告或计数");
   const parts = createArchitectureReviewParts({ ...f.options, initial: result.parts });
   const reference = parts.reference();
   assert.throws(() => validateReview(parts.assemble({ candidateHash: f.candidateHash, progressHash: reference.progressHash, verdict: "pass", summary: "不能跳过未通过项" }),

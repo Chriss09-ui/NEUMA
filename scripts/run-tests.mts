@@ -35,6 +35,7 @@ export const TEST_LAYERS = Object.freeze({
   // R5 起显式登记全部集成测试（原 integration 兜底发现改为登记基线，运行器兜底仍保留防漏测）；
   // 新增集成测试必须在此登记，hygiene 的测试登记检查会拒绝新遗漏。
   integration: Object.freeze([
+    "architecture/architecture-review-judgment.test.mjs",
     "services/workflow-crash-recovery.test.mjs",
     "agents/agent-operations.test.mjs",
     "runtime/execution-runtime.test.mjs",

@@ -99,7 +99,7 @@ function draftLocation(source: UnknownRecord) {
 
 export function architectureModelContext(source: UnknownRecord, { role, continuation = false, materialFiles }: { role?: string | undefined; continuation?: boolean; materialFiles?: ArchitectureMaterialFile[] | undefined } = {}) {
   const filesMode = role === "reviewer" || ["review_slice", "review_revision"].includes(String(source.pipelineStage));
-  if (filesMode) return filePacket(source, [...metadata, "assignment", "issues", "deterministicIssues", "distributedReview", "priorFindings",
+  if (filesMode) return filePacket(source, [...metadata, "assignment", "issues", "deterministicIssues", "distributedReview", "priorFindings", "disputedObjections",
     "reviewRetry", "reviewReferenceRecovery", "reviewEvidenceIndex", "reviewParts", "revisionFeedback"].filter(key =>
       !["unsubmittedDraft", "editableSubmission", "repairPreparation"].includes(key)), materialFiles);
   const fields = [...metadata];
@@ -208,7 +208,7 @@ export function projectVerificationMessages(messages: ContextEvent["messages"], 
 
 export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol, flatHandoffs = false }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown; flatHandoffs?: boolean }) {
   const textHandoffs = blueprintProtocol === "module-handoff-v3";
-  const task = pipelineStage === "review_slice" ? "你是独立评审者，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。其他组的材料可用作核查依据，相关疑点写在issues里，由主评审统筹。核对真实证据及反证，不修改设计，不代替主评审作整体通过决定。"
+  const task = pipelineStage === "review_slice" ? "你是独立评审小组，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。你有本组通过权，只把有依据、影响已确认需求且当前必须修改的问题设为阻塞；个人偏好、等价可行方案及已有安排的后续验证不阻塞。每条意见只写一个可独立处理的问题。interfaces负责跨组接口一致性，跨组疑点仍须具体依据。若收到disputedObjections，只补查这些争议，并按需读取previousReport.json，保留本组其他有效检查。核对原文和反证，不修改设计，不代表其他组通过。"
     : pipelineStage === "blueprint" ? "按本轮工具的模块数量与每模块需求条数上限，设计全局蓝图及模块职责、依赖和需求分工；不提前展开各模块实现。"
     : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
     : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"

@@ -27,6 +27,7 @@ export interface StoredArchitectureRecord extends UnknownRecord {
   reviewProgressCheckpoint?: UnknownRecord | null; mainReviewCheckpoint?: UnknownRecord | null; requirementFidelityProgress?: UnknownRecord | null;
   reviewRevisionCheckpoint?: UnknownRecord | null; reviewRetryCheckpoint?: UnknownRecord | null; reviewRevisionSource?: string; revisionSource?: UnknownRecord;
   reviewDispatchCheckpoint?: unknown; reviewDispatchSource?: string;
+  reviewJudgmentCheckpoint?: unknown;
   requirementFidelity?: UnknownRecord; designRecovery?: UnknownRecord;
   developmentRevision?: unknown;
   feedbackLedger?: unknown;
@@ -40,6 +41,7 @@ export interface HandoffResult { needsInput: RequirementIssue[] }
 export interface ArchitectureRolePayload extends UnknownRecord { requirements?: RequirementItem[]; draft?: unknown; requirement?: RequirementDraft | { name: string; draft: RequirementDraft }; design?: unknown; previousDesign?: unknown; candidateSchema?: ToolSchema; candidateHash?: string | null; capabilities?: readonly import("../contracts/architecture.mjs").Capability[]; evidence?: EvidenceItem[]; pipelineStage?: string; integrationPolicy?: { allowedRoots: string[]; instruction: string }; priorFindings?: unknown }
 export type ReviewRoleProgress = Pick<import("../contracts/architecture.mjs").ReviewProgressCheckpoint, "modelCalls"> & Partial<Pick<import("../contracts/architecture.mjs").ReviewProgressCheckpoint, "origin" | "diagnostic" | "parts" | "rejectedParts" | "rejectedInput">> & { review?: Pick<ArchitectureReview, "candidateHash"> | null | undefined };
 export interface ArchitectureRoleOptions<T = unknown> { role: string; agentId?: string | undefined; systemPrompt: string; payload: ArchitectureRolePayload; submitName: string; parameters: ToolSchema; legacyReviewParameters?: ToolSchema; previousReviewParameters?: ToolSchema; prepareSubmission?: NeumaTool["prepareArguments"]; validate: (value: unknown) => T;
+  assembledReview?: T | undefined;
   tools?: NeumaTool[]; signal?: AbortSignal | undefined; onProgress?: Progress | undefined; allowHandoff?: boolean; reviewEvidenceContext?: unknown;
   recoverReviewReferences?: (messages: readonly SessionMessage[]) => UnknownRecord | undefined;
   onFidelity?: (value: Awaited<ReturnType<typeof import("./requirement-fidelity.mjs").verifyRequirementFidelity>>) => unknown | Promise<unknown>; onDiagnostics?: (value: ArchitectureRoleDiagnostic) => unknown | Promise<unknown>;
