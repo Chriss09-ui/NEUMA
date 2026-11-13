@@ -97,7 +97,7 @@ function prepareDispatch(options: DispatchInputs) {
     if (record.reviewDispatchSource !== undefined) fail("已分派评审的检查点缺失，不能重新领取额度。");
     checkpoint = { version: 1, candidateHash, bindingHash, dispatch: createReviewTaskCheckpoint(binding, base, issues) };
   }
-  const checked = (value: unknown, assignment: Assignment): SliceResult => {
+  const checked = (value: unknown, assignment: Assignment, derived = false): SliceResult => {
     const raw = objectFields(value);
     if (Object.keys(raw).sort().join() !== "parts,summary" || typeof raw.summary !== "string" || !raw.summary.trim() || raw.summary.length > 1500)
       fail("评审分组必须提交完整分项及有界摘要。");
@@ -107,7 +107,7 @@ function prepareDispatch(options: DispatchInputs) {
       const expected = field === assignment.field ? assignment.ids : [];
       if (repairHash(ids.slice().sort()) !== repairHash(expected.slice().sort())) fail("评审子任务必须恰好覆盖本组编号，不能遗漏或代交其他组。");
     }
-    if (parts.issues.length > 4) fail("每组最多提交四条独立意见，请合并同因问题并保留具体依据。");
+    if (!derived && parts.issues.length > 4) fail("每组最多提交四条独立意见，请合并同因问题并保留具体依据。");
     return { summary: raw.summary, parts };
   };
   const ledger = (value: unknown) => {
@@ -168,7 +168,7 @@ function prepareDispatch(options: DispatchInputs) {
           design: objectFields(context).candidate,
           priorFindings: assignment!.field === "priorFindingDecisions" ? { ...objectFields(priorFindings),
             findings: rows(objectFields(priorFindings).findings).filter(row => assignment!.ids.includes(String(row.findingId))) } : null,
-          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，相关问题写入本组 issues 并附资料文件位置；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；只有需求缺漏、关键可行性障碍或业务职责及流程矛盾才阻塞；内部实现和可执行测试材料由研发准备，不作为本组打回条件。补查时保留已有问题编号，撤销意见标blocking=false并说明原因。各组完成后再汇总并作独立范围复核。` } };
+          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，相关问题写入本组 issues 并附资料文件位置；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；只有需求缺漏、关键可行性障碍或业务职责及流程矛盾才阻塞；内部实现和可执行测试材料由研发准备，不作为本组打回条件。撤销旧意见时保留问题编号，标blocking=false并说明原因。各组完成后再汇总并作独立范围复核。` } };
   };
   return { checkpoint, binding, base, plan, checked, ledger, roleFor };
 }
@@ -263,15 +263,10 @@ export async function runArchitectureReviewDispatch(options: DispatchInputs & Pa
   const verified = canonicalArchitectureReviewParts(parts, { schema, candidateHash, context, priorFindings, signal });
   return { parts: verified,
     groups: plan.map(assignment => ({ id: assignment.id, assignment, parts: checked(slices[assignment.id], assignment).parts })),
-    validateGroup: (id: string, parts: ReviewParts) => {
+    validateGroup: (id: string, parts: ReviewParts, derived = false) => {
       const assignment = plan.find(row => row.id === id);
-      if (!assignment) fail("补查的小组不存在。");
-      return checked({ summary: "本组判定复核", parts }, assignment).parts;
-    },
-    recheckRole: (id: string) => {
-      const group = checkpoint.dispatch.groups.find(row => row.issueIds.includes(id));
-      if (!group?.result || !group.inputHash) fail("补查缺少原小组的完整结果和会话绑定。");
-      return { ...roleFor({ group, base, baseHash: group.inputHash }), group, baseHash: group.inputHash };
+      if (!assignment) fail("判定对应的小组不存在。");
+      return checked({ summary: "本组判定复核", parts }, assignment, derived).parts;
     },
     summary: { modelCalls: checkpoint.dispatch.calls, modelCallLimit: checkpoint.dispatch.callLimit,
     groups: plan.map(assignment => ({ assignment, summary: checked(slices[assignment.id], assignment).summary })),

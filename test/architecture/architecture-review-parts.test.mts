@@ -245,11 +245,6 @@ test("评审子组不能代交其他组，分项未通过也不能在主评审�
         updates: [{ path: node.worker.group.paths[0]!, value: parts }] });
     } });
   assert.equal(result.summary.failedChecks.length, 1);
-  const original = structuredClone(record), assigned = result.groups.find(group => group.assignment.ids.includes("requirements"))!;
-  const recheck = result.recheckRole(assigned.id);
-  const repeated = recheck.validate({ summary: "继续同一组核对原意见", checks: assigned.parts.checks, issues: assigned.parts.issues });
-  assert.equal(repeated.parts.issues[0]!.id, assigned.parts.issues[0]!.id, "同一意见的编号在原组补查时保持");
-  assert.deepEqual(record, original, "取得补查任务不修改原报告或计数");
   const parts = createArchitectureReviewParts({ ...f.options, initial: result.parts });
   const reference = parts.reference();
   assert.throws(() => validateReview(parts.assemble({ candidateHash: f.candidateHash, progressHash: reference.progressHash, verdict: "pass", summary: "不能跳过未通过项" }),

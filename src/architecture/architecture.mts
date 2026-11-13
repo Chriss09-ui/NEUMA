@@ -541,28 +541,9 @@ export class ArchitectureDesigner {
     key: "reviewJudgmentCheckpoint" | "reviewRevisionJudgment", signal?: AbortSignal, onProgress?: Progress) {
     return judgeArchitectureReviewGroups({ config: this.config, candidateHash: subject.candidateHash!, context: evidenceContext,
       priorFindings, groups: dispatched.groups, checkpoint: record[key], signal,
-      validate: (group, parts) => dispatched.validateGroup(group.id, parts),
+      validate: (group, parts, derived) => dispatched.validateGroup(group.id, parts, derived),
       save: async checkpoint => { record[key] = checkpoint; await this.save(record); },
-      recheck: async request => {
-        const node = dispatched.recheckRole(request.group.id);
-        onProgress?.({ type: "status", phase: "evaluating", label: "本组正在补查有争议的意见…" });
-        await this.role({ role: "specialist", agentId: record.agentId,
-          systemPrompt: ARCHITECTURE_REVIEW_SCOPE + "\n你是原评审小组。本组JEV对所列意见尚不能作出判定，请读取对应原文，只补查这些争议。保留本组其他有效检查。意见不成立或仅属改进时可通过本组；真实缺陷须有依据。混合主张分别列明，不要求整个设计先返工。",
-          payload: { ...node.payload, pipelineStage: "review_slice", previousReport: request.parts, disputedObjections: request.objections },
-          submitName: "submit_architecture_review_slice", parameters: node.parameters,
-          legacyReviewParameters: node.legacyParameters, previousReviewParameters: node.previousParameters,
-          prepareSubmission: node.prepareArguments, tools: node.tools, validate: node.validate,
-          recoverReviewReferences: node.recoverReviewReferences, modelCallLimit: null,
-          initialModelCalls: node.group.calls + request.calls, previousRejection: request.rejection,
-          onSliceRejection: request.onRejection, onStageModelCall: event => event.retryAttempt ? undefined : request.onCall(),
-          onStageResult: value => request.onResult(dispatched.validateGroup(request.group.id, objectFields(value).parts as import("../contracts/architecture.mjs").ReviewParts)),
-          sessionStorage: { directory: await this.storage.directory(record.agentId, "architecture-review-dispatch/sessions", { create: true }),
-            binding: { version: 1, role: "architecture-review-slice", agentId: record.agentId, candidateHash: subject.candidateHash,
-              dispatchHash: subject.reviewDispatchSource, groupId: node.group.id, baseHash: node.baseHash },
-            ...(request.sessionFile || node.group.sessionFile ? { file: request.sessionFile ?? node.group.sessionFile! } : {}) },
-          onSessionRef: reference => request.onSession(reference.file), stageReasoningMode: "off",
-          maxOutputTokens: architectureModelOutputBudget(this.config, "reviewer"), signal, onProgress });
-      } });
+    });
   }
 
   async role<T>(options: ArchitectureRoleOptions<T> & { role: "specialist"; allowHandoff?: false }): Promise<T>;

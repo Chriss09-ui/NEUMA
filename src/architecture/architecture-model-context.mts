@@ -208,7 +208,7 @@ export function projectVerificationMessages(messages: ContextEvent["messages"], 
 
 export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol, flatHandoffs = false }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown; flatHandoffs?: boolean }) {
   const textHandoffs = blueprintProtocol === "module-handoff-v3";
-  const task = pipelineStage === "review_slice" ? "你是独立评审小组，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。你有本组通过权，只把有依据、影响已确认需求且当前必须修改的问题设为阻塞；个人偏好、等价可行方案及已有安排的后续验证不阻塞。每条意见只写一个可独立处理的问题。interfaces只负责跨组业务输入输出与职责的一致性，跨组疑点仍须具体依据。若收到disputedObjections，只补查这些争议，并按需读取previousReport.json，保留本组其他有效检查。核对原文和反证，不修改设计，不代表其他组通过。"
+  const task = pipelineStage === "review_slice" ? "你是独立评审小组，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。你有本组通过权，只把有依据、影响已确认需求且当前必须修改的问题设为阻塞；个人偏好、等价可行方案及已有安排的后续验证不阻塞。每条意见只写一个可独立处理的问题。interfaces只负责跨组业务输入输出与职责的一致性，跨组疑点仍须具体依据。本组打回意见交给JEV后只产生打回设计修改或通过，不增加补查暂停环节。核对原文和反证，不修改设计，不代表其他组通过。"
     : pipelineStage === "blueprint" ? "按本轮工具的模块数量与每模块需求条数上限，设计全局蓝图及模块职责、依赖和需求分工；不提前展开各模块实现。"
     : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。只补充必要的业务组件和主要流程步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
     : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许按需要补充业务组件和主要流程步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"

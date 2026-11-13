@@ -1,0 +1,665 @@
+{
+  "provenance": "Produced by judgeArchitectureReviewGroups at 106ddc1. Restore previousPolicy from architecture-group-jev-v1.json checkpoint; the original sealed hash includes that exact object.",
+  "checkpoint": {
+    "version": 2,
+    "bindingHash": "f06c3539ef56f6ce3176cfd3b767f893f0be5681a883a5de5c5ea3ce5a0a8e62",
+    "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+    "completedReviewHash": null,
+    "groups": {
+      "interfaces": {
+        "sourceHash": "9cd22b3d01737bb2793dce514eea9cc958142f437abc357ba358927310a336b0",
+        "rounds": [
+          {
+            "parts": {
+              "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+              "checks": [
+                {
+                  "id": "interfaces",
+                  "passed": false,
+                  "evidence": "要求补充研发细节"
+                }
+              ],
+              "issues": [
+                {
+                  "id": "internal_name",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "未确定内部函数名称",
+                  "remedy": "指定函数名称",
+                  "candidatePaths": [
+                    "/components/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/components/0"
+                    }
+                  ]
+                },
+                {
+                  "id": "test_fixture",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "尚未提供可执行的模拟故障测试数据",
+                  "remedy": "编写可执行测试数据",
+                  "candidatePaths": [
+                    "/acceptance/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/acceptance/0"
+                    }
+                  ]
+                }
+              ],
+              "acceptanceScopeChecks": [],
+              "priorFindingDecisions": []
+            },
+            "receipts": {
+              "issues/0": {
+                "stateHash": "885c7219c9d5634e6030445291bf1d179c9672a06bdf61703b4bbf1ee744d8d7",
+                "attempts": 1,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              },
+              "issues/1": {
+                "stateHash": "dfff6d8392fe07de068090772a3d912953421f6386bbe156d0c244325692000f",
+                "attempts": 1,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              }
+            }
+          },
+          {
+            "parts": {
+              "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+              "checks": [
+                {
+                  "id": "interfaces",
+                  "passed": false,
+                  "evidence": "要求补充研发细节"
+                }
+              ],
+              "issues": [
+                {
+                  "id": "internal_name",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "未确定内部函数名称",
+                  "remedy": "指定函数名称",
+                  "candidatePaths": [
+                    "/components/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/components/0"
+                    }
+                  ]
+                },
+                {
+                  "id": "test_fixture",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "尚未提供可执行的模拟故障测试数据",
+                  "remedy": "编写可执行测试数据",
+                  "candidatePaths": [
+                    "/acceptance/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/acceptance/0"
+                    }
+                  ]
+                }
+              ],
+              "acceptanceScopeChecks": [],
+              "priorFindingDecisions": []
+            },
+            "receipts": {
+              "issues/0": {
+                "stateHash": "01d0a27990e7dee73e63b500e89404c3f0c4289196cca14357a232fba5378cf2",
+                "attempts": 2,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  },
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              },
+              "issues/1": {
+                "stateHash": "01a462401ac7c15390320a64302b9e76d4d55680ab575b729a95de1e9d5ef44b",
+                "attempts": 2,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  },
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              }
+            }
+          }
+        ],
+        "recheckCalls": 8,
+        "recheckSession": "original-review-session.jsonl"
+      }
+    },
+    "hash": "fe7a2e975f8b8d4be1804df8854bcf810a6811bfae9c39652c435a6489e045cd"
+  }
+}

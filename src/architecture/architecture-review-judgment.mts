@@ -11,17 +11,14 @@ import { ARCHITECTURE_JEV_SCOPE } from "./architecture-prompts.mjs";
 
 export interface JudgmentGroup { id: string; assignment: { field: string; ids: string[] }; parts: ReviewParts }
 interface Score { score: number; probabilities: Record<string, number>; confidence: number }
-interface Assessment { necessity: Score; strictness: Score; basis: string; route: "revise" | "waive" | "suggestion" | "recheck" }
+interface Assessment { necessity: Score; strictness: Score; basis: string; route: "revise" | "pass" | "waive" | "suggestion" | "recheck" }
 interface Objection { key: string; field: keyof Omit<ReviewParts, "candidateHash">; index: number; value: unknown }
 interface Receipt { stateHash: string; attempts: number; response: unknown; responses: unknown[]; assessment: Assessment | null; formatFailures: number }
 interface JudgmentRound { parts: ReviewParts; receipts: Record<string, Receipt> }
 interface GroupCheckpoint { sourceHash: string; rounds: JudgmentRound[]; recheckCalls: number; recheckRejection?: ReviewDiagnostic["repeatedFailure"]; recheckSession?: string }
-export interface ReviewJudgmentCheckpoint { version: 1 | 2; bindingHash: string; candidateHash: string; completedReviewHash: string | null;
+type PolicyVersion = 1 | 2 | 3;
+export interface ReviewJudgmentCheckpoint { version: PolicyVersion; bindingHash: string; candidateHash: string; completedReviewHash: string | null;
   groups: Record<string, GroupCheckpoint>; previousPolicy?: ReviewJudgmentCheckpoint; hash: string }
-export interface JudgmentRecheck { group: JudgmentGroup; parts: ReviewParts; objections: unknown[]; calls: number;
-  rejection: ReviewDiagnostic["repeatedFailure"]; sessionFile?: string;
-  onCall(): Promise<void>; onRejection(value: NonNullable<ReviewDiagnostic["repeatedFailure"]>): Promise<void>;
-  onSession(file: string): Promise<void>; onResult(parts: ReviewParts): Promise<void> }
 
 // Frozen only for validating existing receipts; new requests use the stage-scoped rubric below.
 const legacyRubric = {
@@ -36,7 +33,7 @@ const legacyRubric = {
         contradicted: "材料足够，意见的全部阻塞主张都与原文或程序事实相矛盾。", unproven: "材料不足、主张含混或相互冲突，尚不能决定放行或打回。" } },
   },
 };
-const rubric = {
+const stageRubric = {
   version: "group-jev-v2",
   scope: ARCHITECTURE_JEV_SCOPE,
   questions: {
@@ -49,6 +46,12 @@ const rubric = {
         contradicted: "材料足够，意见的全部阻塞主张与原文或程序事实相矛盾。", unproven: "影响总体判断的关键事实缺失、含混或相互冲突，需核实。" } },
   },
 };
+const routing = { reviseNecessityAtLeast: 75, reviseStrictnessBelow: 50,
+  instruction: "合法评分只产生打回或通过。必要分至少75且过严分低于50时交回设计修改，再评审；其余通过，可保留非阻塞建议。依据判断、置信度和分歧只记录，不另设补查或暂停。" };
+const rubric = { ...stageRubric, version: "group-jev-v3", routing,
+  questions: { ...stageRubric.questions, basis: { ...stageRubric.questions.basis,
+    instructions: stageRubric.questions.basis.instructions + " 此项只记录依据状态，不单独触发补查或暂停；影响当前总体方案的真实缺口计入必要性评分。" } } };
+const rubrics = { 1: legacyRubric, 2: stageRubric, 3: rubric };
 const rows = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.map(objectFields) : [];
 const seal = (value: Omit<ReviewJudgmentCheckpoint, "hash">): ReviewJudgmentCheckpoint => ({ ...value, hash: repairHash(value) });
 function stop(reason: string, message: string, details: UnknownRecord = {}): never {
@@ -61,7 +64,7 @@ export function architectureGroupJevEnabled(config: ModelConfig) {
 
 export function judgmentApprovesReview(record: unknown, review: unknown): boolean {
   const source = objectFields(record), value = objectFields(source.reviewJudgmentCheckpoint), { hash, ...body } = value;
-  return (value.version === 1 || value.version === 2) && value.candidateHash === source.candidateHash && hash === repairHash(body)
+  return (value.version === 1 || value.version === 2 || value.version === 3) && value.candidateHash === source.candidateHash && hash === repairHash(body)
     && value.completedReviewHash === repairHash(review) && objectFields(review).verdict === "pass";
 }
 
@@ -79,7 +82,7 @@ function score(value: unknown): Score {
   return { score: answer.score * 25, probabilities: p, confidence: answer.confidence };
 }
 
-function assess(response: unknown): Assessment {
+function assess(response: unknown, version: PolicyVersion): Assessment {
   const answers = objectFields(objectFields(response).answers), necessity = score(answers.necessity), strictness = score(answers.strictness);
   const basis = objectFields(answers.basis), p = objectFields(basis.probabilities);
   if (basis.type !== "choice" || !["supported", "contradicted", "unproven"].includes(String(basis.choice))
@@ -87,8 +90,10 @@ function assess(response: unknown): Assessment {
     || Object.values(p).some(value => typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)
     || Math.abs(Object.values(p).reduce<number>((sum, value) => sum + Number(value), 0) - 1) > .02)
     throw new InputError("JEV 依据判断结构无效。");
+  if (version === 3) return { necessity, strictness, basis: String(basis.choice),
+    route: necessity.score >= routing.reviseNecessityAtLeast && strictness.score < routing.reviseStrictnessBelow ? "revise" : "pass" };
+  // Kept only to verify historical receipts. Current decisions never enter this branch.
   let route: Assessment["route"] = "recheck";
-  // A low mean can conceal a split between no defect and a severe defect. Never average that into approval.
   const split = [necessity, strictness].some(a => a.probabilities["0"]! + a.probabilities["1"]! >= .25
     && a.probabilities["3"]! + a.probabilities["4"]! >= .25);
   if (!split && Number(p[String(basis.choice)]) >= .75 && basis.choice !== "unproven") {
@@ -137,11 +142,12 @@ function arithmeticFacts(candidate: unknown) {
   });
 }
 
-function judgmentState(group: JudgmentGroup, objection: Objection, context: unknown, priorFindings: unknown, legacy = false) {
+function judgmentState(group: JudgmentGroup, objection: Objection, context: unknown, priorFindings: unknown, version: PolicyVersion) {
   const source = objectFields(context), candidate = objectFields(source.candidate), value = objectFields(objection.value);
   const paths = new Map<string, { source: string; path: string }>();
   const add = (source: string, path: string) => paths.set(`${source}:${path}`, { source, path });
-  for (const row of group.parts.issues) {
+  const relatedIssues = version < 3 ? group.parts.issues : objection.field === "issues" ? [group.parts.issues[objection.index]!] : group.parts.issues;
+  for (const row of relatedIssues) {
     for (const path of row.candidatePaths ?? []) add("candidate", path);
     for (const ref of row.references ?? []) add(ref.source, ref.path);
     for (const fact of row.factClaims ?? []) add(fact.source, fact.path);
@@ -161,7 +167,19 @@ function judgmentState(group: JudgmentGroup, objection: Objection, context: unkn
       verification: ["acceptance"], acceptance_quality: ["acceptance"] };
     for (const section of sections[String(value.id)] ?? ["components", "steps"]) if (Object.hasOwn(candidate, section)) add("candidate", `/${section}`);
   }
-  const materials = [...paths.values()].map(ref => {
+  if (version === 3) {
+    const sections: Record<string, string[]> = { requirements: ["coverage", "components", "interaction"], requirement_sufficiency: ["coverage", "unknowns", "selectionBasis"],
+      feasibility: ["capabilities", "execution", "decisions", "platformClaims"], minimality: ["components", "steps"],
+      interfaces: ["components", "steps", "interaction", "failureHandling"], failure_handling: ["components", "failureHandling", "steps"],
+      verification: ["acceptance", "components", "steps"], acceptance_quality: ["acceptance", "components", "steps"] };
+    const themes = objection.field === "checks" ? [value.id] : objection.field === "issues" ? [value.checkId]
+      : objection.field === "acceptanceScopeChecks" ? ["acceptance_quality"] : Array.isArray(value.checkIds) ? value.checkIds : [];
+    for (const theme of themes) for (const section of sections[String(theme)] ?? ["components", "steps"])
+      if (Object.hasOwn(candidate, section)) add("candidate", `/${section}`);
+  }
+  const selected = [...paths.values()].filter(ref => version < 3 || ![...paths.values()].some(parent => parent.source === ref.source
+    && parent.path !== ref.path && (parent.path === "" || ref.path.startsWith(parent.path + "/"))));
+  const materials = selected.map(ref => {
     const text = modelContextValue(source, ref.source, ref.path);
     if (text === undefined) stop("review_judgment_material_missing", "JEV 所需的原文位置无法读取。", { groupId: group.id, ...ref });
     return { ...ref, value: text };
@@ -171,7 +189,7 @@ function judgmentState(group: JudgmentGroup, objection: Objection, context: unkn
     deferredVerifications: source.deferredVerifications, priorFindings: objection.field === "priorFindingDecisions" ? priorFindings : null,
     acceptanceIndex: rows(candidate.acceptance).map(row => ({ id: row.id, requirementIds: row.requirementIds, input: row.input, expected: row.expected })),
     programFacts: arithmeticFacts(candidate), instruction: "只决定本组这一条意见是否应阻塞当前架构；其他组没有被授权通过。不要把评审意见当原始需求；不要假设本次资料中未出现的事实。",
-    ...(legacy ? {} : { architectureScope: ARCHITECTURE_JEV_SCOPE }) };
+    ...(version === 1 ? {} : { architectureScope: ARCHITECTURE_JEV_SCOPE }), ...(version === 3 ? { routing } : {}) };
   if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024)
     stop("review_judgment_material_capacity", "这一条争议所需原文过多，需要缩小问题范围；未截断材料或自动放行。", { groupId: group.id, objection: objection.key });
   return state;
@@ -179,21 +197,24 @@ function judgmentState(group: JudgmentGroup, objection: Objection, context: unkn
 
 export async function judgeArchitectureReviewGroups(options: { config: ModelConfig; candidateHash: string; context: unknown; priorFindings?: unknown;
   groups: JudgmentGroup[]; checkpoint?: unknown; signal?: AbortSignal | undefined; save(value: ReviewJudgmentCheckpoint): Promise<void>;
-  recheck(input: JudgmentRecheck): Promise<void>; validate(group: JudgmentGroup, parts: ReviewParts): ReviewParts;
+  validate(group: JudgmentGroup, parts: ReviewParts, derived?: boolean): ReviewParts;
   request?: typeof requestJevDecision }) {
   const { groups, signal } = options, model = options.config.jevModel || "jev-1.14.0";
-  const binding = (legacy: boolean) => repairHash({ candidateHash: options.candidateHash, context: options.context,
-    priorFindings: options.priorFindings ?? null, groups, rubric: legacy ? legacyRubric : rubric, model });
+  const binding = (version: PolicyVersion) => repairHash({ candidateHash: options.candidateHash, context: options.context,
+    priorFindings: options.priorFindings ?? null, groups, rubric: rubrics[version], model });
   const read = (input: unknown): ReviewJudgmentCheckpoint => {
     const saved = objectFields(input), { hash, ...body } = saved;
     const keys = ["bindingHash", "candidateHash", "completedReviewHash", "groups", "hash", "version",
-      ...(saved.version === 2 && saved.previousPolicy !== undefined ? ["previousPolicy"] : [])].sort().join();
-    if ((saved.version !== 1 && saved.version !== 2) || saved.bindingHash !== binding(saved.version === 1)
+      ...((saved.version === 2 || saved.version === 3) && saved.previousPolicy !== undefined ? ["previousPolicy"] : [])].sort().join();
+    if ((saved.version !== 1 && saved.version !== 2 && saved.version !== 3) || saved.bindingHash !== binding(saved.version as PolicyVersion)
       || saved.candidateHash !== options.candidateHash || hash !== repairHash(body) || Object.keys(saved).sort().join() !== keys
       || !saved.groups || typeof saved.groups !== "object" || Array.isArray(saved.groups))
       stop("review_judgment_binding", "JEV 原判定与候选、分组、模型或评分规则不符；不能清零后重跑。");
     return structuredClone(saved) as unknown as ReviewJudgmentCheckpoint;
   };
+  const roundVersion = (value: ReviewJudgmentCheckpoint, id: string, index: number): PolicyVersion =>
+    value.previousPolicy && index < (value.previousPolicy.groups[id]?.rounds.length ?? 1) - 1
+      ? roundVersion(value.previousPolicy, id, index) : value.version;
   const verifyGroups = (value: ReviewJudgmentCheckpoint) => {
     for (const [id, saved] of Object.entries(value.groups)) {
       const group = groups.find(group => group.id === id);
@@ -205,10 +226,10 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
         options.validate(group, round.parts);
         const pending = objections(round.parts, options.context);
         if (!round.receipts || Array.isArray(round.receipts)) stop("review_judgment_binding", "JEV 判定回执缺失。");
-        const legacy = value.version === 1 || index < (value.previousPolicy?.groups[id]?.rounds.length ?? 1) - 1;
+        const version = roundVersion(value, id, index);
         for (const [key, receipt] of Object.entries(round.receipts)) {
           const item = pending.find(item => item.key === key);
-          if (!item || receipt.stateHash !== repairHash(judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, legacy))
+          if (!item || receipt.stateHash !== repairHash(judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, version))
             || !Number.isSafeInteger(receipt.attempts) || receipt.attempts < 0 || !Array.isArray(receipt.responses)
             || receipt.responses.length > receipt.attempts || !Number.isSafeInteger(receipt.formatFailures)
             || receipt.formatFailures < 0 || receipt.formatFailures > 3
@@ -216,7 +237,7 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
             stop("review_judgment_binding", "JEV 原始材料或请求计数无法核验。");
           if (receipt.assessment) {
             let expected: Assessment;
-            try { expected = assess(receipt.response); } catch { stop("review_judgment_binding", "JEV 保存的评分结构无效。"); }
+            try { expected = assess(receipt.response, version); } catch { stop("review_judgment_binding", "JEV 保存的评分结构无效。"); }
             if (repairHash(expected!) !== repairHash(receipt.assessment)) stop("review_judgment_binding", "JEV 判定与保存的响应不一致。");
           }
         }
@@ -227,34 +248,38 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
     if (value.completedReviewHash !== null && groups.some(group => !value.groups[group.id]))
       stop("review_judgment_binding", "已完成判定缺少小组结果。");
   };
-  let checkpoint = options.checkpoint === undefined
-    ? seal({ version: 2, bindingHash: binding(false), candidateHash: options.candidateHash, completedReviewHash: null, groups: {} })
-    : read(options.checkpoint);
-  if (checkpoint.previousPolicy) {
-    const previous = read(checkpoint.previousPolicy);
-    if (previous.version !== 1 || previous.completedReviewHash !== null) stop("review_judgment_binding", "评分规则升级来源不是旧版未完成判定。");
-    verifyGroups(previous);
-    for (const [id, old] of Object.entries(previous.groups)) {
-      const current = checkpoint.groups[id];
-      if (!current || current.recheckCalls < old.recheckCalls || current.recheckSession !== old.recheckSession && old.recheckSession
-        || current.rounds.length < old.rounds.length) stop("review_judgment_binding", "评分规则升级丢失原补查或会话。");
-      for (const [index, round] of old.rounds.entries()) {
-        const next = current.rounds[index]!;
-        if (repairHash(next.parts) !== repairHash(round.parts)
-          || index < old.rounds.length - 1 && repairHash(next) !== repairHash(round))
-          stop("review_judgment_binding", "评分规则升级改写了原报告或历史评分。");
-        for (const [key, receipt] of Object.entries(round.receipts)) {
-          const updated = next.receipts[key];
-          if (!updated || updated.attempts < receipt.attempts || updated.formatFailures < receipt.formatFailures
-            || repairHash(updated.responses.slice(0, receipt.responses.length)) !== repairHash(receipt.responses)
-            || index === old.rounds.length - 1 && updated.assessment && updated.responses.length === receipt.responses.length)
-            stop("review_judgment_binding", "评分规则升级丢失原用量或复用了旧规则评分。");
+  const verifyHistory = (checkpoint: ReviewJudgmentCheckpoint) => {
+    if (checkpoint.previousPolicy) {
+      const previous = read(checkpoint.previousPolicy);
+      if (previous.version >= checkpoint.version || previous.completedReviewHash !== null)
+        stop("review_judgment_binding", "评分规则升级来源不是旧版未完成判定。");
+      verifyHistory(previous);
+      for (const [id, old] of Object.entries(previous.groups)) {
+        const current = checkpoint.groups[id];
+        if (!current || current.recheckCalls < old.recheckCalls || current.recheckSession !== old.recheckSession && old.recheckSession
+          || current.rounds.length < old.rounds.length) stop("review_judgment_binding", "评分规则升级丢失原补查或会话。");
+        for (const [index, round] of old.rounds.entries()) {
+          const next = current.rounds[index]!;
+          if (repairHash(next.parts) !== repairHash(round.parts)
+            || index < old.rounds.length - 1 && repairHash(next) !== repairHash(round))
+            stop("review_judgment_binding", "评分规则升级改写了原报告或历史评分。");
+          for (const [key, receipt] of Object.entries(round.receipts)) {
+            const updated = next.receipts[key];
+            if (!updated || updated.attempts < receipt.attempts || updated.formatFailures < receipt.formatFailures
+              || repairHash(updated.responses.slice(0, receipt.responses.length)) !== repairHash(receipt.responses)
+              || index === old.rounds.length - 1 && updated.assessment && updated.responses.length === receipt.responses.length)
+              stop("review_judgment_binding", "评分规则升级丢失原用量或复用了旧规则评分。");
+          }
         }
       }
     }
-  }
-  verifyGroups(checkpoint);
-  const migrated = checkpoint.version === 1 && checkpoint.completedReviewHash === null;
+    verifyGroups(checkpoint);
+  };
+  let checkpoint = options.checkpoint === undefined
+    ? seal({ version: 3, bindingHash: binding(3), candidateHash: options.candidateHash, completedReviewHash: null, groups: {} })
+    : read(options.checkpoint);
+  verifyHistory(checkpoint);
+  const migrated = checkpoint.version < 3 && checkpoint.completedReviewHash === null;
   if (migrated) {
     const previousPolicy = structuredClone(checkpoint);
     // Preserve all reports, sessions and cumulative counters; only the latest report needs the new judgment.
@@ -264,11 +289,11 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
       for (const item of objections(round.parts, options.context)) {
         const receipt = round.receipts[item.key];
         if (!receipt) continue;
-        receipt.stateHash = repairHash(judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings));
+        receipt.stateHash = repairHash(judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, 3));
         receipt.assessment = null;
       }
     }
-    checkpoint = seal({ version: 2, bindingHash: binding(false), candidateHash: options.candidateHash,
+    checkpoint = seal({ version: 3, bindingHash: binding(3), candidateHash: options.candidateHash,
       completedReviewHash: null, groups: checkpoint.groups, previousPolicy });
   }
   const persist = async () => {
@@ -289,68 +314,77 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
     if (saved.sourceHash !== repairHash(group) || !Number.isSafeInteger(saved.recheckCalls) || saved.recheckCalls < 0
       || !Array.isArray(saved.rounds) || saved.rounds.length < 1 || saved.rounds.length > 2
       || repairHash(saved.rounds[0]!.parts) !== repairHash(group.parts)) stop("review_judgment_binding", "JEV 小组原报告或累计用量无法核验。");
-    let round = saved.rounds.at(-1)!;
+    const round = saved.rounds.at(-1)!;
     options.validate(group, round.parts);
-    let needsRecheck: Objection[] = [];
-    for (;;) {
-      const pending = objections(round.parts, options.context), keys = new Set(pending.map(item => item.key));
-      if (Object.keys(round.receipts).some(key => !keys.has(key))) stop("review_judgment_binding", "JEV 判定没有对应的原始意见。");
-      for (const item of pending) {
-        const state = judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, checkpoint.version === 1), stateHash = repairHash(state);
-        const receipt = round.receipts[item.key] ??= { stateHash, attempts: 0, response: null, responses: [], assessment: null, formatFailures: 0 };
-        if (receipt.stateHash !== stateHash || !Number.isSafeInteger(receipt.attempts) || receipt.attempts < 0
-          || !Array.isArray(receipt.responses) || receipt.responses.length > receipt.attempts
-          || !Number.isSafeInteger(receipt.formatFailures) || receipt.formatFailures < 0 || receipt.formatFailures > 3)
-          stop("review_judgment_binding", "JEV 原始材料或请求计数无法核验。");
-        if (receipt.assessment) {
-          if (repairHash(assess(receipt.response)) !== repairHash(receipt.assessment)) stop("review_judgment_binding", "JEV 判定与保存的响应不一致。");
-          continue;
-        }
-        while (!receipt.assessment && receipt.formatFailures < 3) {
-          let response: unknown;
-          try {
-            response = await (options.request ?? requestJevDecision)({ config: options.config, state, questions: (checkpoint.version === 1 ? legacyRubric : rubric).questions, signal,
-              onAttempt: async () => { receipt.attempts++; await persist(); } });
-          } catch (error) {
-            const diagnostic = objectFields(objectFields(error).diagnostic);
-            if (diagnostic.reason !== "invalid_json") stop("review_judgment_request", error instanceof Error ? error.message : "JEV 请求未完成。",
-              { groupId: group.id, objection: item.key, providerReason: diagnostic.reason ?? "request_failed", attempts: receipt.attempts });
-            response = { error: "invalid_json" };
-          }
-          receipt.responses.push(response);
-          receipt.response = response;
-          try { receipt.assessment = assess(response); }
-          catch (error) { if (!(error instanceof InputError)) throw error; receipt.formatFailures++; }
-          await persist();
-        }
-        if (!receipt.assessment) stop("review_judgment_format", "JEV 连续三次返回无效评分结构；原报告和用量已保存。", { groupId: group.id, objection: item.key });
+    const pending = objections(round.parts, options.context), keys = new Set(pending.map(item => item.key));
+    if (Object.keys(round.receipts).some(key => !keys.has(key))) stop("review_judgment_binding", "JEV 判定没有对应的原始意见。");
+    for (const item of pending) {
+      const state = judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, checkpoint.version), stateHash = repairHash(state);
+      const receipt = round.receipts[item.key] ??= { stateHash, attempts: 0, response: null, responses: [], assessment: null, formatFailures: 0 };
+      if (receipt.stateHash !== stateHash || !Number.isSafeInteger(receipt.attempts) || receipt.attempts < 0
+        || !Array.isArray(receipt.responses) || receipt.responses.length > receipt.attempts
+        || !Number.isSafeInteger(receipt.formatFailures) || receipt.formatFailures < 0 || receipt.formatFailures > 3)
+        stop("review_judgment_binding", "JEV 原始材料或请求计数无法核验。");
+      if (receipt.assessment) {
+        if (repairHash(assess(receipt.response, checkpoint.version)) !== repairHash(receipt.assessment)) stop("review_judgment_binding", "JEV 判定与保存的响应不一致。");
+        continue;
       }
-      needsRecheck = pending.filter(item => round.receipts[item.key]!.assessment!.route === "recheck"
-        || item.field === "priorFindingDecisions" && round.receipts[item.key]!.assessment!.route !== "revise"
-        || ["checks", "acceptanceScopeChecks"].includes(item.field) && round.receipts[item.key]!.assessment!.route === "revise");
-      if (!needsRecheck.length) break;
-      if (saved.rounds.length > 1) stop("review_judgment_unproven", "本组补查后，JEV 仍无法确定打回是否合理；暂停本组，未计为设计返工。",
-        { groupId: group.id, objections: needsRecheck.map(item => ({ key: item.key, value: item.value, assessment: round.receipts[item.key]!.assessment })) });
-      await options.recheck({ group, parts: structuredClone(round.parts), objections: needsRecheck.map(item => ({ ...item,
-        assessment: round.receipts[item.key]!.assessment })), calls: saved.recheckCalls, rejection: saved.recheckRejection,
-        ...(saved.recheckSession ? { sessionFile: saved.recheckSession } : {}),
-        onCall: async () => { saved.recheckCalls++; await persist(); },
-        onSession: async file => { saved.recheckSession = file; await persist(); },
-        onRejection: async value => { saved.recheckRejection = structuredClone(value); await persist(); },
-        onResult: async parts => { options.validate(group, parts); saved.rounds.push({ parts: structuredClone(parts), receipts: {} }); await persist(); } });
-      if (saved.rounds.length !== 2) stop("review_judgment_recheck_incomplete", "小组尚未交回补查结果，保留原会话继续。");
-      round = saved.rounds[1]!;
+      while (!receipt.assessment && receipt.formatFailures < 3) {
+        let response: unknown;
+        try {
+          response = await (options.request ?? requestJevDecision)({ config: options.config, state, questions: rubrics[checkpoint.version].questions, signal,
+            onAttempt: async () => { receipt.attempts++; await persist(); } });
+        } catch (error) {
+          const diagnostic = objectFields(objectFields(error).diagnostic);
+          if (diagnostic.reason !== "invalid_json") stop("review_judgment_request", error instanceof Error ? error.message : "JEV 请求未完成。",
+            { groupId: group.id, objection: item.key, providerReason: diagnostic.reason ?? "request_failed", attempts: receipt.attempts });
+          response = { error: "invalid_json" };
+        }
+        receipt.responses.push(response);
+        receipt.response = response;
+        try { receipt.assessment = assess(response, checkpoint.version); }
+        catch (error) { if (!(error instanceof InputError)) throw error; receipt.formatFailures++; }
+        await persist();
+      }
+      if (!receipt.assessment) stop("review_judgment_format", "JEV 连续三次返回无效评分结构；原报告和用量已保存。", { groupId: group.id, objection: item.key });
     }
     const effective = structuredClone(round.parts);
-    for (const item of objections(effective, options.context)) {
-      const decision = round.receipts[item.key]!.assessment!;
-      if (decision.route === "revise") continue;
-      const note = `本组 JEV 判定为${decision.route === "waive" ? "撤销打回" : "非阻塞建议"}（必要度 ${decision.necessity.score.toFixed(1)}，过严度 ${decision.strictness.score.toFixed(1)}）；原文与原报告保存在小组判定记录。`;
-      if (item.field === "checks") { effective.checks[item.index]!.passed = true; effective.checks[item.index]!.evidence = note; }
-      if (item.field === "issues") { effective.issues[item.index]!.blocking = false; effective.issues[item.index]!.remedy = note; }
-      if (item.field === "acceptanceScopeChecks") { effective.acceptanceScopeChecks[item.index]!.sufficient = true; effective.acceptanceScopeChecks[item.index]!.reason = note; }
-      // Historical closure has additional factual guards; the reviewer must submit that explanation itself.
-      if (item.field === "priorFindingDecisions") stop("review_judgment_prior_closure", "历史问题需要本组提供符合原关闭规则的解释，JEV 分数不能代替实际修复证据。", { groupId: group.id, finding: item.value });
+    for (const item of pending) {
+      const decision = round.receipts[item.key]!.assessment!, approved = decision.route !== "revise";
+      if (checkpoint.version < 3 && !approved) continue;
+      const note = checkpoint.version < 3
+        ? `本组 JEV 判定为${decision.route === "waive" ? "撤销打回" : "非阻塞建议"}（必要度 ${decision.necessity.score.toFixed(1)}，过严度 ${decision.strictness.score.toFixed(1)}）；原文与原报告保存在小组判定记录。`
+        : `本组 JEV 判定${approved ? "通过，不保留此项打回" : "打回设计修改"}（必要度 ${decision.necessity.score.toFixed(1)}，过严度 ${decision.strictness.score.toFixed(1)}）；原文、原报告和评分保留，不表示设计已修改或业务已验收。`;
+      if (item.field === "issues") {
+        if (approved) { effective.issues[item.index]!.blocking = false; effective.issues[item.index]!.remedy = note; }
+        continue;
+      }
+      // Flags and historical decisions still need a concrete issue for the ordinary aggregate validator.
+      let checkId: string, candidatePaths: string[], description: string, id: string;
+      if (item.field === "checks") {
+        const check = effective.checks[item.index]!; check.passed = approved;
+        if (approved) { check.evidence = note; continue; }
+        checkId = check.id; description = check.evidence; id = `jev_${repairHash([group.id, item.key]).slice(0, 24)}`;
+        candidatePaths = judgmentState(group, item, options.context, options.priorFindings, checkpoint.version).materials
+          .filter(ref => ref.source === "candidate").map(ref => ref.path).slice(0, 12);
+      } else if (item.field === "acceptanceScopeChecks") {
+        const check = effective.acceptanceScopeChecks[item.index]!; check.sufficient = approved;
+        if (approved) { check.reason = note; continue; }
+        checkId = "acceptance_quality"; description = check.reason; id = `jev_${repairHash([group.id, item.key]).slice(0, 24)}`;
+        candidatePaths = [`/acceptance/${rows(objectFields(objectFields(options.context).candidate).acceptance).findIndex(row => row.id === check.acceptanceId)}`];
+      } else {
+        const row = effective.priorFindingDecisions[item.index]!;
+        const finding = rows(objectFields(options.priorFindings).findings).find(finding => finding.findingId === row.findingId);
+        row.status = approved ? "unsupported" : "unresolved"; row.reason = note;
+        checkId = row.checkIds[0]!; candidatePaths = row.candidatePaths; id = row.findingId;
+        description = String(objectFields(finding?.issue).description ?? objectFields(item.value).reason);
+      }
+      const existing = effective.issues.find(issue => issue.id === id);
+      const references = [...(existing?.references ?? []), ...candidatePaths.map(path => ({ source: "candidate", path }))]
+        .filter((ref, index, all) => all.findIndex(other => other.source === ref.source && other.path === ref.path) === index);
+      const issue = { ...existing, id, checkId, kind: existing?.kind ?? "design", blocking: !approved, description,
+        remedy: note, candidatePaths, references } as ReviewParts["issues"][number];
+      if (existing) Object.assign(existing, issue); else effective.issues.push(issue);
     }
     for (const check of effective.checks) if (round.parts.issues.some(issue => issue.blocking && issue.checkId === check.id)) {
       check.passed = !effective.issues.some(issue => issue.blocking && issue.checkId === check.id);
@@ -360,7 +394,10 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
       check.sufficient = !scopeIssues(effective, check.acceptanceId, options.context).length;
       if (check.sufficient) check.reason = "本项具体阻塞意见已逐条由 JEV 撤销或降为建议；原判断保留在判定记录。";
     }
-    options.validate(group, effective);
+    if (checkpoint.version === 3) for (const check of effective.checks) {
+      if (effective.issues.some(issue => issue.blocking && issue.checkId === check.id)) check.passed = false;
+    }
+    options.validate(group, effective, checkpoint.version === 3);
     approvals.push({ groupId: group.id, by: objections(round.parts, options.context).length ? "jev" : "reviewer", status: objections(effective, options.context).length ? "revise" : "pass" });
     for (const field of ["checks", "issues", "acceptanceScopeChecks", "priorFindingDecisions"] as const)
       (result[field] as unknown[]).push(...effective[field]);
