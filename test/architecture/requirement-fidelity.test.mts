@@ -115,17 +115,17 @@ test("验收输入和交付前提的新增约束沿原checks提交，依据须�
   }
 });
 
-test("验收可构造性未证明可用既有unproven返回，合法自选样本不增加用户确认步骤", async () => {
+test("影响业务范围的关键可行性缺口可用unproven返回，合法自选样本不增加用户确认步骤", async () => {
   for (const classification of ["unproven", "preserved"]) {
     const current = { requirements: [{ id: "input", text: "按已确认边界完整处理合法输入。" }], draft: {}, confirmedRequirementContext: {},
       candidate: { instructions: "保持原约束，不增加字符限制。", acceptance: [{ input: classification === "unproven"
-        ? "尚无可达性依据的边界组合" : "系统自行选取满足全部原约束的代表性样本", expected: "完整输出" }] } };
+        ? "已确认最大输入超过所选通道容量，尚无保留完整业务范围的可行路径" : "系统自行选取满足全部原约束的代表性样本", expected: "完整输出" }] } };
     let charges = 0;
     const result = await invoke({ context: current, charge() { charges++; }, sessionFactory: async (options) => ({
       modelCallAccounting: true, dispose() {}, async prompt(text: string) {
         await options.onModelCall!({}); const payload = JSON.parse(String(text)), value = fidelityResult(payload, classification);
         assert.match(options.systemPrompt!, /不要求用户提供具体样本或逐一确认可选质量提升/u);
-        assert.match(options.systemPrompt!, /可构造性尚无足够依据时判unproven，不能判preserved/u);
+        assert.match(options.systemPrompt!, /只有业务映射不明或关键技术缺口使原承诺能否保持无法确认时才用unproven/u);
         assert.deepEqual(options.customTools!.map(({ name }) => name), ["submit_requirement_fidelity", "read_model_context", "read_architecture_file"]);
         if (classification === "unproven") value.checks[0]!.deliveryPreserved = false;
         await fixtureToolAt(options.customTools, 0)!.execute("classification", value);
@@ -142,7 +142,7 @@ test("架构设计与主评审共享验收约束可达性指导，保留系统�
     assert.match(prompt, /按交集推导最大合法集合/u);
     assert.match(prompt, /无代理对字符\/无控制字符/u);
     assert.match(prompt, /不要求用户提供具体样本或逐一确认可选质量提升/u);
-    assert.match(prompt, /可构造性未证明不能据此宣布范围保持/u);
+    assert.match(prompt, /尚未准备研发测试材料本身不代表范围变化/u);
   }
   assert.match(DESIGN_PROMPT, /仅当本轮宿主提供editableSubmission时/u);
   assert.match(DESIGN_PROMPT, /没有该宿主编号时，首次仍用本阶段公开的提交工具提交完整工具参数/u);

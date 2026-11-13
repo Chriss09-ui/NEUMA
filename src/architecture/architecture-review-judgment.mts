@@ -7,6 +7,7 @@ import { requestJevDecision } from "../requirements/providers.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { modelContextValue } from "../runtime/model-context.mjs";
 import { repairHash } from "../runtime/repair-scheduler.mjs";
+import { ARCHITECTURE_JEV_SCOPE } from "./architecture-prompts.mjs";
 
 export interface JudgmentGroup { id: string; assignment: { field: string; ids: string[] }; parts: ReviewParts }
 interface Score { score: number; probabilities: Record<string, number>; confidence: number }
@@ -15,13 +16,15 @@ interface Objection { key: string; field: keyof Omit<ReviewParts, "candidateHash
 interface Receipt { stateHash: string; attempts: number; response: unknown; responses: unknown[]; assessment: Assessment | null; formatFailures: number }
 interface JudgmentRound { parts: ReviewParts; receipts: Record<string, Receipt> }
 interface GroupCheckpoint { sourceHash: string; rounds: JudgmentRound[]; recheckCalls: number; recheckRejection?: ReviewDiagnostic["repeatedFailure"]; recheckSession?: string }
-export interface ReviewJudgmentCheckpoint { version: 1; bindingHash: string; candidateHash: string; completedReviewHash: string | null; groups: Record<string, GroupCheckpoint>; hash: string }
+export interface ReviewJudgmentCheckpoint { version: 1 | 2; bindingHash: string; candidateHash: string; completedReviewHash: string | null;
+  groups: Record<string, GroupCheckpoint>; previousPolicy?: ReviewJudgmentCheckpoint; hash: string }
 export interface JudgmentRecheck { group: JudgmentGroup; parts: ReviewParts; objections: unknown[]; calls: number;
   rejection: ReviewDiagnostic["repeatedFailure"]; sessionFile?: string;
   onCall(): Promise<void>; onRejection(value: NonNullable<ReviewDiagnostic["repeatedFailure"]>): Promise<void>;
   onSession(file: string): Promise<void>; onResult(parts: ReviewParts): Promise<void> }
 
-const rubric = {
+// Frozen only for validating existing receipts; new requests use the stage-scoped rubric below.
+const legacyRubric = {
   version: "group-jev-v1",
   questions: {
     necessity: { type: "score", instructions: "评估这一条意见所要求的当前架构整改的必要性。以已确认需求、当前阶段、原文及程序计算事实为准；评审意见不是事实。多项主张混在一起时，按仍成立的最重要缺陷判断，不能因其中一项错误而撤销其余真实缺陷。后续代码和真实验证未完成不等于当前架构有错。",
@@ -33,11 +36,24 @@ const rubric = {
         contradicted: "材料足够，意见的全部阻塞主张都与原文或程序事实相矛盾。", unproven: "材料不足、主张含混或相互冲突，尚不能决定放行或打回。" } },
   },
 };
+const rubric = {
+  version: "group-jev-v2",
+  scope: ARCHITECTURE_JEV_SCOPE,
+  questions: {
+    necessity: { type: "score", instructions: "评估这一条意见要求当前架构整改的必要性。只根据已确认需求、总体可行性、关键业务职责与输入输出判断；当前仅需总体方案。函数名、内部调用、开发任务和可执行测试材料由研发设计，不因未写这些细节给高分。混合意见只评真实架构缺陷的必要性，不把额外要求算作必须整改。",
+      criteria: ["原文已经满足要求，或意见所指问题不存在。", "只有实现细节、研发测试材料、重复验收或个人偏好方面的要求，不影响总体方案。", "有局部改进空间，但当前总体方案可交研发继续实施。", "具体原文证明需求遗漏、关键可行性障碍或业务职责和输入输出矛盾，影响某项已确认需求，当前必须整改。", "核心任务缺失或直接违背用户硬性要求，当前总体方案必然无法完成任务。"] },
+    strictness: { type: "score", instructions: "评估打回是否越过架构职责。只要求总体做法、关键业务配合、主要失败响应及业务验证方向；不要求逐节点研发设计和完整回归。已有场景覆盖同一要求即可复用。真实架构障碍仍须处理，但不能附带强制研发细节。",
+      criteria: ["要求针对当前真实架构缺陷，整改范围必要且适当。", "稍保守，仍针对当前必要的架构修改。", "混合真实架构缺陷和额外要求，应仅保留真实缺陷的最小整改。", "主要强加内部实现、逐节点开发、可执行测试材料或重复验证，超出架构职责。", "完全依据开发细节、偏好或完美化标准阻拦，当前总体方案已满足需求。"] },
+    basis: { type: "choice", instructions: "核对本条意见陈述的事实是否有原文依据。没写研发细节可以是事实，supported仅确认事实，不能因此认定架构必须整改；由必要性和过严度判断。材料已足以区分阶段职责时，不因缺少后续研发产物选unproven。混合主张分别核对，确有影响总体判断的材料缺口才选unproven。",
+      criteria: { supported: "材料足够，意见陈述的事实成立；是否应在当前阶段整改另行评分。",
+        contradicted: "材料足够，意见的全部阻塞主张与原文或程序事实相矛盾。", unproven: "影响总体判断的关键事实缺失、含混或相互冲突，需核实。" } },
+  },
+};
 const rows = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.map(objectFields) : [];
 const seal = (value: Omit<ReviewJudgmentCheckpoint, "hash">): ReviewJudgmentCheckpoint => ({ ...value, hash: repairHash(value) });
-const stop = (reason: string, message: string, details: UnknownRecord = {}): never => {
+function stop(reason: string, message: string, details: UnknownRecord = {}): never {
   throw Object.assign(new InputError(message), { diagnostic: { stage: "architecture", role: "reviewer", phase: "evaluating", reason, ...details } });
-};
+}
 
 export function architectureGroupJevEnabled(config: ModelConfig) {
   return typeof config.jevApiKey === "string" && Boolean(config.jevApiKey.trim());
@@ -45,7 +61,7 @@ export function architectureGroupJevEnabled(config: ModelConfig) {
 
 export function judgmentApprovesReview(record: unknown, review: unknown): boolean {
   const source = objectFields(record), value = objectFields(source.reviewJudgmentCheckpoint), { hash, ...body } = value;
-  return value.version === 1 && value.candidateHash === source.candidateHash && hash === repairHash(body)
+  return (value.version === 1 || value.version === 2) && value.candidateHash === source.candidateHash && hash === repairHash(body)
     && value.completedReviewHash === repairHash(review) && objectFields(review).verdict === "pass";
 }
 
@@ -121,7 +137,7 @@ function arithmeticFacts(candidate: unknown) {
   });
 }
 
-function judgmentState(group: JudgmentGroup, objection: Objection, context: unknown, priorFindings: unknown) {
+function judgmentState(group: JudgmentGroup, objection: Objection, context: unknown, priorFindings: unknown, legacy = false) {
   const source = objectFields(context), candidate = objectFields(source.candidate), value = objectFields(objection.value);
   const paths = new Map<string, { source: string; path: string }>();
   const add = (source: string, path: string) => paths.set(`${source}:${path}`, { source, path });
@@ -154,7 +170,8 @@ function judgmentState(group: JudgmentGroup, objection: Objection, context: unkn
     objection: objection.value, requirements: source.requirements, materials, confirmedRequirementContext: source.confirmedRequirementContext,
     deferredVerifications: source.deferredVerifications, priorFindings: objection.field === "priorFindingDecisions" ? priorFindings : null,
     acceptanceIndex: rows(candidate.acceptance).map(row => ({ id: row.id, requirementIds: row.requirementIds, input: row.input, expected: row.expected })),
-    programFacts: arithmeticFacts(candidate), instruction: "只决定本组这一条意见是否应阻塞当前架构；其他组没有被授权通过。不要把评审意见当原始需求；不要假设本次资料中未出现的事实。" };
+    programFacts: arithmeticFacts(candidate), instruction: "只决定本组这一条意见是否应阻塞当前架构；其他组没有被授权通过。不要把评审意见当原始需求；不要假设本次资料中未出现的事实。",
+    ...(legacy ? {} : { architectureScope: ARCHITECTURE_JEV_SCOPE }) };
   if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024)
     stop("review_judgment_material_capacity", "这一条争议所需原文过多，需要缩小问题范围；未截断材料或自动放行。", { groupId: group.id, objection: objection.key });
   return state;
@@ -165,22 +182,101 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
   recheck(input: JudgmentRecheck): Promise<void>; validate(group: JudgmentGroup, parts: ReviewParts): ReviewParts;
   request?: typeof requestJevDecision }) {
   const { groups, signal } = options, model = options.config.jevModel || "jev-1.14.0";
-  const bindingHash = repairHash({ candidateHash: options.candidateHash, context: options.context, priorFindings: options.priorFindings ?? null,
-    groups, rubric, model });
-  let checkpoint = seal({ version: 1, bindingHash, candidateHash: options.candidateHash, completedReviewHash: null, groups: {} });
-  if (options.checkpoint !== undefined) {
-    const saved = objectFields(options.checkpoint), { hash, ...body } = saved;
-    if (saved.version !== 1 || saved.bindingHash !== bindingHash || saved.candidateHash !== options.candidateHash || hash !== repairHash(body)
-      || Object.keys(saved).sort().join() !== "bindingHash,candidateHash,completedReviewHash,groups,hash,version" || !saved.groups || Array.isArray(saved.groups))
+  const binding = (legacy: boolean) => repairHash({ candidateHash: options.candidateHash, context: options.context,
+    priorFindings: options.priorFindings ?? null, groups, rubric: legacy ? legacyRubric : rubric, model });
+  const read = (input: unknown): ReviewJudgmentCheckpoint => {
+    const saved = objectFields(input), { hash, ...body } = saved;
+    const keys = ["bindingHash", "candidateHash", "completedReviewHash", "groups", "hash", "version",
+      ...(saved.version === 2 && saved.previousPolicy !== undefined ? ["previousPolicy"] : [])].sort().join();
+    if ((saved.version !== 1 && saved.version !== 2) || saved.bindingHash !== binding(saved.version === 1)
+      || saved.candidateHash !== options.candidateHash || hash !== repairHash(body) || Object.keys(saved).sort().join() !== keys
+      || !saved.groups || typeof saved.groups !== "object" || Array.isArray(saved.groups))
       stop("review_judgment_binding", "JEV 原判定与候选、分组、模型或评分规则不符；不能清零后重跑。");
-    checkpoint = structuredClone(saved) as unknown as ReviewJudgmentCheckpoint;
-    if (Object.keys(checkpoint.groups).some(id => !groups.some(group => group.id === id))) stop("review_judgment_binding", "JEV 检查点含未知小组。");
+    return structuredClone(saved) as unknown as ReviewJudgmentCheckpoint;
+  };
+  const verifyGroups = (value: ReviewJudgmentCheckpoint) => {
+    for (const [id, saved] of Object.entries(value.groups)) {
+      const group = groups.find(group => group.id === id);
+      if (!group || saved.sourceHash !== repairHash(group) || !Number.isSafeInteger(saved.recheckCalls) || saved.recheckCalls < 0
+        || !Array.isArray(saved.rounds) || saved.rounds.length < 1 || saved.rounds.length > 2
+        || repairHash(saved.rounds[0]!.parts) !== repairHash(group.parts))
+        stop("review_judgment_binding", "JEV 小组原报告或累计用量无法核验。");
+      for (const [index, round] of saved.rounds.entries()) {
+        options.validate(group, round.parts);
+        const pending = objections(round.parts, options.context);
+        if (!round.receipts || Array.isArray(round.receipts)) stop("review_judgment_binding", "JEV 判定回执缺失。");
+        const legacy = value.version === 1 || index < (value.previousPolicy?.groups[id]?.rounds.length ?? 1) - 1;
+        for (const [key, receipt] of Object.entries(round.receipts)) {
+          const item = pending.find(item => item.key === key);
+          if (!item || receipt.stateHash !== repairHash(judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, legacy))
+            || !Number.isSafeInteger(receipt.attempts) || receipt.attempts < 0 || !Array.isArray(receipt.responses)
+            || receipt.responses.length > receipt.attempts || !Number.isSafeInteger(receipt.formatFailures)
+            || receipt.formatFailures < 0 || receipt.formatFailures > 3
+            || repairHash(receipt.response) !== repairHash(receipt.responses.at(-1) ?? null))
+            stop("review_judgment_binding", "JEV 原始材料或请求计数无法核验。");
+          if (receipt.assessment) {
+            let expected: Assessment;
+            try { expected = assess(receipt.response); } catch { stop("review_judgment_binding", "JEV 保存的评分结构无效。"); }
+            if (repairHash(expected!) !== repairHash(receipt.assessment)) stop("review_judgment_binding", "JEV 判定与保存的响应不一致。");
+          }
+        }
+        if (value.completedReviewHash !== null && index === saved.rounds.length - 1
+          && pending.some(item => !round.receipts[item.key]?.assessment)) stop("review_judgment_binding", "已完成判定缺少正式评分。");
+      }
+    }
+    if (value.completedReviewHash !== null && groups.some(group => !value.groups[group.id]))
+      stop("review_judgment_binding", "已完成判定缺少小组结果。");
+  };
+  let checkpoint = options.checkpoint === undefined
+    ? seal({ version: 2, bindingHash: binding(false), candidateHash: options.candidateHash, completedReviewHash: null, groups: {} })
+    : read(options.checkpoint);
+  if (checkpoint.previousPolicy) {
+    const previous = read(checkpoint.previousPolicy);
+    if (previous.version !== 1 || previous.completedReviewHash !== null) stop("review_judgment_binding", "评分规则升级来源不是旧版未完成判定。");
+    verifyGroups(previous);
+    for (const [id, old] of Object.entries(previous.groups)) {
+      const current = checkpoint.groups[id];
+      if (!current || current.recheckCalls < old.recheckCalls || current.recheckSession !== old.recheckSession && old.recheckSession
+        || current.rounds.length < old.rounds.length) stop("review_judgment_binding", "评分规则升级丢失原补查或会话。");
+      for (const [index, round] of old.rounds.entries()) {
+        const next = current.rounds[index]!;
+        if (repairHash(next.parts) !== repairHash(round.parts)
+          || index < old.rounds.length - 1 && repairHash(next) !== repairHash(round))
+          stop("review_judgment_binding", "评分规则升级改写了原报告或历史评分。");
+        for (const [key, receipt] of Object.entries(round.receipts)) {
+          const updated = next.receipts[key];
+          if (!updated || updated.attempts < receipt.attempts || updated.formatFailures < receipt.formatFailures
+            || repairHash(updated.responses.slice(0, receipt.responses.length)) !== repairHash(receipt.responses)
+            || index === old.rounds.length - 1 && updated.assessment && updated.responses.length === receipt.responses.length)
+            stop("review_judgment_binding", "评分规则升级丢失原用量或复用了旧规则评分。");
+        }
+      }
+    }
+  }
+  verifyGroups(checkpoint);
+  const migrated = checkpoint.version === 1 && checkpoint.completedReviewHash === null;
+  if (migrated) {
+    const previousPolicy = structuredClone(checkpoint);
+    // Preserve all reports, sessions and cumulative counters; only the latest report needs the new judgment.
+    for (const group of groups) {
+      const round = checkpoint.groups[group.id]?.rounds.at(-1);
+      if (!round) continue;
+      for (const item of objections(round.parts, options.context)) {
+        const receipt = round.receipts[item.key];
+        if (!receipt) continue;
+        receipt.stateHash = repairHash(judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings));
+        receipt.assessment = null;
+      }
+    }
+    checkpoint = seal({ version: 2, bindingHash: binding(false), candidateHash: options.candidateHash,
+      completedReviewHash: null, groups: checkpoint.groups, previousPolicy });
   }
   const persist = async () => {
     signal?.throwIfAborted();
     const { hash: _hash, ...body } = checkpoint;
     checkpoint = seal(body); await options.save(structuredClone(checkpoint)); signal?.throwIfAborted();
   };
+  if (migrated) await persist();
   const result: ReviewParts = { candidateHash: options.candidateHash, checks: [], issues: [], acceptanceScopeChecks: [], priorFindingDecisions: [] };
   const approvals: { groupId: string; by: "reviewer" | "jev"; status: "pass" | "revise" }[] = [];
   for (const group of groups) {
@@ -200,7 +296,7 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
       const pending = objections(round.parts, options.context), keys = new Set(pending.map(item => item.key));
       if (Object.keys(round.receipts).some(key => !keys.has(key))) stop("review_judgment_binding", "JEV 判定没有对应的原始意见。");
       for (const item of pending) {
-        const state = judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings), stateHash = repairHash(state);
+        const state = judgmentState({ ...group, parts: round.parts }, item, options.context, options.priorFindings, checkpoint.version === 1), stateHash = repairHash(state);
         const receipt = round.receipts[item.key] ??= { stateHash, attempts: 0, response: null, responses: [], assessment: null, formatFailures: 0 };
         if (receipt.stateHash !== stateHash || !Number.isSafeInteger(receipt.attempts) || receipt.attempts < 0
           || !Array.isArray(receipt.responses) || receipt.responses.length > receipt.attempts
@@ -213,7 +309,7 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
         while (!receipt.assessment && receipt.formatFailures < 3) {
           let response: unknown;
           try {
-            response = await (options.request ?? requestJevDecision)({ config: options.config, state, questions: rubric.questions, signal,
+            response = await (options.request ?? requestJevDecision)({ config: options.config, state, questions: (checkpoint.version === 1 ? legacyRubric : rubric).questions, signal,
               onAttempt: async () => { receipt.attempts++; await persist(); } });
           } catch (error) {
             const diagnostic = objectFields(objectFields(error).diagnostic);

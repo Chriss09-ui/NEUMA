@@ -40,7 +40,7 @@ import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED
   requirementItems, validateDesign, validateReview, checkDesign, designHash, requiresDevelopment, validateArchitectureDecisionReferences,
   completeDecisionNotes } from "./architecture-contract.mjs";
 import { DESIGN_PROMPT, renderArchitectureReviewPrompt, SPECIALIST_PROMPT, PLATFORM_CLAIMS_PROMPT,
-  BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, REVIEW_REVISION_PROMPT } from "./architecture-prompts.mjs";
+  ARCHITECTURE_DESIGN_SCOPE, ARCHITECTURE_REVIEW_SCOPE, BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, REVIEW_REVISION_PROMPT } from "./architecture-prompts.mjs";
 import { createTechnicalResearch, RESEARCH_PARAMETERS } from "./architecture-research.mjs";
 import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
 import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT } from "../runtime/web-capabilities.mjs";
@@ -547,7 +547,7 @@ export class ArchitectureDesigner {
         const node = dispatched.recheckRole(request.group.id);
         onProgress?.({ type: "status", phase: "evaluating", label: "本组正在补查有争议的意见…" });
         await this.role({ role: "specialist", agentId: record.agentId,
-          systemPrompt: "你是原评审小组。本组JEV对所列意见尚不能作出判定，请读取对应原文，只补查这些争议。保留本组其他有效检查。意见不成立或仅属改进时可通过本组；真实缺陷须有依据。混合主张分别列明，不要求整个设计先返工。",
+          systemPrompt: ARCHITECTURE_REVIEW_SCOPE + "\n你是原评审小组。本组JEV对所列意见尚不能作出判定，请读取对应原文，只补查这些争议。保留本组其他有效检查。意见不成立或仅属改进时可通过本组；真实缺陷须有依据。混合主张分别列明，不要求整个设计先返工。",
           payload: { ...node.payload, pipelineStage: "review_slice", previousReport: request.parts, disputedObjections: request.objections },
           submitName: "submit_architecture_review_slice", parameters: node.parameters,
           legacyReviewParameters: node.legacyParameters, previousReviewParameters: node.previousParameters,
@@ -1933,7 +1933,7 @@ export class ArchitectureDesigner {
             const decision = original && revisionAssessment.review.issues.find(issue => issue.id === original.id);
             return decision && !decision.blocking ? { ...item, description: `本组 JEV 已撤销原打回：${item.description}`,
               remedy: "保留原正确内容，不为该意见修改设计；在提交说明中记录撤销依据，仍须覆盖原任务编号。" } : item;
-          }) } : worker, context: { requirements, candidateSchema, platformRules,
+          }) } : worker, taskInstructions: ARCHITECTURE_DESIGN_SCOPE, context: { requirements, candidateSchema, platformRules,
             runtimeCapabilities: runtimeCapabilities ?? null, acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE },
             binding: { agentId: record.agentId, source: record.reviewRevisionSource }, config: this.config,
             cwd: this.cwd, dataDir: this.dataDir, sessionFactory: this.sessionFactory,
@@ -2145,7 +2145,7 @@ export class ArchitectureDesigner {
                 const { worker, assignment } = node;
                 onProgress({ type: "status", phase: "evaluating", label: `正在分组独立评审（本组${assignment.ids.length}项）…` });
                 return this.role({ role: "specialist", agentId: definition.id,
-                  systemPrompt: "你是独立评审小组，只核对本组指定分项，引用本次冻结证据。你有本组通过权；只把明确影响已确认需求且当前必须改的问题设为阻塞。表达偏好、等价可行方案和已有安排的后续验证不阻塞。每条意见只描述一个可独立处理的问题。interfaces检查同时负责跨组接口一致性。你不修改设计，也不能代表其他组通过。",
+                  systemPrompt: ARCHITECTURE_REVIEW_SCOPE + "\n你是独立评审小组，只核对本组指定分项，引用本次冻结证据。你有本组通过权；只把明确影响已确认需求且当前必须改的问题设为阻塞。表达偏好、等价可行方案和已有安排的后续验证不阻塞。每条意见只描述一个可独立处理的问题。interfaces只检查跨组业务输入输出和职责一致性。你不修改设计，也不能代表其他组通过。",
                   payload: { ...node.payload, pipelineStage: "review_slice" }, submitName: "submit_architecture_review_slice",
                   parameters: node.parameters, prepareSubmission: node.prepareArguments, legacyReviewParameters: node.legacyParameters, previousReviewParameters: node.previousParameters, tools: node.tools, validate: node.validate,
                   recoverReviewReferences: node.recoverReviewReferences,

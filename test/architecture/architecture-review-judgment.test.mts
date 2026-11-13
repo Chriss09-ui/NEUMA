@@ -9,7 +9,7 @@ import { architectureReviewEvidenceContext } from "../../src/architecture/archit
 import { requestJevDecision } from "../../src/requirements/providers.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { validDesign, passingReview } from "../helpers/architecture.mjs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
@@ -118,6 +118,52 @@ test("JEV格式失败连续三次单独保存，恢复不清零；模型或材�
   await assert.rejects(judgeArchitectureReviewGroups({ ...f.options, checkpoint: saved, request: async () => assert.fail("不得重新领取") }), /连续三次/);
   await assert.rejects(judgeArchitectureReviewGroups({ ...f.options, checkpoint: saved, config: { ...f.options.config, jevModel: "different" } }), /不符/);
   await assert.rejects(judgeArchitectureReviewGroups({ ...f.options, checkpoint: saved, context: { ...f.options.context, requirements: [] } }), /不符/);
+});
+
+test("旧评分规则停点保留报告、原会话和全部用量，按新阶段边界续判且中断后不重复迁移", async () => {
+  const f = fixture(), old = JSON.parse(await readFile(new URL("../fixtures/architecture-group-jev-v1.json", import.meta.url), "utf8")) as {
+    candidateHash: string; context: typeof f.options.context; groups: JudgmentGroup[]; checkpoint: ReviewJudgmentCheckpoint;
+    formatCheckpoint: ReviewJudgmentCheckpoint };
+  const source = structuredClone(old.checkpoint);
+  const options = { ...f.options, candidateHash: old.candidateHash, context: old.context, groups: old.groups,
+    validate: (_group: JudgmentGroup, parts: ReviewParts) => canonicalArchitectureReviewParts(parts, {
+      schema: reviewSubmissionSchema({ evidenceRequired: true }), candidateHash: old.candidateHash, context: old.context }) };
+  let calls = 0;
+  await assert.rejects(judgeArchitectureReviewGroups({ ...options, checkpoint: source, request: async args => {
+    calls++; await args.onAttempt(1);
+    assert.deepEqual(f.saved().previousPolicy, source, "发送前已完整保存旧评分依据");
+    assert.equal(f.saved().groups.interfaces!.recheckCalls, 8);
+    assert.equal(f.saved().groups.interfaces!.rounds[1]!.receipts["issues/0"]!.attempts, 2);
+    assert.match(String(objectFields(args.state).architectureScope), /这个事实本身不足以支持打回/);
+    assert.match(String(objectFields(objectFields(args.questions).necessity).instructions), /研发设计/);
+    throw new Error("连接中断");
+  } }), /连接中断/);
+  const interrupted = f.saved();
+  const result = await judgeArchitectureReviewGroups({ ...options, checkpoint: interrupted, request: async args => {
+    calls++; await args.onAttempt(1); return response(1, 4);
+  } });
+  assert.equal(result.review.verdict, "pass");
+  assert.equal(calls, 3, "只对最新报告两条意见重判，额外保留失败请求");
+  assert.equal(result.checkpoint.version, 2);
+  assert.deepEqual(result.checkpoint.previousPolicy, source);
+  assert.deepEqual(old.checkpoint, source, "旧检查点未被改写");
+  const current = result.checkpoint.groups.interfaces!, previous = source.groups.interfaces!;
+  assert.equal(current.recheckCalls, 8); assert.equal(current.recheckSession, previous.recheckSession);
+  assert.deepEqual(current.rounds.map(round => round.parts), previous.rounds.map(round => round.parts));
+  assert.deepEqual(current.rounds[0], previous.rounds[0], "已被补查替代的原评分留存，不重复请求");
+  assert.equal(current.rounds.flatMap(round => Object.values(round.receipts)).reduce((n, r) => n + r.attempts, 0), 7);
+  for (const [key, receipt] of Object.entries(previous.rounds[1]!.receipts))
+    assert.deepEqual(current.rounds[1]!.receipts[key]!.responses.slice(0, receipt.responses.length), receipt.responses);
+  await judgeArchitectureReviewGroups({ ...options, checkpoint: result.checkpoint,
+    request: async () => assert.fail("新规则已完成的评分直接复用") });
+  const corrupt = structuredClone(result.checkpoint);
+  corrupt.groups.interfaces!.rounds[1]!.receipts["issues/0"]!.attempts = 0;
+  const { hash: _hash, ...body } = corrupt; corrupt.hash = designHash(body);
+  await assert.rejects(judgeArchitectureReviewGroups({ ...options, checkpoint: corrupt,
+    request: async () => assert.fail("不可刷新原用量") }), /丢失原用量/);
+  await assert.rejects(judgeArchitectureReviewGroups({ ...options, checkpoint: old.formatCheckpoint,
+    request: async () => assert.fail("旧三次格式错误不因规则升级清零") }), /连续三次/);
+  assert.equal(f.saved().groups.interfaces!.rounds[0]!.receipts["issues/0"]!.formatFailures, 3);
 });
 
 test("JEV连接失败使用既有传输重试，每次真实请求先记账；凭据不进入业务状态", async () => {

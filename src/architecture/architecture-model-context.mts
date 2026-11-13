@@ -4,7 +4,7 @@ import { objectFields, isArray } from "../runtime/type-boundary.mjs";
 function array(value: unknown): unknown[] { if (!isArray(value)) throw new TypeError("Model context list is invalid"); return value; }
 import { modelContextPacket, MODEL_CONTEXT_INSTRUCTIONS } from "../runtime/model-context.mjs";
 import { ARCHITECTURE_ID_READ_RULE } from "./architecture-material-path.mjs";
-import { BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, INTEGRATION_ACCEPTANCE_RULE, REVIEW_EVIDENCE_READ_RULE, REVIEW_FACT_CLAIM_RULE, REVIEW_FORMAT_RULE, REVIEW_SCOPE_LOCATION_RULE } from "./architecture-prompts.mjs";
+import { ARCHITECTURE_DESIGN_SCOPE, ARCHITECTURE_REVIEW_SCOPE, BLUEPRINT_ASSIGNMENT_RULE, CAPABILITY_VERIFICATION_RULE, INTEGRATION_ACCEPTANCE_RULE, REVIEW_EVIDENCE_READ_RULE, REVIEW_FACT_CLAIM_RULE, REVIEW_FORMAT_RULE, REVIEW_SCOPE_LOCATION_RULE } from "./architecture-prompts.mjs";
 import { architectureAdapterRulePaths } from "./architecture-review-evidence.mjs";
 import type { ArchitectureMaterialFile } from "./architecture-material-files.mjs";
 import { MODULE_OBLIGATION_RULE } from "./architecture-module-obligations.mjs";
@@ -208,16 +208,17 @@ export function projectVerificationMessages(messages: ContextEvent["messages"], 
 
 export function architectureNodePrompt({ role, pipelineStage, submitName, blueprintProtocol, flatHandoffs = false }: { role: string; pipelineStage?: string | undefined; submitName: string; blueprintProtocol?: unknown; flatHandoffs?: boolean }) {
   const textHandoffs = blueprintProtocol === "module-handoff-v3";
-  const task = pipelineStage === "review_slice" ? "你是独立评审小组，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。你有本组通过权，只把有依据、影响已确认需求且当前必须修改的问题设为阻塞；个人偏好、等价可行方案及已有安排的后续验证不阻塞。每条意见只写一个可独立处理的问题。interfaces负责跨组接口一致性，跨组疑点仍须具体依据。若收到disputedObjections，只补查这些争议，并按需读取previousReport.json，保留本组其他有效检查。核对原文和反证，不修改设计，不代表其他组通过。"
+  const task = pipelineStage === "review_slice" ? "你是独立评审小组，只核对assignment指定的检查、验收范围或历史问题；提交工具只显示本组结果、issues和summary，完整填写本组编号。你有本组通过权，只把有依据、影响已确认需求且当前必须修改的问题设为阻塞；个人偏好、等价可行方案及已有安排的后续验证不阻塞。每条意见只写一个可独立处理的问题。interfaces只负责跨组业务输入输出与职责的一致性，跨组疑点仍须具体依据。若收到disputedObjections，只补查这些争议，并按需读取previousReport.json，保留本组其他有效检查。核对原文和反证，不修改设计，不代表其他组通过。"
     : pipelineStage === "blueprint" ? "按本轮工具的模块数量与每模块需求条数上限，设计全局蓝图及模块职责、依赖和需求分工；不提前展开各模块实现。"
-    : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
-    : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许自主补充内部组件和步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"
+    : pipelineStage === "module" && textHandoffs ? "按assignment.handoffText设计本模块，遵守蓝图的全局选择和需求分工。只补充必要的业务组件和主要流程步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。"
+    : pipelineStage === "module" ? "仅设计assignment负责的模块，遵守blueprint中的全局选择和接口。module-boundaries-v2协议允许按需要补充业务组件和主要流程步骤；本地引用用字符串，跨模块引用用{moduleId,id}且必须来自dependencyInterfaces。frozen-ids-v1历史协议沿用原蓝图编号。"
       : pipelineStage === "integration" ? "核对已组装方案的接口和conflicts，只按integrationPolicy提交baseHash及必要updates，保留冻结组件和步骤。"
         : pipelineStage === "review_revision" ? "依据当前阻断核实并修订baseCandidate，单项提交baseHash、path和value，多项提交updates；遵守allowedRoots，保留有效内容和编号。"
           : role === "reviewer" ? "独立评审当前design的需求覆盖、可行性、最简性、接口、失败处理、验收与范围。不修改候选；完整检查后提交真实结论。"
             : role === "specialist" ? "仅回答assignment中的局部设计问题，说明接口、取舍、证据和未知，不递归委派。"
               : "依据已确认需求设计最简且充分的完整方案；修订时只改相关内容，保留有效设计与编号。";
   return `你是NEUMA的${role}。${task}
+${role === "reviewer" || pipelineStage === "review_slice" ? ARCHITECTURE_REVIEW_SCOPE : ARCHITECTURE_DESIGN_SCOPE}
 ${MODEL_CONTEXT_INSTRUCTIONS}
 ${role !== "reviewer" && pipelineStage !== "review_slice" ? ARCHITECTURE_ID_READ_RULE : ""}
 按实际公开工具schema提交${submitName}；不要复制schema或编造字段。modelBudget记录请求用量，policy为task_rejections时依同一任务正式退回次数停止，提交后停止。roleGuide保留本角色详细规程，遇到具体协议疑问再读取。
@@ -232,7 +233,7 @@ ${pipelineStage === "blueprint" ? "需求分工还决定系统验收责任：tas
 ${pipelineStage === "blueprint" ? "interaction.assistant仅指托管页面的浮窗助手，不是普通对话入口；未确认启用则不得添加，启用必须page=true且保留用途。profile=workflow表示需要持久检查点的流程，不能配builtin；单次专属代码动作按实际需求选择custom。Python不能配builtin；无代码必须none/builtin。保持已确认的默认入口、页面和操作交付。" : ""}
 ${pipelineStage === "module" ? "capabilities中status=available的id必须逐字来自本轮能力目录，不能为已有能力另起别名；平台交付机制不等于新工具编号。专属待开发代码单独标needs_development，不把目录已可用的运行器改标为待开发。" : ""}
 ${pipelineStage === "module" ? "moduleId和blueprintHash由宿主在正式提交时绑定本次assignment，无需复制历史摘要。遵守moduleCapacity的本模块条数额度，保留完整业务义务，合并重复表达而不截断内容。" : ""}
-${pipelineStage === "module" && flatHandoffs ? "用handoffText向下游交接；在components填负责的requirementIds，直接上游引用填dependencyCoverage，并让每条主责需求有实际验收用例。宿主生成coverage，优先省略该字段。" : ""}
+${pipelineStage === "module" && flatHandoffs ? "用handoffText向下游交接；在components填负责的requirementIds，直接上游引用填dependencyCoverage，并为每条主责需求保留业务验收场景和结果，不要求当前已有可执行用例。宿主生成coverage，优先省略该字段。" : ""}
 ${role === "reviewer" ? "完整评审通过可省略issues；一项问题使用issue，多项使用issues。仍须逐项检查验收和证据。" : ""}
 ${pipelineStage === "module" && !flatHandoffs ? "requirementScope明确本模块主责与其他模块的参考要求。coverage和acceptance[*].requirementIds仅使用ownedRequirementIds；参考内容可用于接口配合和本模块测试，但不能认领其中其他模块负责的正式编号。后续义务的单独requirementId决定主责，其requirementIds仅表示关联原始要求。" : ""}
 ${pipelineStage === "module" ? MODULE_OBLIGATION_RULE : ""}

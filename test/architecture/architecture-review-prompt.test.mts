@@ -5,6 +5,28 @@ import { DESIGN_PROMPT, REVIEW_PROMPT, REVIEW_REVISION_PROMPT, SPECIALIST_PROMPT
   renderArchitectureReviewPrompt } from "../../src/architecture/architecture-prompts.mjs";
 import { HANDOFF_POLICY } from "../../src/architecture/architecture-handoff-verification.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../../src/verification/acceptance-contract.mjs";
+import { architectureNodePrompt } from "../../src/architecture/architecture-model-context.mjs";
+
+test("实际开场与详细规程统一限定架构深度，研发细节不能成为打回条件", () => {
+  const design = [DESIGN_PROMPT, REVIEW_REVISION_PROMPT, SPECIALIST_PROMPT,
+    ...["blueprint", "module", "integration", "review_revision"].map(pipelineStage =>
+      architectureNodePrompt({ role: "designer", pipelineStage, submitName: "submit" }))];
+  for (const prompt of design) {
+    assert.match(prompt, /完整回归条件、测试脚本和模拟故障数据，由研发阶段设计/);
+    assert.match(prompt, /功能可以由一个模块完成时，不强行拆分/);
+    assert.doesNotMatch(prompt, /至少给出 success、missing_input、boundary 三类具体输入与预期|必答：为何选/);
+  }
+  const review = [REVIEW_PROMPT, renderArchitectureReviewPrompt({ batchMode: true }),
+    architectureNodePrompt({ role: "reviewer", submitName: "submit" }),
+    architectureNodePrompt({ role: "specialist", pipelineStage: "review_slice", submitName: "submit" })];
+  for (const prompt of review) {
+    assert.match(prompt, /以下情况不能单独作为打回理由/);
+    assert.match(prompt, /不要求逐组件重复验证/);
+    assert.match(prompt, /最小改动为限/);
+    assert.match(prompt, /没有必要建议时，直接通过/);
+    assert.doesNotMatch(prompt, /核实构造能力及容量推导的可追溯依据；能执行不等于样本可构造/);
+  }
+});
 
 test("设计、顾问、修订和两种评审区分执行依赖与验收义务，保留真实缺口和验证边界", () => {
   for (const prompt of [DESIGN_PROMPT, SPECIALIST_PROMPT, REVIEW_REVISION_PROMPT, REVIEW_PROMPT,

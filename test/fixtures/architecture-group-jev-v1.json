@@ -1,0 +1,935 @@
+{
+  "provenance": "Produced by judgeArchitectureReviewGroups at 3bb649abafc609526ead8c78ebaa2c530f117a95 with controlled provider responses; no live credentials or user materials.",
+  "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+  "context": {
+    "candidate": {
+      "profile": "light",
+      "rationale": "输入和交付均为文本，现有执行器可完成。",
+      "instructions": "根据用户提供的材料整理周报。缺少信息时询问，不编造进展，不执行外部动作。",
+      "components": [
+        {
+          "id": "summarize",
+          "purpose": "整理工作记录",
+          "necessity": "提取进展并保留用户限制",
+          "inputs": "用户提供的工作记录",
+          "outputs": "中文周报"
+        }
+      ],
+      "steps": [
+        {
+          "id": "compose",
+          "componentId": "summarize",
+          "dependsOn": [],
+          "input": "用户的工作记录和本轮要求",
+          "output": "中文周报",
+          "completion": "覆盖用户提供的进展并标注缺失信息"
+        }
+      ],
+      "capabilities": [
+        {
+          "id": "conversation",
+          "status": "available",
+          "reason": "只处理用户提供的文本"
+        }
+      ],
+      "state": {
+        "mode": "task",
+        "reason": "只需本次对话上下文"
+      },
+      "failureHandling": [
+        {
+          "scenario": "未提供工作记录",
+          "response": "请用户补充记录，不编造结果"
+        },
+        {
+          "scenario": "文件工具失败",
+          "response": "明确说明未保存成功，保留文本结果供重试"
+        }
+      ],
+      "decisions": [
+        {
+          "id": "runtime",
+          "problem": "怎样执行文本整理",
+          "choice": "使用现有执行器",
+          "alternatives": [
+            {
+              "option": "独立程序",
+              "reason": "本需求没有独立部署或专用处理依赖"
+            }
+          ],
+          "reason": "复用已有文本处理能力即可覆盖需求",
+          "evidenceIds": [],
+          "uncertainties": []
+        }
+      ],
+      "coverage": [
+        {
+          "requirementId": "R1",
+          "componentIds": [
+            "summarize"
+          ],
+          "verification": "核对结果满足：统计整数数组，3.0 按数值整数接受"
+        }
+      ],
+      "acceptance": [
+        {
+          "id": "valid",
+          "kind": "success",
+          "requirementIds": [
+            "R1"
+          ],
+          "input": "本周完成原型，下周验证交互",
+          "expected": "基于记录给出中文周报，不添加未提供的进展",
+          "verification": {
+            "stage": "development",
+            "owner": "generated-code",
+            "adapterId": "action"
+          }
+        },
+        {
+          "id": "empty",
+          "kind": "missing_input",
+          "requirementIds": [
+            "R1"
+          ],
+          "input": "没有提供记录",
+          "expected": "请求用户提供记录，不编造周报",
+          "verification": {
+            "stage": "development",
+            "owner": "generated-code",
+            "adapterId": "action"
+          }
+        },
+        {
+          "id": "boundary",
+          "kind": "boundary",
+          "requirementIds": [
+            "R1"
+          ],
+          "input": "直接发送周报",
+          "expected": "说明尚未发送，不执行未授权的外部动作",
+          "verification": {
+            "stage": "development",
+            "owner": "generated-code",
+            "adapterId": "action"
+          }
+        },
+        {
+          "id": "tool_failure",
+          "kind": "tool_failure",
+          "requirementIds": [
+            "R1"
+          ],
+          "input": "保存文件失败",
+          "expected": "说明保存失败，保留文本并允许重试",
+          "verification": {
+            "stage": "development",
+            "owner": "generated-code",
+            "adapterId": "action"
+          }
+        }
+      ],
+      "unknowns": [],
+      "schemaVersion": 3,
+      "connections": [],
+      "interaction": {
+        "defaultEntry": "conversation",
+        "page": false,
+        "operations": false,
+        "inputs": "原始记录",
+        "results": "核对结果",
+        "persistentData": "无"
+      },
+      "execution": {
+        "language": "none",
+        "hosting": "builtin",
+        "reason": "本地文本候选"
+      },
+      "selectionBasis": {
+        "capacity": "本轮输入",
+        "process": "逐项核对",
+        "quality": "保留原文",
+        "requirementIds": [
+          "R1"
+        ],
+        "assumptions": []
+      }
+    },
+    "requirements": [
+      {
+        "id": "R1",
+        "text": "统计整数数组，3.0 按数值整数接受"
+      }
+    ],
+    "runtimeCapabilities": {},
+    "evidence": [],
+    "confirmedRequirementContext": null,
+    "deferredVerifications": null,
+    "acceptanceAdapterGuide": {
+      "adapters": {}
+    },
+    "contextManifest": {
+      "candidate": {
+        "delivery": "full",
+        "characters": 2084,
+        "sha256": "43fceb53f03c6f39dde64d91bc51203951c9175d430c19a8a69030a200075e95"
+      },
+      "requirements": {
+        "delivery": "full",
+        "characters": 41,
+        "sha256": "93695a24ca5a4e681efb8835fa023b58782c6b7222394ba1da52b880dcca0881"
+      },
+      "runtimeCapabilities": {
+        "delivery": "full",
+        "characters": 2,
+        "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      "evidence": {
+        "delivery": "full",
+        "characters": 2,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "confirmedRequirementContext": {
+        "delivery": "full",
+        "characters": 4,
+        "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+      },
+      "deferredVerifications": {
+        "delivery": "full",
+        "characters": 4,
+        "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+      },
+      "acceptanceAdapterGuide": {
+        "delivery": "full",
+        "characters": 15,
+        "sha256": "d204fca0e893a956538a241643f8cdbbdc5f9dfe0eeb17ac3a023203561e44dc"
+      }
+    }
+  },
+  "groups": [
+    {
+      "id": "interfaces",
+      "assignment": {
+        "field": "checks",
+        "ids": [
+          "interfaces"
+        ]
+      },
+      "parts": {
+        "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+        "checks": [
+          {
+            "id": "interfaces",
+            "passed": false,
+            "evidence": "要求补充研发细节"
+          }
+        ],
+        "issues": [
+          {
+            "id": "internal_name",
+            "checkId": "interfaces",
+            "kind": "design",
+            "blocking": true,
+            "description": "未确定内部函数名称",
+            "remedy": "指定函数名称",
+            "candidatePaths": [
+              "/components/0"
+            ],
+            "references": [
+              {
+                "source": "candidate",
+                "path": "/components/0"
+              }
+            ]
+          },
+          {
+            "id": "test_fixture",
+            "checkId": "interfaces",
+            "kind": "design",
+            "blocking": true,
+            "description": "尚未提供可执行的模拟故障测试数据",
+            "remedy": "编写可执行测试数据",
+            "candidatePaths": [
+              "/acceptance/0"
+            ],
+            "references": [
+              {
+                "source": "candidate",
+                "path": "/acceptance/0"
+              }
+            ]
+          }
+        ],
+        "acceptanceScopeChecks": [],
+        "priorFindingDecisions": []
+      }
+    }
+  ],
+  "checkpoint": {
+    "version": 1,
+    "bindingHash": "2537a77a97797eb46e202ed6e3bf11be99d956d4d895bf39318bace21a3adf9d",
+    "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+    "completedReviewHash": null,
+    "groups": {
+      "interfaces": {
+        "sourceHash": "9cd22b3d01737bb2793dce514eea9cc958142f437abc357ba358927310a336b0",
+        "rounds": [
+          {
+            "parts": {
+              "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+              "checks": [
+                {
+                  "id": "interfaces",
+                  "passed": false,
+                  "evidence": "要求补充研发细节"
+                }
+              ],
+              "issues": [
+                {
+                  "id": "internal_name",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "未确定内部函数名称",
+                  "remedy": "指定函数名称",
+                  "candidatePaths": [
+                    "/components/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/components/0"
+                    }
+                  ]
+                },
+                {
+                  "id": "test_fixture",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "尚未提供可执行的模拟故障测试数据",
+                  "remedy": "编写可执行测试数据",
+                  "candidatePaths": [
+                    "/acceptance/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/acceptance/0"
+                    }
+                  ]
+                }
+              ],
+              "acceptanceScopeChecks": [],
+              "priorFindingDecisions": []
+            },
+            "receipts": {
+              "issues/0": {
+                "stateHash": "885c7219c9d5634e6030445291bf1d179c9672a06bdf61703b4bbf1ee744d8d7",
+                "attempts": 1,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              },
+              "issues/1": {
+                "stateHash": "dfff6d8392fe07de068090772a3d912953421f6386bbe156d0c244325692000f",
+                "attempts": 1,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              }
+            }
+          },
+          {
+            "parts": {
+              "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+              "checks": [
+                {
+                  "id": "interfaces",
+                  "passed": false,
+                  "evidence": "要求补充研发细节"
+                }
+              ],
+              "issues": [
+                {
+                  "id": "internal_name",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "未确定内部函数名称",
+                  "remedy": "指定函数名称",
+                  "candidatePaths": [
+                    "/components/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/components/0"
+                    }
+                  ]
+                },
+                {
+                  "id": "test_fixture",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "尚未提供可执行的模拟故障测试数据",
+                  "remedy": "编写可执行测试数据",
+                  "candidatePaths": [
+                    "/acceptance/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/acceptance/0"
+                    }
+                  ]
+                }
+              ],
+              "acceptanceScopeChecks": [],
+              "priorFindingDecisions": []
+            },
+            "receipts": {
+              "issues/0": {
+                "stateHash": "885c7219c9d5634e6030445291bf1d179c9672a06bdf61703b4bbf1ee744d8d7",
+                "attempts": 1,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              },
+              "issues/1": {
+                "stateHash": "dfff6d8392fe07de068090772a3d912953421f6386bbe156d0c244325692000f",
+                "attempts": 1,
+                "response": {
+                  "answers": {
+                    "necessity": {
+                      "type": "score",
+                      "score": 2.8,
+                      "confidence": 0.8,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 0,
+                        "2": 0.2,
+                        "3": 0.8,
+                        "4": 0
+                      }
+                    },
+                    "strictness": {
+                      "type": "score",
+                      "score": 1,
+                      "confidence": 1,
+                      "probabilities": {
+                        "0": 0,
+                        "1": 1,
+                        "2": 0,
+                        "3": 0,
+                        "4": 0
+                      }
+                    },
+                    "basis": {
+                      "type": "choice",
+                      "choice": "supported",
+                      "probabilities": {
+                        "supported": 1,
+                        "contradicted": 0,
+                        "unproven": 0
+                      }
+                    }
+                  },
+                  "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 12
+                  }
+                },
+                "responses": [
+                  {
+                    "answers": {
+                      "necessity": {
+                        "type": "score",
+                        "score": 2.8,
+                        "confidence": 0.8,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 0,
+                          "2": 0.2,
+                          "3": 0.8,
+                          "4": 0
+                        }
+                      },
+                      "strictness": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 1,
+                        "probabilities": {
+                          "0": 0,
+                          "1": 1,
+                          "2": 0,
+                          "3": 0,
+                          "4": 0
+                        }
+                      },
+                      "basis": {
+                        "type": "choice",
+                        "choice": "supported",
+                        "probabilities": {
+                          "supported": 1,
+                          "contradicted": 0,
+                          "unproven": 0
+                        }
+                      }
+                    },
+                    "usage": {
+                      "input_tokens": 100,
+                      "output_tokens": 12
+                    }
+                  }
+                ],
+                "assessment": {
+                  "necessity": {
+                    "score": 70,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 0,
+                      "2": 0.2,
+                      "3": 0.8,
+                      "4": 0
+                    },
+                    "confidence": 0.8
+                  },
+                  "strictness": {
+                    "score": 25,
+                    "probabilities": {
+                      "0": 0,
+                      "1": 1,
+                      "2": 0,
+                      "3": 0,
+                      "4": 0
+                    },
+                    "confidence": 1
+                  },
+                  "basis": "supported",
+                  "route": "recheck"
+                },
+                "formatFailures": 0
+              }
+            }
+          }
+        ],
+        "recheckCalls": 8,
+        "recheckSession": "original-review-session.jsonl"
+      }
+    },
+    "hash": "238340192898cd631f9ba827033f4b9a272e16ada69dbcf394d11ec983084401"
+  },
+  "formatCheckpoint": {
+    "version": 1,
+    "bindingHash": "2537a77a97797eb46e202ed6e3bf11be99d956d4d895bf39318bace21a3adf9d",
+    "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+    "completedReviewHash": null,
+    "groups": {
+      "interfaces": {
+        "sourceHash": "9cd22b3d01737bb2793dce514eea9cc958142f437abc357ba358927310a336b0",
+        "rounds": [
+          {
+            "parts": {
+              "candidateHash": "7250b3fa616a07781a65c56569ecb70bd62cd61c7988a7ccec604fb4f1ddc22a",
+              "checks": [
+                {
+                  "id": "interfaces",
+                  "passed": false,
+                  "evidence": "要求补充研发细节"
+                }
+              ],
+              "issues": [
+                {
+                  "id": "internal_name",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "未确定内部函数名称",
+                  "remedy": "指定函数名称",
+                  "candidatePaths": [
+                    "/components/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/components/0"
+                    }
+                  ]
+                },
+                {
+                  "id": "test_fixture",
+                  "checkId": "interfaces",
+                  "kind": "design",
+                  "blocking": true,
+                  "description": "尚未提供可执行的模拟故障测试数据",
+                  "remedy": "编写可执行测试数据",
+                  "candidatePaths": [
+                    "/acceptance/0"
+                  ],
+                  "references": [
+                    {
+                      "source": "candidate",
+                      "path": "/acceptance/0"
+                    }
+                  ]
+                }
+              ],
+              "acceptanceScopeChecks": [],
+              "priorFindingDecisions": []
+            },
+            "receipts": {
+              "issues/0": {
+                "stateHash": "885c7219c9d5634e6030445291bf1d179c9672a06bdf61703b4bbf1ee744d8d7",
+                "attempts": 3,
+                "response": {
+                  "answers": {}
+                },
+                "responses": [
+                  {
+                    "answers": {}
+                  },
+                  {
+                    "answers": {}
+                  },
+                  {
+                    "answers": {}
+                  }
+                ],
+                "assessment": null,
+                "formatFailures": 3
+              }
+            }
+          }
+        ],
+        "recheckCalls": 0
+      }
+    },
+    "hash": "e8a582b4a155c9051a7d83e347bea81b3c8f77eb941901da0313b5511ec269de"
+  }
+}

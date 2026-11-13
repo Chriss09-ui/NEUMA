@@ -72,7 +72,8 @@ test("显式缺少平台事实时preserved提交被拒，原回合可用unproven
     const result = await invoke({ ...base(), acceptanceAdapterGuide }, async (options: PiSessionOptions) => ({ modelCallAccounting: true, dispose() {}, async prompt(text: string) {
       await options.onModelCall!({}); calls++;
       const payload = JSON.parse(String(text));
-      assert.match(options.systemPrompt!, /所需平台事实缺失、与指南矛盾或构造\/容量依据尚不足时不能preserved/u);
+      assert.match(options.systemPrompt!, /只有平台事实缺口或与指南的矛盾实际影响原业务范围能否保持时才用unproven/u);
+      assert.match(options.systemPrompt!, /不得仅因研发测试材料尚未准备就否定范围保持/u);
       await assert.rejects(callFixture(Reflect.apply, Reflect, [fixtureToolAt(options.customTools, 0)!.execute, fixtureToolAt(options.customTools, 0), ["unsupported-pass", fidelityResult(payload)]]),
         (error: TestFailure) => error.validationIssues!.some((issue) => issue.reason === "platform_facts_unavailable"));
       await fixtureToolAt(options.customTools, 0)!.execute("unproven", fidelityResult(payload, "unproven"));
@@ -133,7 +134,7 @@ test("主评审和fidelity实际首包使用同版冻结事实，旧schema仍走
 
 test("构造反证或容量依据不足的模拟独立判断不能被主评审pass覆盖，不增会话或模型请求", async (t) => {
   assert.match(REVIEW_PROMPT, /联查该项input、完整expected与关联decisions/u);
-  assert.match(REVIEW_PROMPT, /矛盾或依据不足不得pass，应revise或insufficient/u);
+  assert.match(REVIEW_PROMPT, /影响方案成立的关键事实无法确认时，才要求修订或核实/u);
   const result = await reviewRole(t, { unproven: true });
   assert.equal(result.result, undefined); assert.equal(result.diagnostic!.requirementFidelity!.verdict, "unproven");
   assert.equal(result.children, 1); assert.equal(result.childCalls, 1); assert.equal(result.mainCalls, 1);

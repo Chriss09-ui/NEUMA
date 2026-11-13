@@ -168,7 +168,7 @@ function prepareDispatch(options: DispatchInputs) {
           design: objectFields(context).candidate,
           priorFindings: assignment!.field === "priorFindingDecisions" ? { ...objectFields(priorFindings),
             findings: rows(objectFields(priorFindings).findings).filter(row => assignment!.ids.includes(String(row.findingId))) } : null,
-          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，相关问题写入本组 issues 并附资料文件位置；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；只有当前必须整改的真实缺陷才阻塞。补查时保留已有问题编号，撤销意见标blocking=false并说明原因。各组完成后再汇总并作独立范围复核。` } };
+          instruction: `只提交 summary、issues 和本组的 ${assignment.field}。结果恰好覆盖 assignment.ids 中的编号。其他组的材料可用于核查依赖，相关问题写入本组 issues 并附资料文件位置；其他组负责的结果留给对应组提交。先读取相关资料，报告保留判断、理由及位置；只有需求缺漏、关键可行性障碍或业务职责及流程矛盾才阻塞；内部实现和可执行测试材料由研发准备，不作为本组打回条件。补查时保留已有问题编号，撤销意见标blocking=false并说明原因。各组完成后再汇总并作独立范围复核。` } };
   };
   return { checkpoint, binding, base, plan, checked, ledger, roleFor };
 }
@@ -277,5 +277,5 @@ export async function runArchitectureReviewDispatch(options: DispatchInputs & Pa
     groups: plan.map(assignment => ({ assignment, summary: checked(slices[assignment.id], assignment).summary })),
     issues: verified.issues, failedChecks: verified.checks.filter(item => !item.passed),
     insufficientAcceptance: verified.acceptanceScopeChecks.filter(item => !item.sufficient),
-    instruction: "分组结果已按同一候选和证据校验并保存在reviewParts；请核对组间冲突与整体充分性，必要时读取原文或修正分项，再提交总评。完整校验和独立需求范围复核仍执行。" } };
+    instruction: "分组结果已按同一候选和证据校验并保存在reviewParts；只核对组间业务职责、输入输出的矛盾和需求遗漏，不重新要求各组补充开发细节；必要时读取原文或修正分项，再提交总评。完整校验和独立需求范围复核仍执行。" } };
 }

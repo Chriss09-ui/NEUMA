@@ -53,7 +53,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { InputError, ProviderError } from "../requirements/core.mjs";
 import { CAPABILITIES, completeDecisionNotes, designHash, designSubmissionSchema } from "./architecture-contract.mjs";
-import { INTEGRATION_ACCEPTANCE_RULE } from "./architecture-prompts.mjs";
+import { ARCHITECTURE_DESIGN_SCOPE, INTEGRATION_ACCEPTANCE_RULE } from "./architecture-prompts.mjs";
 import { platformCapabilityCatalog } from "./platform-contract.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { architectureStageRepairPlan } from "./architecture-stage-recovery.mjs";
@@ -520,7 +520,7 @@ export function readArchitectureDesignProgress(record: { designProgressCheckpoin
 
 const instructions = {
   blueprint: "你负责本轮架构蓝图，不承担模块内部的详细设计。只提交全局执行选择与1至3个功能模块的职责、正式需求归属、输入输出和依赖边界。每条正式需求恰有一个主责模块，跨模块依赖明确声明。不要声明或冻结组件、步骤编号；这些由模块设计者按需要补充。不提前展开完整覆盖表和验收表，不编造平台能力，不执行外部动作。蓝图保存只是中间成果，不代表完整候选或通过。",
-  module: "你只设计本轮assignment主责的功能模块。遵守蓝图的模块职责、输入输出与依赖，自主设计和补充本模块的组件、步骤、能力、失败处理、决策、需求覆盖和验收义务。每个组件至少由一个步骤使用。组件和步骤编号在本模块内唯一；本地引用用字符串，跨模块步骤依赖及组件覆盖用{moduleId,id}，只能引用dependencyInterfaces提供的直接依赖模块真实编号，不猜测或代写其他模块。不修改其他模块或全局选择，不递归委派、不缩减用户要求。只按当前节点工具提交完整模块产物；保存不代表最终通过。",
+  module: "你只设计本轮assignment主责的功能模块。遵守蓝图的模块职责、输入输出与依赖，用简洁说明交代必要组件、主要业务步骤、关键能力、主要失败响应和需求覆盖；验收只写业务场景、结果及后续验证方向。每个组件至少由一个步骤使用。组件和步骤编号在本模块内唯一；本地引用用字符串，跨模块步骤依赖及组件覆盖用{moduleId,id}，只能引用dependencyInterfaces提供的直接依赖模块真实编号，不猜测或代写其他模块。不修改其他模块或全局选择，不递归委派、不缩减用户要求。只按当前节点工具提交完整模块产物；保存不代表最终通过。",
   integration: "你是架构整合者。程序已经拼装蓝图与模块产物，只处理给定冲突和整体验收衔接，按baseHash提交必要的局部updates；无须修改时提交空updates。保留蓝图约束、模块职责、稳定ID及有效内容，不重写完整候选，不重新开展全局设计。修改仍受完整原结构与独立评审约束，不能以整合自述宣布通过。",
 };
 const legacyInstructions = {
@@ -798,9 +798,9 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
     rejectionLimit([key]);
     onProgress?.({ type: "status", phase: "designing", label: ({ blueprint: "正在确定架构蓝图与模块边界…", module: "正在设计功能模块并核对上游接口…", integration: "正在整合模块并核对交接…", consultation: "正在分组核对蓝图专项问题…" })[stage] });
     const submitName = ({ blueprint: "submit_architecture_blueprint", module: "submit_architecture_module", integration: "submit_architecture_integration", consultation: "submit_blueprint_analysis" })[stage];
-    const value = await runRole({ stage, key, role, stageInstruction: stage === "consultation"
+    const value = await runRole({ stage, key, role, stageInstruction: ARCHITECTURE_DESIGN_SCOPE + "\n" + (stage === "consultation"
       ? "只分析assignment中的一个专项问题及责任需求，按提供的平台事实给出建议、依据位置和未知。不能编写完整蓝图、改需求、执行外部操作或继续委派；建议不是已验证结论。"
-      : (context.legacyBlueprint && (stage !== "integration" && legacyInstructions[stage]) || instructions[stage]).replace("1至3", `1至${checkpoint.moduleLimit ?? 3}`),
+      : (context.legacyBlueprint && (stage !== "integration" && legacyInstructions[stage]) || instructions[stage]).replace("1至3", `1至${checkpoint.moduleLimit ?? 3}`)),
       submitName, ...(stage === "blueprint" && checkpoint.schemaVersion >= 4 ? { tools: [consultationTool] } : {}),
       payload: { ...payload, stageSchema: parameters, stageContract: { submitName, fields: Object.keys(parameters.properties ?? {}), source: "tool_parameters" }, blueprintProtocol: context.textHandoffs ? "module-handoff-v3" : context.legacyBlueprint ? "frozen-ids-v1" : "module-boundaries-v2", pipelineStage: stage, designModelBudget: { limit: checkpoint.submissionPolicy ? null : architectureDesignCallLimits(checkpoint).pipeline, used: checkpoint.modelCalls,
         remaining: checkpoint.submissionPolicy ? null : architectureDesignCallLimits(checkpoint).pipeline - checkpoint.modelCalls, stageLimit: modelCallLimit,
@@ -931,7 +931,7 @@ export async function runArchitectureDesignPipeline({ record, context, binding, 
           moduleObligations: obligations[assignment.id],
           requirementScope: { moduleId: assignment.id, ownedRequirementIds: [...assignment.requirementIds],
             referenceOnly: blueprint.modules.filter(owner => owner.id !== assignment.id).map(owner => ({ moduleId: owner.id, requirementIds: [...owner.requirementIds] })),
-            instruction: (context.compactSubmissions ? "组件关联与验收只能登记ownedRequirementIds；" : "coverage与acceptance[*].requirementIds只能登记ownedRequirementIds；") + "referenceOnly列出其他模块主责，供理解接口、配合实现或测试，不能在本模块登记覆盖或验收。后续义务的主责按其单独的requirementId查本表；requirementIds只是关联的原始需求，不转移主责。跨模块验证由主责模块保留完整检查，本模块仍须提交自己负责要求的具体测试。" },
+            instruction: (context.compactSubmissions ? "组件关联与验收只能登记ownedRequirementIds；" : "coverage与acceptance[*].requirementIds只能登记ownedRequirementIds；") + "referenceOnly列出其他模块主责，供理解接口、配合实现或测试，不能在本模块登记覆盖或验收。后续义务的主责按其单独的requirementId查本表；requirementIds只是关联的原始需求，不转移主责。跨模块验证由主责模块保留完整检查，本模块只需保留自己负责要求的业务验收方向，不编写可执行测试材料。" },
           ...(!context.legacyBlueprint ? { dependencyInterfaces } : {}),
           requirements: context.requirements.filter(item => assignment.requirementIds.includes(item.id)) },
         parameters, value => {

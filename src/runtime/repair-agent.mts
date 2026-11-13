@@ -25,7 +25,7 @@ const prompt = `你是本次修复调度中的独立子Agent，仅负责repairAs
 
 export async function runRepairAgent(options: { worker: RepairWorker; context: Record<string, unknown>; binding: unknown;
   config: ModelConfig; cwd: string; dataDir: string; sessionDirectory: string; sessionFactory: SessionFactory;
-  maxOutputTokens: number; signal?: AbortSignal | undefined; tools?: NeumaTool[];
+  maxOutputTokens: number; signal?: AbortSignal | undefined; tools?: NeumaTool[]; taskInstructions?: string;
   prepareMaterials?: (sources: UnknownRecord) => Promise<{ tool: NeumaTool; project: (input: UnknownRecord) => UnknownRecord | Promise<UnknownRecord>;
     transformContext?: (messages: ContextEvent["messages"]) => Promise<ContextEvent["messages"]>; resolvePointer?: ModelContextPointerResolver }> }): Promise<void> {
   const { worker, signal } = options;
@@ -92,7 +92,7 @@ export async function runRepairAgent(options: { worker: RepairWorker; context: R
   signal?.addEventListener("abort", abort, { once: true });
   try {
     session = await options.sessionFactory({ config: options.config, cwd: options.cwd, dataDir: options.dataDir, reasoningMode: "off",
-      maxOutputTokens: options.maxOutputTokens, systemPrompt: (fileDelivery ? prompt.replace("preparedContext直接提供本组已有字段和必要材料，未内联材料才用read_repair_context读取", "materialFiles提供本组资料文件目录，先用read_architecture_file读取需要的原文；旧read_repair_context同样可用") : prompt) + "\n" + renderPiSubmissionContract({ role: "repair", submitName: submit.name, tools, structuredResponse: true }),
+      maxOutputTokens: options.maxOutputTokens, systemPrompt: (fileDelivery ? prompt.replace("preparedContext直接提供本组已有字段和必要材料，未内联材料才用read_repair_context读取", "materialFiles提供本组资料文件目录，先用read_architecture_file读取需要的原文；旧read_repair_context同样可用") : prompt) + (options.taskInstructions ? "\n" + options.taskInstructions : "") + "\n" + renderPiSubmissionContract({ role: "repair", submitName: submit.name, tools, structuredResponse: true }),
       ...(fileDelivery ? { preparePrompt: projectMessage, transformContext: fileDelivery.transformContext ?? projectHistory } : {}),
       customTools: tools, sessionStorage: { directory: options.sessionDirectory,
         binding: { version: 1, role: "repair", bindingHash: repairHash(options.binding), groupId: worker.group.id, baseHash: worker.baseHash },
