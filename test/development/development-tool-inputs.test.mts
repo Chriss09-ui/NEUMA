@@ -48,15 +48,17 @@ async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, co
   return { controller, ctx, handle, captured: capture.current, tools, requests, executed, counter, error: () => serverError };
 }
 
-test("新研发会话的最后一次真实模型请求只暴露提交工具，不把剩余额度花在读取上", async t => {
+test("研发超过旧请求上限仍可读取再提交，只有用量累计", async t => {
   const f = await fixture(t, (body, count) => {
     if (count === 1) return [{ name: "read_development_context", args: { requests: [{ section: "task" }] } }];
-    assert.equal(count, 2);
-    assert.deepEqual(recordArray(body.tools).map(tool => objectFields(tool.function).name), ["submit_development_work"]);
+    const names = recordArray(body.tools).map(tool => objectFields(tool.function).name);
+    assert.ok(names.includes("read_development_context")); assert.ok(names.includes("submit_development_work"));
+    if (count === 2) return [{ name: "read_development_context", args: { requests: [{ section: "task" }] } }];
+    assert.equal(count, 3);
     return [{ name: "submit_development_work", args: { summary: "完成有界任务", changedFiles: [], knownIssues: [], nextAction: "验收", continue: false } }];
   }, { turns: 2, boundedWorkload: true });
   await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, { task: { id: "bounded" } }]);
-  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 2); assert.equal(f.counter.turns, 2);
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 3); assert.equal(f.counter.turns, 3);
 });
 
 test("研发真实Pi原始参数不被强转，下一请求包含具体字段诊断，修正后正常提交", async (t) => {
@@ -96,7 +98,7 @@ test("研发相同错误原参数三次后在下一请求前停止，持久记�
   const changedTools = f.tools.map((tool) => ({ ...tool, parameters: { ...tool.parameters, properties: { value: { type: "string", maxLength: 200 } } } }));
   const changed = await callFixture(f.controller.role, f.controller, [f.ctx, { kind: "developer", tools: changedTools, scope: {}, counter: { turns: 0 }, limit: 12, validate: (value: unknown) => value }]);
   try {
-    assert.equal(changed.counter.turns, 3); assert.equal(changed.reference.toolInputFailure, undefined, "公开工具契约改变后旧结构拒绝不再适用，预算仍保留");
+    assert.equal(changed.counter.turns, 3); assert.equal(changed.reference.toolInputFailure!.count, 3, "修改字段契约不能清零已发生的格式错误");
   } finally { callFixture(f.controller.dispose, f.controller, [f.ctx, changed]); }
 });
 
@@ -115,19 +117,18 @@ test("供应商跨请求复用callId仍分别计数，同一回复重复校验�
   assert.deepEqual<NonNullable<typeof f>["executed"]>(f.executed, []);
 });
 
-test("不同错误原参数重置连续计数，同callId预检不重复计数，读取其他工具不清零", async (t) => {
+test("不同参数与不同工具的格式错误连续累计，同callId预检去重，正常读取不清零", async (t) => {
   const f = await fixture(t, () => []);
   const validate = f.captured!.rawInputValidators!.change_input!;
   assert.equal((await callFixture(validate, undefined, [{ args: { value: 7 }, toolCallId: "same" }])).valid, false);
   await callFixture(validate, undefined, [{ args: { value: 7 }, toolCallId: "same" }]);
   assert.equal(f.handle.reference.toolInputFailure!.count, 1);
   await callFixture(validate, undefined, [{ args: { value: 8 }, toolCallId: "changed" }]);
-  assert.equal(f.handle.reference.toolInputFailure!.count, 1);
-  await callFixture(validate, undefined, [{ args: { value: 8 }, toolCallId: "second" }]);
+  assert.equal(f.handle.reference.toolInputFailure!.count, 2);
   f.handle.accepting = true; f.handle.payload = { report: { status: "fixed-local-read" } };
   await fixtureTools(f.captured!.customTools).read_development_context!.execute("read", { section: "report", offset: 0, limit: 1000 });
   assert.equal(f.handle.reference.toolInputFailure!.count, 2);
-  await callFixture(validate, undefined, [{ args: { value: 8 }, toolCallId: "third" }]);
+  await callFixture(f.captured!.rawInputValidators!.read_development_context!, undefined, [{ args: { requests: "invalid" }, toolCallId: "third" }]);
   await assert.rejects(async () => await f.captured!.onModelCall!({}), (error: unknown) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
   assert.equal(f.counter.turns, 0); assert.equal(f.requests.length, 0);
 });

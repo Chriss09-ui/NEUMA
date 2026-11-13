@@ -120,13 +120,13 @@ test("不可写补丁在保存完成结果前拒绝，恢复用原剩余额度�
   assert.equal(result.budgets.corrections, stopped.budgets.corrections);
 });
 
-test("修复子组耗尽后公开为不可直接续跑，重复调用不重领额度", async t => {
+test("修复子组连续三次未提交后停止，恢复保留格式计数和原会话", async t => {
   const f = await fixture(t, "repair_budget"); if (!f) return;
   const stopped = await f.controller.run(f.architecture);
-  assert.equal(stopped.status, "failed"); assert.equal(f.calls.repair, 12);
+  assert.equal(stopped.status, "failed"); assert.equal(f.calls.repair, 3); assert.equal(stopped.diagnostic!.reason, "repeated_tool_error");
   const summary = await f.controller.get(f.architecture.agentId);
   assert.equal(summary!.continuation!.mode, "blocked");
   const resumed = await f.controller.run(f.architecture, { resume: true });
-  assert.equal(resumed.status, "failed"); assert.equal(f.calls.repair, 12);
+  assert.equal(resumed.status, "failed"); assert.equal(f.calls.repair, 3);
   assert.equal(resumed.budgets.corrections, stopped.budgets.corrections);
 });

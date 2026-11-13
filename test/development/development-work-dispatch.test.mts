@@ -8,13 +8,13 @@ import type { SessionFactory, SessionMessage } from "../../src/runtime/execution
 import { DevelopmentController } from "../../src/development/development.mjs";
 import { DevelopmentExecutor } from "../../src/development/development-executor.mjs";
 import { designHash } from "../../src/architecture/architecture-contract.mjs";
-import { developmentArchitecture, developmentReview, developmentWork } from "../helpers/development.mjs";
+import { developmentArchitecture, developmentReview, developmentWork, developmentJevResponse } from "../helpers/development.mjs";
 import { validDesign, passingReview } from "../helpers/architecture.mjs";
 import { fixtureTools, toolText } from "../helpers/m7-test-boundaries.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import type { TaskProgress, PassedDevelopmentArchitecture } from "../../src/development/development-controller-types.mjs";
 
-async function fixture(t: test.TestContext, interrupt = false, activation = false) {
+async function fixture(t: test.TestContext, interrupt = false, activation = false, objection = false) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-dispatch-")), executor = new DevelopmentExecutor();
   const availability = await executor.probe();
   if (!availability.available) { await rm(root, { recursive: true, force: true }); t.skip(availability.reason); return; }
@@ -74,7 +74,9 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
           } else if (tools.submit_development_review_part) {
             const scope = payload.reviewScope as { kind: string; ids: string[] };
             if (scope.kind === "files") for (const path of scope.ids) await tools.read_code_file!.execute("read", { path });
-            await tools.submit_development_review_part.execute("review", developmentReview(String(payload.subjectHash)));
+            await tools.submit_development_review_part.execute("review", developmentReview(String(payload.subjectHash), objection ? {
+              verdict: "revise", issues: [{ id: "style", kind: "code", blocking: true, description: "建议按评审个人偏好换一种代码写法",
+                remedy: "改成另一套命名", taskIds: ["task_0"], files: ["main.mjs"] }] } : {}));
           } else if (tools.submit_development_work) {
             const task = payload.task as TaskProgress;
             await tools.write!.execute("write", { path: "main.mjs", content: "export const actions={async echo(input){return {n:input.n};}};" });
@@ -108,6 +110,35 @@ test("复杂研发拆为骨架、独立用例组及完整覆盖的评审组，�
   const planCases = f.calls.filter(call => call.mode === "plan" && call.scope?.kind === "cases").flatMap(call => call.scope!.ids);
   assert.deepEqual(planCases.sort(), result.plan!.cases.map(test => test.id).sort());
   assert.ok(f.calls.filter(call => call.scope?.kind === "cases").every(call => call.scope!.ids.length <= 6));
+});
+
+test("每个研发评审小组分别由JEV放行，真实代码通过后汇总，评分中断不重做已收分组", async t => {
+  let unavailable = true, attempts = 0;
+  const states: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const state = objectFields(JSON.parse(String(init.body)).state); states.push(state); attempts++;
+    if (unavailable && attempts > 1) throw new TypeError("fetch failed");
+    return Response.json(developmentJevResponse(1, 4));
+  });
+  const f = await fixture(t, false, false, true); if (!f) return;
+  f.controller.config.jevApiKey = "local-jev-fixture";
+  const stopped = await f.controller.run(f.architecture);
+  assert.equal(stopped.status, "failed"); assert.equal(stopped.phase, "planning");
+  const completed = Object.values(stopped.reviewJudgments!).find(row => row.effective)!;
+  assert.ok(completed); const archived = structuredClone(completed), callsBefore = f.calls.length;
+  const originalReports = structuredClone(stopped.workDispatches);
+  unavailable = false;
+  const result = await f.restart().run(f.architecture, { resume: true });
+  assert.equal(result.status, "completed", result.summary);
+  assert.ok(result.reports.every(row => row.status === "passed"));
+  assert.ok(result.tasks.every(row => row.repairs === 0));
+  assert.deepEqual(Object.values(result.reviewJudgments!).find(row => row.bindingHash === completed.bindingHash), archived);
+  for (const [key, checkpoint] of Object.entries(originalReports!)) assert.deepEqual(result.workDispatches![key], checkpoint);
+  assert.equal(f.calls.slice(callsBefore).filter(call => call.mode === "plan" || call.id === "outline" || call.id.startsWith("cases_")).length, 0);
+  const judged = Object.values(result.reviewJudgments!).filter(row => row.original.issues.length);
+  assert.ok(judged.length > 4); assert.ok(judged.every(row => row.original.verdict === "revise" && row.effective!.verdict === "pass"));
+  assert.deepEqual(new Set(states.map(state => objectFields(state.scope).kind)), new Set(["requirements", "cases", "files", "interfaces"]));
+  assert.ok(judged.some(row => row.receipts.style!.attempts > 1), "连接重试累计保存，恢复不清零");
 });
 
 test("规划分组中断后重建控制器仅续跑未完成组，原调用与完成结果保留", async t => {

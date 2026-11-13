@@ -2,14 +2,15 @@ import { basename } from "node:path";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { RegisteredTool } from "../runtime/execution-port.mjs";
-import { createRepairCheckpoint, readRepairCheckpoint, repairHash, runRepairSchedule, type RepairCheckpoint } from "../runtime/repair-scheduler.mjs";
+import { createDevelopmentTaskCheckpoint, readDevelopmentTaskCheckpoint, repairHash, runDevelopmentTaskSchedule, type RepairCheckpoint } from "../runtime/repair-scheduler.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { InputError } from "../requirements/core.mjs";
 import type { DevelopmentController } from "./development.mjs";
 import type { DevelopmentContext, DevelopmentRole } from "./development-controller-types.mjs";
 import { isPlanningBlockerOutcome } from "./development-planning-blocker.mjs";
+import { noteDevelopmentRejection, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
 
-export interface DevelopmentWorkCheckpoint { version: 1; bindingHash: string; dispatch: RepairCheckpoint }
+export interface DevelopmentWorkCheckpoint { version: 1; bindingHash: string; dispatch: RepairCheckpoint<null> }
 export interface DevelopmentPart<T> { id: string; role: DevelopmentRole; instruction: string; schema: ToolSchema;
   payload: UnknownRecord; tools?: RegisteredTool[]; allowBlocker?: boolean; validate(value: unknown): T }
 
@@ -17,28 +18,38 @@ export function readDevelopmentWorkCheckpoint(value: unknown): DevelopmentWorkCh
   const raw = objectFields(value);
   if (Object.keys(raw).sort().join() !== "bindingHash,dispatch,version" || raw.version !== 1 || typeof raw.bindingHash !== "string")
     throw new InputError("研发分组检查点无效，不能重新领取额度。");
-  const dispatch = readRepairCheckpoint(raw.dispatch);
-  if (dispatch.version !== 2 || dispatch.bindingHash !== raw.bindingHash) throw new InputError("研发分组绑定不一致。");
+  const dispatch = readDevelopmentTaskCheckpoint(raw.dispatch);
+  if (dispatch.bindingHash !== raw.bindingHash) throw new InputError("研发分组绑定不一致。");
   return { version: 1, bindingHash: raw.bindingHash, dispatch };
 }
 
 /** Fixed assignments, independent sessions, bounded concurrency, and results accepted before merging. */
 export async function runDevelopmentParts<T>(controller: DevelopmentController, ctx: DevelopmentContext, key: string,
   binding: unknown, parts: DevelopmentPart<T>[], callLimit = 6, validateCombined?: (results: T[]) => unknown): Promise<T[]> {
-  const identity: unknown = JSON.parse(JSON.stringify({ binding, assignments: parts.map(part => ({ id: part.id, role: part.role, schema: part.schema,
+  let identity: unknown = JSON.parse(JSON.stringify({ binding, assignments: parts.map(part => ({ id: part.id, role: part.role, schema: part.schema,
     instruction: part.instruction, payload: part.payload, allowBlocker: part.allowBlocker === true })), callLimit }));
-  const bindingHash = repairHash(identity), base = { parts: Object.fromEntries(parts.map(part => [part.id, null])) };
+  let bindingHash = repairHash(identity);
+  const base = { parts: Object.fromEntries(parts.map(part => [part.id, null])) };
   const issues = parts.map(part => ({ id: part.id, owner: part.id, paths: [`/parts/${part.id}`],
     description: part.instruction, remedy: "只提交本组结果，其他分组由独立会话处理。" }));
   const saved = ctx.record.workDispatches?.[key];
   let checkpoint: DevelopmentWorkCheckpoint;
   if (saved) {
     checkpoint = readDevelopmentWorkCheckpoint(saved);
+    if (checkpoint.bindingHash !== bindingHash && checkpoint.dispatch.previousQuota && ctx.record.retryPolicy) {
+      const legacy = structuredClone(objectFields(identity));
+      for (const raw of legacy.assignments as unknown[]) {
+        const payload = objectFields(objectFields(raw).payload);
+        delete payload.unresolvedIssues;
+        payload.remaining = structuredClone(ctx.record.retryPolicy.legacy.budgets);
+      }
+      if (repairHash(legacy) === checkpoint.bindingHash) { identity = legacy; bindingHash = checkpoint.bindingHash; }
+    }
     if (checkpoint.bindingHash !== bindingHash || !ctx.record.dispatchedWork?.includes(key)
       || repairHash(checkpoint.dispatch.issues) !== repairHash(issues)) throw new InputError("研发分组材料已变化，不能重建会话刷新额度。");
   } else {
     if (ctx.record.dispatchedWork?.includes(key)) throw new InputError("已分派研发的检查点缺失，不能重新领取额度。");
-    checkpoint = { version: 1, bindingHash, dispatch: createRepairCheckpoint(identity, base, issues, callLimit, 2) };
+    checkpoint = { version: 1, bindingHash, dispatch: createDevelopmentTaskCheckpoint(identity, base, issues) };
   }
   const validate = (value: unknown, final = false) => {
     const values = objectFields(objectFields(value).parts);
@@ -55,8 +66,15 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
   };
   let result: unknown;
   for (;;) try {
-  result = await runRepairSchedule({ checkpoint: checkpoint.dispatch, binding: identity, base, signal: ctx.signal,
+  result = await runDevelopmentTaskSchedule({ checkpoint: checkpoint.dispatch, binding: identity, base, signal: ctx.signal,
     validateCandidate: validate,
+    onInvalidMerge: async (_ids, receiptHash) => {
+      if (parts.every(part => part.role === "reviewer")) return;
+      const count = noteDevelopmentRejection(ctx.record, "plan", { work: key, receiptHash });
+      await controller.save(ctx);
+      if (count >= DEVELOPMENT_CONTENT_LIMIT) throw Object.assign(new InputError("规划已累计五次内容退回，分组结果、会话及用量保留。"),
+        { diagnostic: { stage: "development", phase: ctx.record.phase, reason: "content_rejection_limit", owner: "plan", attempts: count } });
+    },
     save: async dispatch => {
       controller.guard(ctx);
       (ctx.record.workDispatches ??= {})[key] = { version: 1, bindingHash, dispatch };

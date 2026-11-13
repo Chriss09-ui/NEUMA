@@ -450,6 +450,24 @@ export class PrototypeAgents {
   }
 
   async executeDevelopment(input: StoredArchitectureRecord | null, options: { resume?: boolean; signal?: AbortSignal | undefined; onProgress?: Progress }) {
+    if (options.resume && input?.status === "failed" && input.review?.verdict === "pass") {
+      const stored = await this.development.store.get(input.agentId);
+      const record = stored ? readDevelopmentRunRecord(stored) : null;
+      if (record && record.phase === "intake" && record.planning.turns === 0 && record.tasks.length === 0
+        && record.architectureRef.version === input.version && record.architectureRef.candidateHash === input.candidateHash) {
+        const approved = checkedPassedArchitecture(record.architecture);
+        const stable = (value: StoredArchitectureRecord) => {
+          const { status: _status, delivery: _delivery, summary: _summary, updatedAt: _updatedAt, designRecovery: _recoveryView, ...body } = value;
+          return contentHash(body);
+        };
+        if (approved.agentId !== input.agentId || stable(approved) !== stable(input))
+          throw new InputError("研发接收停点的架构与原通过记录不一致，不能恢复通过状态。");
+        await this.storage.writeJson(input.agentId, `development/handoff-recovery-${input.version}.json`, {
+          version: 1, runId: record.id, original: input, approvedHash: contentHash(approved), reason: "passed_architecture_handoff_failed" });
+        await this.architecture.save({ ...approved, summary: "架构评审已通过，正在从原研发接收停点继续。" });
+        input = await this.getArchitecture(input.agentId);
+      }
+    }
     const pending = checkedActivationTransaction(await this.storage.readJson(input!.agentId, "application/activation.json"));
     if (pending && pending.status !== "completed") throw Object.assign(
       new InputError("上次激活尚未完成恢复核对，请检查存储并重新启动后继续"), { reason: "activation_recovery_required" });
@@ -1364,8 +1382,10 @@ export class PrototypeAgents {
       }
       if (architecture) {
         architecture.delivery = "blocked";
-        architecture.status = controller.signal.aborted ? "cancelled" : "failed";
-        architecture.summary = controller.signal.aborted ? "生成已停止，已有定义保留。" : "执行定义未能保存，已有有效定义保留，请重试。";
+        const handoff = architecture.status === "passed" && requiresDevelopment(architecture.design);
+        architecture.status = handoff ? "passed" : controller.signal.aborted ? "cancelled" : "failed";
+        architecture.summary = handoff ? "架构评审已通过；研发交接未完成，已保存原结果和停点。"
+          : controller.signal.aborted ? "生成已停止，已有定义保留。" : "执行定义未能保存，已有有效定义保留，请重试。";
         await this.architecture.save(architecture);
       }
       if (controller.signal.aborted) throw modelError("cancelled");

@@ -1,14 +1,16 @@
 import { Ajv } from "ajv";
-import { readRepairCheckpoint } from "../runtime/repair-scheduler.mjs";
+import { readDevelopmentTaskCheckpoint } from "../runtime/repair-scheduler.mjs";
 import { readDevelopmentWorkCheckpoint } from "./development-dispatch.mjs";
 import { InputError } from "../requirements/core.mjs";
-import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, REVIEW_SCHEMA as ARCHITECTURE_REVIEW_SCHEMA } from "../architecture/architecture-contract.mjs";
+import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, reviewSubmissionSchema } from "../architecture/architecture-contract.mjs";
 import { LEGACY_PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, REVIEW_SCHEMA, WORK_SCHEMA } from "./development-contract.mjs";
 import { checkedStoredDraft } from "../requirements/consultation-storage.mjs";
 import { validateApplicationManifest } from "../applications/application-contract.mjs";
 import { PLANNING_BLOCKER_SCHEMA } from "./development-planning-blocker.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
 import type { DevelopmentRunRecord, DevelopmentDeliveryRecord } from "./development-controller-types.mjs";
+import { readDevelopmentPolicy } from "./development-policy.mjs";
+import { readDevelopmentJudgment } from "./development-review-judgment.mjs";
 
 const string = { type: "string" }, integer = { type: "integer" }, boolean = { type: "boolean" };
 const array = (items: ToolSchema): ToolSchema => ({ type: "array", items });
@@ -74,7 +76,7 @@ const architecture = object({ agentId: string, name: string, version: integer, c
   requirements: array(object({ id: string, text: string }, ["id", "text"])), draft: object({}), design: candidateDesign,
   sourceFingerprint: string, platformHash: string, platformContractVersion: integer, evidence: array({}),
   deferredVerifications: nullable(object({ issues: array(object({ requirementId: string, stage: string }, ["requirementId"])) })),
-  review: ARCHITECTURE_REVIEW_SCHEMA, issues: array(object({ blocking: boolean }, ["blocking"])) },
+  review: reviewSubmissionSchema(), issues: array(object({ blocking: boolean }, ["blocking"])) },
   ["agentId", "name", "version", "contractVersion", "status", "candidateHash", "requirements", "design"]);
 const properties = {
   id: string, agentId: string, name: string, version: integer, revision: integer, createdAt: string, updatedAt: string,
@@ -101,7 +103,16 @@ const valid = new Ajv({ strict: false, allErrors: false }).compile<DevelopmentRu
 
 /** Checks persisted controller fields without filling historical gaps or changing stored bytes. Semantic bindings remain controller gates. */
 export function readDevelopmentRunRecord(value: unknown): DevelopmentRunRecord {
-  if (!valid(value)) throw new InputError("研发检查点字段已损坏，不能恢复阶段状态或模型预算");
+  if (!valid(value)) {
+    const error = valid.errors?.[0];
+    throw Object.assign(new InputError(`研发检查点字段校验未通过：${error?.instancePath || "/"} [${error?.keyword ?? "schema"}]；已有记录保留。`),
+      { reason: "development_record_invalid", diagnostic: { path: error?.instancePath || "/", keyword: error?.keyword ?? "schema" } });
+  }
+  if (value.retryPolicy !== undefined) readDevelopmentPolicy(value.retryPolicy);
+  if (value.reviewJudgments !== undefined) {
+    if (!value.reviewJudgments || typeof value.reviewJudgments !== "object" || Array.isArray(value.reviewJudgments)) throw new InputError("研发 JEV 记录无效。");
+    for (const judgment of Object.values(value.reviewJudgments)) readDevelopmentJudgment(judgment);
+  }
   if (value.workloadPolicyVersion !== undefined && value.workloadPolicyVersion !== 1
     || value.dispatchedWork !== undefined && (!Array.isArray(value.dispatchedWork) || value.dispatchedWork.some(key => typeof key !== "string"))
     || value.workDispatches !== undefined && (!value.workDispatches || typeof value.workDispatches !== "object" || Array.isArray(value.workDispatches)))
@@ -113,7 +124,7 @@ export function readDevelopmentRunRecord(value: unknown): DevelopmentRunRecord {
     throw new InputError("研发修复调度版本或进度无效。");
   for (const batch of Object.values(value.repairBatches ?? {})) {
     if (!batch || typeof batch.applied !== "boolean") throw new InputError("研发修复批次损坏。");
-    readRepairCheckpoint(batch.checkpoint);
+    readDevelopmentTaskCheckpoint(batch.checkpoint);
   }
   if (value.repairDispatchVersion === 1 && (!Array.isArray(value.dispatchedRepairs) || !value.repairBatches
     || new Set(value.dispatchedRepairs).size !== value.dispatchedRepairs.length

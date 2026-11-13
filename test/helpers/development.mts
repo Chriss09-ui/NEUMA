@@ -41,3 +41,10 @@ export function developmentIssue(kind: DevelopmentReview["issues"][number]["kind
 export function developmentWork(task: Pick<DevelopmentTask, "title" | "files">, overrides: Partial<DevelopmentWork> = {}) {
   return { summary: `已实现 ${task.title}`, changedFiles: [...task.files], knownIssues: [], nextAction: "提交独立验收", continue: false, ...overrides };
 }
+
+export function developmentJevResponse(necessity: number, strictness: number) {
+  const score = (value: number) => ({ type: "score", score: value, confidence: .1,
+    probabilities: Object.fromEntries([0, 1, 2, 3, 4].map(level => [String(level), level === value ? 1 : 0])) });
+  return { answers: { necessity: score(necessity), strictness: score(strictness),
+    basis: { type: "choice", choice: "unproven", probabilities: { supported: 0, contradicted: 0, unproven: 1 } } } };
+}

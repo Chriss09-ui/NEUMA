@@ -60,6 +60,7 @@ test("只读交付投影接受旧包，不能据此声称拥有研发恢复预�
   assert.equal(readDevelopmentDeliveryRecord(delivery), delivery);
   assert.equal(JSON.stringify(delivery), before);
   assert.equal(Object.hasOwn(delivery, "budgets"), false);
-  assert.throws(() => readDevelopmentRunRecord(delivery), /研发检查点字段已损坏/);
+  assert.throws(() => readDevelopmentRunRecord(delivery), { reason: "development_record_invalid",
+    diagnostic: { path: "/", keyword: "required" } });
   assert.throws(() => readDevelopmentDeliveryRecord({ ...delivery, planHash: 42 }), /应用交付与当前/);
 });

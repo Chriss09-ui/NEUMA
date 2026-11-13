@@ -111,7 +111,7 @@ async function sdkFixture(t: test.TestContext, { invalidPlan = false, sdkInvalid
       const expected = role === "planner" ? filesPlan ? ["read", "write", "edit", "save_plan_cases", "edit_plan_cases", "save_plan_json", "update_plan_json", "list_plan_files", "read_plan_diagnostics", "read_plan_file", "submit_development_blocker", "submit_development_plan"] : ["list_code_files", "read_code_file", "submit_development_blocker", "submit_development_plan"]
         : role === "developer" ? ["list_code_files", "read_code_file", "run_development_checks", "submit_development_work", ...(filesPlan ? ["read", "write", "edit"] : ["write_code_file"])]
           : payload.mode === "plan" ? ["submit_development_review"] : ["list_code_files", "read_code_file", "submit_development_review"];
-      assert.deepEqual(names, [...expected, "read_development_context", ...(role === "reviewer" ? [] : ["web_search", "web_fetch"])].sort());
+      assert.deepEqual(names, [...expected, "read_development_context", "read_development_history", ...(role === "reviewer" ? [] : ["web_search", "web_fetch"])].sort());
       if (!called.length) {
         assert.equal(body.messages.some((message) => ["assistant", "tool"].includes(message.role)), false);
         assert.doesNotMatch(JSON.stringify(body.messages), /PRIVATE_SESSION_FINISH/);
@@ -271,10 +271,12 @@ test("真实Pi研发链执行规划、独立评审、文件写入与结构化交
     assert.equal(session.messages!.filter(message => message.role === "user").length, 1, "每个角色从自己的独立输入开始");
   }
   const firstRequests = fixture.requests.filter(({ body }) => recordArray(objectFields(body).messages).every((message) => ["system", "user"].includes(fixtureString(message.role))));
-  assert.deepEqual(objectFields(firstRequests.find(({ key }) => key === "planner")!.payload).modelBudget, { limit: 12, used: 0, remaining: 12 });
+  assert.deepEqual(objectFields(firstRequests.find(({ key }) => key === "planner")!.payload).modelBudget, { limit: null, used: 0, remaining: null, accountingOnly: true });
   const developerContinuation = fixture.requests.find(({ key, body }) => key === "developer" && recordArray(objectFields(body).messages).some((message) => message.role === "tool"));
   const writeFeedback = recordArray(objectFields(developerContinuation!.body).messages).find((message) => message.role === "tool");
-  assert.match(textOf(writeFeedback!.content), /"hostModelBudget":\{"limit":40,"used":1,"remaining":39/);
+  const usage = objectFields(JSON.parse(textOf(writeFeedback!.content).trim().split("\n").at(-1)!)).hostModelBudget;
+  assert.equal(objectFields(usage).limit, null); assert.equal(objectFields(usage).remaining, null);
+  assert.equal(objectFields(usage).used, 1); assert.equal(objectFields(usage).accountingOnly, true);
   assert.deepEqual(firstRequests.map(({ key }) => key), ["planner", "reviewer-plan", "developer", "reviewer-task", "reviewer-integration"]);
   const taskReview = firstRequests.find(({ key }) => key === "reviewer-task");
   assert.equal(objectFields(objectFields(taskReview!.payload).report).fixture, true);
@@ -323,13 +325,14 @@ test("真实SDK在执行前拒绝的计划也保存安全诊断，修复后继�
   assert.doesNotMatch(JSON.stringify(fixture.progress), /PRIVATE_SUBMISSION_VALUE|Received arguments/);
 });
 
-test("真实SDK连续拒绝耗尽原预算时保留字段原因，不把原始参数输出界面", { timeout: 20_000 }, async (t) => {
+test("真实SDK连续三次格式拒绝时保留字段原因，不把原始参数输出界面", { timeout: 20_000 }, async (t) => {
   const fixture = await sdkFixture(t, { sdkInvalidPlan: true, limits: { reviewerTurns: 2 } });
   const result = await fixture.run();
   assert.deepEqual(fixture.errors, []);
   assert.equal(result.status, "failed");
   assert.equal(result.plan, null); assert.equal(result.package, null);
-  assert.equal(result.diagnostic!.reason, "turn_limit");
+  assert.equal(result.diagnostic!.reason, "repeated_tool_error");
+  assert.deepEqual(result.retryPolicy!.content, {}, "结构拒绝不计内容退回");
   assert.ok(fixtureNumber(objectFields(result.diagnostic!.submission).rejected) >= 2);
   assert.equal(objectFields(objectFields(objectFields(result.diagnostic!.submission).issues)[0]).path, "plan.summary");
   assert.equal(objectFields(objectFields(objectFields(result.diagnostic!.submission).issues)[0]).reason, "maxLength");
@@ -387,14 +390,16 @@ test("真实Pi精确拒绝基本值工具参数及夹具根类型，原会话纠
   const rejection = history.find((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "save_plan_json" && entry.message.isError);
   assert.ok(rejection); assert.match(textOf(rejection.message.content), /save_plan_json\.value/);
   assert.doesNotMatch(textOf(rejection.message.content), /PRIVATE_JSON_VALUE|Received arguments/);
-  assert.equal(result.planning.turns, 6); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, 12);
+  assert.equal(result.planning.turns, 6); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, undefined);
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 2, accepted: 1, rejected: 1 });
   assert.deepEqual(result.reviews.map((item) => item.mode), ["plan", "task", "integration"]);
 });
 
 test("真实Pi拒绝基本值根且无文件写入，连续JSON文本保存后沿原预算正式验收", { timeout: 20_000 }, async (t) => {
-  const rejectedValues = [7, null, true, "7", "null", "false", JSON.stringify("PRIVATE_JSON_VALUE"), JSON.stringify(JSON.stringify({ id: "PRIVATE_JSON_VALUE" }))];
-  const fixture = await sdkFixture(t, { structuredPlan: true, structuredValueString: true, structuredRejectedValues: rejectedValues });
+  const values = [7, null, true, "7", "null", "false", JSON.stringify("PRIVATE_JSON_VALUE"), JSON.stringify(JSON.stringify({ id: "PRIVATE_JSON_VALUE" }))];
+  for (const [index, value] of values.entries()) await t.test(`value_${index}`, async child => {
+  const rejectedValues = [value];
+  const fixture = await sdkFixture(child, { structuredPlan: true, structuredValueString: true, structuredRejectedValues: rejectedValues });
   const result = await fixture.run();
   assert.deepEqual(fixture.errors, []); assert.equal(result.status, "completed", result.summary);
   const saves = fixture.toolCalls.filter((entry) => entry.name === "save_plan_json");
@@ -405,9 +410,10 @@ test("真实Pi拒绝基本值根且无文件写入，连续JSON文本保存后�
   assert.equal(replies.length, rejectedValues.length + 2); assert.ok(replies.slice(0, -2).every((message) => message.isError));
   assert.doesNotMatch(replies.slice(0, -2).map((message) => textOf(message.content)).join("\n"), /PRIVATE_JSON_VALUE|Received arguments/);
   assert.ok(replies.slice(-2).every((message) => textOf(message.content).includes('"inputEncoding":"json-text"')));
-  assert.equal(result.planning.turns, rejectedValues.length + 3); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, 12);
+  assert.equal(result.planning.turns, rejectedValues.length + 3); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, undefined);
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 1, accepted: 1, rejected: 0 });
   assert.deepEqual(result.reviews.map((item) => item.mode), ["plan", "task", "integration"]);
+  });
 });
 
 test("真实Pi保存自定义索引时对象与JSON文本均由宿主识别并完成同一写后预检", { timeout: 20_000 }, async (t) => {
@@ -479,7 +485,7 @@ test("真实Pi专用用例接受完整数组文本，保留夹具并实际执行
   assert.deepEqual(report!.results!.find((item) => item.caseId === "echo_text")!.actual, { input: "研发协议验证" });
   assert.deepEqual(report!.results!.find((item) => item.caseId === "empty_text")!.actual, { error: "missing_input" });
   assert.deepEqual(result.reviews.map((item) => item.mode), ["plan", "task", "integration"]);
-  assert.equal(result.planning.turns, 3 + fixture.planSchemaPages.length); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, 12);
+  assert.equal(result.planning.turns, 3 + fixture.planSchemaPages.length); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, undefined);
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 1, accepted: 1, rejected: 0 });
 });
 
@@ -504,6 +510,6 @@ test("真实Pi用例原参数禁止SDK把内层数值转字符串，写前拒绝
   assert.ok(stored); assert.doesNotMatch(textOf(stored.message.content), /研发协议验证|Received arguments/);
   assert.equal(objectFields(objectFields(result.plan!.cases[0]!.input).fixture).value, "研发协议验证");
   assert.deepEqual(result.reports!.at(-1)!.results.find((item) => item.caseId === "echo_text")!.actual, { input: "研发协议验证" });
-  assert.equal(result.planning.turns, 5); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, 12);
+  assert.equal(result.planning.turns, 5); assert.equal(Object.values(result.sessions!).find((entry) => entry.role === "planner")!.limit, undefined);
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 1, accepted: 1, rejected: 0 });
 });

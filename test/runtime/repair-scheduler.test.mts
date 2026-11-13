@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRepairCheckpoint, runRepairSchedule, readReviewTaskCheckpoint, runReviewTaskSchedule, readRepairCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
+import { createRepairCheckpoint, runRepairSchedule, readReviewTaskCheckpoint, runReviewTaskSchedule, readRepairCheckpoint,
+  readDevelopmentTaskCheckpoint, runDevelopmentTaskSchedule } from "../../src/runtime/repair-scheduler.mjs";
 import type { RepairIssue, RepairWorker } from "../../src/runtime/repair-scheduler.mjs";
 
 const issue = (id: string, path: string, owner = id): RepairIssue => ({ id, paths: [path], owner, description: `修复${id}`, remedy: "保留原要求" });
@@ -9,6 +10,27 @@ async function submit(worker: RepairWorker, value: unknown) {
   await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "局部修改，等待独立验证",
     updates: [{ path: worker.group.paths[0]!, value }] });
 }
+
+test("研发升级真实旧调度停点，保存原额度与已完成组，原子累计超过旧请求上限", async () => {
+  const base = { a: "old", b: "old" }, binding = "development-upgrade";
+  let legacy = createRepairCheckpoint(binding, base, [issue("a", "/a"), issue("b", "/b")], 1, 2);
+  await assert.rejects(runRepairSchedule({ checkpoint: legacy, binding, base, save: async value => { legacy = value; }, run: async worker => {
+    if (worker.group.issueIds.includes("a")) return submit(worker, "done-a");
+    await worker.onSession("b.jsonl"); await worker.onCall(); throw new Error("controlled interruption");
+  } }), /controlled interruption/);
+  const original = structuredClone(legacy);
+  let current = readDevelopmentTaskCheckpoint(legacy);
+  const groups: string[] = [];
+  const result = await runDevelopmentTaskSchedule({ checkpoint: current, binding, base, save: async value => { current = value; }, run: async worker => {
+    groups.push(worker.group.id); assert.equal(worker.group.sessionFile, "b.jsonl"); assert.equal(worker.group.calls, 1);
+    for (let index = 0; index < 15; index++) await worker.onCall();
+    await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "沿原会话完成读取与修复", updates: [{ path: "/b", value: "done-b" }] });
+  } });
+  assert.deepEqual(result, { a: "done-a", b: "done-b" }); assert.deepEqual(groups, [original.groups[1]!.id]);
+  assert.equal(current.calls, 17); assert.equal(current.callLimit, null); assert.equal(current.groupCallLimit, null);
+  assert.deepEqual(current.previousQuota, original); assert.deepEqual(legacy, original);
+  assert.deepEqual(current.groups[0], original.groups[0]); assert.deepEqual(readDevelopmentTaskCheckpoint(current), current);
+});
 
 test("十个独立问题动态分派，最多三个子Agent同时工作，全部补丁合并", async () => {
   const base = Object.fromEntries(Array.from({ length: 10 }, (_, n) => [`field${n}`, "before"]));

@@ -158,7 +158,7 @@ test("取消前未接受阻断，晚到或无证据的文字阻断不能代替�
     captured.session!.messages.push({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "方案受阻，不能规划。" }] });
   } });
   const failed = await plain.controller.run(plain.architecture);
-  assert.equal(failed.status, "failed"); assert.equal(failed.feedback, null); assert.equal(failed.diagnostic!.reason, "submission_incomplete");
+  assert.equal(failed.status, "failed"); assert.equal(failed.feedback, null); assert.equal(failed.diagnostic!.reason, "repeated_tool_error");
 });
 
 test("报告已保存而工具尚未返回时中断，重启不用WeakSet或pendingResult恢复也不再付费", async (t) => {

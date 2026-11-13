@@ -10,7 +10,7 @@ import { fixtureChatRequest, fixturePort } from "../helpers/http-model.mjs";
 import { developmentArchitecture, developmentPlan } from "../helpers/development.mjs";
 import { SessionReplay } from "../helpers/session-replay.mjs";
 
-for (const boundary of ["budget", "result"]) test(`研发真实SIGKILL：${boundary}后恢复不补预算、不重调已提交规划`, { timeout: 20000 }, async t => {
+for (const boundary of ["budget", "result"]) test(`研发真实SIGKILL：${boundary}后恢复累计原用量、复用已提交规划`, { timeout: 20000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-kill-")), children: ChildProcess[] = [], roles: string[] = [];
   const replay = new SessionReplay({ version: 1, kind: "synthetic", complete: true, changes: "一轮规划后在真实持久边界强制退出", protocol: "neuma-execution-v1" },
     boundary === "budget" ? [] : [{ role: "planner", stage: "planning", tools: ["submit_development_plan"], context: ["requirements"], answer: developmentPlan(developmentArchitecture()) }]);
@@ -36,8 +36,8 @@ for (const boundary of ["budget", "result"]) test(`研发真实SIGKILL：${bound
   assert.deepEqual(roles, boundary === "budget" ? [] : ["planner"]);
   recovering = true;
   const resumed = start("resume"), [result] = await once(resumed, "message", { signal: AbortSignal.timeout(12000) });
-  assert.equal(result.type, "result"); assert.equal(result.plannerTurns, 1); assert.equal(result.status, "failed");
+  assert.equal(result.type, "result"); assert.equal(result.plannerTurns, boundary === "budget" ? 2 : 1); assert.equal(result.status, "failed");
   assert.equal(result.proposalSaved, boundary === "result"); assert.equal(result.approvedPlan, false); assert.equal(result.pending, false);
-  assert.deepEqual(roles, boundary === "budget" ? [] : ["planner", "reviewer"]); replay.assertConsumed();
+  assert.deepEqual(roles, boundary === "budget" ? ["planner"] : ["planner", "reviewer"]); replay.assertConsumed();
   await once(resumed, "exit");
 });

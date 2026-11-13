@@ -3,7 +3,7 @@ import type { DevelopmentController } from "./development.mjs";
 import type { DevelopmentContext, VerificationFeedback, TaskProgress } from "./development-controller-types.mjs";
 import type { DevelopmentSnapshot } from "./development-workspace.mjs";
 import { inspectDevelopmentCode, validateDevelopmentCodeFiles } from "./development-workspace.mjs";
-import { createRepairCheckpoint, readRepairCheckpoint, runRepairSchedule, repairHash, repairPointer } from "../runtime/repair-scheduler.mjs";
+import { createDevelopmentTaskCheckpoint, readDevelopmentTaskCheckpoint, runDevelopmentTaskSchedule, repairHash, repairPointer } from "../runtime/repair-scheduler.mjs";
 import type { RepairCheckpoint, RepairIssue } from "../runtime/repair-scheduler.mjs";
 import { runRepairAgent } from "../runtime/repair-agent.mjs";
 import { developmentModelOutputBudget } from "../runtime/model-limits.mjs";
@@ -12,8 +12,9 @@ import { validatePlan } from "./development-contract.mjs";
 import { renderPlatformRules } from "../architecture/platform-contract.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { repairableDevelopmentResult } from "./development-failures.mjs";
+import { noteDevelopmentRejection, unresolvedDevelopmentIssues, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
 
-export interface DevelopmentRepairBatch { checkpoint: RepairCheckpoint; snapshot?: DevelopmentSnapshot; applied: boolean }
+export interface DevelopmentRepairBatch { checkpoint: RepairCheckpoint<null>; snapshot?: DevelopmentSnapshot; applied: boolean }
 type Feedback = { review: DevelopmentReview; report?: VerificationFeedback["report"] };
 
 function issuesFor(plan: DevelopmentPlan, feedback: Feedback, kind: "plan" | "code", allowedFiles: string[], combineFailures = false): RepairIssue[] {
@@ -78,16 +79,23 @@ async function dispatch(controller: DevelopmentController, ctx: DevelopmentConte
   let batch = batches[key];
   if (!batch) {
     if (ctx.record.dispatchedRepairs?.includes(key)) throw new InputError("已分派修复的检查点缺失，不能重新领取额度。");
-    batch = { checkpoint: createRepairCheckpoint(binding, base, issues, 12, ctx.record.repairDispatchVersion === 2 ? 2 : 1), ...(snapshot ? { snapshot } : {}), applied: false };
+    batch = { checkpoint: createDevelopmentTaskCheckpoint(binding, base, issues), ...(snapshot ? { snapshot } : {}), applied: false };
     (ctx.record.dispatchedRepairs ??= []).push(key);
     batches[key] = batch; await controller.save(ctx);
   } else {
-    readRepairCheckpoint(batch.checkpoint);
-    if (batch.checkpoint.version !== (ctx.record.repairDispatchVersion === 2 ? 2 : 1)) throw new InputError("修复批次的额度版本与原研发记录不一致。");
+    batch.checkpoint = readDevelopmentTaskCheckpoint(batch.checkpoint);
     if (repairHash(batch.checkpoint.issues) !== repairHash(issues)) throw new InputError("修复分组与原问题不一致。");
   }
-  const result = await runRepairSchedule({ checkpoint: batch.checkpoint, binding, base, signal: ctx.signal, validateCandidate,
+  const result = await runDevelopmentTaskSchedule({ checkpoint: batch.checkpoint, binding, base, signal: ctx.signal, validateCandidate,
     retryInvalidMerge: Boolean(snapshot),
+    onInvalidMerge: async (_ids, receiptHash) => {
+      const task = ctx.record.tasks.find(task => task.id === ctx.record.currentTaskId);
+      const owner = snapshot ? task && !task.integration ? `task:${task.id}` : "integration" : "plan";
+      const count = noteDevelopmentRejection(ctx.record, owner, { repairBatch: key, receiptHash }, feedback.review);
+      await controller.save(ctx);
+      if (count >= DEVELOPMENT_CONTENT_LIMIT) throw Object.assign(new InputError("本责任任务已累计五次内容退回，修复与原计数已保存。"),
+        { diagnostic: { stage: "development", phase: ctx.record.phase, reason: "content_rejection_limit", owner, attempts: count } });
+    },
     save: async checkpoint => { controller.guard(ctx); batch!.checkpoint = checkpoint; await controller.save(ctx); },
     run: async worker => {
       controller.guard(ctx);
@@ -107,6 +115,7 @@ async function dispatch(controller: DevelopmentController, ctx: DevelopmentConte
           runtimeCapabilities: ctx.record.architecture.runtimeCapabilities ?? null,
           platformRules: ctx.record.architecture.platformSnapshot ? renderPlatformRules(ctx.record.architecture.platformSnapshot,
             { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities }) : "以当前需求、架构和真实平台契约为准。",
+          unresolvedIssues: unresolvedDevelopmentIssues(ctx.record),
           plan: ctx.record.plan ?? null, task: assignedTasks.length ? { tasks: assignedTasks, allowedPaths: worker.group.paths }
             : ctx.record.tasks.find(task => task.id === ctx.record.currentTaskId) ?? null, feedback } });
     } });

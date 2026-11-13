@@ -6,6 +6,7 @@ import type { DevelopmentSnapshot } from "./development-workspace.mjs";
 import { REVIEW_SCHEMA, hashValue, validateReview } from "./development-contract.mjs";
 import { developmentCaseFacts } from "./development-case-facts.mjs";
 import { runDevelopmentParts, type DevelopmentPart } from "./development-dispatch.mjs";
+import { judgeDevelopmentReview } from "./development-review-judgment.mjs";
 
 interface ReviewPayload { plan: DevelopmentPlan; planHash: string; report?: DevelopmentEvidence; codeHash?: string;
   task?: TaskProgress | null; admissionFacts?: unknown; caseFacts?: unknown }
@@ -73,8 +74,11 @@ export async function reviewDevelopmentParts(controller: DevelopmentController, 
   });
   // Snapshot readers are independently bound and validated on each actual file read.
   if (snapshot) for (const part of parts) part.tools = await controller.workspace.snapshotTools(snapshot, ctx.record.agentId);
-  const results = await runDevelopmentParts(controller, ctx, `review_${subjectHash}`, { mode, subjectHash, planHash: payload.planHash,
+  const originals = await runDevelopmentParts(controller, ctx, `review_${subjectHash}`, { mode, subjectHash, planHash: payload.planHash,
     codeHash: snapshot?.hash ?? null, reportId: payload.report?.id ?? null }, parts, 6);
+  const results: DevelopmentReview[] = [];
+  for (const [index, original] of originals.entries())
+    results.push(await judgeDevelopmentReview(controller, ctx, parts[index]!.id, mode, original, payload, snapshot, scopes[index]));
   const issues = results.flatMap((result, index) => result.issues.map(issue => ({ ...issue, id: `r${index}_${hashValue(issue.id).slice(0, 20)}` })));
   const verdict = results.some(result => result.verdict === "blocked") ? "blocked" : issues.some(issue => issue.blocking) ? "revise" : "pass";
   return validateReview({ subjectHash, verdict, issues,

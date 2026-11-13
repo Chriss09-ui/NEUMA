@@ -32,7 +32,7 @@ function recoveryPayload(input: unknown): RecoveryPayload {
   return value as RecoveryPayload;
 }
 async function fixture(t: test.TestContext, { interruptDeveloper = false, interruptReviewer = false, compactDeveloper = false, crashAfterDeveloperSubmit = false,
-  rejectDeveloperFiles = false, developerTurns = 40, materialPadding = false, compactBeforeResume = false, compactDuringResume = false } = {}) {
+  rejectDeveloperFiles = false, developerTurns = 40, materialPadding = false, compactBeforeResume = false, compactDuringResume = false, readHistory = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-persistent-")), architecture = developmentArchitecture();
   if (materialPadding) architecture.requirements[0]!.text += "完整冻结要求仍按原文保留。".repeat(800);
   const requests: { body: FixtureChatRequest; role: string|undefined; payload: RecoveryPayload; }[] = [], sessions: { options: PiSessionOptions; session: NeumaPiSession; }[] = [], controllers: DevelopmentController[] = [], executionCalls: {codeHash: string;caseIds: string[]}[] = [];
@@ -58,6 +58,8 @@ async function fixture(t: test.TestContext, { interruptDeveloper = false, interr
       else tool = { name: submitNames.reviewer, arguments: JSON.stringify(developmentReview(payload.subjectHash!)) };
     } else if (interruptDeveloper && !interrupted) { interrupted = true; content = "developer-interruption-history-marker"; }
     else if (compactDeveloper && !compacted) content = "仍在整理既定任务的说明，尚未提交结果。";
+    else if (readHistory && payload.task?.id === "core" && !body.messages.some(message => message.tool_calls?.some(call => call.function.name === "read_development_history")))
+      tool = { name: "read_development_history", arguments: JSON.stringify({ requests: [{ section: "sessionIndex", limit: 10000 }] }) };
     else {
       const latestUser = body.messages.findLastIndex((item: { role: string; }) => item.role === "user");
       const writes = (compactBeforeResume || compactDuringResume ? body.messages : body.messages.slice(latestUser + 1))
@@ -120,6 +122,7 @@ async function fixture(t: test.TestContext, { interruptDeveloper = false, interr
         compacted = true;
         session.settingsManager.applyOverrides({ compaction: { enabled: true, reserveTokens: 8192, keepRecentTokens: 20 } });
         await session.compact();
+        throw new Error("模拟压缩保存后进程中断，恢复时沿用原历史与用量");
       };
     }
     if ((interruptDeveloper || interruptReviewer) && !compactDeveloper) {
@@ -151,8 +154,8 @@ async function fixture(t: test.TestContext, { interruptDeveloper = false, interr
   return { root, architecture, requests, sessions, executionCalls, controller, setSource: (source: string) => { codeSource = source; } };
 }
 
-test("真实 Pi 开发会话在控制器重建后续接原历史，同任务不重新建立交接摘要", async (t) => {
-  const f = await fixture(t, { interruptDeveloper: true });
+test("真实Pi保留原会话但不自动发送旧轮次，模型按需读取历史后继续", async (t) => {
+  const f = await fixture(t, { interruptDeveloper: true, readHistory: true });
   const firstController = f.controller(), first = await firstController.run(f.architecture);
   assert.equal(first.status, "failed"); assert.equal(first.currentTaskId, "core");
   const original = f.sessions.find((entry) => entry.options.customTools!.some((tool: { name: string; }) => tool.name === submitNames.developer));
@@ -163,12 +166,14 @@ test("真实 Pi 开发会话在控制器重建后续接原历史，同任务不�
   const developerSessions = f.sessions.filter((entry) => entry.options.customTools!.some((tool: { name: string; }) => tool.name === submitNames.developer));
   assert.equal(developerSessions[1]!.session.sessionFile, original!.session.sessionFile);
   const resumedRequest = f.requests.filter((entry) => entry.role === "developer")[1];
-  assert.ok(resumedRequest!.body.messages.some((message) => message.role === "assistant" && textOf(message.content).includes("developer-interruption-history-marker")));
+  assert.ok(!resumedRequest!.body.messages.some((message) => message.role === "assistant" && textOf(message.content).includes("developer-interruption-history-marker")));
+  assert.match(await readFile(original!.session.sessionFile!, "utf8"), /developer-interruption-history-marker/);
+  assert.ok(f.requests.some(entry => entry.body.messages.some(message => message.role === "tool" && textOf(message.content).includes("developer-interruption-history-marker"))), "旧记录只有实际读取后才进入上下文");
   assert.equal(resumed.tasks[0]!.attempts, 1);
   assert.ok(Object.values(resumed.sessions!).find((entry) => entry.file === reference!.file)!.turns > reference!.turns);
 });
 
-test("真实 Pi 同绑定恢复复用已完整投递的材料，原历史及预算不变", async (t) => {
+test("真实Pi同绑定恢复重投当前材料，不依赖已从请求中移除的旧消息", async (t) => {
   const f = await fixture(t, { interruptDeveloper: true, materialPadding: true });
   const initial = await f.controller().run(f.architecture);
   assert.equal(initial.status, "failed");
@@ -178,12 +183,12 @@ test("真实 Pi 同绑定恢复复用已完整投递的材料，原历史及预�
   assert.equal(resumed.status, "completed", resumed.summary);
   const requests = f.requests.filter((entry) => entry.role === "developer" && entry.payload.task!.id === "core");
   const raw = JSON.parse(textOf(requests[1]!.body.messages.findLast((message: { role: string; }) => message.role === "user")!.content));
-  assert.ok(raw.contextReuse.sections.includes("requirements"));
-  assert.equal(Object.hasOwn(raw, "requirements"), false);
-  assert.equal(raw.contextSections.find((item: { section: string; }) => item.section === "requirements").delivery, "session");
+  assert.equal(raw.contextReuse, undefined);
+  assert.equal(Object.hasOwn(raw, "requirements"), true);
+  assert.equal(raw.contextSections.find((item: { section: string; }) => item.section === "requirements").delivery, "full");
   assert.equal(raw.modelBudget.used, original!.turns);
   assert.deepEqual(requests[1]!.payload.requirements, f.architecture.requirements);
-  assert.ok(requests[1]!.body.messages.some((message) => message.role === "assistant" && textOf(message.content).includes("developer-interruption-history-marker")));
+  assert.ok(!requests[1]!.body.messages.some((message) => message.role === "assistant" && textOf(message.content).includes("developer-interruption-history-marker")));
   assert.ok(Object.values(resumed.sessions!).find((entry) => entry.file === original!.file)!.turns > original!.turns);
 });
 
@@ -273,22 +278,22 @@ test("真实 Pi 独立评审中断后沿用同一对象和报告，恢复不重�
   const taskReviews = f.requests.filter((entry) => entry.role === "reviewer" && entry.payload.mode === "task" && entry.payload.task!.id === "core");
   assert.equal(taskReviews.length, 2); assert.equal(taskReviews[1]!.payload.subjectHash, pending!.subjectHash);
   assert.equal(taskReviews[1]!.payload.report!.id, report!.id);
-  assert.ok(taskReviews[1]!.body.messages.some((message) => message.role === "assistant" && textOf(message.content).includes("reviewer-interruption-history-marker")));
+  assert.ok(!taskReviews[1]!.body.messages.some((message) => message.role === "assistant" && textOf(message.content).includes("reviewer-interruption-history-marker")));
   const matching = f.executionCalls.filter((entry) => entry.codeHash === report!.codeHash && JSON.stringify(entry.caseIds) === JSON.stringify(report!.results.map((item) => item.caseId)));
   assert.equal(matching.length, 1, "已保存同一代码和用例的真实执行证据不重复跑");
   const resumedSession = f.sessions.find((entry) => entry !== original && entry.session.sessionFile === original!.session.sessionFile);
   assert.ok(resumedSession);
 });
 
-test("模型与原生压缩在发请求前持久扣预算，控制器重建后不重置", async (t) => {
+test("模型和压缩请求持久累计，控制器重建后越过旧上限仍继续原任务", async (t) => {
   const f = await fixture(t, { interruptDeveloper: true, compactDeveloper: true, developerTurns: 3 });
   const initial = await f.controller().run(f.architecture), reference = Object.values(initial.sessions!).find((entry) => entry.role === "developer");
   assert.equal(initial.status, "failed"); assert.equal(reference!.turns, 3, initial.summary); assert.equal(reference!.compactions, 1);
   assert.equal(initial.tasks[0]!.turns, 3);
   const before = f.requests.length, resumed = await f.controller().run(f.architecture, { resume: true });
-  assert.equal(resumed.status, "failed"); assert.equal(resumed.diagnostic!.reason, "turn_limit");
-  assert.equal(f.requests.length, before, "预算耗尽时恢复不得再发模型或压缩请求");
-  assert.equal(Object.values(resumed.sessions!).find((entry) => entry.file === reference!.file)!.turns, 3);
+  assert.equal(resumed.status, "completed", resumed.summary);
+  assert.ok(f.requests.length > before);
+  assert.ok(Object.values(resumed.sessions!).find((entry) => entry.file === reference!.file)!.turns > 3);
   const runtime = f.sessions.find((entry) => entry.options.customTools!.some((tool: { name: string; }) => tool.name === submitNames.developer));
   assert.match(await readFile(runtime!.session.sessionFile!, "utf8"), /compaction/);
 });
@@ -373,25 +378,26 @@ test("旧记录的越权声明待消费结果只清理该提交，恢复原历�
   const core = f.requests.filter((entry) => entry.role === "developer" && entry.payload.task!.id === "core");
   assert.equal(core.length, 4); assert.equal(resumed.tasks[0]!.turns, 4, "清理旧坏提交不能归零已用回合");
   assert.equal(core[2]!.payload.submissionFeedback!.issues![0]!.reason, "work_file_unauthorized");
-  assert.ok(core[2]!.body.messages.some((message) => message.tool_calls?.some((call: { function: { name: string; }; }) => call.function.name === submitNames.developer)),
-    "已保存的原会话开发历史继续可见");
+  assert.ok(!core[2]!.body.messages.some((message) => message.tool_calls?.some((call: { function: { name: string; }; }) => call.function.name === submitNames.developer)),
+    "旧提交不自动重投，最新字段诊断已在本轮明确提供");
   assert.equal(Object.values(resumed.sessions!).find((item) => item.file === reference!.file)!.pendingResult, undefined);
 });
 
-test("越权声明旧提交清理后预算耗尽仍停止，不新开会话、不重复调用或放行", async (t) => {
+test("越权声明旧提交清理后沿原会话纠正，旧请求上限不阻止重新验收", async (t) => {
   const f = await fixture(t, { crashAfterDeveloperSubmit: true, developerTurns: 2 }), controller = f.controller();
   const initial = await controller.run(f.architecture), reference = Object.values(initial.sessions!).find((item) => item.role === "developer");
   objectFields(reference!.pendingResult!.result).changedFiles = ["mistaken.mjs"];
   await controller.store.save(initial);
   const before = f.requests.length, resumed = await f.controller().run(f.architecture, { resume: true });
-  assert.equal(resumed.status, "failed"); assert.equal(resumed.diagnostic!.reason, "turn_limit");
-  assert.equal(f.requests.length, before); assert.equal(resumed.tasks[0]!.turns, 2);
+  assert.equal(resumed.status, "completed", resumed.summary);
+  assert.ok(f.requests.length > before); assert.equal(resumed.tasks[0]!.turns, 4);
   const saved = Object.values(resumed.sessions!).find((item) => item.file === reference!.file);
-  assert.equal(saved!.pendingResult, undefined); assert.equal(saved!.turns, 2);
-  assert.equal(resumed.package, null); assert.equal(resumed.tasks[0]!.status, "active");
+  assert.equal(saved!.pendingResult, undefined); assert.equal(saved!.turns, 4);
+  assert.ok(resumed.package); assert.equal(resumed.tasks[0]!.status, "verified");
+  const completedCalls = f.requests.length;
   const again = await f.controller().run(f.architecture, { resume: true });
-  assert.equal(again.diagnostic!.reason, "turn_limit"); assert.equal(f.requests.length, before);
-  assert.equal(Object.values(again.sessions!).filter((item) => item.role === "developer").length, 1);
+  assert.equal(again.status, "completed"); assert.equal(f.requests.length, completedCalls);
+  assert.equal(Object.values(again.sessions!).filter((item) => item.role === "developer").length, 2);
 });
 
 test("待消费结果的结构或对象代码绑定损坏仍严格拒绝，不按旧越权声明清理", async (t) => {

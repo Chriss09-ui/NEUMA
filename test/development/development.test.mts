@@ -23,7 +23,7 @@ import { hashValue } from "../../src/development/development-contract.mjs";
 import { InputError } from "../../src/requirements/core.mjs";
 import { createPlatformSnapshot, platformCapabilityCatalog, renderPlatformRules } from "../../src/architecture/platform-contract.mjs";
 import { WebCapabilities } from "../../src/runtime/web-capabilities.mjs";
-import { developmentArchitecture, developmentPlan, developmentReview, developmentIssue, developmentWork } from "../helpers/development.mjs";
+import { developmentArchitecture, developmentPlan, developmentReview, developmentIssue, developmentWork, developmentJevResponse } from "../helpers/development.mjs";
 import type { DevelopmentPlan } from "../../src/contracts/development.mjs";
 import type { PathLike } from "fs";
 
@@ -178,6 +178,7 @@ for (const repairNode of ["plan", "task", "integration"] as const) test(`${repai
     return { sessionFile: join(options.sessionStorage!.directory, `child-${assignments.length}-${Math.random().toString(16).slice(2)}.jsonl`),
       async prompt(text) {
         const input = JSON.parse(text), assignment = input.repairAssignment;
+        assert.equal(input.preparedContext.unresolvedIssues.length, 10, "子组保留全部未解决问题，仍只修改本组授权范围");
         assignments.push({ count: assignment.issues.length, binding: options.sessionStorage!.binding });
         const page = JSON.parse(toolText(await tools.read_repair_context!.execute("read", { section: "base", limit: 24000 })));
         assert.equal(page.nextOffset, null); const base = JSON.parse(page.text);
@@ -237,7 +238,7 @@ test("二百个用例同时失败按原责任与诊断合组，进入修复并�
   assert.equal(result.status, "completed", result.summary); assert.equal(result.plan!.cases.length, 200);
   assert.equal(children, 1); assert.equal(result.budgets.corrections, 5);
   const batch = Object.values(result.repairBatches!)[0]!;
-  assert.equal(batch.checkpoint.version, 2); assert.equal(batch.checkpoint.issues.length, 2);
+  assert.equal(batch.checkpoint.version, 4); assert.equal(batch.checkpoint.issues.length, 2); assert.equal(batch.checkpoint.callLimit, null);
   assert.equal(result.reports[0]!.results.length, 200);
   assert.equal(result.reports.at(-1)!.results.filter(row => row.status === "passed").length, 200);
 });
@@ -438,15 +439,15 @@ test("独立研发评审请求关闭可选思考后，长度不足仍不能接�
     await respond();
   } });
   const result = await controller.run(architecture);
-  assert.equal(result.status, "failed"); assert.equal(result.diagnostic!.reason, "output_limit");
+  assert.equal(result.status, "failed"); assert.equal(result.diagnostic!.reason, "repeated_tool_error");
   assert.equal(result.diagnostic!.role, "reviewer"); assert.equal(result.plan, null); assert.equal(result.package, null);
   assert.deepEqual(sessions.map((item) => item.options.reasoningMode), ["auto", "off"] as const);
-  assert.equal(sessions[1]!.options.maxOutputTokens, 4096); assert.equal(sessions[1]!.prompts.length, 1);
+  assert.equal(sessions[1]!.options.maxOutputTokens, 4096); assert.equal(sessions[1]!.prompts.length, 3);
   assert.equal(executor.calls.verify.length, 0);
 });
 
 test("研发模型重试、截断和半截流保存各自原因，不再统称连接失败", async (t) => {
-  for (const [outcome, reason] of [["retry", "api_unavailable"], ["truncated", "output_limit"], ["stream", "api_stream_interrupted"]])
+  for (const [outcome, reason] of [["retry", "api_unavailable"], ["truncated", "repeated_tool_error"], ["stream", "api_stream_interrupted"]])
     await t.test(outcome, async (child) => {
       const { controller, architecture } = await fixture(child, { onPrompt: async ({ record, emit }) => {
         assert.equal(record.role, "planner");
@@ -549,7 +550,7 @@ test("交付启动失败把原始证据交给新修复会话，扣一次预算�
   assert.equal(repair!.task!.integration, true); assert.equal(repair!.feedback!.report!.mode, "runtime");
   assert.deepEqual(repair!.feedback!.report!.results, smoke.results);
   assert.equal(repair!.feedback!.report!.codeHash, activations[0]!.package!.codeHash);
-  assert.equal(repair!.remaining!.corrections, 5); assert.equal(repair!.remaining!.integrationRepairs, 1);
+  assert.equal(objectFields(repair!.remaining!.contentRejections).integration, 1); assert.equal(repair!.remaining!.modelRequests, "usage-only");
   assert.equal(result.budgets.corrections, 5); assert.equal(result.budgets.integrationRepairs, 1);
   assert.equal(result.reports.filter((report) => report.mode === "runtime").length, 1);
   assert.equal(executor.calls.verify.length, 5);
@@ -597,26 +598,26 @@ test("上下文接近上限时仍使用原会话，失败证据和预算保持�
   const developers = sessions.filter((item) => item.role === "developer");
   assert.equal(developers.length, 2); assert.equal(developers[0]!.prompts.length, 2);
   assert.equal(developers[0]!.payload!.task!.id, "core");
-  assert.equal(developers[0]!.payload!.task!.turns, 1); assert.equal(developers[0]!.payload!.remaining!.corrections, 5);
+  assert.equal(developers[0]!.payload!.task!.turns, 1); assert.equal(objectFields(developers[0]!.payload!.remaining!.contentRejections)["task:core"], 1);
   assert.deepEqual(developers[0]!.payload!.feedback!.report, result.reports[0]);
   assert.equal(developers[0]!.disposed, true);
 });
 
-test("当前任务回合达到上限后续接不能刷新预算", async (t) => {
+test("开发请求超过旧回合上限仍在原任务继续，实际请求累计保留", async (t) => {
   const { controller, architecture, sessions, executor } = await fixture(t, {
     limits: { developerTurns: 2 },
     onPrompt: async ({ record, payload, submit, respond, write }) => {
       if (record.role !== "developer") return respond();
-      await write(); return submit(developmentWork(payload.task!, { continue: true, nextAction: "继续同一任务" }));
+      await write(); return submit(developmentWork(payload.task!, { continue: record.prompts.length < 3, nextAction: "继续同一任务" }));
     },
   });
   const result = await controller.run(architecture);
-  assert.equal(result.status, "failed"); assert.match(result.summary, /回合预算/);
-  assert.equal(result.tasks![0]!.turns, 2); assert.equal(result.package, null); assert.equal(executor.calls.verify.length, 0);
-  assert.equal(sessions.filter((item) => item.role === "developer").flatMap((item) => item.prompts).length, 2);
+  assert.equal(result.status, "completed", result.summary);
+  assert.equal(result.tasks![0]!.turns, 3); assert.ok(result.package); assert.equal(executor.calls.verify.length, 3);
+  assert.equal(sessions.filter((item) => item.role === "developer").flatMap((item) => item.prompts).length, 6);
 });
 
-test("一次模型调用内部多回合超限后，即使已经提交也不能推进", async (t) => {
+test("一次会话内部的多个模型回合只记用量，合法提交仍继续真实验收", async (t) => {
   const { controller, architecture, sessions, executor } = await fixture(t, {
     limits: { developerTurns: 2 },
     onPrompt: async ({ record, respond, emit }) => {
@@ -625,8 +626,8 @@ test("一次模型调用内部多回合超限后，即使已经提交也不能�
     },
   });
   const result = await controller.run(architecture);
-  assert.equal(result.status, "failed"); assert.equal(result.package, null); assert.equal(executor.calls.verify.length, 0);
-  assert.ok(result.tasks![0]!.turns > 2); assert.equal(sessions.find!((item) => item.role === "developer")!.aborted, true);
+  assert.equal(result.status, "completed", result.summary); assert.ok(result.package); assert.equal(executor.calls.verify.length, 3);
+  assert.ok(result.tasks![0]!.turns > 2); assert.equal(sessions.find!((item) => item.role === "developer")!.aborted, false);
 });
 
 test("取消中迟到提交和文件写入被拒绝，状态不会变成完成", { timeout: 10_000 }, async (t) => {
@@ -717,7 +718,7 @@ test("重启恢复已经扣减的修复预算和任务回合，不重做规划�
   assert.equal(result.status, "completed"); assert.equal(result.id, stopped.id);
   assert.equal(result.budgets.corrections, 5); assert.equal(result.tasks![0]!.repairs, 1); assert.equal(result.tasks![0]!.turns, 3);
   assert.equal(resumedSessions.some((item) => item.role === "planner"), false);
-  assert.equal(resumedSessions[0]!.role, "developer"); assert.equal(resumedSessions[0]!.payload!.remaining!.corrections, 5);
+  assert.equal(resumedSessions[0]!.role, "developer"); assert.equal(objectFields(resumedSessions[0]!.payload!.remaining!.contentRejections)["task:core"], 1);
   assert.equal(resumedSessions[0]!.payload!.task!.id, "core");
   assert.notEqual(resumedSessions[0]!.session, sessions.find!((item) => item.role === "developer")!.session);
 });
@@ -782,7 +783,7 @@ test("普通模型回复不能代替规划、开发或评审的结构化提交",
       if (record.role !== omittedRole) await respond();
     } });
     const result = await controller.run(architecture);
-    assert.equal(result.status, "failed", omittedRole); assert.match(result.summary, /结构化结果/);
+    assert.equal(result.status, "failed", omittedRole); assert.equal(result.diagnostic!.reason, "repeated_tool_error");
     assert.equal(result.package, null); assert.equal(result.delivery, "blocked");
   }
 });
@@ -831,6 +832,36 @@ test("计划评审修订把拒绝版本和具体意见交回同一规划会话",
   assert.notEqual(result.planAttempts![0]!.planHash, result.planAttempts![1]!.planHash);
 });
 
+test("开发退回规划五次时原子保留最新反馈与未解决问题，恢复不重复评审或扣数", async (t) => {
+  let rejections = 0, plans = 0;
+  const { controller, architecture, sessions, executor } = await fixture(t, {
+    onPrompt: async ({ record, payload, submit, respond }) => {
+      if (record.role === "planner") {
+        const plan = developmentPlan({ requirements: payload.requirements!, design: payload.design! });
+        plan.tasks[0]!.description += `，补齐当前第${++plans}版规划范围`;
+        return submit(plan);
+      }
+      if (record.role === "reviewer" && payload.mode === "task") return submit(developmentReview(payload.subjectHash!, {
+        verdict: "revise", issues: [developmentIssue("plan", `missing_${++rejections}`)] }));
+      return respond();
+    },
+  });
+  const stopped = await controller.run(architecture);
+  assert.equal(stopped.diagnostic!.reason, "content_rejection_limit");
+  assert.equal(stopped.diagnostic!.owner, "plan"); assert.equal(stopped.needsReplan, true);
+  assert.equal(stopped.feedback!.review!.issues[0]!.id, "missing_5");
+  assert.deepEqual(stopped.feedback!.rejectedPlan, stopped.plan);
+  assert.equal(stopped.retryPolicy!.content.plan!.count, 5);
+  assert.deepEqual(stopped.retryPolicy!.unresolved.plan!.map(issue => issue.id), ["missing_5"],
+    "前四项已分别通过规划复评关闭，第五项必须留待修复");
+  const calls = sessions.reduce((sum, session) => sum + session.prompts.length, 0), probes = executor.calls.probe.length;
+  const resumed = await controller.run(architecture, { resume: true });
+  assert.equal(resumed.diagnostic!.reason, "content_rejection_limit");
+  assert.deepEqual(resumed.retryPolicy, stopped.retryPolicy); assert.deepEqual(resumed.feedback, stopped.feedback);
+  assert.equal(sessions.reduce((sum, session) => sum + session.prompts.length, 0), calls);
+  assert.equal(executor.calls.probe.length, probes); assert.equal(rejections, 5);
+});
+
 test("测试证据绑定错误代码版本直接失败，不能进入评审或打包", async (t) => {
   const { controller, architecture, sessions } = await fixture(t, { onVerify: (_options, report) => ({ ...report, codeHash: "0".repeat(64) }) });
   const result = await controller.run(architecture);
@@ -848,17 +879,17 @@ test("测试未执行或执行异常不能被模型评审放行", async (t) => {
   }
 });
 
-test("修复预算耗尽保留失败证据，不能自动判定完成或重置预算", async (t) => {
+test("内容累计五次退回后停止，格式与请求不混计，恢复不重新领取次数", async (t) => {
   const { controller, architecture, sessions } = await fixture(t, { limits: { corrections: 1 }, onVerify: (_options, report) => failReport(report) });
   const result = await controller.run(architecture);
-  assert.equal(result.status, "failed"); assert.match(result.summary, /预算/); assert.equal(result.package, null);
-  assert.equal(result.budgets.corrections, 0); assert.equal(result.tasks![0]!.repairs, 1);
-  assert.equal(result.reports.length, 2); assert.ok(result.reports.every((report) => report.status === "failed"));
+  assert.equal(result.status, "failed"); assert.equal(result.diagnostic!.reason, "content_rejection_limit"); assert.equal(result.package, null);
+  assert.equal(result.retryPolicy!.content["task:core"]!.count, 5); assert.equal(result.tasks![0]!.repairs, 4);
+  assert.equal(result.reports.length, 5); assert.ok(result.reports.every((report) => report.status === "failed"));
   assert.equal(sessions.filter((item) => item.role === "developer").length, 1);
-  assert.equal(sessions.find!((item) => item.role === "developer")!.prompts.length, 2);
+  assert.equal(sessions.find!((item) => item.role === "developer")!.prompts.length, 5);
   const resumed = await controller.run(architecture, { resume: true });
-  assert.equal(resumed.status, "failed"); assert.equal(resumed.budgets.corrections, 0);
-  assert.equal(resumed.tasks![0]!.repairs, 1);
+  assert.equal(resumed.status, "failed"); assert.deepEqual(resumed.retryPolicy, result.retryPolicy);
+  assert.equal(resumed.tasks![0]!.repairs, 4); assert.equal(resumed.tasks[0]!.turns, 5);
 });
 
 test("只有已经绑定独立评审的 workflow/custom 架构可以进入研发", async (t) => {
@@ -891,9 +922,147 @@ test("恢复边界保留真实研发记录原值，并拒绝损坏的交付清�
   assert.ok(damagedLedger.acceptanceLedger.items.length);
   assert.equal(readDevelopmentRunRecord(damagedLedger), damagedLedger);
   Reflect.set(damagedLedger.acceptanceLedger!.items[0]!, "evidence", { kind: "independent-review", bindingHash: 42 });
-  assert.throws(() => readDevelopmentRunRecord(damagedLedger), /研发检查点字段已损坏/);
+  assert.throws(() => readDevelopmentRunRecord(damagedLedger), /研发检查点字段校验未通过/);
 
   const damagedReport = { ...structuredClone(record), feedback: { report: { status: "passed", results: [] } } };
-  assert.throws(() => readDevelopmentRunRecord(damagedReport), /研发检查点字段已损坏/);
+  assert.throws(() => readDevelopmentRunRecord(damagedReport), /研发检查点字段校验未通过/);
   assert.deepEqual(await controller.store.getRun(record.id), original);
+});
+
+test("研发单组JEV逐条保留必要修改、撤销过严意见，低置信度不增加暂停出口", async t => {
+  let rejected = false;
+  const states: Record<string, unknown>[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const body = JSON.parse(String(init.body)), state = objectFields(body.state); states.push(state);
+    return Response.json(developmentJevResponse(objectFields(state.objection).id === "necessary" ? 3 : 1, objectFields(state.objection).id === "necessary" ? 1 : 4));
+  });
+  const f = await fixture(t, { onPrompt: async ({ record, payload, submit, respond }) => {
+    if (record.role === "reviewer" && payload.mode === "plan" && !rejected) {
+      rejected = true;
+      return submit(developmentReview(payload.subjectHash!, { verdict: "revise", issues: ["necessary", "style"].map(id => ({
+        ...developmentIssue("plan", id), taskIds: ["core"], candidatePaths: ["/summary"] })) }));
+    }
+    return respond();
+  } });
+  f.controller.config.jevApiKey = "local-jev-fixture";
+  const result = await f.controller.run(f.architecture);
+  assert.equal(result.status, "completed", result.summary); assert.equal(result.planAttempts.length, 2);
+  assert.equal(result.retryPolicy!.content.plan!.count, 1); assert.equal(states.length, 2);
+  const judgment = Object.values(result.reviewJudgments!).find(row => row.original.issues.length === 2)!;
+  assert.deepEqual(judgment.effective!.issues.map(row => [row.id, row.blocking]), [["necessary", true], ["style", false]]);
+  assert.ok(judgment.original.issues.every(row => row.blocking)); assert.equal(judgment.receipts.necessary!.assessment!.route, "revise");
+  assert.equal(judgment.receipts.style!.assessment!.route, "pass");
+});
+
+test("JEV撤销评语也不能覆盖真实失败报告，必须按原用例修复并重新验收", async t => {
+  t.mock.method(globalThis, "fetch", async () => Response.json(developmentJevResponse(0, 4)));
+  const f = await fixture(t, {
+    onVerify: (_options, report, number) => number === 1 ? failReport(report) : report,
+    onPrompt: async ({ record, payload, submit, respond }) => {
+      if (record.role === "reviewer" && payload.mode === "task" && objectFields(payload.report).status === "failed")
+        return submit(developmentReview(payload.subjectHash!, { verdict: "revise", issues: [developmentIssue()] }));
+      return respond();
+    },
+  });
+  f.controller.config.jevApiKey = "local-jev-fixture";
+  const result = await f.controller.run(f.architecture);
+  assert.equal(result.status, "completed", result.summary); assert.equal(result.reports[0]!.status, "failed");
+  assert.equal(result.tasks[0]!.repairs, 1); assert.equal(result.retryPolicy!.content["task:core"]!.count, 1);
+  assert.ok(Object.values(result.reviewJudgments!).some(row => row.original.verdict === "revise" && row.effective!.verdict === "pass"));
+  assert.equal(result.reports.at(-1)!.status, "passed");
+});
+
+test("JEV过严分恰为50时通过，原blocked结论不能残留为程序暂停", async t => {
+  let requests = 0, rejected = false;
+  t.mock.method(globalThis, "fetch", async () => { requests++; return Response.json(developmentJevResponse(3, 2)); });
+  const f = await fixture(t, { onPrompt: async ({ record, payload, submit, respond }) => {
+    if (record.role === "reviewer" && payload.mode === "plan" && !rejected) {
+      rejected = true;
+      return submit(developmentReview(payload.subjectHash!, { verdict: "blocked", issues: [developmentIssue("plan")] }));
+    }
+    return respond();
+  } });
+  f.controller.config.jevApiKey = "local-jev-fixture";
+  const result = await f.controller.run(f.architecture);
+  assert.equal(result.status, "completed", result.summary); assert.equal(requests, 1);
+  assert.deepEqual(result.retryPolicy!.content, {}); assert.equal(result.planAttempts.length, 1);
+  const judgment = Object.values(result.reviewJudgments!).find(row => row.original.verdict === "blocked")!;
+  assert.equal(judgment.receipts.missing_behavior!.assessment!.strictness, 50); assert.equal(judgment.effective!.verdict, "pass");
+});
+
+test("评审误把未来任务未写的文件当缺陷时，JEV得到真实缺失事实并可直接放行", async t => {
+  let observed = false;
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const state = JSON.parse(String(init.body)).state;
+    assert.equal(state.currentTaskId, "core");
+    assert.ok(state.code.some((file: { path: string; exists: boolean }) => file.path === "guard.mjs" && file.exists === false));
+    observed = true; return Response.json(developmentJevResponse(0, 4));
+  });
+  const f = await fixture(t, { onPrompt: async ({ record, payload, submit, respond }) => {
+    if (record.role === "reviewer" && payload.mode === "task" && payload.task?.id === "core")
+      return submit(developmentReview(payload.subjectHash!, { verdict: "revise", issues: [{ ...developmentIssue(),
+        taskIds: ["guard"], files: ["guard.mjs"], description: "后续guard任务的文件还没有写好" }] }));
+    return respond();
+  } });
+  f.controller.config.jevApiKey = "local-jev-fixture";
+  const result = await f.controller.run(f.architecture);
+  assert.equal(result.status, "completed", result.summary); assert.ok(observed); assert.deepEqual(result.retryPolicy!.content, {});
+});
+
+test("JEV连续三次格式错误独立停止，恢复不清空评分计数或占用内容退回", async t => {
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => { requests++; return Response.json({ answers: {} }); });
+  const f = await fixture(t, { onPrompt: async ({ record, payload, submit, respond }) => {
+    if (record.role === "reviewer") return submit(developmentReview(payload.subjectHash!, { verdict: "revise", issues: [developmentIssue("plan")] }));
+    return respond();
+  } });
+  f.controller.config.jevApiKey = "local-jev-fixture";
+  const stopped = await f.controller.run(f.architecture);
+  assert.equal(stopped.status, "failed"); assert.equal(stopped.diagnostic!.reason, "review_judgment_format"); assert.equal(requests, 3);
+  assert.deepEqual(stopped.retryPolicy!.content, {});
+  const receipt = Object.values(stopped.reviewJudgments!)[0]!.receipts.missing_behavior!;
+  assert.equal(receipt.attempts, 3); assert.equal(receipt.formatFailures, 3); assert.equal(receipt.responses.length, 3);
+  const before = f.sessions.length, resumed = await f.controller.run(f.architecture, { resume: true });
+  assert.equal(resumed.diagnostic!.reason, "review_judgment_format"); assert.equal(requests, 3);
+  assert.deepEqual(resumed.reviewJudgments, stopped.reviewJudgments); assert.deepEqual(resumed.retryPolicy, stopped.retryPolicy);
+  assert.ok(f.sessions.slice(before).every(session => session.prompts.length === 0), "复用待消费原报告，不再调用评审模型");
+});
+
+test("架构位置报告经过研发创建、读取及重启仍兼容，旧摘录保留，坏字段仍拒绝", async t => {
+  const architecture = developmentArchitecture();
+  const issue = { id: "style_note", blocking: false, checkId: "interfaces", kind: "design", description: "可选建议", remedy: "按需改进",
+    candidatePaths: ["/components"], references: [{ source: "candidate", path: "/components" }] };
+  Object.assign(architecture.review, { issues: [issue], acceptanceScopeChecks: [{ acceptanceId: architecture.design.acceptance[0]!.id,
+    adapterId: "action", scope: "generated-action-execution", sufficient: true, reason: "架构只交业务验证方向", adapterRulePath: "/adapters/action" }] });
+  const f = await fixture(t, { architecture });
+  const result = await f.controller.run(architecture);
+  assert.equal(result.status, "completed", result.summary);
+  const restored = new DevelopmentStore({ dataDir: f.dataDir }); await restored.ready;
+  const record = readDevelopmentRunRecord(await restored.getRun(result.id));
+  assert.deepEqual(record.architecture.review, architecture.review);
+  const firstRef = (value: DevelopmentRunRecord) => objectFields((objectFields((objectFields(value.architecture.review).issues as unknown[])[0]).references as unknown[])[0]);
+  const old = structuredClone(record); Reflect.set(firstRef(old), "quote", "原组件描述");
+  assert.doesNotThrow(() => readDevelopmentRunRecord(old));
+  const broken = structuredClone(record); Reflect.set(firstRef(broken), "path", 42);
+  assert.throws(() => readDevelopmentRunRecord(broken), /architecture\/review/);
+});
+
+test("评审结果已保存但任务尚未消费时中断，恢复复用原评审和执行证据", async t => {
+  const f = await fixture(t);
+  const save = f.controller.save.bind(f.controller); let interrupted = false;
+  f.controller.save = async ctx => {
+    await save(ctx);
+    if (!interrupted && ctx.record.pendingReview?.mode === "task" && ctx.record.reviews.at(-1)?.subjectHash === ctx.record.pendingReview.subjectHash) {
+      interrupted = true; throw new Error("controlled crash after durable review, before task consumption");
+    }
+  };
+  const stopped = await f.controller.run(f.architecture);
+  assert.equal(stopped.status, "failed"); assert.equal(stopped.pendingReview!.mode, "task");
+  const subject = stopped.pendingReview!.subjectHash, report = stopped.reports[0]!;
+  const resumed = await f.controller.run(f.architecture, { resume: true });
+  assert.equal(resumed.status, "completed", resumed.summary); assert.equal(resumed.pendingReview, null);
+  assert.equal(f.sessions.filter(session => session.payload?.subjectHash === subject).length, 1);
+  assert.equal(f.executor.calls.verify.filter(call => call.snapshot.hash === report.codeHash
+    && call.cases.length === report.results.length).length, 1);
+  assert.deepEqual(resumed.retryPolicy!.content, {});
 });

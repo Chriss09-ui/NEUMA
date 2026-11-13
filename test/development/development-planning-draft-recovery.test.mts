@@ -26,7 +26,7 @@ async function directory(t: test.TestContext) {
   return root;
 }
 
-test("正常run耗尽后同批次不补预算，新批次仅续接未通过草稿并重新诊断", async (t) => {
+test("规划中断保留原请求用量，同批次继续；显式新批次仅接手未通过草稿", async (t) => {
   const root = await directory(t), architecture = developmentArchitecture({ contractVersion: 2 });
   Reflect.set(architecture.design, "schemaVersion", 2);
   architecture.candidateHash = designHash(architecture.design); architecture.review = passingReview(architecture.candidateHash);
@@ -44,7 +44,7 @@ test("正常run耗尽后同批次不补预算，新批次仅续接未通过草�
         async prompt(text) {
           await options.onModelCall!();
           const payload = JSON.parse(text);
-          if (payloads.length && objectFields(objectFields(options.sessionStorage!.binding).architectureRef).version === 1) {
+          if (payloads.length && objectFields(options.sessionStorage!.binding).runId !== objectFields(bindings[0]).runId && objectFields(objectFields(options.sessionStorage!.binding).architectureRef).version === 1) {
             if (!payload.historicalPlanningDraft) {
               const page = await tools.read_development_context!.execute("history", { section: "historicalPlanningDraft", limit: 8000 });
               payload.historicalPlanningDraft = JSON.parse(JSON.parse(toolText(page)).text);
@@ -81,30 +81,30 @@ test("正常run耗尽后同批次不补预算，新批次仅续接未通过草�
         } };
     } });
   const first = await controller.run(architecture);
-  assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "turn_limit"); assert.equal(first.planning.turns, 2);
-  assert.deepEqual(developmentSummary(first)!.continuation, { mode: "fresh", sourceRunId: first.id, reason: "planning_budget_exhausted", historyPreserved: true });
+  assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "submission_incomplete"); assert.equal(first.planning.turns, 3);
+  assert.equal(developmentSummary(first)!.continuation, undefined);
   for (const delta of [{ status: "interrupted" }, { status: "cancelled" }, { plan: { summary: "accepted" } }, { tasks: [{ id: "executed", status: "verified" }] }])
     assert.notEqual(callFixture(developmentSummary, undefined, [{ ...first, ...delta }])!.continuation?.mode, "fresh");
   assert.equal(first.plan, null); assert.equal(first.planningDraft!.snapshot.kind, "untrusted-planning-draft");
   const original = await readFile(join(await controller.artifacts.directory(first.agentId, first.id), "index.json"));
   const resumed = await controller.run(architecture, { resume: true });
-  assert.equal(resumed.id, first.id); assert.equal(resumed.planning.turns, 2); assert.equal(payloads.length, 1);
+  assert.equal(resumed.id, first.id); assert.equal(resumed.planning.turns, 6); assert.equal(payloads.length, 2);
   const fresh = await controller.run(architecture);
   assert.notEqual(fresh.id, first.id); assert.equal(fresh.plan, null); assert.equal(fresh.planHash, null); assert.deepEqual<NonNullable<typeof fresh>["tasks"]>(fresh.tasks, []);
-  assert.equal(payloads.length, 2); assert.equal(objectFields(payloads[1]!.historicalPlanningDraft).trust, "unverified");
-  assert.equal(objectFields(objectFields(payloads[1]!.historicalPlanningDraft).source).runId, first.id);
-  assert.ok(Number(objectFields(objectFields(objectFields(payloads[1]!.historicalPlanningDraft).currentCheck).diagnostics).total) > 0);
-  assert.equal(objectFields(payloads[1]!.modelBudget).limit, 2); assert.equal(objectFields(payloads[1]!.modelBudget).used, 0);
+  assert.equal(payloads.length, 3); assert.equal(objectFields(payloads[2]!.historicalPlanningDraft).trust, "unverified");
+  assert.equal(objectFields(objectFields(payloads[2]!.historicalPlanningDraft).source).runId, first.id);
+  assert.ok(Number(objectFields(objectFields(objectFields(payloads[2]!.historicalPlanningDraft).currentCheck).diagnostics).total) > 0);
+  assert.equal(objectFields(payloads[2]!.modelBudget).limit, null); assert.equal(objectFields(payloads[2]!.modelBudget).used, 0);
   assert.notEqual(objectFields(bindings.at(-1)).runId, objectFields(bindings[0]).runId);
   assert.deepEqual(await readFile(join(await controller.artifacts.directory(fresh.agentId, fresh.id), "index.json")), original);
-  assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 2);
+  assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 6);
   const legacy = await controller.store.getRun(fresh.id); delete legacy!.planningDraft;
   const measured = await controller.artifacts.diagnose(legacy!.agentId, legacy!.id, "index.json");
   legacy!.planDraftChecks = [{ hash: measured.hash }];
   await controller.store.save(legacy);
   const compatible = await controller.run(architecture);
   assert.equal(compatible.planningDraftSource!.snapshot.runId, fresh.id);
-  assert.equal(compatible.planning.turns, 2); assert.equal(compatible.plan, null);
+  assert.equal(compatible.planning.turns, 3); assert.equal(compatible.plan, null);
   const changed = structuredClone(architecture); changed.version++;
   const different = await controller.run(changed);
   assert.equal(different.planningDraftSource, undefined);
@@ -173,14 +173,14 @@ test("正式候选被独立评审退回后，新批次保留精确版本评语�
       } };
     } });
   const first = await controller.run(architecture);
-  assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "turn_limit"); assert.equal(first.planAttempts.length, 1);
+  assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "content_rejection_limit"); assert.equal(first.planAttempts.length, 5);
   assert.equal(first.planAttempts[0]!.review.verdict, "revise"); assert.equal(first.plan, null); assert.ok(first.planningDraft);
   const next = await controller.run(architecture);
   assert.equal(next.plan, null); assert.deepEqual<NonNullable<typeof next>["tasks"]>(next.tasks, []); assert.deepEqual<NonNullable<typeof next>["reviews"]>(next.reviews, []); assert.equal(next.package, null);
   assert.equal(continued!.trust, "unverified"); assert.equal(continued!.source.runId, first.id);
   assert.equal(continued!.historicalReview.reviewedPlanHash, first.planAttempts[0]!.planHash);
   assert.equal(continued!.historicalReview.review.verdict, "revise");
-  assert.equal(continued!.currentCheck.status, "valid"); assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 2);
+  assert.equal(continued!.currentCheck.status, "valid"); assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 10);
   await controller.run(architecture);
   assert.equal(continued!.historicalReview.sourceRunId, first.id);
   assert.equal(continued!.historicalReview.reviewedPlanHash, first.planAttempts[0]!.planHash);

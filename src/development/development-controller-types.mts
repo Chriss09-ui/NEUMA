@@ -39,6 +39,8 @@ export interface DevelopmentDiagnostic extends UnknownRecord { stage: string; ph
 export interface HistoricalReview { sourceRunId: string; reviewedPlanHash: string; review: DevelopmentReview & { subjectVersion?: number }; instruction: string }
 export interface PlanningDraft { bindingHash: string; snapshot: PlanningDraftSnapshot; historicalReview?: HistoricalReview }
 export interface DevelopmentRunRecord extends SubmissionRecord {
+  retryPolicy?: import("./development-policy.mjs").DevelopmentRetryPolicy;
+  reviewJudgments?: Record<string, import("./development-review-judgment.mjs").DevelopmentJudgmentCheckpoint>;
   workloadPolicyVersion?: 1;
   dispatchedWork?: string[];
   workDispatches?: Record<string, import("./development-dispatch.mjs").DevelopmentWorkCheckpoint>;
@@ -63,11 +65,13 @@ export interface DevelopmentSession extends PiSessionPort { sessionFile?: string
 export interface DevelopmentHandle<Result = unknown> {
   compactionAllowed?: boolean;
   nodeGuide?: string;
-  kind: DevelopmentRole; submitName: string; accepting: boolean; submitted: boolean; result: Result | undefined; counter: { turns: number }; limit: number; failed: boolean;
+  kind: DevelopmentRole; submitName: string; accepting: boolean; submitted: boolean; result: Result | undefined; counter: { turns: number }; limit: number | null; failed: boolean;
   turnsInPrompt: number; disposed: boolean; submissionCalls: Map<string, { value: unknown; recorded: boolean }>; planningBlocker?: unknown;
   checkToolInputs?: () => void; charge: (options?: { purpose?: string; retryAttempt?: number }) => Promise<void>;
+  noteFormatFailure?: (id: string, reason: string) => Promise<void>;
   reference: DevelopmentSessionReference; validate: (value: unknown) => Result | Promise<Result>; session: DevelopmentSession; unsubscribe?: () => void;
   payload: DevelopmentContextPayload; contextMessage?: PreparedDevelopmentContext; contextMaxChars: number; structuredSubmissionTools: NeumaTool[];
+  historyProjection?: ReturnType<typeof import("../runtime/work-round-context.mjs").createWorkRoundProjection>;
   lastAssistant?: SessionMessage | undefined; retries?: number; failure?: { message: string; reason: string };
 }
 export interface DevelopmentContext { controller: AbortController; signal: AbortSignal; onProgress: (value: UnknownRecord) => void; handles: Set<DevelopmentHandle>;

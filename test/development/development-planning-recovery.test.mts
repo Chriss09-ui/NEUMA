@@ -99,7 +99,7 @@ test("真实Pi完整诊断后同hash重交只给有界未修改反馈，模型�
   assert.equal(serverError, undefined); assert.equal(calls, 5); assert.ok(accepted && "cases" in accepted); assert.deepEqual(accepted.cases, good);
   assert.equal(typeof accepted.cases[0]!.input, "object"); assert.deepEqual(validatePlan(accepted, { architecture }), accepted);
   assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).rejected, 3); assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).accepted, 1);
-  assert.equal(handle.counter.turns, 5); assert.equal(handle.limit, 12);
+  assert.equal(handle.counter.turns, 5); assert.equal(handle.limit, null);
   const frozen = await callFixture(controller.artifacts.validateSnapshot, controller.artifacts, [objectFields(record).planningArtifact]);
   assert.deepEqual(frozen.plan, accepted); assert.notEqual(frozen.snapshot.hash, changedFeedback!.hash);
 });
