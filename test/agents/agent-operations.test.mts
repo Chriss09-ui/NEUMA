@@ -8,6 +8,9 @@ import { AgentStorage } from "../../src/agents/agent-storage.mjs";
 import { createAgentRuntime } from "../../public/agent-runtime.js";
 import type { OperationReference } from "../../public/operation-view.js";
 import { emptyDraft } from "../../src/requirements/core.mjs";
+import { createServer } from "node:http";
+import { createRequestHandler } from "../../src/server.mjs";
+import { continueDevelopmentOperation } from "../../scripts/development-operation.mjs";
 
 test("制作任务持久接受、重复提交及旧代次停止共用同一次执行，快照读取不执行业务", async t => {
   const root = await mkdtemp(join(tmpdir(), "neuma-operation-")), storage = new AgentStorage({ dataDir: root });
@@ -103,4 +106,49 @@ test("前端断线重试不重复执行，确认失败或取消后可用同一�
   await api.cancelOperation(reference);
   assert.deepEqual(await api.startDevelopment("one", { resume: true }), {});
   assert.equal(calls, 4, "观察已中止时，明确取消的终态回执也必须允许下一次提交");
+});
+
+test("真实HTTP续测丢失接受回执及查看连接后仍沿同一后台任务完成，不重复执行或取消", async t => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-live-development-operation-")), storage = new AgentStorage({ dataDir: root });
+  let calls = 0, release!: () => void, executionSignal: AbortSignal | undefined, released = false;
+  let result = { development: { id: "existing_development", status: "running", requests: 5 } };
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const run = async (_id: string, { signal }: { signal: AbortSignal }) => {
+    calls++; executionSignal = signal; await gate;
+    result = { development: { ...result.development, status: "completed", requests: 6 } }; return result;
+  };
+  const operations = new AgentOperations({ storage, build: async () => ({}), develop: run, snapshot: async () => result });
+  const handler = createRequestHandler({ dataDir: root, config: {}, providers: {},
+    projects: { dispose: async () => {} }, projectAgent: { dispose: async () => {} },
+    prototypeAgents: { close: () => operations.close(),
+      submitOperation: (kind, input, options) => {
+        const { mutationId, ...body } = input;
+        return operations.submit(String(input.id), kind, body, mutationId, options?.signal);
+      }, operation: (id, operationId, after) => operations.view(id, operationId, after) } });
+  let lostSubmit = false, lostQuery = false;
+  const server = createServer((request, response) => {
+    if (request.method === "POST" && !lostSubmit) {
+      lostSubmit = true; response.end = () => { response.destroy(); return response; };
+    } else if (request.method === "GET" && !lostQuery) {
+      lostQuery = true; response.end = () => { response.destroy(); return response; };
+    }
+    void handler(request, response);
+  });
+  t.after(async () => {
+    release(); await handler.dispose(); server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true });
+  });
+  await handler.ready;
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const retries: string[] = [];
+  const completed = await continueDevelopmentOperation({ baseUrl: `http://127.0.0.1:${address.port}/`, agentId: "one", mutationId: "continue_original",
+    onRetry(event) { retries.push(event.phase); }, onView() {
+      assert.equal(executionSignal!.aborted, false);
+      if (retries.includes("observe") && !released) { released = true; release(); }
+    } });
+  assert.deepEqual(retries, ["submit", "observe"]); assert.equal(calls, 1);
+  assert.equal(completed.running, false); assert.equal(completed.interrupted, false); assert.equal(completed.error, null);
+  assert.deepEqual(completed.result, { development: { id: "existing_development", status: "completed", requests: 6 } });
+  assert.ok((await operations.read("one", "continue_original")).settledAt);
 });

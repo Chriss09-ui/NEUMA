@@ -154,6 +154,8 @@ Node 动作和 `node-check` 使用真实操作系统隔离，只读代码快照�
 
 制作/研发页面先取得持久操作回执，再独立查看。关闭页面只解绑查看；明确停止才取消真实执行。操作索引保存架构版本和研发编号，不产生第二套业务终态或调度额度；重启不自动 resume。接口与快照规则见 [用户指南](user-guide.md)。
 
+真实续测脚本同样使用后台任务入口，可复用 [development-operation.mts](../scripts/development-operation.mts) 的 `continueDevelopmentOperation({baseUrl,agentId,mutationId,onView})`。调用前保存本次 mutationId；提交回执丢失时沿同编号核对，查看失败只重试 GET，不重新领取业务次数。单次 HTTP 请求有15秒超时及最多3次传输尝试，后台任务总时长和模型请求数不受此限制。旧 `development/stream` 保留断开取消语义，不用于长时间续测。续测从最近停点承接原会话、已完成结果及计数，停止查看不自动取消后台任务。
+
 
 本地记录、工作区及快照按 Agent 归属：
 
