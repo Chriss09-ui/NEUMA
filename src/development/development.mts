@@ -1,4 +1,6 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { developmentExecutionConfig, developmentExecutionInputSchema, developmentServiceInputSchema,
+  applyDevelopmentExecution, developmentExecutionGuide } from "./development-execution-config.mjs";
 import { withAssertionPathGuide } from "./development-assertion-path.mjs";
 import { developmentTestCapabilities, withTestCapabilityGuide } from "./development-test-capabilities.mjs";
 import { createFormatRecovery, readFormatRecovery, noteFormatRejection, resolveFormatRecovery, deliverFormatFeedback,
@@ -296,6 +298,7 @@ export class DevelopmentController {
     const name = submission?.name ?? (kind === "planner" ? "submit_development_plan" : kind === "developer" ? "submit_development_work" : "submit_development_review");
     const schemas = { planner: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : ctx.record.architecture.design.schemaVersion === 2 ? PLAN_V2_SCHEMA : PLAN_SCHEMA, developer: WORK_SCHEMA, reviewer: REVIEW_SCHEMA };
     const resultSchema = submission?.schema ?? schemas[kind];
+    const executionConfig = developmentExecutionConfig(ctx.record.architecture);
     const filePlan = !submission && kind === "planner" && Number(ctx.record.architecture.design.schemaVersion) >= 2;
     const freshWorkspace = filePlan && ctx.planningWorkspace?.empty === true;
     const submitSchema = filePlan ? { type: "object", properties: { indexPath: { type: "string", minLength: 1, maxLength: 500,
@@ -383,7 +386,9 @@ export class DevelopmentController {
       return issues;
     };
     const submit: NeumaTool = { name, label: "提交阶段结果", description: "提交经过结构校验的阶段结果；提交不表示整体通过。",
-      parameters: submitSchema, executionMode: "sequential" as const, execute: async (_id: string, value: unknown) => {
+      parameters: kind === "planner" && !filePlan ? developmentExecutionInputSchema(submitSchema, executionConfig) : submitSchema,
+      ...(kind === "planner" && !filePlan ? { prepareArguments: (input: unknown) => applyDevelopmentExecution(input, resultSchema, executionConfig) } : {}),
+      executionMode: "sequential" as const, execute: async (_id: string, value: unknown) => {
         this.guard(ctx);
         checkToolInputs();
         const calls = Array.isArray(handle.lastAssistant?.content) ? handle.lastAssistant.content.filter(part => part.type === "toolCall") : [];
@@ -538,6 +543,7 @@ export class DevelopmentController {
     const inputFeedback = (toolName: string, args: unknown) => {
       const tool = sessionTools.find((entry) => entry.name === toolName);
       if (!tool) return;
+      if (toolName === name && kind === "planner" && !filePlan) args = applyDevelopmentExecution(args, resultSchema, executionConfig);
       const structural = toolInputValidation(args, tool.parameters as ToolSchema, { root: toolName === name ? root : toolName });
       if (structural.valid) return;
       const issues = toolName === name ? submissionIssues(args, submitSchema, { root, sdk: true })
@@ -565,6 +571,7 @@ export class DevelopmentController {
       reasoningMode: kind === "reviewer" ? "off" : "auto",
       dataDir: await this.storage.directory(ctx.record.agentId, "", { create: true }),
       systemPrompt: developmentNodePrompt(kind)
+        + "\n" + developmentExecutionGuide(executionConfig)
         + (submission ? "\n本次分派优先规则：" + submission.instruction : "")
         + (webTools.length ? "\n" + WEB_RUNTIME_PROMPT : "")
         + "\n" + renderPiSubmissionContract({ role: kind, submitName: name, tools: sessionTools, alternativeTools: blockerTool ? [blockerTool.name] : [], structuredResponse: true }),
@@ -644,7 +651,15 @@ export class DevelopmentController {
     handle.checkToolInputs?.();
     ctx.lastRole = handle.kind;
     handle.payload = clone({ ...payload, ...(handle.planningBlocker ? { planningBlockerContract: handle.planningBlocker } : {}) });
-    if (handle.payload.planSchema) handle.payload.planSchema = withTestCapabilityGuide(withAssertionPathGuide(handle.payload.planSchema as ToolSchema));
+    const executionConfig = developmentExecutionConfig(ctx.record.architecture);
+    handle.payload.executionConfig = executionConfig;
+    handle.payload.runtime ??= executionConfig.runtime;
+    if (handle.payload.planSchema) handle.payload.planSchema = withTestCapabilityGuide(withAssertionPathGuide(
+      developmentExecutionInputSchema(handle.payload.planSchema as ToolSchema, executionConfig)));
+    if (handle.payload.serviceManifestSchema) {
+      if (executionConfig.runtime === "managed-service") handle.payload.serviceManifestSchema = developmentServiceInputSchema(handle.payload.serviceManifestSchema as ToolSchema, executionConfig);
+      else delete handle.payload.serviceManifestSchema;
+    }
     handle.payload.testCapabilities = developmentTestCapabilities();
     handle.payload.roleGuide = handle.nodeGuide ?? { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[handle.kind];
     if (ctx.record.architecture.platformSnapshot) handle.payload.platformGuide = renderPlatformRules(ctx.record.architecture.platformSnapshot,

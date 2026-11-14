@@ -177,7 +177,7 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
       : encoded(value[item.section]) === sectionSources.get(item.section) ? "full" : "summary",
   })) });
   const bindings: UnknownRecord = {};
-  for (const field of ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment"]) {
+  for (const field of ["architectureRef", "executionConfig", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment"]) {
     if (Object.hasOwn(payload, field) && payload[field] !== undefined) bindings[field] = structuredClone(payload[field]);
   }
   const base = describeDelivery({ contextTruncated: true, contextNotice: notice, ...bindings });
@@ -198,7 +198,7 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
 }
 
 export function developmentNodeContext(payload: DevelopmentContextPayload, kind: string) {
-  const fields = ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment", "caseAssignments", "reviewScope", "partSchema", "task", "feedback", "submissionFeedback", "issues", "remaining", "unresolvedIssues", "historyPolicy",
+  const fields = ["architectureRef", "executionConfig", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment", "caseAssignments", "reviewScope", "partSchema", "task", "feedback", "submissionFeedback", "issues", "remaining", "unresolvedIssues", "historyPolicy",
     "requirements", "design", "verificationAssignments", "entrypoint", "runtime", "application", "checkpoint", "planningWorkspace", "testCapabilities"];
   if (kind === "planner") fields.push("previousPlan", "planningRepair", "historicalPlanningDraft", "caseFacts", "completedTasks", "planningFiles");
   if (payload.workAssignment) fields.push("plan");

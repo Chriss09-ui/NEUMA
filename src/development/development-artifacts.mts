@@ -7,6 +7,7 @@ import type { NeumaTool, RegisteredTool } from "../runtime/execution-port.mjs";
 import type { PlanDiagnosticSource, PlanDiagnosticIssue } from "./development-plan-diagnostics.mjs";
 import { objectFields, isInteger, errorField } from "../runtime/type-boundary.mjs";
 import { normalizeAssertionPath } from "./development-assertion-path.mjs";
+import { developmentExecutionConfig, applyDevelopmentExecution, type DevelopmentExecutionConfig } from "./development-execution-config.mjs";
 interface PlanIndex extends UnknownRecord { caseFiles: string[]; activationCaseFiles?: string[] }
 export type PlanningSnapshot = { agentId: string; runId: string; path: string; hash: string; files: { path: string; size: number; hash: string }[]; indexPath: string };
 export type PlanningDraftSnapshot = PlanningSnapshot & { version: number; kind: string };
@@ -605,20 +606,22 @@ async function freezeBundle(source: PlanningSource, parent: string, signal?: Abo
 
 export class DevelopmentArtifacts {
   storage: Pick<AgentStorage, "directory">;
-  indexContracts: Map<string, { schema: ToolSchema; paths: Set<string> }>;
+  indexContracts: Map<string, { schema: ToolSchema; paths: Set<string>; executionConfig?: DevelopmentExecutionConfig }>;
   constructor({ dataDir, storage }: { dataDir?: string; storage?: Pick<AgentStorage, "directory"> }) {
     if (!dataDir && !storage) throw new InputError("缺少研发存储目录");
     this.storage = storage ?? new AgentStorage({ dataDir: dataDir! });
     this.indexContracts = new Map();
   }
 
-  bindIndex(root: string, schema: ToolSchema | undefined, indexPath: unknown) {
+  bindIndex(root: string, schema: ToolSchema | undefined, indexPath: unknown, architecture?: DevelopmentArchitecture) {
     if (!schema) return;
     let bound = this.indexContracts.get(root);
     if (!bound || bound.schema !== schema) {
       bound = { schema, paths: new Set(["index.json"]) }; this.indexContracts.set(root, bound);
     }
     if (indexPath !== undefined) bound.paths.add(planPath(indexPath));
+    if (architecture?.design && (architecture.design.schemaVersion !== undefined || !schema.properties?.schemaVersion))
+      bound.executionConfig = developmentExecutionConfig(architecture);
   }
 
   async directory(agentId: string, id: string, { create = true } = {}) {
@@ -638,6 +641,7 @@ export class DevelopmentArtifacts {
     if (typeof content !== "string" || content.includes("\0") || Buffer.byteLength(content) > PLAN_ARTIFACT_LIMITS.fileBytes)
       throw new InputError("规划材料必须是 UTF-8 文本且单文件不超过 2 MiB");
     const text = decode(Buffer.from(content));
+    let savedContent = content;
     let value: unknown;
     try { value = JSON.parse(text); }
     catch (error) { throw artifactFailure("json", "index", undefined, jsonLocation(error, text)); }
@@ -650,19 +654,25 @@ export class DevelopmentArtifacts {
       try { if (current.contents.has(file)) former = JSON.parse(decode(current.contents.get(file)!)); } catch { /* A bound invalid index can be repaired by a complete write. */ }
       if (bound.paths.has(file) || claimsIndex(value) || claimsIndex(former)) {
         bound.paths.add(file);
+        if (bound.executionConfig) {
+          const assembled = applyDevelopmentExecution(value, bound.schema, bound.executionConfig);
+          if (JSON.stringify(assembled) !== JSON.stringify(value)) savedContent = JSON.stringify(assembled, null, 2) + "\n";
+          value = assembled;
+        }
         const issues = indexIssues(value, bound.schema, file);
         if (issues.length) throw rejectIndex(issues);
       }
     }
-    const size = Buffer.byteLength(content);
-    if ((!previous && current.files.length >= PLAN_ARTIFACT_LIMITS.files)
+    const size = Buffer.byteLength(savedContent);
+    if (size > PLAN_ARTIFACT_LIMITS.fileBytes || (!previous && current.files.length >= PLAN_ARTIFACT_LIMITS.files)
       || current.files.reduce((sum, entry) => sum + entry.size, 0) - (previous?.size ?? 0) + size > PLAN_ARTIFACT_LIMITS.totalBytes)
       throw new InputError("规划材料超过 201 个文件或 10 MiB 总量限制");
     const destination = await target(root, file, true), temporary = join(dirname(destination), `.write-${randomUUID()}`);
     try {
-      await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+      await writeFile(temporary, savedContent, { flag: "wx", mode: 0o600 });
       abort(signal); await target(root, file); abort(signal); await rename(temporary, destination);
     } finally { await rm(temporary, { force: true }); }
+    return { hash: digest(savedContent), fileHash: digest(savedContent), bytes: size };
   }
 
   async tools(agentId: string, id: string, { signal, casesSchema, planSchema, architecture, previousPlan, historicalDraft, indexPath, freshWorkspace = false }: PlanningOptions = {}): Promise<RegisteredTool[]> {
@@ -675,10 +685,10 @@ export class DevelopmentArtifacts {
     const root = await this.directory(agentId, id), lock = <T,>(operation: () => Promise<T>) => this.serial(agentId, id, operation);
     const history = historicalDraft && !previousPlan ? structuredClone(historicalDraft) : null;
     if (history) await this.draftSource(history!, agentId, id, { signal });
-    this.bindIndex(root, planSchema, indexPath ?? history?.indexPath);
+    this.bindIndex(root, planSchema, indexPath ?? history?.indexPath, architecture);
     const native = await restrictedNativeFileTools({ root, lock, signal, validatePath: planPath,
       readFile: async (path, options) => { abort(signal, options?.signal); return readBytes(root, planPath(path)); },
-      writeFile: (path, content, options) => this.write(root, path, content, options),
+      writeFile: async (path, content, options) => { await this.write(root, path, content, options); },
     });
     const tool = (name: string, description: string, parameters: ToolSchema, action: (params: UnknownRecord, options: PlanningOptions) => Promise<unknown>): NeumaTool => ({ name, label: description, description, parameters,
       executionMode: "sequential", execute: async (_callId, params, toolSignal) => lock(async () => {
@@ -699,8 +709,8 @@ export class DevelopmentArtifacts {
         const indexDiagnostics = checkCaseDraft(source, planPath(safe.path), cases, { schema: planSchema, architecture });
         assertBatchIdsPreserved(source, safe.path, cases, validateCases);
         const content = JSON.stringify(cases, null, 2) + "\n";
-        await this.write(root, planPath(safe.path), content, options);
-        return { path: safe.path, hash: digest(content), fileHash: digest(content), hashScope: "file", bytes: Buffer.byteLength(content), serialized: true, inputEncoding: "structured", caseCount: cases.length,
+        const saved = await this.write(root, planPath(safe.path), content, options);
+        return { path: safe.path, ...saved, hashScope: "file", serialized: true, inputEncoding: "structured", caseCount: cases.length,
           ...(indexDiagnostics ? { indexDiagnostics } : {}) };
       }),
       tool("save_plan_json", "保存规划JSON对象/数组或完整JSON文本；文本严格解析一次，宿主统一安全序列化", {
@@ -720,8 +730,8 @@ export class DevelopmentArtifacts {
         value = copyJson(value);
         if (!value || typeof value !== "object") throw new InputError(`save_plan_json.value [type]：规划文件须保存JSON对象或数组；JSON文本只解码一次，${inputEncoding === "json-text" ? "解码后" : "当前"}根类型为${value === null ? "null" : typeof value}，不能保存基本值`);
         const content = JSON.stringify(value, null, 2) + "\n";
-        await this.write(root, planPath(safe.path), content, options);
-        return { path: safe.path, hash: digest(content), fileHash: digest(content), hashScope: "file", bytes: Buffer.byteLength(content), serialized: true, inputEncoding,
+        const saved = await this.write(root, planPath(safe.path), content, options);
+        return { path: safe.path, ...saved, hashScope: "file", serialized: true, inputEncoding,
           planningIndex: Array.isArray(objectFields(value).caseFiles) };
       }),
       tool("update_plan_json", "按JSON Pointer替换已有规划字段或用例；不删减冻结验收，宿主重新序列化", {
@@ -737,8 +747,8 @@ export class DevelopmentArtifacts {
         try { value = JSON.parse(text); }
         catch (error) { throw artifactFailure("json", "index", undefined, jsonLocation(error, text)); }
         const content = JSON.stringify(copyJson(replaceJson(value, safe.updates)), null, 2) + "\n";
-        await this.write(root, planPath(safe.path), content, options);
-        return { path: safe.path, hash: digest(content), fileHash: digest(content), hashScope: "file", bytes: Buffer.byteLength(content), updated: objectFields(safe.updates).length };
+        const saved = await this.write(root, planPath(safe.path), content, options);
+        return { path: safe.path, ...saved, hashScope: "file", updated: objectFields(safe.updates).length };
       }),
       tool("edit_plan_cases", "按稳定用例编号和当前文件摘要增、改、删或重排未冻结草稿；不自动去重或改断言", {
         type: "object", additionalProperties: false, required: ["path", "expectedHash", "changes"], properties: {
@@ -795,8 +805,8 @@ export class DevelopmentArtifacts {
         checkCaseIds(source, planPath(safe.path), cases as DevelopmentCase[]);
         const indexDiagnostics = checkCaseDraft(source, planPath(safe.path), cases as DevelopmentCase[], { schema: planSchema, architecture });
         const content = JSON.stringify(cases, null, 2) + "\n";
-        await this.write(root, planPath(safe.path), content, options);
-        return { path: safe.path, hash: digest(content), fileHash: digest(content), hashScope: "file", bytes: Buffer.byteLength(content), updated: safe.changes.length,
+        const saved = await this.write(root, planPath(safe.path), content, options);
+        return { path: safe.path, ...saved, hashScope: "file", updated: safe.changes.length,
           ...(indexDiagnostics ? { indexDiagnostics } : {}),
           ...(cases.length ? {} : { incomplete: true, nextAction: "该草稿批次已空；在索引调整引用或补入真实用例后再正式提交。空批次不能通过正式封存与验收。" }),
           cases: cases.map((entry, localIndex) => ({ id: objectFields(entry).id, localIndex, hash: hashValue(entry), caseHash: hashValue(entry), hashScope: "case" })) };
@@ -850,9 +860,9 @@ export class DevelopmentArtifacts {
               : "核对当前文件与源文件；确需恢复时，使用本回执的currentFileHash作为expectedHash主动重试，不能把存在的目标写成null。" }));
           error.reason = "planning_restore_conflict"; error.restoreState = state; throw error;
         }
-        await this.write(root, planPath(path), decode(bytes), options);
+        const saved = await this.write(root, planPath(path), decode(bytes), options);
         return { restored: true, path, trust: "unverified", sourceRunId: history!.runId,
-          hash: digest(bytes), fileHash: digest(bytes), hashScope: "file", bytes: bytes.length };
+          ...saved, sourceFileHash: expectedSourceHash, hashScope: "file" };
       })] : []),
     ];
   }

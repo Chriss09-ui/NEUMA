@@ -70,6 +70,7 @@ const readError = async (tool: NeumaTool, params: unknown) => {
 
 function largePayload() {
   return { architectureRef: { version: 3, candidateHash: "a".repeat(64) }, subjectHash: "b".repeat(64), mode: "task",
+    executionConfig: { schemaVersion: 3, runtime: "managed-service", protocolVersion: 3, language: "python", hosting: "managed" },
     task: { id: "extract", title: "提取记录", description: "保留事实并明确缺失输入", summary: "已实现主体逻辑", turns: 2 },
     plan: { summary: "逐项实现再验收", runtime: "node-json", entrypoint: "main.mjs", tasks: [], cases: [] },
     report: { id: "report_1", codeHash: "c".repeat(64), status: "failed", summary: "输出与预期不一致", results: [
@@ -97,6 +98,7 @@ test("超长证据严格限制提示词长度，保留版本绑定、任务目�
     assert.equal(compact.contextTruncated, true); assert.match(fixtureString(compact.contextNotice), /不完整摘要/);
     assert.match(fixtureString(compact.contextNotice), /read_development_context/);
     assert.deepEqual(compact.architectureRef, payload.architectureRef); assert.equal(compact.subjectHash, payload.subjectHash);
+    assert.deepEqual(compact.executionConfig, payload.executionConfig, "运行配置必须完整保留，不能被长历史挤出首包");
     assert.equal(objectFields(compact.task).id, "extract"); assert.equal(objectFields(compact.task).description, "保留事实并明确缺失输入");
     assert.equal(objectFields(compact.report).id, "report_1"); assert.equal(objectFields(compact.report).codeHash, payload.report.codeHash);
     assert.equal(objectFields(compact.report).nonPassingResults, 1); assert.equal(recordArray(objectFields(compact.report).failureSummaries)[0]!.caseId, "case_missing");

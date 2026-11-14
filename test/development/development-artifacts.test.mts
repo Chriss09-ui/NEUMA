@@ -33,6 +33,45 @@ async function fixture(t: test.TestContext, { casesSchema = PLAN_V2_SCHEMA.prope
 const call = async (tools: RegisteredTool[], name: string, args: unknown, signal?: AbortSignal) => fixtureTools(tools)[name]!.execute("test", args, signal);
 const save = (tools: RegisteredTool[], path: string, value: unknown) => call(tools, "write", { path, content: JSON.stringify(value, null, 2) });
 
+test("规划索引按架构带入JavaScript/Python和managed/docker配置，回执绑定实际文件且完整校验继续生效", async t => {
+  for (const language of ["javascript", "python"] as const) for (const hosting of ["managed", "docker"] as const)
+    await t.test(`${language}/${hosting}`, async t => {
+      const f = await fixture(t, { casesSchema: PLAN_V3_SCHEMA.properties.cases });
+      const architecture = developmentArchitecture();
+      Object.assign(architecture.design, { schemaVersion: 3, execution: { language, hosting, reason: "固定受管计算" } });
+      const original = developmentPlan(architecture), entrypoint = language === "python" ? "main.py" : "main.mjs";
+      const inputSchema = { type: "string" as const }, outputSchema = { type: "object" as const,
+        properties: { scenario: { type: "string" as const }, verified: { type: "boolean" as const } }, required: ["scenario", "verified"], additionalProperties: false as const };
+      const operation = { id: "run", title: "执行", inputSchema, outputSchema, connectionIds: [] };
+      const expected: DevelopmentPlan = { ...original, schemaVersion: 3, runtime: "managed-service", entrypoint,
+        application: { protocolVersion: 3, runtime: "managed-service", entrypoint, page: null, actions: [operation], stateVersion: 1, evidenceIds: [],
+          service: { schemaVersion: 1, language, host: hosting, entrypoint, operations: [operation], dependencies: { packages: [] }, capabilities: [], dataVersion: 1,
+            ...(hosting === "docker" ? { docker: { baseImage: `${language === "python" ? "python" : "node"}@sha256:${"b".repeat(64)}`, buildSteps: [] } } : {}) } },
+        tasks: [{ id: "implement", title: "实现", description: "完整处理及输入检查", requirementIds: architecture.requirements.map(row => row.id),
+          acceptanceIds: architecture.design.acceptance.map(row => row.id), dependsOn: [], files: [entrypoint] }],
+        cases: original.cases.map(row => ({ ...row, taskId: "implement", actionId: "run", mocks: [], input: JSON.stringify(row.input) })) };
+      const { cases, ...index } = structuredClone(expected), value = { ...index, caseFiles: ["cases.json"] };
+      const submitted = objectFields(value), application = objectFields(submitted.application), service = objectFields(application.service);
+      delete submitted.schemaVersion; delete submitted.runtime; delete application.runtime; delete application.protocolVersion;
+      if (language === "javascript") { delete service.language; delete service.host; }
+      else { service.language = "javascript"; service.host = "builtin"; }
+      const tools = await f.artifacts.tools("agent_one", "run_one", { planSchema: PLAN_V3_SCHEMA, casesSchema: PLAN_V3_SCHEMA.properties.cases, architecture });
+      const receipt = JSON.parse(toolText(await call(tools, "save_plan_json", { path: "index.json", value })));
+      const saved = await readFile(join(f.directory, "index.json"));
+      assert.equal(receipt.bytes, saved.length);
+      const readBack = JSON.parse(toolText(await call(tools, "read_plan_file", { path: "index.json" })));
+      assert.equal(receipt.fileHash, readBack.fileHash);
+      assert.equal(submitted.runtime, undefined, "保留调用方原始提交对象");
+      await call(tools, "save_plan_cases", { path: "cases.json", cases });
+      const accepted = await f.artifacts.submit("agent_one", "run_one", "index.json");
+      assert.deepEqual(validatePlan(accepted.plan, { architecture }), expected);
+      assert.deepEqual((await f.artifacts.validateSnapshot(accepted.snapshot)).plan, expected);
+      const missingRequirement = structuredClone(accepted.plan);
+      objectFields((missingRequirement.tasks as unknown[])[0]).requirementIds = [];
+      assert.throws(() => validatePlan(missingRequirement, { architecture }), /需求|requirement/);
+    });
+});
+
 async function savePlan(tools: RegisteredTool[], plan: DevelopmentPlan) {
   const { cases, ...index } = plan;
   await save(tools, "index.json", { ...index, caseFiles: ["cases/first.json", "cases/rest.json"] });

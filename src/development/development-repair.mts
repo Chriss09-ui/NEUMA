@@ -11,6 +11,7 @@ import { InputError } from "../requirements/core.mjs";
 import { validatePlan } from "./development-contract.mjs";
 import { renderPlatformRules } from "../architecture/platform-contract.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
+import { developmentExecutionConfig, developmentExecutionGuide } from "./development-execution-config.mjs";
 import { repairableDevelopmentResult } from "./development-failures.mjs";
 import { noteDevelopmentRejection, unresolvedDevelopmentIssues, developmentContentLimit } from "./development-policy.mjs";
 
@@ -110,8 +111,10 @@ async function dispatch(controller: DevelopmentController, ctx: DevelopmentConte
         dataDir: await controller.storage.directory(ctx.record.agentId, "", { create: true }),
         sessionDirectory: await controller.storage.directory(ctx.record.agentId, `development/repair-sessions/${ctx.record.id}/${key}`, { create: true }),
         signal: ctx.signal, maxOutputTokens: developmentModelOutputBudget(controller.config, "developer"),
+        taskInstructions: developmentExecutionGuide(developmentExecutionConfig(ctx.record.architecture)) + "\n修复沿用基底中的固定运行配置，不提交这些字段的替换补丁。",
         context: { requirements: assignedTasks.length ? ctx.record.architecture.requirements.filter(item => requirementIds.has(item.id)) : ctx.record.architecture.requirements,
           fullRequirements: ctx.record.architecture.requirements, design: ctx.record.architecture.design,
+          executionConfig: developmentExecutionConfig(ctx.record.architecture),
           runtimeCapabilities: ctx.record.architecture.runtimeCapabilities ?? null,
           platformRules: ctx.record.architecture.platformSnapshot ? renderPlatformRules(ctx.record.architecture.platformSnapshot,
             { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities }) : "以当前需求、架构和真实平台契约为准。",

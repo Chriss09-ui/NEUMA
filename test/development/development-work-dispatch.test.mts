@@ -34,7 +34,7 @@ function fixtureCases(id: string, payload: Record<string, unknown>) {
 }
 
 async function fixture(t: test.TestContext, interrupt = false, activation = false, objection = false, rejectOutline = false,
-  legacy?: { url: string; part: string }, inputConflict = false) {
+  legacy?: { url: string; part: string; current?: boolean }, inputConflict = false) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-dispatch-")), executor = new DevelopmentExecutor();
   const availability = await executor.probe();
   if (!availability.available) { await rm(root, { recursive: true, force: true }); t.skip(availability.reason); return; }
@@ -69,13 +69,15 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
     if (legacyEnabled && objectFields(objectFields(options.sessionStorage?.binding).scope).partId === legacy!.part) {
       // Reproduce the old adapter boundary: malformed container text reaches SDK validation unchanged.
       const native = await createPiSession({ ...options, config: { ...options.config, chatUrl: legacy!.url, model: "local-model", apiKey: "local-only" },
-        customTools: (options.customTools ?? []).map(tool => ({ ...tool, prepareArguments: (value: unknown) => value })) });
+        customTools: legacy?.current ? options.customTools ?? [] : (options.customTools ?? []).map(tool => ({ ...tool, prepareArguments: (value: unknown) => value })) });
       native.setAutoRetryEnabled(false); return native;
     }
     const binding = objectFields(options.sessionStorage?.binding), session = { messages: [] as SessionMessage[],
       ...(scoped ? { sessionFile: options.sessionStorage!.file ?? join(options.sessionStorage!.directory, `${String(binding.bindingHash).slice(0, 20)}.jsonl`) } : {}),
       setAutoCompactionEnabled() {}, async abort() {}, dispose() {}, async prompt(message: string) {
         const payload = objectFields(JSON.parse(message)), assignment = objectFields(payload.workAssignment), id = String(assignment.id ?? "developer");
+        if (legacy?.current) assert.deepEqual(payload.executionConfig, { schemaVersion: activation ? 3 : 2,
+          runtime: "node-action", protocolVersion: 2, language: "javascript", hosting: "builtin" }, "用例、开发和评审使用同一已批准配置");
         calls.push({ id, ...(typeof payload.mode === "string" ? { mode: payload.mode } : {}), ...(payload.reviewScope ? { scope: payload.reviewScope as { kind: string; ids: string[] } } : {}) });
         active++; maxActive = Math.max(maxActive, active);
         try {
@@ -184,6 +186,40 @@ async function rejectedNativeFixture(t: test.TestContext, { part = "outline", in
   f.useCurrentAdapter();
   return { ...f, stopped, requests };
 }
+
+test("真实Pi接收省略或旧稿错填的固定运行字段，程序带入架构配置后完成分组研发", async t => {
+  for (const mode of ["omitted", "legacy-values"]) await t.test(mode, async t => {
+    let f: Awaited<ReturnType<typeof fixture>>, serverError: unknown, requests = 0;
+    const server = createServer(async (request, response) => {
+      try {
+        const chunks = []; for await (const chunk of request) chunks.push(chunk);
+        const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")); requests++;
+        assert.ok(f); assert.equal(requests, 1, "固定字段由程序填写，无需模型重交");
+        const tool = body.tools!.find(row => row.function.name === "submit_development_plan_part")!.function;
+        const schema = objectFields(objectFields(objectFields(tool).parameters).properties).plan;
+        assert.deepEqual(objectFields(objectFields(objectFields(schema).properties).runtime).enum, ["node-action"]);
+        assert.ok(!(objectFields(schema).required as string[]).includes("runtime"));
+        const value = structuredClone(f.outline), plan = objectFields(value.plan), application = objectFields(plan.application);
+        if (mode === "omitted") {
+          delete plan.schemaVersion; delete plan.runtime; delete application.runtime; delete application.protocolVersion;
+        } else {
+          plan.schemaVersion = 3; plan.runtime = "managed-service"; application.runtime = "managed-service"; application.protocolVersion = 3;
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(`data: ${JSON.stringify({ id: "fixed-execution", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0,
+          id: "outline_from_model", type: "function", function: { name: "submit_development_plan_part", arguments: JSON.stringify(value) } }] }, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`);
+      } catch (error) { serverError = error; response.writeHead(500); response.end(); }
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+    f = await fixture(t, false, false, false, false, { url: `http://127.0.0.1:${listeningAddress(server).port}/v1/chat/completions`, part: "outline", current: true });
+    if (!f) return;
+    const result = await f.controller.run(f.architecture);
+    assert.equal(serverError, undefined); assert.equal(result.status, "completed", result.summary);
+    assert.equal(result.plan!.runtime, "node-action"); assert.equal(result.plan!.application!.protocolVersion, 2);
+    assert.deepEqual(result.retryPolicy!.content, {}); assert.equal(requests, 1);
+  });
+});
 
 test("真实Pi同轮交稿与问题报告保留草稿并按报告结束，不受工具顺序影响", async t => {
   for (const mode of ["plan-first", "blocker-first", "invalid-then-corrected", "invalid-exhausted", "plan-and-read"]) await t.test(mode, async t => {

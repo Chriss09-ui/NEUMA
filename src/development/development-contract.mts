@@ -14,6 +14,7 @@ import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
 import { textLength, textWithinLimit } from "../runtime/text-length.mjs";
 
 import { isSafeAssertionPath, normalizeAssertionPath } from "./development-assertion-path.mjs";
+import { developmentExecutionConfig } from "./development-execution-config.mjs";
 
 const text = (maxLength = 4000, minLength = 1) => ({ type: "string", minLength, maxLength });
 const identifier = { ...text(80), pattern: "^[A-Za-z][A-Za-z0-9_-]*$" };
@@ -341,9 +342,9 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
     validateApplicationManifest(value.application, { allowUnverified: true });
     if (value.runtime !== value.application.runtime) fail("计划与应用运行协议不一致");
     if (architecture?.design?.schemaVersion === 3) {
-      const execution = architecture.design.execution!;
-      if (execution.hosting === "builtin" ? value.runtime !== "node-action" : value.runtime !== "managed-service"
-        || value.application.service?.language !== execution.language || value.application.service?.host !== execution.hosting)
+      const execution = developmentExecutionConfig(architecture);
+      if (value.runtime !== execution.runtime || value.application.protocolVersion !== execution.protocolVersion
+        || execution.runtime === "managed-service" && (value.application.service?.language !== execution.language || value.application.service?.host !== execution.hosting))
         fail("研发运行语言和托管方式必须保持已评审选择", { path: "plan.application", reason: "execution_mismatch" });
     }
     if (value.application.entrypoint !== value.entrypoint) fail("应用入口与研发入口不一致");
