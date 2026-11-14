@@ -296,13 +296,6 @@ test("真实Pi正式提交收到完整有界台账及材料定位，按同hash�
     try {
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(String(Buffer.concat(chunks))); calls++;
-      if (calls === 4) {
-        assert.equal(JSON.parse(String(textOf(body.messages.findLast((item: { role: string; }) => item.role === "tool").content))).submitted, true);
-        response.writeHead(200, { "content-type": "text/event-stream" });
-        response.end(`data: ${JSON.stringify({ id: "ledger-complete", object: "chat.completion.chunk", model: "fixture-model", choices: [{ index: 0,
-          delta: { role: "assistant", content: "阶段提交已接收。" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
-        return;
-      }
       let tools;
       if (calls === 1) tools = [{ name: "submit_development_plan", args: { indexPath: "index.json" } }];
       else if (calls === 2) {
@@ -362,7 +355,7 @@ test("真实Pi正式提交收到完整有界台账及材料定位，按同hash�
   let accepted;
   try { accepted = await callFixture(controller.ask, controller, [ctx, handle, { requirements: architecture.requirements, architecture, planSchema: PLAN_V3_SCHEMA }]); }
   catch (error) { throw serverError ?? error; }
-  assert.equal(serverError, undefined); assert.equal(calls, 4); assert.equal(objectFields(objectFields(accepted).activationCases).length, 42);
+  assert.equal(serverError, undefined); assert.equal(calls, 3); assert.equal(objectFields(objectFields(accepted).activationCases).length, 42);
   assert.deepEqual(objectFields(accepted).activationCases, good);
   assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).rejected, 1); assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).accepted, 1);
   assert.equal(recordArray(recordArray(objectFields(record).submissionAttempts)[0]!.issues).length, 40);

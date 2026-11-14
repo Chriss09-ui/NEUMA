@@ -77,6 +77,41 @@ test("规划阻断仅接受当前完整来源绑定与逐字路径证据，不�
   assert.equal(samePlanningBlocker({ ...current, status: "blocked", feedback: { report: environment } }, current.architecture, ACCEPTANCE_ADAPTER_GUIDE), false);
 });
 
+test("显示信息变化的恢复兼容仍核对实质内容、原冻结来源和原报告证据", () => {
+  const current = record(), blocker = createDevelopmentPlanningBlocker(current, { acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE });
+  const report = blocker.submit(argumentsFor(blocker.context, current.architecture.design));
+  const saved = { ...current, status: "blocked", feedback: { report } };
+  const displayed = { ...structuredClone(current.architecture), summary: "当前状态说明", updatedAt: "2026-11-14T12:00:00.000Z" };
+  assert.equal(samePlanningBlocker(saved, displayed, ACCEPTANCE_ADAPTER_GUIDE), true);
+  const mutations: [string, (value: typeof displayed) => void][] = [
+    ["版本", value => { value.version++; }],
+    ["需求", value => { value.requirements[0]!.text += "新增真实要求"; }],
+    ["设计", value => { value.design.instructions += "新增真实行为"; }],
+    ["嵌套设计摘要", value => { Object.assign(value.design, { summary: "新增设计职责" }); }],
+    ["嵌套更新时间", value => { Object.assign(value.design, { updatedAt: "2026-11-15T00:00:00.000Z" }); }],
+    ["候选摘要", value => { value.candidateHash = "0".repeat(64); }],
+    ["平台契约", value => { Object.assign(value, { platformHash: "0".repeat(64) }); }],
+    ["运行能力", value => { Object.assign(value, { runtimeCapabilities: { changed: true } }); }],
+    ["确认需求上下文", value => { Object.assign(value, { confirmedRequirementContext: { changed: true } }); }],
+    ["待验证义务", value => { Object.assign(value, { deferredVerifications: { changed: true } }); }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const changed = structuredClone(displayed); mutate(changed);
+    assert.equal(samePlanningBlocker(saved, changed, ACCEPTANCE_ADAPTER_GUIDE), false, name);
+  }
+  assert.equal(samePlanningBlocker(saved, displayed, { ...ACCEPTANCE_ADAPTER_GUIDE, changed: true }), false, "验收适配说明变化也不能复用");
+
+  // A display-only difference is tolerated on the current view, not when validating the stored source itself.
+  const damagedSource = structuredClone(saved);
+  Object.assign(damagedSource.architecture, { summary: "修改了报告所绑定的原冻结对象" });
+  assert.equal(samePlanningBlocker(damagedSource, displayed, ACCEPTANCE_ADAPTER_GUIDE), false);
+  const damagedReport = structuredClone(saved);
+  damagedReport.feedback.report.issues[0]!.references[0]!.quote = "原文没有的证据";
+  const { reportHash: _oldHash, ...body } = damagedReport.feedback.report;
+  damagedReport.feedback.report.reportHash = hashValue(body);
+  assert.equal(samePlanningBlocker(damagedReport, displayed, ACCEPTANCE_ADAPTER_GUIDE), false, "重算报告摘要不能跳过原引用校验");
+});
+
 test("小型阻断契约保留在首包绑定，完整大schema仍分页且不复制平台说明", () => {
   const current = record(), blocker = createDevelopmentPlanningBlocker(current, { acceptanceAdapterGuide: ACCEPTANCE_ADAPTER_GUIDE });
   const prompt = compactDevelopmentContext({ architectureRef: current.architectureRef, design: current.architecture.design,
@@ -115,7 +150,7 @@ async function fixture(t: test.TestContext, { kind = "architecture", onPrompt, s
   return { root, controller, config, sessions, probes, get architecture() { return architecture; }, changeArchitecture(value: typeof architecture) { architecture = value; } };
 }
 
-test("无合法计划即可正式受阻，同架构恢复/重新启动均零新请求且预算不重置", async (t) => {
+test("无合法计划即可正式受阻，显示说明和更新时间变化后恢复仍零新请求且原记录不变", async (t) => {
   const f = await fixture(t), first = await f.controller.run(f.architecture);
   assert.equal(first.status, "blocked"); assert.equal(first.phase, "planning"); assert.equal(first.plan, null);
   assert.equal(first.pendingPlan, undefined); assert.deepEqual<NonNullable<typeof first>["planAttempts"]>(first.planAttempts, []); assert.deepEqual<NonNullable<typeof first>["reviews"]>(first.reviews, []);
@@ -125,8 +160,12 @@ test("无合法计划即可正式受阻，同架构恢复/重新启动均零新�
   assert.ok(Object.values(first.sessions!).every((reference) => reference.pendingResult === undefined));
   const reference = developmentRevisionReference(first, f.architecture);
   assert.deepEqual(reference.feedback!.report, first.feedback!.report); assert.equal(reference.plan, null);
-  const oldHash = hashValue(first), resumed = await f.controller.run(f.architecture, { resume: true });
-  assert.equal(hashValue(resumed), oldHash); assert.equal(f.sessions.length, 1); assert.equal(f.probes.length, 1);
+  const oldHash = hashValue(first);
+  const displayed = { ...structuredClone(f.architecture), summary: "同一方案的最新状态说明", updatedAt: "2026-11-14T12:00:00.000Z" };
+  f.changeArchitecture(displayed);
+  const resumed = await f.controller.run(f.architecture, { resume: true });
+  assert.equal(f.sessions.length, 1, "展示信息变化不能让模型重做原任务"); assert.equal(f.probes.length, 1);
+  assert.equal(hashValue(resumed), oldHash);
   const restarted = new DevelopmentController(f.config); t.after(() => restarted.close());
   assert.equal(hashValue(await restarted.run(f.architecture, { resume: true })), oldHash);
   assert.equal(f.sessions.length, 1);

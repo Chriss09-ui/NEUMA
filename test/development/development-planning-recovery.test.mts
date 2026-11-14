@@ -64,9 +64,7 @@ test("真实Pi完整诊断后同hash重交只给有界未修改反馈，模型�
         tools = [{ name: "save_plan_cases", args: { path: "cases.json", cases: good } },
           { name: "submit_development_plan", args: { indexPath: "index.json" } }];
       } else {
-        assert.equal(calls, 5); assert.equal(JSON.parse(textOf(body.messages.findLast((item: { role: string; }) => item.role === "tool")!.content)).submitted, true);
-        response.writeHead(200, { "content-type": "text/event-stream" });
-        response.end(`data: ${JSON.stringify({ id: "complete", choices: [{ index: 0, delta: { role: "assistant", content: "阶段正式提交已接收" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`); return;
+        assert.fail("正式提交成功后不应再请求模型生成确认语");
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(`data: ${JSON.stringify({ id: "planning", choices: [{ index: 0, delta: { role: "assistant", tool_calls: tools.map((item, index) => ({
@@ -96,10 +94,10 @@ test("真实Pi完整诊断后同hash重交只给有界未修改反馈，模型�
   let accepted;
   try { accepted = await callFixture((context: DevelopmentContext) => controller.ask(context, handle, { architecture, planSchema: PLAN_V3_SCHEMA }), undefined, [ctx]); }
   catch (error) { throw serverError ?? error; }
-  assert.equal(serverError, undefined); assert.equal(calls, 5); assert.ok(accepted && "cases" in accepted); assert.deepEqual(accepted.cases, good);
+  assert.equal(serverError, undefined); assert.equal(calls, 4); assert.equal(handle.submitted, true); assert.ok(accepted && "cases" in accepted); assert.deepEqual(accepted.cases, good);
   assert.equal(typeof accepted.cases[0]!.input, "object"); assert.deepEqual(validatePlan(accepted, { architecture }), accepted);
   assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).rejected, 3); assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).accepted, 1);
-  assert.equal(handle.counter.turns, 5); assert.equal(handle.limit, null);
+  assert.equal(handle.counter.turns, 4); assert.equal(handle.limit, null);
   const frozen = await callFixture(controller.artifacts.validateSnapshot, controller.artifacts, [objectFields(record).planningArtifact]);
   assert.deepEqual(frozen.plan, accepted); assert.notEqual(frozen.snapshot.hash, changedFeedback!.hash);
 });

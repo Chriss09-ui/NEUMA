@@ -26,8 +26,9 @@ async function directory(t: test.TestContext) {
   return root;
 }
 
-test("规划中断保留原请求用量，同批次继续；显式新批次仅接手未通过草稿", async (t) => {
-  const root = await directory(t), architecture = developmentArchitecture({ contractVersion: 2 });
+test("规划中断保留原请求用量；展示信息变化仍可接手原草稿，业务变化或坏绑定不能复用", async (t) => {
+  const root = await directory(t), architecture = developmentArchitecture({ contractVersion: 2,
+    summary: "架构已通过", updatedAt: "2026-11-13T00:00:00.000Z" });
   Reflect.set(architecture.design, "schemaVersion", 2);
   architecture.candidateHash = designHash(architecture.design); architecture.review = passingReview(architecture.candidateHash);
   const { cases: _cases, ...ordinary } = developmentPlan(architecture);
@@ -35,6 +36,7 @@ test("规划中断保留原请求用量，同批次继续；显式新批次仅�
     page: null, stateVersion: 1, evidenceIds: [], actions: [{ id: "echo", title: "回显", inputSchema: { type: "string" },
       outputSchema: { type: "object" }, connectionIds: [] }] }, caseFiles: ["missing.json"] };
   const payloads: Record<string,unknown>[] = [], bindings: unknown[] = [];
+  let expectHistoricalDraft = true;
   const controller = new DevelopmentController({ dataDir: join(root, "data"), cwd: root, config: {}, limits: { reviewerTurns: 2 },
     executor: { probe: async () => ({ available: true }) }, sessionFactory: async (options: PiSessionOptions) => {
       assert.equal(options.reasoningMode, "auto");
@@ -44,7 +46,7 @@ test("规划中断保留原请求用量，同批次继续；显式新批次仅�
         async prompt(text) {
           await options.onModelCall!();
           const payload = JSON.parse(text);
-          if (payloads.length && objectFields(options.sessionStorage!.binding).runId !== objectFields(bindings[0]).runId && objectFields(objectFields(options.sessionStorage!.binding).architectureRef).version === 1) {
+          if (expectHistoricalDraft && payloads.length && objectFields(options.sessionStorage!.binding).runId !== objectFields(bindings[0]).runId && objectFields(objectFields(options.sessionStorage!.binding).architectureRef).version === 1) {
             if (!payload.historicalPlanningDraft) {
               const page = await tools.read_development_context!.execute("history", { section: "historicalPlanningDraft", limit: 8000 });
               payload.historicalPlanningDraft = JSON.parse(JSON.parse(toolText(page)).text);
@@ -89,7 +91,9 @@ test("规划中断保留原请求用量，同批次继续；显式新批次仅�
   const original = await readFile(join(await controller.artifacts.directory(first.agentId, first.id), "index.json"));
   const resumed = await controller.run(architecture, { resume: true });
   assert.equal(resumed.id, first.id); assert.equal(resumed.planning.turns, 6); assert.equal(payloads.length, 2);
-  const fresh = await controller.run(architecture);
+  const frozenSource = await controller.store.getRun(first.id);
+  const displayChanged = { ...architecture, summary: "已完成架构评审，可继续研发", updatedAt: "2026-11-14T00:00:00.000Z" };
+  const fresh = await controller.run(displayChanged);
   assert.notEqual(fresh.id, first.id); assert.equal(fresh.plan, null); assert.equal(fresh.planHash, null); assert.deepEqual<NonNullable<typeof fresh>["tasks"]>(fresh.tasks, []);
   assert.equal(payloads.length, 3); assert.equal(objectFields(payloads[2]!.historicalPlanningDraft).trust, "unverified");
   assert.equal(objectFields(objectFields(payloads[2]!.historicalPlanningDraft).source).runId, first.id);
@@ -97,15 +101,35 @@ test("规划中断保留原请求用量，同批次继续；显式新批次仅�
   assert.equal(objectFields(payloads[2]!.modelBudget).limit, null); assert.equal(objectFields(payloads[2]!.modelBudget).used, 0);
   assert.notEqual(objectFields(bindings.at(-1)).runId, objectFields(bindings[0]).runId);
   assert.deepEqual(await readFile(join(await controller.artifacts.directory(fresh.agentId, fresh.id), "index.json")), original);
+  assert.deepEqual(fresh.planningDraftSource, resumed.planningDraft, "复用保留原冻结来源及摘要，不用新视图改写旧绑定");
+  assert.deepEqual(await controller.store.getRun(first.id), frozenSource);
   assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 6);
   const legacy = await controller.store.getRun(fresh.id); delete legacy!.planningDraft;
   const measured = await controller.artifacts.diagnose(legacy!.agentId, legacy!.id, "index.json");
   legacy!.planDraftChecks = [{ hash: measured.hash }];
-  await controller.store.save(legacy);
-  const compatible = await controller.run(architecture);
+  const legacySource = await controller.store.save(legacy);
+  const currentView = { ...displayChanged, summary: "研发等待继续" };
+  const compatible = await controller.run(currentView);
   assert.equal(compatible.planningDraftSource!.snapshot.runId, fresh.id);
   assert.equal(compatible.planning.turns, 3); assert.equal(compatible.plan, null);
-  const changed = structuredClone(architecture); changed.version++;
+  assert.deepEqual(await controller.store.getRun(fresh.id), legacySource);
+  const corrupted = await controller.store.getRun(compatible.id);
+  objectFields(corrupted!.planningDraftSource).bindingHash = "0".repeat(64);
+  await controller.store.save(corrupted);
+  const beforeRejectedResume = payloads.length;
+  const rejectedResume = await controller.run(currentView, { resume: true });
+  assert.equal(rejectedResume.diagnostic!.reason, "invalid_result");
+  assert.match(rejectedResume.summary, /历史规划草稿与当前架构事实不一致/u);
+  assert.equal(payloads.length, beforeRejectedResume, "无法认证原冻结摘要时不得把草稿交给模型");
+  assert.deepEqual(await controller.store.getRun(fresh.id), legacySource);
+  const corruptedDraft = await controller.store.getRun(rejectedResume.id);
+  objectFields(corruptedDraft!.planningDraft).bindingHash = "0".repeat(64);
+  await controller.store.save(corruptedDraft);
+  expectHistoricalDraft = false;
+  const rejectedDraft = await controller.run(currentView);
+  assert.equal(rejectedDraft.planningDraftSource, undefined);
+  assert.equal(payloads.at(-1)!.historicalPlanningDraft, undefined);
+  const changed = structuredClone(currentView); changed.requirements[0]!.text += "，新增业务要求";
   const different = await controller.run(changed);
   assert.equal(different.planningDraftSource, undefined);
   assert.equal(payloads.at(-1)!.historicalPlanningDraft, undefined);
@@ -136,7 +160,8 @@ test("草稿封存拒绝符号链接，不从链接读取内容", async (t) => {
 });
 
 test("正式候选被独立评审退回后，新批次保留精确版本评语但不继承接受或通过状态", async (t) => {
-  const root = await directory(t), architecture = developmentArchitecture({ contractVersion: 2 });
+  const root = await directory(t), architecture = developmentArchitecture({ contractVersion: 2,
+    summary: "架构已通过", updatedAt: "2026-11-13T00:00:00.000Z" });
   Reflect.set(architecture.design, "schemaVersion", 2);
   architecture.candidateHash = designHash(architecture.design); architecture.review = passingReview(architecture.candidateHash);
   const plan = developmentPlan(architecture);
@@ -175,19 +200,23 @@ test("正式候选被独立评审退回后，新批次保留精确版本评语�
   const first = await controller.run(architecture);
   assert.equal(first.status, "failed"); assert.equal(first.diagnostic!.reason, "content_rejection_limit"); assert.equal(first.planAttempts.length, 5);
   assert.equal(first.planAttempts[0]!.review.verdict, "revise"); assert.equal(first.plan, null); assert.ok(first.planningDraft);
-  const next = await controller.run(architecture);
+  const frozenReviewSource = await controller.store.getRun(first.id);
+  const displayChanged = { ...architecture, summary: "可继续研发", updatedAt: "2026-11-14T00:00:00.000Z" };
+  const next = await controller.run(displayChanged);
   assert.equal(next.plan, null); assert.deepEqual<NonNullable<typeof next>["tasks"]>(next.tasks, []); assert.deepEqual<NonNullable<typeof next>["reviews"]>(next.reviews, []); assert.equal(next.package, null);
   assert.equal(continued!.trust, "unverified"); assert.equal(continued!.source.runId, first.id);
   assert.equal(continued!.historicalReview.reviewedPlanHash, first.planAttempts[0]!.planHash);
   assert.equal(continued!.historicalReview.review.verdict, "revise");
   assert.equal(continued!.currentCheck.status, "valid"); assert.equal(objectFields((await controller.store.getRun(first.id))!.planning).turns, 10);
-  await controller.run(architecture);
+  const continuedView = { ...displayChanged, summary: "继续处理未通过草稿" };
+  await controller.run(continuedView);
   assert.equal(continued!.historicalReview.sourceRunId, first.id);
   assert.equal(continued!.historicalReview.reviewedPlanHash, first.planAttempts[0]!.planHash);
+  assert.deepEqual(await controller.store.getRun(first.id), frozenReviewSource);
   const pending = await controller.store.get(architecture.agentId);
   pending!.pendingPlan = { plan, planHash: first.planAttempts[0]!.planHash };
   await controller.store.save(pending);
-  const unreviewed = await controller.run(architecture);
+  const unreviewed = await controller.run(displayChanged);
   assert.equal(unreviewed.plan, null); assert.equal(unreviewed.pendingPlan, undefined);
   assert.equal(unreviewed.planningDraftSource!.snapshot.runId, pending!.id);
   assert.deepEqual<NonNullable<typeof unreviewed>["reviews"]>(unreviewed.reviews, []); assert.equal(unreviewed.package, null);

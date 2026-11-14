@@ -96,6 +96,15 @@ export function planningBlockerOutcome(report: PlanningBlockerReport) {
 
 export function isPlanningBlockerOutcome(value: unknown): value is { report: PlanningBlockerReport } { return Boolean(value && typeof value === "object" && outcomes.has(value)); }
 
+function recoveryContent(architecture: DevelopmentArchitecture) {
+  const { summary: _summary, updatedAt: _updatedAt, ...content } = objectFields(architecture);
+  return content;
+}
+
+export function samePlanningArchitecture(left: DevelopmentArchitecture, right: DevelopmentArchitecture) {
+  return hashValue(recoveryContent(left)) === hashValue(recoveryContent(right));
+}
+
 export function samePlanningBlocker(record: PlanningBlockerRecord | null | undefined, architecture: DevelopmentArchitecture, acceptanceAdapterGuide: unknown) {
   const report = objectFields(record?.feedback?.report);
   if (record?.status !== "blocked" || record.phase !== "planning"
@@ -103,12 +112,15 @@ export function samePlanningBlocker(record: PlanningBlockerRecord | null | undef
     || report.trust !== "untrusted-reference" || report.status !== "blocked"
     || !Array.isArray(report.issues) || !report.issues.some((issue: unknown) => objectFields(issue).kind === "architecture")) return false;
   try {
-    const current = { ...record, architecture, architectureRef: { version: architecture.version!, candidateHash: architecture.candidateHash! } };
     const { reportHash, ...body } = report;
     if (hashValue(body) !== reportHash) return false;
     const value = { subjectHash: report.subjectHash, summary: report.summary,
       issues: (report.issues as unknown[]).map((entry) => { const { blocking, ...issue } = objectFields(entry); return issue; }) };
-    const checked = createDevelopmentPlanningBlocker(current, { acceptanceAdapterGuide }).submit(value, current);
-    return hashValue(checked) === hashValue(report);
+    // Authenticate the original frozen report first; never rewrite historical hashes to match a new view.
+    const checked = createDevelopmentPlanningBlocker(record, { acceptanceAdapterGuide }).submit(value, record);
+    return hashValue(checked) === hashValue(report)
+      && record.architectureRef?.version === architecture.version
+      && record.architectureRef?.candidateHash === architecture.candidateHash
+      && samePlanningArchitecture(record.architecture, architecture);
   } catch { return false; }
 }

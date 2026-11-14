@@ -102,7 +102,17 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         }
         if (firstSlice && malformedReviewSlice) {
           state.malformedSliceInterrupted = true;
-          assert.match(text(body.messages.findLast(message => message.role === "tool")!.content), /JSON文字无法解析/);
+          const feedback = objectFields(JSON.parse(text(body.messages.findLast(message => message.role === "tool")!.content).split("\n")[0]!));
+          const diagnostics = recordArray(feedback.issues);
+          assert.deepEqual(diagnostics.map(row => row.path).sort(), ["review_slice.checks", "review_slice.issues"]);
+          for (const issue of diagnostics) {
+            assert.equal(issue.reason, "invalid_type");
+            const location = objectFields(issue.location);
+            assert.equal(location.line, 1); assert.ok(fixtureNumber(location.offset) > 0);
+            assert.equal(location.column, fixtureNumber(location.offset) + 1);
+            assert.ok(fixtureString(issue.remedy).includes(`第 ${location.line} 行、第 ${location.column} 列`));
+            assert.match(fixtureString(issue.remedy), /无法解析/u);
+          }
         }
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(`data: ${JSON.stringify({ id: "revision-length", choices: [{ index: 0, delta: { role: "assistant", content: "固定修订阶段截断" }, finish_reason: "length" }] })}\n\ndata: [DONE]\n\n`);
@@ -509,7 +519,14 @@ test("原生评审列表文字损坏后逐字段回填诊断，重启原会话�
   assert.equal(packet.modelBudget!.used, stopped.calls);
   const recovery = objectFields(packet.reviewReferenceRecovery), diagnostics = recordArray(recovery.submissionIssues);
   assert.deepEqual(diagnostics.map(row => row.path).sort(), ["review_slice.checks", "review_slice.issues"]);
-  assert.ok(diagnostics.every(row => row.reason === "invalid_type" && String(row.remedy).includes("JSON文字无法解析")));
+  for (const issue of diagnostics) {
+    assert.equal(issue.reason, "invalid_type");
+    const location = objectFields(issue.location);
+    assert.equal(location.line, 1); assert.ok(fixtureNumber(location.offset) > 0);
+    assert.equal(location.column, fixtureNumber(location.offset) + 1);
+    assert.ok(fixtureString(issue.remedy).includes(`第 ${location.line} 行、第 ${location.column} 列`));
+    assert.match(fixtureString(issue.remedy), /无法解析/u);
+  }
   assert.equal(typeof objectFields(recovery.draft).checks, "string");
   const prompt = request.body.messages.filter(row => ["system", "developer"].includes(row.role)).map(row => text(row.content)).join("\n");
   assert.match(prompt, /列表直接提交原生数组/);

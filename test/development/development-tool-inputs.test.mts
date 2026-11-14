@@ -220,7 +220,6 @@ test("修好一项后新的读取错误得到自己的反馈和纠正机会，�
       assert.equal(feedback.outstanding[0].correctionsUsed, 0);
       return [{ name: "change_input", args: { value: "fixed" } }, { name: "read_development_context", args: { requests: [{ section: "report", pointer: "0" }] } }];
     }
-    if (count === 5) return "已完成正式提交。";
     assert.equal(count, 4);
     const feedback = JSON.parse(textOf(body.messages.findLast(row => row.role === "user")!.content)).formatCorrection;
     assert.equal(feedback.outstanding.length, 1); assert.equal(feedback.outstanding[0].toolName, "read_development_context");
@@ -228,9 +227,11 @@ test("修好一项后新的读取错误得到自己的反馈和纠正机会，�
     return [{ name: "read_development_context", args: { requests: [{ section: "report", pointer: "/0" }] } },
       { name: "submit_development_work", args: { summary: "完成", changedFiles: [], knownIssues: [], nextAction: "验收", continue: false } }];
   });
-  try { await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, { report: ["current"] }]); }
+  let submitted: unknown;
+  try { submitted = await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, { report: ["current"] }]); }
   catch (error) { throw f.error() ?? error; }
-  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 5);
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 4); assert.equal(f.counter.turns, 4);
+  assert.equal(objectFields(submitted).summary, "完成");
   assert.deepEqual(f.handle.reference.formatRecovery!.episodes.map(row => row.corrections.map(value => value.outcome)), [["accepted"], ["accepted"]]);
 });
 

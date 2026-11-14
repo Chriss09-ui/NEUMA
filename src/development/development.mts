@@ -75,7 +75,7 @@ import { DevelopmentArtifacts, PLAN_ARTIFACT_GUIDE } from "./development-artifac
 import { planReviewSubject } from "../verification/plan-review-subject.mjs";
 import { JSON_VALUE_SCHEMA_DESCRIPTION } from "../applications/value-schema-rules.mjs";
 import { createDevelopmentFileTools } from "./development-file-tools.mjs";
-import { createDevelopmentPlanningBlocker, planningBlockerOutcome, isPlanningBlockerOutcome, samePlanningBlocker } from "./development-planning-blocker.mjs";
+import { createDevelopmentPlanningBlocker, planningBlockerOutcome, isPlanningBlockerOutcome, samePlanningBlocker, samePlanningArchitecture } from "./development-planning-blocker.mjs";
 import { createAcceptanceLedger, recordDevelopmentAcceptance, recordIndependentAcceptance, assertAcceptanceComplete, summarizeAcceptanceLedger, ACCEPTANCE_ADAPTER_GUIDE } from "../verification/acceptance-contract.mjs";
 
 const LABELS: Record<string, string> = { intake: "正在接收设计与准备工作区…", planning: "正在拆分并检查研发任务…",
@@ -828,7 +828,14 @@ export class DevelopmentController {
     let historicalPlanningDraft, historicalDraft;
     if (ctx.record.planningDraftSource && unacceptedPlanning(ctx.record)) {
       const source = ctx.record.planningDraftSource;
-      if (source.bindingHash !== planningDraftBinding(ctx.record)) throw new InputError("历史规划草稿与当前架构事实不一致");
+      if (source.bindingHash !== planningDraftBinding(ctx.record)) {
+        const storedOriginal = await this.store.getRun(source.snapshot.runId);
+        const original = storedOriginal ? readDevelopmentRunRecord(storedOriginal) : null;
+        this.guard(ctx);
+        if (!original || original.agentId !== ctx.record.agentId || source.bindingHash !== planningDraftBinding(original)
+          || !samePlanningArchitecture(original.architecture, ctx.record.architecture))
+          throw new InputError("历史规划草稿与当前架构事实不一致");
+      }
       historicalDraft = source.snapshot;
       const currentCheck = await this.artifacts.diagnose(ctx.record.agentId, ctx.record.id, source.snapshot.indexPath, {
         schema: ctx.record.architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA,
@@ -1060,7 +1067,7 @@ export class DevelopmentController {
           planning: { turns: 0 }, tasks: [], plan: null, planHash: null, planAttempts: [], reviews: [], reports: [], handoffs: [],
           currentTaskId: null, snapshot: null, verifiedSnapshot: null, package: null, deliveries: [], feedback: null }));
         if (previous?.status === "failed" && unacceptedPlanning(previous) && Number(architecture.design.schemaVersion) >= 2
-          && planningDraftBinding(previous) === planningDraftBinding(ctx.record)) {
+          && previous.agentId === ctx.record.agentId && samePlanningArchitecture(previous.architecture, ctx.record.architecture)) {
           try {
             let draft = previous.planningDraft;
             if (!draft && previous.planDraftChecks?.at(-1)?.hash) {
@@ -1068,7 +1075,7 @@ export class DevelopmentController {
                 expectedHash: previous.planDraftChecks!.at(-1)!.hash, signal: ctx.signal });
               if (snapshot) draft = { bindingHash: planningDraftBinding(previous), snapshot };
             }
-            if (draft?.bindingHash === planningDraftBinding(ctx.record) && draft.snapshot.runId === previous.id) {
+            if (draft?.bindingHash === planningDraftBinding(previous) && draft.snapshot.runId === previous.id) {
               const restored = await this.artifacts.restoreDraft(draft.snapshot, agentId, ctx.record.id, { signal: ctx.signal });
               ctx.record.planningIndexPath = restored.indexPath;
               ctx.record.planningDraftSource = clone(draft);
@@ -1078,7 +1085,7 @@ export class DevelopmentController {
                 const storedOriginal = await this.store.getRun(inherited!.sourceRunId);
                 const original = storedOriginal ? readDevelopmentRunRecord(storedOriginal) : null;
                 this.guard(ctx);
-                if (original && planningDraftBinding(original) === planningDraftBinding(ctx.record))
+                if (original && original.agentId === ctx.record.agentId && samePlanningArchitecture(original.architecture, ctx.record.architecture))
                   historicalReview = historicalPlanReview(original);
               }
               if (historicalReview) ctx.record.planningDraftSource.historicalReview = historicalReview;
