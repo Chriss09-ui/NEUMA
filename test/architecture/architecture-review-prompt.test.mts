@@ -81,9 +81,11 @@ test("完整评审路径原文兼容，分批模式不再同时要求先修整�
   assert.doesNotMatch(batch, /最多两次范围复核|原5轮|实际剩余额度/);
 });
 
-test("完整与分批评审要求逐条关闭依据，并支持用未通过草稿只修错误行", () => {
+test("完整与分批评审允许两栏共同提供关闭依据，并支持用未通过草稿只修错误行", () => {
   for (const prompt of [REVIEW_PROMPT, renderArchitectureReviewPrompt({ batchMode: true })]) {
-    assert.match(prompt, /声明处理五条就逐条提供五条对应依据/u);
+    assert.match(prompt, /candidatePaths或references/u);
+    assert.match(prompt, /不必逐条重复列齐/u);
+    assert.match(prompt, /只引编号不能证明功能内容/u);
     assert.match(prompt, /candidatePath指出缺少对应关系的具体候选条款/u);
     assert.match(prompt, /rejectedDraft是尚未通过的规范化分项草稿，与saved分开/u);
     assert.match(prompt, /仅重交需要修正的行/u);

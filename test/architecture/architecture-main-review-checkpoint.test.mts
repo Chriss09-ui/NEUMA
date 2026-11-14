@@ -325,12 +325,23 @@ test("取消后的迟到提交不保存，取消前已保存检查点可在新�
   assert.equal(f.stageCalls.length, stageCount);
 });
 
-test("检查点篡改或未知中断原因不得跳过新的主评审", async (t) => {
-  for (const kind of ["tamper", "semantic-checkpoint", "unknown"]) await t.test(kind, async (t) => {
+test("主评审检查点被篡改时拒绝恢复，保留原记录与用量且不再调用模型", async t => {
+  const f = await fixture(t); await assert.rejects(f.run());
+  const source = (await f.designer.get(f.definition.id))!;
+  objectFields(source.mainReviewCheckpoint!.review).summary += " changed";
+  await f.designer.save(source);
+  const before = structuredClone(await f.designer.get(f.definition.id)), count = f.calls.length, stageCount = f.stageCalls.length;
+  f.state.fidelity = "pass";
+  await assert.rejects(f.run(), error => failureFields(error).validationIssue?.reason === "feedback_repair_source_invalid");
+  assert.equal(f.calls.length, count); assert.equal(f.stageCalls.length, stageCount);
+  assert.deepEqual(await f.designer.get(f.definition.id), before);
+});
+
+test("完整但语义无效的检查点或未知中断原因仍须重新主评审", async (t) => {
+  for (const kind of ["semantic-checkpoint", "unknown"]) await t.test(kind, async (t) => {
     const f = await fixture(t); await assert.rejects(f.run());
     const source = await f.designer.get(f.definition.id);
-    if (kind === "tamper") objectFields(source!.mainReviewCheckpoint!.review).summary += " changed";
-    else if (kind === "semantic-checkpoint") {
+    if (kind === "semantic-checkpoint") {
       const invalid = structuredClone(source!.mainReviewCheckpoint!.review); recordArray(objectFields(invalid).checks)[0]!.passed = false;
       source!.mainReviewCheckpoint = createMainReviewCheckpoint(source, invalid, source!.mainReviewCheckpoint!.modelCalls);
       assert.ok(readMainReviewCheckpoint(source), "完整结构和hash本身不代替review语义校验");

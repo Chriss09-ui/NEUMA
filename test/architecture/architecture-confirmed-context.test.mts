@@ -148,7 +148,7 @@ async function fixture(t: test.TestContext, script?: (input: { role: string; pay
         subscribe: () => () => {}, dispose() {}, async abort() {},
         async prompt(text: string) { await callFixture(options.onModelCall!, options, []); const payload = JSON.parse(String(text)); calls.push({ role, payload });
           if (script) return script({ role, payload, tools });
-          if (storage) {
+          if (storage && objectFields(storage.binding).role === "architecture-design-stage") {
             const id = objectFields(storage.binding).pipelineId;
             if (role === "blueprint") candidates.set(id, candidate(payload.requirements));
             const fixed = candidates.get(id);

@@ -78,7 +78,9 @@ async function fixture(t: test.TestContext, action: (input: ConsultationAction) 
         async prompt(text: string) {
           await options.onModelCall!({}); const payload = packetOf(text); calls.push({ role, payload });
           const submit = (value?: unknown) => {
-            if (!storage) return tools[role === "designer" ? "submit_architecture" : "submit_architecture_review"]!.execute("submit", value);
+            if (objectFields(storage?.binding).role !== "architecture-design-stage")
+              return tools[role === "designer" ? "submit_architecture" : "submit_architecture_review"]!.execute("submit", value);
+            assert.ok(storage);
             if (role === "blueprint") candidates.set(objectFields(storage.binding).pipelineId, structuredClone(candidateOf(value)));
             const candidate = candidates.get(objectFields(storage.binding).pipelineId);
             assert.ok(candidate, "模块和整合必须复用同一次蓝图的固定候选");

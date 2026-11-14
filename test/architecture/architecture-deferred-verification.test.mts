@@ -71,7 +71,7 @@ function sessions(script: SessionScript = {}) {
       async prompt(text: string) {
         await options.onModelCall!();
         const payload = JSON.parse(text);
-        if (storage) {
+        if (storage && objectFields(storage.binding).role === "architecture-design-stage") {
           const id = objectFields(storage.binding).pipelineId;
           if (objectFields(storage.binding).stage === "blueprint") {
             const value = currentDesign(payload.requirements); script.change?.(value, payload); candidates.set(id, value);
