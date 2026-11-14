@@ -186,7 +186,7 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
     let result = describeDelivery({ ...base, ...summaries(payload, limit, count) });
     if (encoded(result).length <= maxChars) {
       // Put actual task material ahead of repeated schema guides; full evidence remains pageable.
-      for (const field of ["task", "caseAssignments", "reviewScope", "feedback", "unresolvedIssues", "historyPolicy", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "deferredObligations", "platformOverview", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
+      for (const field of ["task", "caseAssignments", "testCapabilities", "reviewScope", "feedback", "unresolvedIssues", "historyPolicy", "report", "plan", "previousPlan", "historicalPlanningDraft", "requirements", "deferredObligations", "platformOverview", "design", "runtimeCapabilities", "verificationAssignments", "deferredVerifications", "runtime", "entrypoint", "application", "checkpoint", "admissionFacts", "caseFacts", "planningWorkspace", "acceptanceAdapterGuide", "developmentRevision", "planningFiles", "valueSchemaGuide", "jsonValueSchemaGuide", "planSchema", "serviceManifestSchema", "testFixtureSchema", "testFixtureLimits"]) {
         if (!Object.hasOwn(payload, field)) continue;
         const candidate = describeDelivery({ ...result, [field]: payload[field] });
         if (encoded(candidate).length <= maxChars) result = { ...candidate, [field]: structuredClone(payload[field]) };
@@ -199,7 +199,7 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
 
 export function developmentNodeContext(payload: DevelopmentContextPayload, kind: string) {
   const fields = ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment", "caseAssignments", "reviewScope", "partSchema", "task", "feedback", "submissionFeedback", "issues", "remaining", "unresolvedIssues", "historyPolicy",
-    "requirements", "design", "verificationAssignments", "entrypoint", "runtime", "application", "checkpoint", "planningWorkspace"];
+    "requirements", "design", "verificationAssignments", "entrypoint", "runtime", "application", "checkpoint", "planningWorkspace", "testCapabilities"];
   if (kind === "planner") fields.push("previousPlan", "planningRepair", "historicalPlanningDraft", "caseFacts", "completedTasks", "planningFiles");
   if (payload.workAssignment) fields.push("plan");
   if (kind === "developer") fields.push("cases", "activationCases", "activationChecks");

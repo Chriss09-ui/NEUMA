@@ -88,6 +88,16 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
             assert.doesNotMatch(guide, /\bsubmit_development_plan\b|\bsubmit_development_review\b|save_plan_cases|save_plan_json/);
           }
           if (tools.submit_development_plan_part) {
+            const testCapabilities = objectFields(payload.testCapabilities);
+            assert.ok(Array.isArray(testCapabilities.mockableTools) && testCapabilities.mockableTools.includes("web.fetch"));
+            assert.match(String(testCapabilities.guide), /待开发代码/);
+            const page = JSON.parse(toolText(await tools.read_development_context!.execute("capabilities", { section: "testCapabilities", limit: 10000 })));
+            assert.deepEqual(JSON.parse(page.text), testCapabilities, "骨架和用例节点读取同一份真实工具说明");
+            if (id.startsWith("cases_")) {
+              const schema = objectFields(tools.submit_development_plan_part.parameters);
+              const capability = objectFields(objectFields(objectFields(objectFields(objectFields(objectFields(schema.properties).cases).items).properties).mocks).items).properties;
+              assert.match(String(objectFields(objectFields(capability).capability).description), /web\.fetch/);
+            }
             if (id === "outline") {
               const submitted = structuredClone(outline);
               if (inputConflict && calls.filter(row => row.id === "outline").length > 1) {

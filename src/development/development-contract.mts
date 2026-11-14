@@ -4,7 +4,7 @@ import type { DevelopmentPlan, DevelopmentCase, DevelopmentTask, DevelopmentArch
 import { objectFields, isInteger } from "../runtime/type-boundary.mjs";
 interface PlanOptions { architecture?: DevelopmentArchitecture | undefined; previousPlan?: DevelopmentPlan | undefined; freshWorkspace?: boolean }
 import { validateApplicationManifest, validateActionInput, VALUE_SCHEMA_DESCRIPTION } from "../applications/application-contract.mjs";
-import { ACTION_CAPABILITIES } from "./node-action-bootstrap.mjs";
+import { testingCapabilityIssues } from "./development-test-capabilities.mjs";
 import { createHash } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { testJsonSchema, resolveTestJson, resolveCaseInput, resolveCaseValues, inputContractRejection } from "./development-fixtures.mjs";
@@ -328,6 +328,8 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
   validateSchema(input, fragmentBudget ? { ...schema, properties: { ...schema.properties,
     cases: { ...schema.properties.cases, minItems: 0 } } } : schema, "plan");
   // The schema check above establishes field types; semantic validation below retains all original gates.
+  const capabilityIssues = testingCapabilityIssues(input, architecture);
+  if (capabilityIssues.length) fail("测试替身能力无效", capabilityIssues[0]);
   const value = structuredClone(input) as DevelopmentPlan;
   const allCases = activationCaseEntries(value);
   for (const { test } of allCases) for (const assertion of test.assertions) assertion.path = normalizeAssertionPath(assertion.path);
@@ -385,7 +387,6 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
         if (!inputContractRejection(action!, resolved.input, { target: test!.inputTarget }).rejected) fail("输入契约拒绝用例必须实际违反动作输入契约");
       } else validateActionInput(action!, resolved.input);
       for (const mock of test.mocks!) {
-        if (!ACTION_CAPABILITIES.includes(mock.capability)) fail("测试替身能力无效");
         parsedExpected(mock.argsJson); parsedExpected(mock.resultJson);
       }
       if (source === "activation" && !value.application.actions.some((item) => item.id === test.actionId))

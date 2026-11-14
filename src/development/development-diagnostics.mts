@@ -13,6 +13,7 @@ import { developmentAcceptanceItems, requiredDevelopmentRequirementIds } from ".
 import { diagnoseApplicationManifest } from "./application-manifest-diagnostics.mjs";
 import { PlanningInputConflict } from "./development-input-admission.mjs";
 import { ASSERTION_PATH_GUIDE } from "./development-assertion-path.mjs";
+import { testingCapabilityIssues } from "./development-test-capabilities.mjs";
 
 const remedies: Readonly<Record<string, string>> = Object.freeze({
   required: "补齐提交工具列出的必填字段。", additionalProperties: "移除当前结构没有声明的字段。",
@@ -212,6 +213,10 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
   if (!structural.valid) return structural.issues.map((entry) => ({ ...entry,
     remedy: entry.location ? entry.remedy : schemaIssue(input, entry.path, entry.reason).remedy }));
   // Semantic diagnostics below run only after the registered submission schema accepts the shape.
+  if (root === "plan" && objectFields(error.developmentIssue).reason === "mock_capability_invalid") {
+    const issues = testingCapabilityIssues(input, architecture);
+    if (issues.length) return issues;
+  }
   const value = input as DevelopmentPlan;
   if (root === "plan" && architecture && objectFields(error.developmentIssue).reason === "acceptance_owner_mismatch") {
     const allowed = new Set(developmentAcceptanceItems(architecture).map(item => item.id));

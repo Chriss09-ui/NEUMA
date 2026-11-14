@@ -88,6 +88,27 @@ test("真实规划契约拒绝映射具体字段及固定修复建议，不再�
   }
 });
 
+test("规划在展开测试数据前识别错用设计能力编号，并反馈具体位置和真实可模拟范围", () => {
+  const { architecture, plan, schema } = fixture();
+  const testCase = plan.cases[0]!;
+  testCase.mocks = [{ capability: "workflow_execution", argsJson: "{}", resultJson: "{}" },
+    { capability: "invented.tool", argsJson: "{}", resultJson: "{}" }];
+  testCase.input = "not JSON";
+  let failure: unknown;
+  try { validatePlan(plan, { architecture }); } catch (error) { failure = error; }
+  const issues = submissionIssues(plan, schema, { root: "plan", error: failure, architecture });
+  assert.deepEqual(issues.map(row => [row.path, row.reason]), [
+    ["plan.cases[0].mocks[0].capability", "mock_capability_invalid"],
+    ["plan.cases[0].mocks[1].capability", "mock_capability_invalid"],
+  ]);
+  assert.match(issues[0]!.remedy, /workflow_execution.*待开发代码/);
+  assert.match(issues[1]!.remedy, /invented\.tool.*不支持/);
+  assert.match(issues[0]!.remedy, /web\.fetch/);
+  assert.match(issues[0]!.remedy, /规划/);
+  testCase.input = "{}"; testCase.mocks = [{ capability: "web.fetch", argsJson: "{}", resultJson: "{}" }];
+  assert.doesNotThrow(() => validatePlan(plan, { architecture }));
+});
+
 test("规划误把平台独立检查分给研发任务时，一次指出全部错配且保留真实验证责任", () => {
   const { plan, architecture, schema } = fixture(true);
   const reviews = ["delivery_review", "routing_review"];

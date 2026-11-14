@@ -13,7 +13,8 @@ import { DevelopmentController } from "../../src/development/development.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { developmentArchitecture, developmentPlan } from "../helpers/development.mjs";
 import { LEGACY_PLAN_SCHEMA, validatePlan } from "../../src/development/development-contract.mjs";
-import { ensureDevelopmentPolicy } from "../../src/development/development-policy.mjs";
+import { ensureDevelopmentPolicy, noteDevelopmentRejection, sealDevelopmentPolicy, readDevelopmentPolicy } from "../../src/development/development-policy.mjs";
+import { hashValue } from "../../src/development/development-contract.mjs";
 import type { DevelopmentRunRecord } from "../../src/development/development-controller-types.mjs";
 
 const textOf = (value: unknown) => typeof value === "string" ? value : recordArray(value).filter((entry) => entry.type === "text").map((entry) => entry.text).join("\n");
@@ -101,6 +102,31 @@ test("研发超过旧请求上限仍可读取再提交，只有用量累计", as
   }, { turns: 2, boundedWorkload: true });
   await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, { task: { id: "bounded" } }]);
   assert.equal(f.error(), undefined); assert.equal(f.requests.length, 3); assert.equal(f.counter.turns, 3);
+});
+
+test("明确授权的续测保留五次内容回执，下一次内容退回仍停止且不能重新领取", async t => {
+  const f = await fixture(t, () => {
+    const plan = developmentPlan(); plan.tasks[0]!.requirementIds = [f.architecture.requirements[0]!.id];
+    return [{ name: "submit_development_plan", args: plan }];
+  }, { planning: true });
+  const record = f.ctx.record as unknown as DevelopmentRunRecord;
+  for (let n = 0; n < 5; n++) noteDevelopmentRejection(record, "plan", { rejected: n });
+  const policy = record.retryPolicy!, before = structuredClone(policy.content.plan!);
+  await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), error => failureFields(error).diagnostic?.reason === "content_rejection_limit");
+  assert.equal(f.requests.length, 0);
+  Reflect.set(policy, "continuations", [{ owner: "plan", rejectedAt: 5, receiptsHash: hashValue(before.receipts), authorization: "explicit-user-resume" }]);
+  sealDevelopmentPolicy(policy);
+  const damaged = structuredClone(policy);
+  Reflect.set(damaged, "continuations", [{ owner: "plan", rejectedAt: 5, receiptsHash: "0".repeat(64), authorization: "explicit-user-resume" }]);
+  sealDevelopmentPolicy(damaged);
+  assert.throws(() => readDevelopmentPolicy(damaged), /授权/);
+  await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), error => failureFields(error).diagnostic?.reason === "content_rejection_limit");
+  assert.equal(f.requests.length, 1);
+  assert.equal(policy.content.plan!.count, 6);
+  assert.deepEqual(policy.content.plan!.receipts.slice(0, 5), before.receipts);
+  assert.equal(f.handle.reference.formatRecovery!.episodes.length, 0);
+  await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), error => failureFields(error).diagnostic?.reason === "content_rejection_limit");
+  assert.equal(f.requests.length, 1);
 });
 
 test("研发真实Pi原始参数不被强转，下一请求包含具体字段诊断，修正后正常提交", async (t) => {

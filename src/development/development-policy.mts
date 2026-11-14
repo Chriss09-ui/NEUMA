@@ -8,6 +8,7 @@ export interface DevelopmentRetryPolicy {
   legacy: { budgets: DevelopmentRunRecord["budgets"]; sourceHash: string };
   content: Record<string, { count: number; receipts: string[] }>;
   unresolved: Record<string, DevelopmentReview["issues"]>;
+  continuations?: { owner: string; rejectedAt: number; receiptsHash: string; authorization: "explicit-user-resume" }[];
   hash: string;
 }
 export const DEVELOPMENT_CONTENT_LIMIT = 5;
@@ -28,7 +29,21 @@ export function readDevelopmentPolicy(policy: DevelopmentRetryPolicy) {
       || row.receipts.some(value => !/^[a-f0-9]{64}$/u.test(value)))
     || Object.values(policy.unresolved).some(rows => !Array.isArray(rows) || rows.some(row => row.blocking !== true)))
     throw new InputError("研发退回计数或未解决问题记录无效，不能清零恢复。");
+  if (policy.continuations !== undefined && (!Array.isArray(policy.continuations)
+    || policy.continuations.some(row => !row || typeof row.owner !== "string" || row.authorization !== "explicit-user-resume"
+      || !Number.isSafeInteger(row.rejectedAt) || row.rejectedAt < DEVELOPMENT_CONTENT_LIMIT
+      || !Object.hasOwn(policy.content, row.owner) || row.rejectedAt > policy.content[row.owner]!.count
+      || row.receiptsHash !== hashValue(policy.content[row.owner]!.receipts.slice(0, row.rejectedAt)))
+    || new Set(policy.continuations.map(row => `${row.owner}:${row.rejectedAt}`)).size !== policy.continuations.length))
+    throw new InputError("研发续测授权与原退回回执不一致，不能增加重试机会。");
   return policy;
+}
+
+/** Only an explicitly recorded authorization extends a stopped task to its next content rejection. */
+export function developmentContentLimit(record: { retryPolicy?: DevelopmentRetryPolicy }, owner: string) {
+  if (!record.retryPolicy) return DEVELOPMENT_CONTENT_LIMIT;
+  const policy = readDevelopmentPolicy(record.retryPolicy);
+  return Math.max(DEVELOPMENT_CONTENT_LIMIT, ...policy.continuations?.filter(row => row.owner === owner).map(row => row.rejectedAt + 1) ?? []);
 }
 
 /** The user's policy upgrade retains original counters; no legacy quota is replenished. */
@@ -85,5 +100,6 @@ export function developmentPolicyBudget(record: DevelopmentRunRecord) {
   const policy = record.retryPolicy;
   if (!policy) return record.budgets;
   return { contentLimit: DEVELOPMENT_CONTENT_LIMIT, formatLimit: DEVELOPMENT_FORMAT_LIMIT, modelRequests: "usage-only",
-    contentRejections: Object.fromEntries(Object.entries(policy.content).map(([owner, row]) => [owner, row.count])) };
+    contentRejections: Object.fromEntries(Object.entries(policy.content).map(([owner, row]) => [owner, row.count])),
+    ...(policy.continuations?.length ? { authorizedContentStops: Object.fromEntries(policy.continuations.map(row => [row.owner, developmentContentLimit(record, row.owner)])) } : {}) };
 }

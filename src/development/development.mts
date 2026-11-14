@@ -1,5 +1,6 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import { withAssertionPathGuide } from "./development-assertion-path.mjs";
+import { developmentTestCapabilities, withTestCapabilityGuide } from "./development-test-capabilities.mjs";
 import { createFormatRecovery, readFormatRecovery, noteFormatRejection, resolveFormatRecovery, deliverFormatFeedback,
   formatCorrectionFeedback, formatRecoveryExhausted, formatFailureCount, type FormatIssue } from "../runtime/format-recovery.mjs";
 import { needsDevelopmentRepairDispatch, repairDevelopmentPlan, repairDevelopmentCode } from "./development-repair.mjs";
@@ -10,7 +11,7 @@ import { judgeDevelopmentReview } from "./development-review-judgment.mjs";
 import { projectWorkRound, createWorkRoundProjection } from "../runtime/work-round-context.mjs";
 import { createDevelopmentHistoryTool } from "./development-history.mjs";
 import { ensureDevelopmentPolicy, noteDevelopmentRejection, closeDevelopmentFindings, unresolvedDevelopmentIssues,
-  developmentPolicyBudget, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
+  developmentPolicyBudget, developmentContentLimit } from "./development-policy.mjs";
 import type { WebCapabilityPort } from "../runtime/web-capabilities.mjs";
 import type { RegisteredTool as ToolDefinition } from "../runtime/execution-port.mjs";
 import type { ModelConfig } from "../contracts/model.mjs";
@@ -122,7 +123,7 @@ class Stop extends Error {
 
 function checkContent(ctx: DevelopmentContext, owner: string) {
   const count = ctx.record.retryPolicy?.content[owner]?.count ?? 0;
-  if (count >= DEVELOPMENT_CONTENT_LIMIT) throw new Stop(`同一责任任务已累计 ${count} 次内容退回，原计数保留。`, "failed",
+  if (count >= developmentContentLimit(ctx.record, owner)) throw new Stop(`同一责任任务已累计 ${count} 次内容退回，原计数保留。`, "failed",
     { stage: "development", phase: ctx.record.phase, reason: "content_rejection_limit", owner, attempts: count });
 }
 
@@ -160,7 +161,8 @@ export function developmentSummary(record: DevelopmentRunRecord | DevelopmentSum
   const formatLocked = Object.values(record.sessions ?? {}).some(session => formatRecoveryExhausted(session.formatRecovery))
     || Object.values(record.repairBatches ?? {}).some(batch => batch.checkpoint.groups.some(group => formatRecoveryExhausted(group.formatRecovery)));
   const cannotResume = !freshPlanningRound && (exhaustedWork || exhaustedRepairs || formatLocked
-    || ["content_rejection_limit", "review_judgment_format", ...(!record.retryPolicy ? ["turn_limit", "correction_limit"] : [])].includes(String(record.diagnostic?.reason)));
+    || Object.entries(record.retryPolicy?.content ?? {}).some(([owner, row]) => row.count >= developmentContentLimit(record, owner))
+    || ["review_judgment_format", ...(!record.retryPolicy ? ["content_rejection_limit", "turn_limit", "correction_limit"] : [])].includes(String(record.diagnostic?.reason)));
   return clone({ id: record.id, agentId: record.agentId, name: record.name, version: record.version,
     architectureRef: record.architectureRef, status: record.status, phase: record.phase, summary: record.summary,
     diagnostic: record.diagnostic ?? null,
@@ -250,7 +252,7 @@ export class DevelopmentController {
     const feedback = kind === "task" ? task?.feedback : ctx.record.feedback;
     const count = noteDevelopmentRejection(ctx.record, owner, { owner, reviewIndex: ctx.record.reviews.length,
       reportId: objectFields(feedback?.report).id ?? null, subjectHash: feedback?.review?.subjectHash ?? null }, feedback?.review);
-    if (count >= DEVELOPMENT_CONTENT_LIMIT) {
+    if (count >= developmentContentLimit(ctx.record, owner)) {
       await this.save(ctx);
       throw new Stop(`同一责任任务已累计 ${count} 次内容退回，已保存最新稿、反馈和原计数。`, "failed", {
         stage: "development", phase: ctx.record.phase, reason: "content_rejection_limit", owner, attempts: count,
@@ -523,7 +525,7 @@ export class DevelopmentController {
     const planningTools = guardedTools.map(tool => ["save_plan_cases", "edit_plan_cases", "update_plan_json"].includes(tool.name) ? modelSubmissionTool(tool) : tool);
     handle.structuredSubmissionTools = [...(blockerTool ? [blockerTool] : []), submit].map(modelSubmissionTool);
     const sessionTools = [...planningTools, ...handle.structuredSubmissionTools].map(tool => ({ ...tool,
-      parameters: withAssertionPathGuide(tool.parameters as ToolSchema) }));
+      parameters: withTestCapabilityGuide(withAssertionPathGuide(tool.parameters as ToolSchema)) }));
     const inputFeedback = (toolName: string, args: unknown) => {
       const tool = sessionTools.find((entry) => entry.name === toolName);
       if (!tool) return;
@@ -633,7 +635,8 @@ export class DevelopmentController {
     handle.checkToolInputs?.();
     ctx.lastRole = handle.kind;
     handle.payload = clone({ ...payload, ...(handle.planningBlocker ? { planningBlockerContract: handle.planningBlocker } : {}) });
-    if (handle.payload.planSchema) handle.payload.planSchema = withAssertionPathGuide(handle.payload.planSchema as ToolSchema);
+    if (handle.payload.planSchema) handle.payload.planSchema = withTestCapabilityGuide(withAssertionPathGuide(handle.payload.planSchema as ToolSchema));
+    handle.payload.testCapabilities = developmentTestCapabilities();
     handle.payload.roleGuide = handle.nodeGuide ?? { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[handle.kind];
     if (ctx.record.architecture.platformSnapshot) handle.payload.platformGuide = renderPlatformRules(ctx.record.architecture.platformSnapshot,
       { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities });

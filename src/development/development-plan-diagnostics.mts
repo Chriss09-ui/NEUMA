@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import { validateActionInput } from "../applications/application-contract.mjs";
 import { resolveTestJson, resolveCaseInput, FIXTURE_LIMITS, TEST_FIXTURE_SCHEMA, TEST_FIXTURE_OPERATION_GUIDE, inputContractRejection, inputContractMeasurement } from "./development-fixtures.mjs";
-import { ACTION_CAPABILITIES } from "./node-action-bootstrap.mjs";
+import { testCapabilityIssue } from "./development-test-capabilities.mjs";
 import { activationCaseEntries, activationCheckIssues, actionExecutionIssues, hashValue, safeRelativePath, taskEntrypointIssues, validatePlan } from "./development-contract.mjs";
 import { submissionIssues } from "./development-diagnostics.mjs";
 import { ASSERTION_PATH_GUIDE, isSafeAssertionPath, normalizeAssertionPath } from "./development-assertion-path.mjs";
@@ -297,6 +297,10 @@ export function diagnosePlanningPlan(input: unknown, schema: ToolSchema, { archi
       if (!action) { add(`${path}.actionId`, "action_missing"); continue; }
       if (Object.hasOwn(test ?? {}, "entrypoint") || !Array.isArray(test?.mocks)) add(`${path}.mocks`, "action_case_invalid");
       if (!Array.isArray(test?.assertions) || !Array.isArray(test?.mocks)) continue;
+      for (const [mockIndex, mock] of (test.mocks as unknown[]).map(objectFields).entries()) {
+        const issue = testCapabilityIssue(mock.capability, `${path}.mocks[${mockIndex}].capability`, architecture);
+        if (issue) add(issue.path, issue.reason, { remedy: issue.remedy });
+      }
       const resolved = diagnosticCaseInput(test, { maxInputBytes: value.runtime === "managed-service" ? 1024 * 1024 : 128 * 1024, fixtureBudget,
         report: (field, fixtureReason) => { const { reason, ...detail } = planningFixtureFailure(fixtureReason); add(`${path}.${field}`, reason, detail); },
         reportMaterial: (issue) => add(`${path}.${issue.path}`, issue.reason, { remedy: issue.remedy, ...(issue.measurement ? { measurement: issue.measurement } : {}) }) });
@@ -315,7 +319,6 @@ export function diagnosePlanningPlan(input: unknown, schema: ToolSchema, { archi
           });
         }
       }
-      for (const [mockIndex, mock] of (test.mocks as unknown[]).map(objectFields).entries()) if (!ACTION_CAPABILITIES.includes(typeof mock.capability === "string" ? mock.capability : "")) add(`${path}.mocks[${mockIndex}].capability`, "mock_capability_invalid");
     } else for (const issue of auditCaseMaterials(test, { input: test?.input, mocks: [] }, { budget: fixtureBudget }).issues)
       add(`${path}.${issue.path}`, issue.reason, { remedy: issue.remedy, ...(issue.measurement ? { measurement: issue.measurement } : {}) });
     const paths = new Set();

@@ -149,7 +149,7 @@ export async function planDevelopmentParts(controller: DevelopmentController, ct
     instruction: "仅规划全局接口和可运行任务骨架，不写用例或文件。plan不能包含cases、activationCases或activationChecks。每任务最多24条需求、6项验收；按模块拆分。actionOwners为每个公开动作和迁移/验证动作指定taskId与acceptanceId。activationScopes逐项声明真实启用验收的isolated/shared范围。用例交由后续独立Agent设计。直接调用submit_development_plan_part提交。",
     payload: { ...controller.base(ctx), planSchema: schema },
     ...(previous ? { delivery: { previousPlan: previous.plan,
-      planningRepair: "沿用最新稿修正输入输出契约，可同步摘要、标题和任务说明。错误输入要能到达约定的检查方，错误结果也须能通过输出契约；相关既有样本和预期按需读取。任务编号、依赖、动作、文件授权、运行配置及验收分配保持。" } } : {}),
+      planningRepair: "沿用最新稿和上一轮反馈修正输入输出契约及测试可行性，可同步摘要、标题和任务说明。错误输入要能到达约定检查方，错误结果须能通过输出契约；故障触发手段以testCapabilities为准，不能把待开发代码当作可模拟工具。真实架构缺口按planningBlockerContract报告。相关既有样本和预期按需读取；任务编号、依赖、动作、文件授权、运行配置及验收分配保持。" } } : {}),
     tools: planningResolverTools(controller, ctx), allowBlocker: true, validate: validateOutline }], 12);
   // Bind groups to their original assignments; deliver the latest validated interface and recheck saved results against it.
   const original = savedOutlines(ctx)[0] ?? outline!, groups = caseGroups(original), outlineHash = hashValue(original);

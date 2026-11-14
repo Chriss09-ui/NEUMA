@@ -9,7 +9,7 @@ import { InputError } from "../requirements/core.mjs";
 import type { DevelopmentController } from "./development.mjs";
 import type { DevelopmentContext, DevelopmentRole } from "./development-controller-types.mjs";
 import { isPlanningBlockerOutcome } from "./development-planning-blocker.mjs";
-import { noteDevelopmentRejection, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
+import { noteDevelopmentRejection, developmentContentLimit } from "./development-policy.mjs";
 import { developmentSessionBinding, type DevelopmentSessionReference } from "./development-sessions.mjs";
 import { prepareDevelopmentSubmissionReplay, readDevelopmentSubmissionReplays, type DevelopmentSubmissionReplay } from "./development-submission-replay.mjs";
 import type { SubmissionIssue } from "./development-diagnostics.mjs";
@@ -172,7 +172,7 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
       if (phase === "saved" || parts.every(part => part.role === "reviewer")) return;
       const count = noteDevelopmentRejection(ctx.record, "plan", { work: key, receiptHash });
       await controller.save(ctx);
-      if (count >= DEVELOPMENT_CONTENT_LIMIT) throw Object.assign(new InputError("规划已累计五次内容退回，分组结果、会话及用量保留。"),
+      if (count >= developmentContentLimit(ctx.record, "plan")) throw Object.assign(new InputError(`规划已累计${count}次内容退回，分组结果、会话及用量保留。`),
         { diagnostic: { stage: "development", phase: ctx.record.phase, reason: "content_rejection_limit", owner: "plan", attempts: count } });
     },
     save: async dispatch => {

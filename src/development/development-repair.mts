@@ -12,7 +12,7 @@ import { validatePlan } from "./development-contract.mjs";
 import { renderPlatformRules } from "../architecture/platform-contract.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { repairableDevelopmentResult } from "./development-failures.mjs";
-import { noteDevelopmentRejection, unresolvedDevelopmentIssues, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
+import { noteDevelopmentRejection, unresolvedDevelopmentIssues, developmentContentLimit } from "./development-policy.mjs";
 
 export interface DevelopmentRepairBatch { checkpoint: RepairCheckpoint<null>; snapshot?: DevelopmentSnapshot; applied: boolean }
 type Feedback = { review: DevelopmentReview; report?: VerificationFeedback["report"] };
@@ -93,7 +93,7 @@ async function dispatch(controller: DevelopmentController, ctx: DevelopmentConte
       const owner = snapshot ? task && !task.integration ? `task:${task.id}` : "integration" : "plan";
       const count = noteDevelopmentRejection(ctx.record, owner, { repairBatch: key, receiptHash }, feedback.review);
       await controller.save(ctx);
-      if (count >= DEVELOPMENT_CONTENT_LIMIT) throw Object.assign(new InputError("本责任任务已累计五次内容退回，修复与原计数已保存。"),
+      if (count >= developmentContentLimit(ctx.record, owner)) throw Object.assign(new InputError(`本责任任务已累计${count}次内容退回，修复与原计数已保存。`),
         { diagnostic: { stage: "development", phase: ctx.record.phase, reason: "content_rejection_limit", owner, attempts: count } });
     },
     save: async checkpoint => { controller.guard(ctx); batch!.checkpoint = checkpoint; await controller.save(ctx); },
