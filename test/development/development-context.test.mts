@@ -62,6 +62,11 @@ const call = async (tool: NeumaTool, params: unknown, signal?: AbortSignal): Pro
   assert.ok(page.truncated ? typeof page.nextOffset === "number" : page.nextOffset === null);
   return page as ContextPage;
 };
+const readError = async (tool: NeumaTool, params: unknown) => {
+  const value = fixtureJsonObject(toolText(await tool.execute("bad-read", params)));
+  assert.equal(value.text, undefined); assert.ok(value.error);
+  return objectFields(value.error);
+};
 
 function largePayload() {
   return { architectureRef: { version: 3, candidateHash: "a".repeat(64) }, subjectHash: "b".repeat(64), mode: "task",
@@ -293,7 +298,7 @@ test("页边界或大小非法时明确拒绝，不越界也不返回无法继�
     { section: "value", limit: 0 }, { section: "value", limit: -1 }, { section: "value", limit: 10001 },
     { section: "value", limit: 3.5 }, { section: "value", limit: "4000" },
     { section: "value", offset: Number.MAX_SAFE_INTEGER + 1 }, { section: "value", path: "/private/data" },
-  ]) await assert.rejects(call(tool, params), InputError);
+  ]) assert.equal((await readError(tool, params)).reason, "invalid_request");
   const page = await call(tool, { section: "value", offset: 1, limit: 2 });
   assert.equal(page.text, "😀"); assert.equal(page.nextOffset, 3);
 });
@@ -316,7 +321,7 @@ test("只允许当前输入的自有顶层字段，拒绝原型字段、文件�
   const payload = JSON.parse('{"report":{"status":"failed"},"__proto__":{"secret":"never"},"constructor":"never"}');
   const tool = createContextReadTool(() => payload);
   for (const section of ["__proto__", "constructor", "prototype", "toString", "report.status", "../report", "/tmp/file", "report/status", "", "absent"]) {
-    await assert.rejects(call(tool, { section }), InputError, section);
+    assert.equal((await readError(tool, { section })).reason, "section_missing", section);
   }
   assert.equal((await call(tool, { section: "report" })).text, '{"status":"failed"}');
   assert.equal(tool.name, "read_development_context"); assert.equal(tool.parameters.additionalProperties, false);
@@ -328,7 +333,7 @@ test("每次调用获取当前轮资料，不缓存上一轮 payload 或已移�
   assert.equal((await call(tool, { section: "task" })).text, '{"id":"a"}');
   payload = { task: { id: "b" } };
   assert.equal((await call(tool, { section: "task" })).text, '{"id":"b"}');
-  await assert.rejects(call(tool, { section: "feedback" }), /不存在/);
+  assert.equal((await readError(tool, { section: "feedback" })).reason, "section_missing");
   const controller = new AbortController(); controller.abort();
   await assert.rejects(call(tool, { section: "task" }, controller.signal), { name: "AbortError" });
 });
@@ -336,11 +341,12 @@ test("每次调用获取当前轮资料，不缓存上一轮 payload 或已移�
 test("不存在的资料字段列出当前真实可读section，不暴露值或原型字段", async () => {
   const payload = JSON.parse('{"requirements":"PRIVATE_CONTENT","application":{},"__proto__":{"secret":"PRIVATE_CONTENT"},"constructor":"PRIVATE_CONTENT"}');
   const tool = createContextReadTool(() => payload);
-  await assert.rejects(call(tool, { section: "plan" }), (error) => {
-    assert.match(failureFields(error).message!, /section：\["requirements","application"\]/u);
-    assert.doesNotMatch(failureFields(error).message!, /PRIVATE_CONTENT|__proto__|constructor/u);
-    return true;
-  });
+  const error = await readError(tool, { section: "plan" });
+  assert.deepEqual(error.availableSections, ["requirements", "application"]);
+  assert.doesNotMatch(JSON.stringify(error), /PRIVATE_CONTENT|__proto__|constructor/u);
+  const broken = createContextReadTool(() => { throw new Error("磁盘读取失败"); });
+  await assert.rejects(broken.execute("source", { section: "plan" }), exception =>
+    objectFields(objectFields(exception).diagnostic).reason === "context_source_failed");
 });
 
 test("评审对象能完整放入首包时优先给完整计划，不为无关大指南仅保留计划摘要", () => {

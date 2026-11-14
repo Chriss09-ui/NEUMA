@@ -352,15 +352,11 @@ export function createContextReadTool(getPayload: () => unknown | Promise<unknow
     execute: async (id, params, signal) => {
       if (Array.isArray(objectFields(params).requests)) return reader.execute(id, params, signal);
       signal?.throwIfAborted();
-      const source = checkedPayload(await getPayload()), section = objectFields(params).section;
-      if (typeof section === "string" && sectionPattern.test(section) && !forbiddenSections.has(section) && !Object.hasOwn(source, section))
-        throw new InputError("当前轮上下文不存在这个顶层字段；可读取的section：" + JSON.stringify(Object.keys(source)
-          .filter(key => sectionPattern.test(key) && !forbiddenSections.has(key))));
-      const result = await createModelContextReader(() => source).execute(id, { requests: [params] }, signal);
+      const result = await reader.execute(id, { requests: [params] }, signal);
       const content = result.content[0];
       if (content?.type !== "text") throw new InputError("研发资料读取回执无效");
       const row = objectFields((JSON.parse(content.text) as { results: unknown[] }).results[0]);
-      if (row.error) throw new InputError(String(objectFields(row.error).message));
+      if (row.error) return { content: [{ type: "text", text: JSON.stringify(row) }], details: {} };
       return { content: [{ type: "text", text: JSON.stringify({ ...row, totalChars: row.totalCharacters,
         truncated: row.nextOffset !== null }) }], details: {} };
     } };

@@ -15,8 +15,10 @@ import { continueDevelopmentOperation, classifyDevelopmentToolError } from "../.
 test("续测观察器按实际输入错误类型允许重交，额度停止和执行故障仍终止", () => {
   assert.equal(classifyDevelopmentToolError(new InputError("提交未通过")), "validation");
   assert.equal(classifyDevelopmentToolError(Object.assign(new Error("存储失败"), { name: "InputError" })), "execution");
-  for (const reason of ["content_rejection_limit", "repeated_tool_error", "review_judgment_format"])
+  for (const reason of ["content_rejection_limit", "repeated_tool_error", "review_judgment_format", "read_input_correction_limit"])
     assert.equal(classifyDevelopmentToolError(Object.assign(new InputError("已达到控制器上限"), { diagnostic: { reason } })), "limit");
+  assert.equal(classifyDevelopmentToolError(Object.assign(new InputError("资料来源损坏"), { diagnostic: { reason: "context_source_failed" } })), "execution");
+  assert.equal(classifyDevelopmentToolError(Object.assign(new InputError("纠正次数落盘失败"), { diagnostic: { reason: "read_recovery_persistence" } })), "execution");
 });
 
 test("制作任务持久接受、重复提交及旧代次停止共用同一次执行，快照读取不执行业务", async t => {

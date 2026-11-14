@@ -51,7 +51,7 @@ import { InputError } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { developmentModelOutputBudget } from "../runtime/model-limits.mjs";
 import { toolInputValidation } from "../runtime/tool-input-diagnostics.mjs";
-import { modelSubmissionTool } from "../runtime/model-submission-arguments.mjs";
+import { modelSubmissionTool, modelReadInputIssues } from "../runtime/model-submission-arguments.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { designHash, supportedArchitectureVersion, requiresDevelopment } from "../architecture/architecture-contract.mjs";
 import { renderPlatformRules, platformCapabilityCatalog, validatePlatformMetadata } from "../architecture/platform-contract.mjs";
@@ -483,22 +483,15 @@ export class DevelopmentController {
       let result;
       try { result = await tool.execute(args[0], args[1], args[2], args[3], args[4]); }
       catch (error) {
-        if (error instanceof InputError) await noteFormat(tool.name, args[0], [{ path: tool.name, reason: "tool_input_invalid",
+        if (error instanceof InputError && objectFields(error.diagnostic).reason !== "context_source_failed") await noteFormat(tool.name, args[0], [{ path: tool.name, reason: "tool_input_invalid",
           remedy: "本次工具调用未通过输入检查。请按该工具公开参数及刚返回的错误回执修正后重试，不要重复发送未修改的参数。" }]);
         throw error;
       }
       this.guard(ctx);
       let readRejected = false;
       if (["read_development_context", "read_development_history"].includes(tool.name)) {
-        const first = result.content.find(block => block.type === "text");
-        if (first?.type === "text") {
-          const data = objectFields(JSON.parse(first.text));
-          const issues = (Array.isArray(data.results) ? data.results : []).flatMap((row, index) => objectFields(row).error ? [{
-            path: `${tool.name}.requests[${index}]`, reason: "context_read_rejected",
-            remedy: String(objectFields(objectFields(row).error).message ?? "读取参数无效。")
-              + " pointer使用以/开头的JSON Pointer（例如/0），空字符串表示整项；历史目录可直接使用readRequest，长内容原样使用nextRequest续读。" }] : []);
-          if (issues.length) { readRejected = true; await noteFormat(tool.name, args[0], issues); }
-        }
+        const issues = modelReadInputIssues(result, tool.name);
+        if (issues.length) { readRejected = true; await noteFormat(tool.name, args[0], issues); }
       }
       if (!readRejected) await clearToolInputFailure(tool.name);
       let draftCheck, fileState;

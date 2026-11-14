@@ -8,7 +8,7 @@ const forbidden = new Set(["__proto__", "constructor", "prototype"]);
 const maxBytes = MODEL_JSON_MAX_BYTES;
 export const MODEL_FORMAT_REJECTION_LIMIT = 3;
 const formatReasons = new Set(["required_field", "unknown_field", "invalid_type", "invalid_contract", "invalid_json", "sdk_validation", "invalid_value", "size_limit",
-  "invalid_request", "path_missing", "reference_path_missing", "reference_id_ambiguous", "assertion_path_invalid",
+  "invalid_request", "section_missing", "path_missing", "reference_path_missing", "reference_id_ambiguous", "assertion_path_invalid",
   "required", "additionalProperties", "type", "anyOf", "oneOf", "enum", "const", "pattern", "uniqueItems",
   "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minProperties", "maxProperties", "multipleOf"]);
 export function isModelSubmissionFormatIssue(issue: unknown): boolean {
@@ -38,9 +38,12 @@ export function modelReadInputIssues(output: ToolResult, root: string) {
       const row = objectFields(item), error = objectFields(row.error);
       const reason = typeof error.reason === "string" ? error.reason : row.found === false ? row.reason : undefined;
       if (typeof reason !== "string" || !formatReasons.has(reason)) continue;
-      issues.push({ path: batch ? `${root}.requests[${index}]` : `${root}.pointer`, reason,
+      const field = ["section", "pointer", "cursor", "offset", "limit"].includes(String(error.field)) ? String(error.field) : undefined;
+      const hint = objectFields(error.readRequest);
+      issues.push({ path: batch ? `${root}.requests[${index}]${field ? `.${field}` : ""}` : `${root}.${field ?? "pointer"}`, reason,
         remedy: typeof error.message === "string" ? error.message : typeof row.remedy === "string" ? row.remedy
           : "核对返回的有效位置；续读使用原工具返回的nextRequest，不改变来源或猜写游标。" });
+      if (typeof hint.toolName === "string" && hint.arguments) issues.at(-1)!.remedy += ` 改用 ${hint.toolName}，参数：${JSON.stringify(hint.arguments)}。`;
     }
   }
   return issues;

@@ -81,7 +81,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         : names.includes("submit_requirement_fidelity") ? "fidelity" : "reviewer");
       const firstSlice = kind === "review_slice" && objectFields(payloads.findLast(row => row.pipelineStage === "review_slice")?.assignment).id === "review_checks_0";
       requests.push({ kind, body });
-      if (firstSlice && mixedFormatSlice) assert.ok(++state.formatSliceCalls <= 3, "三轮格式失败后不能再请求模型");
+      if (firstSlice && mixedFormatSlice) assert.ok(++state.formatSliceCalls <= 4, "首次读错不占正式提交次数，三次正式格式失败后不能再请求模型");
       if (stage === "module" && stallModule) {
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.write(`data: ${JSON.stringify({ id: "native-stalled-stream", choices: [{ index: 0,
@@ -249,6 +249,7 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
           if (state.formatSliceCalls === 1) { name = "read_architecture_file"; args = { requests: "列表不能写成普通文字" }; }
           if (state.formatSliceCalls === 2) args = { ...args, issues: '[{"description":"缺少括号"}' };
           if (state.formatSliceCalls === 3) args = { ...args, checks: false };
+          if (state.formatSliceCalls === 4) args = { ...args, issues: false };
         }
       } else if (kind === "repair") {
         const assignment = payloads.findLast(row => row.repairAssignment)!.repairAssignment!;
@@ -546,13 +547,17 @@ test("格式错误在原会话自动重交，第二轮修好后继续主评审�
   assert.ok(feedback.some(row => row.formatRecovery?.attempt === 1 && row.formatRecovery?.retry === true));
 });
 
-test("格式错误换字段仍累计三轮，第三轮停止且重启不再请求", { timeout: 30000 }, async t => {
+test("首次读错单独反馈，正式提交换字段错误仍累计三次并在重启后锁定", { timeout: 30000 }, async t => {
   const f = await fixture(t, { acceptanceCount: 13, mixedFormatSlice: true });
   await assert.rejects(f.run());
   await f.reload();
   const record = (await f.designer.get(f.definition.id))!;
   const first = readReviewTaskCheckpoint(objectFields(record.reviewDispatchCheckpoint).dispatch).groups[0]!;
-  assert.equal(first.calls, 3); assert.equal(first.rejection?.count, 3); assert.equal(first.result, null);
+  assert.equal(first.calls, 4); assert.equal(first.rejection?.count, 3); assert.equal(first.result, null);
+  const readFeedback = f.requests.flatMap(entry => entry.body.messages.filter(row => row.role === "tool")
+    .flatMap(row => text(row.content).split("\n").flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } })))
+    .find(row => row.formatRecovery?.counting === "corrections_after_feedback");
+  assert.equal(readFeedback?.formatRecovery.attempt, 0); assert.equal(readFeedback?.formatRecovery.retry, true);
   assert.deepEqual(f.errors, []);
   const requests = f.requests.length;
   await assert.rejects(f.run(), /连续三次/);

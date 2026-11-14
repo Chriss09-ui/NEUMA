@@ -50,7 +50,9 @@ export function modelContextPacket(source: UnknownRecord, fields: string[], deri
 
 export function modelContextValue(source: UnknownRecord, section: unknown, pointer: unknown = "") {
   if (!sectionPattern.test(section as string) || forbidden.has(section as string) || !Object.hasOwn(source, section as string))
-    throw new InputError("上下文字段不存在，请使用本轮contextIndex中的section。");
+    throw Object.assign(new InputError("此读取工具没有这个section，请使用本工具的资料目录；当前节点资料与历史研发参考使用不同入口。"), {
+      contextIssue: { reason: "section_missing", field: "section", availableSections: Object.keys(source).filter(key => sectionPattern.test(key) && !forbidden.has(key)).slice(0, 64) },
+    });
   if (typeof pointer !== "string" || pointer.length > 500 || pointer !== "" && (!pointer.startsWith("/") || /~(?![01])/u.test(pointer)))
     throw new InputError("上下文pointer须为合法JSON Pointer。");
   let value = source[section as string], parentPointer = "";
@@ -86,7 +88,12 @@ export function createModelContextReader(getSource: () => UnknownRecord | Promis
       const input = objectFields(rawInput);
       if (!rawInput || Object.keys(input).some(key => key !== "requests") || !isArray(input.requests)
         || !input.requests.length || input.requests.length > 8) throw new InputError("上下文读取须提供1至8项requests。");
-      const source = await getSource();
+      let source: UnknownRecord;
+      try { source = await getSource(); }
+      catch (error) {
+        signal?.throwIfAborted();
+        throw Object.assign(new InputError("上下文资料来源读取失败，不能作为模型参数错误重试。"), { cause: error, diagnostic: { reason: "context_source_failed" } });
+      }
       signal?.throwIfAborted();
       let remaining = 24000;
       const results = input.requests.map((rawItem, requestIndex) => {
@@ -125,6 +132,7 @@ export function createModelContextReader(getSource: () => UnknownRecord | Promis
         } catch (error) {
           if (!(error instanceof InputError)) throw error;
           return { requestIndex, ...(typeof item?.section === "string" && sectionPattern.test(item.section) ? { section: item.section } : {}),
+            ...(typeof item.pointer === "string" && item.pointer.length <= 500 ? { pointer: item.pointer } : {}),
             error: { reason: "invalid_request", ...objectFields(errorField(error, "contextIssue")), message: error.message } };
         }
       });

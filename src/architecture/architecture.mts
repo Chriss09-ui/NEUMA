@@ -33,7 +33,8 @@ import { checkedModule, moduleResultSchema, sealArchitectureReviewEvidence, revi
   rejectedFidelityArchitectureRevisionSeed, developmentArchitectureRevisionSeed, continuedDevelopmentRevisionSeed, interruptedArchitectureRevisionSeed,
   interruptedArchitectureReviewSeed, feedbackRepairError, reviewRevisionContinuationSeed, feedbackReviewCheckpoint, feedbackRepairSeed, hasNewPendingFeedback, inheritedFidelityReviewDispatch, historicalArchitectureReviewEvidence } from "./architecture-revision-source.mjs";
 import type { RevisionContext } from "./architecture-revision-source.mjs";
-import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, modelReadRecoveryResult, MODEL_FORMAT_REJECTION_LIMIT } from "../runtime/model-submission-arguments.mjs";
+import { modelSubmissionTool, modelSubmissionFormatRecovery, isModelSubmissionFormatIssue, modelReadInputIssues, MODEL_FORMAT_REJECTION_LIMIT } from "../runtime/model-submission-arguments.mjs";
+import { architectureReadRecovery, architectureReadRecoveryBinding } from "./architecture-read-recovery.mjs";
 import { renderPiSubmissionContract, readPiStructuredSubmission } from "../runtime/pi-submission-contract.mjs";
 import { ARCHITECTURE_VERSION, ARCHITECTURE_ROLE_TURN_LIMIT, ARCHITECTURE_STORED_TURN_LIMIT, ARCHITECTURE_MODULE_LIMIT,
   CAPABILITY_CATALOG_VERSION, CAPABILITIES, designSubmissionSchema, reviewSubmissionSchema,
@@ -685,8 +686,11 @@ export class ArchitectureDesigner {
     const rejectedReference = () => hasRejectedSubmission ? submissionRepair!.reference() : null;
     const unsubmittedDraft = createArchitectureUnsubmittedDraft({ schema: parameters,
       binding: { role, submitName, contextHash: designHash(payload), candidateHash: payload.candidateHash ?? null } });
+    const readRecovery = await architectureReadRecovery(this.storage, id,
+      architectureReadRecoveryBinding(role, id, submitName, payload, sessionStorage, currentVersion), sessionStorage);
+    sessionStorage = readRecovery.sessionStorage;
     let primaryFailure: unknown;
-    let result: T | HandoffResult | undefined, session: PiSessionPort | undefined, unsubscribe = () => {}, failed = false, turns = initialModelCalls, retries = 0, retryError = "", turnLimit = false, truncated = false;
+    let result: T | HandoffResult | undefined, session: PiSessionPort | undefined, unsubscribe = () => {}, failed = false, turns = Math.max(initialModelCalls, readRecovery.snapshot().modelCalls), retries = 0, retryError = "", turnLimit = false, truncated = false;
     let submissionAttempts = 0, lastSubmissionError: string | undefined, lastSubmissionIssue: (ReviewDiagnosticIssue & { allowedReferences?: string[] }) | undefined, lastSubmissionFingerprint: string | undefined, lastSubmissionDiagnostics: { total: unknown; truncated: unknown; issues: ReviewDiagnosticIssue[] } | undefined;
     const resumedIssue = objectFields(resumeSubmissionIssue);
     if (isArchitectureFormatSubmissionIssue(resumeSubmissionIssue)
@@ -707,7 +711,10 @@ export class ArchitectureDesigner {
         || !lastSubmissionIssue && turns > modelCallLimit) extendedSubmissionBudget = true;
       return extendedSubmissionBudget;
     };
-    const submissionCallLimit = () => formatBudgetOpen() ? ARCHITECTURE_FORMAT_SUBMISSION_LIMIT : modelCallLimit;
+    const submissionCallLimit = () => {
+      const limit = formatBudgetOpen() ? ARCHITECTURE_FORMAT_SUBMISSION_LIMIT : modelCallLimit;
+      return limit === null ? null : limit + readRecovery.extraCalls();
+    };
     let handoffFailure: unknown, scopeFailure: UnknownRecord | undefined, delegatedFailure: ArchitectureError | undefined, lastHandoffDiagnostic: unknown, fidelityDecision: Awaited<ReturnType<typeof verifyRequirementFidelity>> | undefined, fallbackEnded = false;
     let modelStopReason: string | undefined, outputTokens = 0, outputUsageReceipts = 0;
     const requestedMaxOutputTokens = maxOutputTokens ?? architectureModelOutputBudget(this.config, role);
@@ -833,6 +840,8 @@ export class ArchitectureDesigner {
       return validationIssue;
     };
     const details = () => ({ role, phase, retries, submissionAttempts, submissionContinuations, stagedDrafts, draftSubmissions, structuredSubmissions,
+      readInputRecovery: { bindingHash: readRecovery.snapshot().bindingHash, modelCalls: readRecovery.snapshot().modelCalls,
+        correctionCalls: readRecovery.snapshot().correctionCalls, feedback: readRecovery.feedback() ?? null },
       ...(meteredStage ? { submissionRejections: stageRejections, rejectionLimit: DESIGN_SUBMISSION_REJECTION_LIMIT,
         formatRejections: stageFormatRejections, formatRejectionLimit: MODEL_FORMAT_REJECTION_LIMIT } : {}),
       ...(unsubmittedDraftDiagnostics.length ? { unsubmittedDraftDiagnostics: structuredClone(unsubmittedDraftDiagnostics) } : {}),
@@ -855,6 +864,7 @@ export class ArchitectureDesigner {
     const abort = () => { void session?.abort()!.catch(() => {}); };
     const charge = (event: { retryAttempt?: number; purpose?: string } = {}) => {
       signal?.throwIfAborted();
+      readRecovery.assertActive();
       assertProgressWritable();
       reviewParts?.assertActive();
       if (delegatedFailure) throw failure(typeof objectFields(delegatedFailure.diagnostic).reason === "string" ? String(objectFields(delegatedFailure.diagnostic).reason) : "module_failed", details());
@@ -872,10 +882,11 @@ export class ArchitectureDesigner {
       charge(event);
       await onStageModelCall?.({ ...event, formatSubmission: formatBudgetOpen() });
       await onMainReviewBudget?.(turns);
+      await readRecovery.requested(turns, event.retryAttempt ?? 0, readRecovery.feedback()?.feedbackId);
     };
     const checkFidelity = async () => {
       if (!fidelityDecision) {
-        if (modelCallLimit !== null && turns >= modelCallLimit && !resumeFidelityProgress) { turnLimit = true; throw failure("turn_limit", details()); }
+        if (requestsSpent() && !resumeFidelityProgress) { turnLimit = true; throw failure("turn_limit", details()); }
         try {
           const evidenceGuide = reviewEvidenceContext && Object.hasOwn(reviewEvidenceContext, "acceptanceAdapterGuide");
           const payloadGuide = Object.hasOwn(payload, "acceptanceAdapterGuide");
@@ -1120,25 +1131,39 @@ export class ArchitectureDesigner {
         }
       } } : null;
     const terminalTools = () => new Set([submitName, ...(reviseSubmission && (editableSubmission || hasRejectedSubmission) ? [reviseSubmission.name] : [])]);
+    const readTools = new Set([contextReader.name, fileMaterials?.tool.name, evidenceReader?.tool.name, platformContractTool?.name,
+      ...tools.filter(tool => tool.name === "read_architecture_development_reference").map(tool => tool.name)].filter((name): name is string => Boolean(name)));
+    const readFeedback = (output: ToolResult, issues: { path: string; reason: string; remedy: string }[]) => {
+      const correction = readRecovery.feedback();
+      let attached = false;
+      return { ...output, content: output.content.map(part => {
+        if (attached || part.type !== "text") return part;
+        let value; try { value = objectFields(JSON.parse(part.text)); } catch { return part; }
+        attached = true;
+        const attempt = Math.max(0, ...(correction?.outstanding.map(row => row.correctionsUsed) ?? []));
+        return { ...part, text: JSON.stringify({ ...value, inputRejected: true, issues, formatCorrection: correction,
+          formatRecovery: { category: "format", counting: "corrections_after_feedback", attempt, limit: 3, retry: attempt < 3,
+            instruction: correction?.instruction } }) };
+      }) };
+    };
     const roleTools = [...tools, contextReader, ...(fileMaterials ? [fileMaterials.tool] : []), ...(evidenceReader ? [evidenceReader.tool] : []), ...(platformContractTool ? [platformContractTool] : []), ...(allowHandoff ? [requestRequirements] : []),
       ...(reviewParts ? [saveReviewParts!, submitReviewParts!] : []),
       submitDraft, ...(reviseSubmission ? [reviseSubmission] : []), submit]
-      .filter(tool => !boundedStage || modelCallLimit - initialModelCalls > 1 || terminalTools().has(tool.name))
+      .filter(tool => !boundedStage || modelCallLimit - initialModelCalls + readRecovery.extraCalls() > 1 || terminalTools().has(tool.name))
       .map((tool): NeumaTool => ({ ...tool, execute: async (...args: Parameters<NeumaTool["execute"]>) => {
         signal?.throwIfAborted();
-        if (boundedStage && turns >= modelCallLimit && !terminalTools().has(tool.name))
+        if (boundedStage && turns >= modelCallLimit + readRecovery.extraCalls() && !terminalTools().has(tool.name))
           throw new InputError("本轮剩余次数只用于正式提交，读取或单独保存不能替代提交。");
         assertProgressWritable();
         if (stalled()) throw failure(stalledReason(), details());
         reviewParts?.assertActive();
         if (delegatedFailure) throw failure(typeof objectFields(delegatedFailure.diagnostic).reason === "string" ? String(objectFields(delegatedFailure.diagnostic).reason) : "module_failed", details());
-        const readInput = (meteredStage || role === "reviewer" || payload.pipelineStage === "review_slice")
-          && [contextReader, fileMaterials?.tool, evidenceReader?.tool, platformContractTool].includes(tool);
+        const readInput = readTools.has(tool.name);
         let output;
         try { output = await tool.execute(...args); }
         catch (error) {
           signal?.throwIfAborted();
-          if (readInput && error instanceof InputError) {
+          if (readInput && error instanceof InputError && objectFields(error.diagnostic).reason !== "context_source_failed") {
             output = toolResult({ results: [{ error: { reason: "invalid_request", message: error.message } }] });
           } else {
             if (tool.name === "delegate_module" && error instanceof ArchitectureError && objectFields(error.diagnostic).delegation) {
@@ -1175,13 +1200,29 @@ export class ArchitectureDesigner {
           }
         }
         signal?.throwIfAborted();
+        let correctionTool = tool.name;
+        if (readInput) output = { ...output, content: output.content.map(part => {
+          if (part.type !== "text") return part;
+          let value; try { value = objectFields(JSON.parse(part.text)); } catch { return part; }
+          const rows = Array.isArray(value.results) ? value.results : [value];
+          for (const entry of rows) {
+            const row = objectFields(entry), error = objectFields(row.error);
+            if (error.reason !== "section_missing" || typeof row.section !== "string") continue;
+            if (tool.name !== contextReader.name && Object.hasOwn(currentMaterials(), row.section)) {
+              error.readRequest = { toolName: contextReader.name, arguments: { requests: [{ section: row.section,
+                ...(typeof row.pointer === "string" ? { pointer: row.pointer } : {}) }] } };
+              correctionTool = contextReader.name;
+            }
+            if (Array.isArray(error.availableSections)) error.message += " 本工具可读section：" + JSON.stringify(error.availableSections);
+          }
+          return { ...part, text: JSON.stringify(value) };
+        }) };
         const readIssues = readInput ? modelReadInputIssues(output, tool.name) : [];
         if (readIssues.length) {
-          await noteSubmissionFailure(args[0], readIssues);
-          rejected(null, false, readIssues[0]);
-          await retainRejectedProgress();
-          output = modelReadRecoveryResult(output, readIssues, meteredStage ? stageFormatRejections : repeatedFailure?.count);
-        }
+          await readRecovery.rejected(correctionTool, args[0], turns, readIssues);
+          output = readFeedback(output, readIssues);
+        } else if (readInput) await readRecovery.accepted(tool.name, turns);
+        if (result !== undefined) await readRecovery.accepted(tool.name, turns, true);
         if (tool === evidenceReader?.tool) {
           const text = output.content.find((item) => item.type === "text");
           if (!text) throw new InputError("评审材料读取缺少文本结果");
@@ -1214,6 +1255,11 @@ export class ArchitectureDesigner {
       const schema = toolSchemas.get(toolName);
       if (!schema) return undefined;
       const feedback = architectureToolValidation(args, schema, { root: toolRoot(toolName) });
+      if (!feedback.valid && readTools.has(toolName)) {
+        await readRecovery.rejected(toolName, toolCallId, turns, feedback.issues);
+        const wrapped = readFeedback(toolResult(feedback), feedback.issues).content[0];
+        return wrapped?.type === "text" ? { ...feedback, ...objectFields(JSON.parse(wrapped.text)) } : feedback;
+      }
       const formatFailure = !feedback.valid && (meteredStage || role === "reviewer" || payload.pipelineStage === "review_slice")
         && feedback.issues.length > 0 && feedback.issues.every(isModelSubmissionFormatIssue);
       if ([submitName, "request_requirements", "revise_architecture_submission"].includes(toolName)
@@ -1297,13 +1343,18 @@ export class ArchitectureDesigner {
       signal?.addEventListener("abort", abort, { once: true });
       session = await this.sessionFactory({ config: this.config, cwd: this.cwd,
         ...(boundedStage ? { toolAvailability: ({ retryAttempt }: { retryAttempt: number; purpose: string }) => {
-          const remaining = modelCallLimit - turns + (retryAttempt > 0 ? 1 : 0);
+          const remaining = modelCallLimit - turns + readRecovery.extraCalls() + (retryAttempt > 0 ? 1 : 0);
           return roleTools.filter(tool => remaining > 1 || terminalTools().has(tool.name)).map(tool => tool.name);
         } } : {}),
         reasoningMode: stageReasoningMode ?? (role === "reviewer" || role === "designer" && editableDesign
           || role === "specialist" && technicalRevision ? "off" : "auto"),
         dataDir: id ? await this.storage.directory(id, "", { create: true }) : this.dataDir,
-        transformContext: roundContext.transformContext,
+        transformContext: async messages => {
+          const current = await roundContext.transformContext(messages) ?? messages;
+          const feedback = readRecovery.feedback();
+          return feedback ? [...current, { role: "user" as const,
+            content: [{ type: "text" as const, text: JSON.stringify({ formatCorrection: feedback }) }], timestamp: Date.now() }] : current;
+        },
         preparePrompt: async text => {
           modelMaterials = { ...modelMaterials, ...objectFields(JSON.parse(text)) };
           return roundContext.preparePrompt();
@@ -1332,6 +1383,7 @@ export class ArchitectureDesigner {
         maxOutputTokens: requestedMaxOutputTokens });
       session.setAutoCompactionEnabled?.(false);
       if (onSessionRef && session.sessionFile) await onSessionRef({ file: basename(session.sessionFile) });
+      if (session.sessionFile) await readRecovery.saveSession(session.sessionFile);
       signal?.throwIfAborted();
       if (recoverReviewReferences && sessionStorage?.file && session.sessionBindingHash && session.sessionFile
         && basename(session.sessionFile) === sessionStorage.file && session.messages) {
@@ -1423,6 +1475,7 @@ export class ArchitectureDesigner {
         await onMainReviewBudget?.(turns);
         await session.prompt(prompt);
         signal?.throwIfAborted();
+        readRecovery.assertActive();
         if (delegatedFailure) throw failure(typeof objectFields(delegatedFailure.diagnostic).reason === "string" ? String(objectFields(delegatedFailure.diagnostic).reason) : "module_failed", details());
         const last = currentPromptAssistant ?? session.messages?.slice(messageCount).findLast((message) => message.role === "assistant");
         if (stalled()) throw failure(stalledReason(), details());

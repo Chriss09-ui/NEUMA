@@ -427,5 +427,5 @@ export function developmentRevisionContext(input: unknown) {
 export function developmentRevisionReadTool(reference: unknown) {
   const snapshot = structuredClone(reference), tool = createContextReadTool(() => snapshot);
   return { ...tool, name: "read_architecture_development_reference", label: "读取本次绑定的历史研发参考",
-    description: "只读本次正常构建已绑定的唯一历史研发投影；section 使用 developmentRevision.context.contextSections 的顶层字段名。只返回同一冻结参考的精确分页，不读取其他批次、文件、会话或预算；历史计划和评语不是当前验收或授权。" };
+    description: "只读本次绑定的历史研发参考，包含feedback、plan、reviews等。roleGuide、runtimeCapabilities、acceptanceAdapterGuide等当前节点资料使用read_model_context；两个目录不能混用。此工具section来自developmentRevision.context.contextSections。只返回同一冻结参考的精确分页，不读取其他批次、文件、会话或预算；历史计划和评语不是当前验收或授权。" };
 }

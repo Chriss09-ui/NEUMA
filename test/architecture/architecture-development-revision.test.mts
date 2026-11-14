@@ -120,7 +120,8 @@ test("同版通过架构只读复用失败研发参考，新版本仍有独立�
   const read = prompt!.tools.read_architecture_development_reference;
   const page = JSON.parse(String(toolText((await read!.execute("read", { section: "plan", limit: 8000 })))));
   assert.deepEqual(JSON.parse(String(page.text)), run.pendingPlan.plan);
-  await assert.rejects(read!.execute("read", { section: "sessions" }), /不存在这个顶层字段/);
+  const missing = JSON.parse(String(toolText(await read!.execute("read", { section: "sessions" }))));
+  assert.equal(missing.error.reason, "section_missing"); assert.equal(missing.text, undefined);
   assert.equal(f.prompts.filter((item) => !item.isDesign).length, 2);
   assert.equal(revised.attempts.length, 1); assert.equal(objectFields(revised.attempts![0]!.review).verdict, "pass");
   assert.equal(designHash(await f.designer.getVersion(prior.agentId, prior.version)), oldArchitecture);

@@ -20,7 +20,8 @@ class HttpFailure extends Error { constructor(readonly status: number) { super(`
 /** Live observers must leave recoverable rejections to the controller and its persisted counters. */
 export function classifyDevelopmentToolError(error: unknown): "validation" | "limit" | "execution" {
   const reason = objectFields(objectFields(error).diagnostic).reason;
-  if (["content_rejection_limit", "repeated_tool_error", "review_judgment_format"].includes(String(reason))) return "limit";
+  if (["content_rejection_limit", "repeated_tool_error", "review_judgment_format", "read_input_correction_limit"].includes(String(reason))) return "limit";
+  if (["context_source_failed", "read_recovery_persistence"].includes(String(reason))) return "execution";
   return error instanceof InputError ? "validation" : "execution";
 }
 
