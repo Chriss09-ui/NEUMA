@@ -9,7 +9,7 @@ import { CAPABILITIES } from "./architecture-contract.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
 import { requiredArchitectureAcceptanceKinds } from "./architecture-stage-semantics.mjs";
 
-const reasons = Object.freeze({ required: "required_field", additionalProperties: "unknown_field", type: "invalid_type",
+const reasons = Object.freeze({ required: "required_field", additionalProperties: "unknown_field", type: "invalid_type", invalid_json: "invalid_type",
   enum: "invalid_value", const: "invalid_value", pattern: "invalid_value", minLength: "size_limit", maxLength: "size_limit",
   minItems: "size_limit", maxItems: "size_limit", minimum: "size_limit", maximum: "size_limit", exclusiveMinimum: "size_limit",
   exclusiveMaximum: "size_limit", minProperties: "size_limit", maxProperties: "size_limit", multipleOf: "size_limit", uniqueItems: "invalid_reference" });
@@ -45,6 +45,7 @@ export function architectureToolValidation(value: unknown, schema: ToolSchema, {
   if (feedback.valid) return feedback;
   const issues = feedback.issues.map(entry => {
     const reason = reasons[entry.reason as keyof typeof reasons] ?? "invalid_contract";
+    if (entry.location) return { ...entry, reason, remedy: entry.remedy };
     if (reason === "unknown_field" && entry.path === root && schema.properties?.issues?.items?.properties?.factClaims
       && !Object.hasOwn(schema.properties, "factClaims") && Object.hasOwn(objectFields(value), "factClaims")) {
       const destination = schema.properties.issue ? "对应意见的 issues[i].factClaims 或单项 issue.factClaims" : "对应意见的 issues[i].factClaims";

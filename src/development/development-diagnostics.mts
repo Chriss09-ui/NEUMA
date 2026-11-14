@@ -191,7 +191,7 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
   if (root === "plan" && schema.properties?.plan?.properties?.application) {
     const structural = toolInputValidation(input, schema, { root });
     if (!structural.valid) return structural.issues.map(entry => ({ ...entry,
-      remedy: schemaIssue(input, entry.path, entry.reason).remedy }));
+      remedy: entry.location ? entry.remedy : schemaIssue(input, entry.path, entry.reason).remedy }));
     const outlineRules = new Map<string, [string, string]>([
       ["每个公开动作及迁移/验证动作必须恰有一项研发任务与验收归属。", ["actionOwners", "action_owner_invalid"]],
       ["动作必须分配给负责真实action验收的任务组合。", ["actionOwners", "action_owner_acceptance_invalid"]],
@@ -207,7 +207,7 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
   }
   const structural = toolInputValidation(input, schema, { root });
   if (!structural.valid) return structural.issues.map((entry) => ({ ...entry,
-    remedy: schemaIssue(input, entry.path, entry.reason).remedy }));
+    remedy: entry.location ? entry.remedy : schemaIssue(input, entry.path, entry.reason).remedy }));
   // Semantic diagnostics below run only after the registered submission schema accepts the shape.
   const value = input as DevelopmentPlan;
   if (root === "plan" && architecture && objectFields(error.developmentIssue).reason === "acceptance_owner_mismatch") {
@@ -313,7 +313,7 @@ export function planningToolIssues(value: unknown, schema: ToolSchema, toolName:
       else if (/^edit_plan_cases\.changes\[[0-9]+\]\.case$/.test(entry.path)) remedy = "add或replace须传同id、符合本轮公开结构的完整case对象；remove和move不传case。宿主不改输入或断言。";
       else if (/^edit_plan_cases\.changes\[[0-9]+\]\.(?:id|beforeId)$/.test(entry.path)) remedy = "使用实际用例稳定编号；重复目标须结合诊断中的localIndex或expectedCaseHash明确选择，不自动去重。";
     }
-    return { ...entry, remedy, receivedType: receivedType(value, toolName, entry.path) };
+    return { ...entry, remedy: entry.location ? entry.remedy : remedy, receivedType: receivedType(value, toolName, entry.path) };
   });
   return [...new Map(result.map((entry) => [JSON.stringify(entry), entry])).values()];
 }

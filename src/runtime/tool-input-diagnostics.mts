@@ -2,6 +2,7 @@ import { Ajv } from "ajv";
 import type { ErrorObject, ValidateFunction } from "ajv";
 import type { ToolSchema, DiagnosticHint, ToolInputIssue, ToolInputValidation } from "../contracts/tools.mjs";
 import { objectFields } from "./type-boundary.mjs";
+import { modelJsonSyntaxIssue } from "./model-json-recovery.mjs";
 type DiagnosticError = Omit<ErrorObject<string, Record<string, unknown>>, "parentSchema"> & { parentSchema: ToolSchema };
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false, verbose: true });
@@ -149,14 +150,17 @@ export function toolInputValidation(value: unknown, schema: ToolSchema, { root =
     const target = error.keyword === "required" ? error.parentSchema.properties?.[error.params.missingProperty as string] : error.parentSchema;
     const constraint = bounds.has(error.keyword) && typeof error.parentSchema[error.keyword] === "number" && Number.isFinite(error.parentSchema[error.keyword])
       ? { [error.keyword]: error.parentSchema[error.keyword] as number } : undefined;
+    const actual = at(value, location.parts);
+    const syntax = error.keyword === "type" && ["object", "array"].includes(String(error.params.type)) ? modelJsonSyntaxIssue(actual.value) : undefined;
     const entry: ToolInputIssue = { path: root + (location.path ? (location.path.startsWith("[") ? "" : ".") + location.path : ""),
       reason: error.keyword, remedy: remedies[error.keyword] ?? (constraint ? "按constraints中的具体上下限修正该字段，保留必要要求。" : "按当前工具声明修正该字段，再提交修改后的参数。"),
-      receivedType: at(value, location.parts).type, ...typeHint(target),
+      receivedType: actual.type, ...typeHint(target),
       ...(error.keyword === "type" ? typeHint({ type: error.params.type as string }) : {}),
       ...(["enum", "const"].includes(error.keyword) ? choiceHint(target) : {}),
       ...(error.keyword === "additionalProperties" ? fields(error.parentSchema) : {}),
       ...(constraint ? { constraints: constraint } : {}),
-      ...(selected.hints.has(error) ? { alternatives: selected.hints.get(error)!, alternativesTruncated: (error.parentSchema[error.keyword] as ToolSchema[]).length > 4 } : {}) };
+      ...(selected.hints.has(error) ? { alternatives: selected.hints.get(error)!, alternativesTruncated: (error.parentSchema[error.keyword] as ToolSchema[]).length > 4 } : {}),
+      ...syntax };
     const key = JSON.stringify(entry);
     if (seen.has(key)) continue;
     seen.add(key); total++;

@@ -53,12 +53,11 @@ test("损坏的容器JSON逐字段说明引号与转义问题，不猜改内容�
     details: '{"reason":"PRIVATE_DETAILS "quoted""}', note: '["PRIVATE_LITERAL "quoted""]', passed: "false" };
   const before = structuredClone(value), result = architectureToolValidation(value, schema, { root: "review_slice" });
   assert.equal(result.valid, false);
-  for (const field of ["acceptanceScopeChecks", "issues", "details"]) {
+  for (const field of ["acceptanceScopeChecks", "issues", "details"] as const) {
     const issue: ToolInputIssue = result.issues.find(entry => entry.path === `review_slice.${field}`)!;
     assert.equal(issue.reason, "invalid_type");
-    assert.match(issue.remedy, /JSON文字无法解析/);
-    assert.match(issue.remedy, /引号、转义或括号/);
-    assert.match(issue.remedy, /直接提交原生数组或对象/);
+    assert.deepEqual(issue.location, { offset: value[field].indexOf("quoted"), line: 1, column: value[field].indexOf("quoted") + 1 });
+    assert.match(issue.remedy, /字符偏移.*无法解析/);
   }
   assert.equal(result.issues.some(entry => entry.path === "review_slice.note"), false);
   assert.doesNotMatch(result.issues.find(entry => entry.path === "review_slice.passed")!.remedy, /JSON文字无法解析/);

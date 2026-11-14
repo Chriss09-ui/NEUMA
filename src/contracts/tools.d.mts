@@ -14,5 +14,6 @@ export interface DiagnosticHint {
   allowedFieldsTruncated?: boolean; requiredFieldsTruncated?: boolean; allowedValuesTruncated?: boolean;
   fieldsTruncated?: boolean; alternativesTruncated?: boolean;
 }
-export interface ToolInputIssue extends DiagnosticHint { path: string; reason: string; remedy: string; receivedType: string; constraints?: Record<string, number> }
+export interface ToolInputIssue extends DiagnosticHint { path: string; reason: string; remedy: string; receivedType: string; constraints?: Record<string, number>;
+  location?: { offset: number; line: number; column: number } }
 export type ToolInputValidation = { valid: true; issues: [] } | { valid: false; issues: ToolInputIssue[]; total: number; retained: number; truncated: boolean };

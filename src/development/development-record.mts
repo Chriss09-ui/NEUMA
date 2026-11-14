@@ -119,7 +119,7 @@ export function readDevelopmentRunRecord(value: unknown): DevelopmentRunRecord {
     || value.dispatchedWork !== undefined && (!Array.isArray(value.dispatchedWork) || value.dispatchedWork.some(key => typeof key !== "string"))
     || value.workDispatches !== undefined && (!value.workDispatches || typeof value.workDispatches !== "object" || Array.isArray(value.workDispatches)))
     throw new InputError("研发工作分派记录无效。");
-  for (const checkpoint of Object.values(value.workDispatches ?? {})) readDevelopmentWorkCheckpoint(checkpoint);
+  for (const checkpoint of Object.values(value.workDispatches ?? {})) readDevelopmentWorkCheckpoint(checkpoint, value.sessions);
   if (value.repairDispatchVersion !== undefined && value.repairDispatchVersion !== 1 && value.repairDispatchVersion !== 2
     || value.pendingPlanRepair !== undefined && typeof value.pendingPlanRepair !== "boolean"
     || value.repairBatches !== undefined && (!value.repairBatches || typeof value.repairBatches !== "object" || Array.isArray(value.repairBatches)))

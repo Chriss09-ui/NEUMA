@@ -10,21 +10,25 @@ import type { DevelopmentController } from "./development.mjs";
 import type { DevelopmentContext, DevelopmentRole } from "./development-controller-types.mjs";
 import { isPlanningBlockerOutcome } from "./development-planning-blocker.mjs";
 import { noteDevelopmentRejection, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
-import { developmentSessionBinding } from "./development-sessions.mjs";
+import { developmentSessionBinding, type DevelopmentSessionReference } from "./development-sessions.mjs";
+import { prepareDevelopmentSubmissionReplay, readDevelopmentSubmissionReplays, type DevelopmentSubmissionReplay } from "./development-submission-replay.mjs";
 
 interface AccountingSnapshot { id: string; remaining?: unknown; omitUnresolved?: true }
 interface WorkIdentity { binding: unknown; assignments: { id: string; role: DevelopmentRole; schema: ToolSchema;
   instruction: string; payload: UnknownRecord; allowBlocker: boolean }[]; callLimit: number }
 export type DevelopmentWorkCheckpoint = { version: 1; bindingHash: string; dispatch: RepairCheckpoint<null> }
-  | { version: 2; bindingHash: string; materialHash: string; originalAccounting?: AccountingSnapshot[]; dispatch: RepairCheckpoint<null> };
+  | { version: 2; bindingHash: string; materialHash: string; originalAccounting?: AccountingSnapshot[];
+    submissionReplays?: DevelopmentSubmissionReplay[]; dispatch: RepairCheckpoint<null> };
 export interface DevelopmentPart<T> { id: string; role: DevelopmentRole; instruction: string; schema: ToolSchema;
   payload: UnknownRecord; tools?: RegisteredTool[]; allowBlocker?: boolean; validate(value: unknown): T }
 
-export function readDevelopmentWorkCheckpoint(value: unknown): DevelopmentWorkCheckpoint {
+export function readDevelopmentWorkCheckpoint(value: unknown, sessions?: Record<string, DevelopmentSessionReference>): DevelopmentWorkCheckpoint {
   const raw = objectFields(value);
   const keys = Object.keys(raw).sort().join(), hash = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  const currentKeys = ["bindingHash", "dispatch", "materialHash", "version", ...(Object.hasOwn(raw, "originalAccounting") ? ["originalAccounting"] : []),
+    ...(Object.hasOwn(raw, "submissionReplays") ? ["submissionReplays"] : [])].sort().join();
   if (!hash(raw.bindingHash) || !(raw.version === 1 && keys === "bindingHash,dispatch,version"
-    || raw.version === 2 && hash(raw.materialHash) && ["bindingHash,dispatch,materialHash,version", "bindingHash,dispatch,materialHash,originalAccounting,version"].includes(keys)))
+    || raw.version === 2 && hash(raw.materialHash) && keys === currentKeys))
     throw new InputError("研发分组检查点无效，不能重新领取额度。");
   const dispatch = readDevelopmentTaskCheckpoint(raw.dispatch);
   if (dispatch.bindingHash !== raw.bindingHash) throw new InputError("研发分组绑定不一致。");
@@ -35,7 +39,9 @@ export function readDevelopmentWorkCheckpoint(value: unknown): DevelopmentWorkCh
       || raw.originalAccounting.some(row => { const entry = objectFields(row); return Object.keys(entry).some(key => !["id", "remaining", "omitUnresolved"].includes(key))
         || entry.omitUnresolved !== undefined && (entry.omitUnresolved !== true || !dispatch.previousQuota); })) throw new InputError("研发历史计量绑定无效。");
   } else if (raw.bindingHash !== raw.materialHash) throw new InputError("研发历史计量绑定缺失。");
+  const submissionReplays = readDevelopmentSubmissionReplays(raw.submissionReplays, dispatch, sessions);
   return { version: 2, bindingHash: String(raw.bindingHash), materialHash: String(raw.materialHash), dispatch,
+    ...(submissionReplays ? { submissionReplays } : {}),
     ...(raw.originalAccounting === undefined ? {} : { originalAccounting: structuredClone(raw.originalAccounting) as AccountingSnapshot[] }) };
 }
 
@@ -100,7 +106,7 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
   const saved = ctx.record.workDispatches?.[key];
   let checkpoint: DevelopmentWorkCheckpoint;
   if (saved) {
-    checkpoint = readDevelopmentWorkCheckpoint(saved);
+    checkpoint = readDevelopmentWorkCheckpoint(saved, ctx.record.sessions);
     if (!ctx.record.dispatchedWork?.includes(key) || repairHash(checkpoint.dispatch.issues) !== repairHash(issues))
       throw new InputError("研发分组材料已变化，不能重建会话刷新额度。");
     if (checkpoint.version === 1) {
@@ -142,6 +148,19 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
     }
     return values;
   };
+  if (saved) {
+    const replay = await prepareDevelopmentSubmissionReplay(controller, ctx, key, checkpoint, parts, base, validate);
+    if (replay) {
+      await controller.current(ctx);
+      const previous = ctx.record.workDispatches![key]!, references = Object.fromEntries(Object.keys(replay.sessions).map(id => [id, ctx.record.sessions![id]!]));
+      Object.assign(ctx.record.sessions!, replay.sessions);
+      ctx.record.workDispatches![key] = replay.checkpoint;
+      try { await controller.save(ctx); }
+      catch (error) { ctx.record.workDispatches![key] = previous; Object.assign(ctx.record.sessions!, references); throw error; }
+      checkpoint = replay.checkpoint;
+      ctx.onProgress({ type: "status", phase: ctx.record.phase, label: "原会话最后提交的格式已由程序还原并通过完整校验，原用量和退回记录保留…" });
+    }
+  }
   let result: unknown;
   for (;;) try {
   result = await runDevelopmentTaskSchedule({ checkpoint: checkpoint.dispatch, binding: identity, base, signal: ctx.signal,

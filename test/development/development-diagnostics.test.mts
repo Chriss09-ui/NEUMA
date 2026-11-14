@@ -46,6 +46,15 @@ test("开发改动声明越权只返回固定字段诊断，不回传错误路�
   assert.doesNotMatch(JSON.stringify(issues), /PRIVATE_/);
 });
 
+test("不能还原的容器JSON反馈具体字符位置，错误正文和业务值不进入诊断", () => {
+  const input = '{\n"PRIVATE_FIELD": "PRIVATE_VALUE",\n"n":\n}';
+  const schema = { type: "object", required: ["plan"], additionalProperties: false, properties: { plan: { type: "object" } } };
+  const [entry] = submissionIssues({ plan: input }, schema, { root: "submission", sdk: true });
+  assert.equal(entry!.path, "submission.plan"); assert.equal(entry!.reason, "invalid_json");
+  assert.deepEqual(entry!.location, { offset: input.indexOf("}"), line: 4, column: 1 });
+  assert.match(entry!.remedy, /第 4 行.*第 1 列/); assert.doesNotMatch(JSON.stringify(entry), /PRIVATE_/);
+});
+
 test("真实规划契约拒绝映射具体字段及固定修复建议，不再只有plan/contract_invalid", () => {
   const mutations: [ (plan: DevelopmentPlan) => void, string, string ][] = [
     [(plan) => { delete plan.cases[0]!.mocks; }, "plan.cases[0].mocks", "required"],

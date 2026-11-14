@@ -57,7 +57,7 @@ v2/v3 规划者只在独立的 `development/workspaces/<runId>/planning/` 目录
 
 规划工具及宿主检查保持以下边界：
 
-- `save_plan_json` 接受结构化对象/数组或只严格解析一次的完整 JSON 文本；模型提交 `save_plan_cases` 可交非空用例数组或该数组的完整 JSON 文本。计划、用例分组与评审提交同样只在声明为对象或数组的字段识别有效 JSON。业务样本、字符串、数值和布尔值依照原契约验证，损坏的 JSON 返回字段错误。
+- `save_plan_json` 的文件内容仍接受结构化对象/数组或严格解析一次的完整 JSON 文本。已声明为对象或数组的提交字段使用共享接收器：可还原单个多余尾部闭合符，或明确的字段外壳套错；重复键、字段冲突、歧义和超额不猜改。业务样本、字符串、数值和布尔值保持原值。还原后照常执行完整契约；无法还原的容器 JSON 报具体字段、字符偏移和行列，不只返回类型错误。原生工具调用和结构化终止回复共用该边界，具体限制见 [架构基线第4.7节](../ARCHITECTURE.md#47-模型输入投影与提交通道)。
 - 原生 `read/write/edit`、JSON 保存及更新共用目录、链接、权限、配额、取消和原子写入检查。代码工具不能访问规划材料，开发者不能修改冻结断言。JSON Pointer 更新、按用例编号的编辑和恢复必须核对正确作用域的摘要。
 - 用例批次覆盖必须保留原稳定编号；删除或替换须使用带当前文件摘要的显式编辑。不能仅用修改过的少数用例覆盖完整批次。
 - 写入与正式提交均复用同源契约检查。诊断汇总独立问题，保留稳定编号、总数、截断及分页入口；局部草稿保存、预览 `valid` 或材料摘要只表示相应检查结果，不表示计划已经接受。
@@ -166,6 +166,8 @@ Node 动作和 `node-check` 使用真实操作系统隔离，只读代码快照�
 
 分组工作检查点 v2 的材料摘要不包含会随退回变化的 `remaining`，其余任务、契约和资料继续核验。旧 v1 在实际恢复入口核对原完整摘要；必要时只读原绑定会话的开场计量，精确匹配后保存 `originalAccounting` 并升级外层版本，旧绑定、原生文件、调度用量及已完成结果不变。历史配额策略沿原来源核验。普通读取不升级，无法证明同源则停止；不通过删除次数恢复。历史计量仅用于验证原绑定，给模型的任务消息使用当前计数。
 
+分组的三次格式纠正停点可在显式继续时复核最后一份原生提交。程序核对同会话、同基底、调用编号、格式回执及当前契约，只接受确有格式还原且完整校验合格的原稿；不回退取更早稿件。组结果、`submissionReplays` 凭据和格式事项关闭状态在同次保存中发布；凭据含原格式记录、原稿/还原结果/会话/来源检查点摘要。全部失败和三次纠正仍在，调用数不增加，已收结果不重做。语义不合格或无法核验时保持原停点，保存失败时回退内存中的暂存接受结果。恢复后仍需完整合并、独立评审及真实验收。
+
 本地记录、工作区及快照按 Agent 归属：
 
 | 相对 Agent 存储根的位置 | 内容 |
@@ -223,6 +225,6 @@ Node 动作和 `node-check` 使用真实操作系统隔离，只读代码快照�
 | 隔离 Node、受管程序与流程 | [development-executor.test.mts](../test/development-executor.test.mts)、[managed-development-integration.test.mts](../test/development/managed-development-integration.test.mts)、[managed-workflow-verification.test.mts](../test/development/managed-workflow-verification.test.mts) |
 | 真实启用前业务、交付、迁移与关闭 | [activation-business-verification.test.mts](../test/development/activation-business-verification.test.mts)、[development-delivery.test.mts](../test/development/development-delivery.test.mts)、[service-data-migrations.test.mts](../test/services/service-data-migrations.test.mts)、[managed-close-failure.test.mts](../test/services/managed-close-failure.test.mts) |
 
-源码测试先通过 `npm run build` 编译，再运行 `dist/ts-build/package/test/` 下对应 `.mjs`；日常按受影响领域选择，`npm run test:unit` / `npm run test:integration` 可按层验证，提交或推送前按 AGENTS.md 执行全量回归。`npm run check:hygiene` 检查其配置范围内的依赖、登记、链接及残留，不代表本文每个行为已通过测试。
+源码测试先通过 `npm run build` 编译，再运行 `dist/ts-build/package/test/` 下受影响的 `.mjs`。仅在用户明确要求时运行全量测试，提交或推送不自动触发；交付说明本次实际验证范围。`npm run check:hygiene` 检查其配置范围内的依赖、登记、链接及残留，不代表本文每个行为已通过测试。
 
 真实模型、真实外部连接及代表性业务验收另存当次用途、范围和用量证据。固定模型、模拟服务、源码核对、单元回归和旧历史记录都不能宣称本轮真实业务已交付。当前打包与发布验收范围为 Mac ARM64，其他平台的历史原生验证不扩大此范围。

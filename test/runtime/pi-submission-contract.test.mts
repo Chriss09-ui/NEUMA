@@ -72,6 +72,28 @@ test("编码容器在正式回复中还原，模糊类型、业务文本、坏JS
   for (const malformed of ['[{"ids":[}', '[{"constructor":{}}]', JSON.stringify([ { ...row, ids: "[3]" } ])]) assert.equal(send(malformed), null);
 });
 
+test("明确的多余闭合符和外层套错可还原，冲突或坏内容仍由完整提交契约拒绝", () => {
+  const tool = { name: "finish", parameters: { type: "object", required: ["plan", "owners", "scopes"], additionalProperties: false,
+    properties: { plan: { type: "object", required: ["n", "text"], additionalProperties: false,
+      properties: { n: { type: "integer" }, text: { type: "string" } } }, owners: { type: "array", items: { type: "string" } }, scopes: { type: "array", items: { type: "string" } } } } };
+  const plan = { n: 3, text: '业务原文 {"n":4}} 不得重写' }, expected = { plan, owners: ["task"], scopes: [] };
+  const fragment = JSON.stringify(expected).slice('{"plan":'.length);
+  const send = (args: unknown) => readPiStructuredSubmission({ role: "assistant", stopReason: "stop", content: [{ type: "text",
+    text: JSON.stringify({ submission: { name: "finish", arguments: args } }) }] }, { tools: [tool] });
+  for (const args of [{ plan: fragment }, { ...expected, plan: fragment }, { ...expected, plan: JSON.stringify(plan) + "}" },
+    { ...expected, owners: '["task"]]' }]) {
+    const before = structuredClone(args);
+    assert.deepEqual(send(args)?.args, expected); assert.deepEqual(args, before);
+  }
+  for (const args of [{ ...expected, plan: fragment, owners: ["different"] },
+    { plan: fragment.replace('"owners"', '"unknown"') },
+    { ...expected, plan: '{"n":1,"n":3,"text":"same"}}' },
+    { ...expected, plan: '{"n":3,"text":"unfinished}' },
+    { ...expected, plan: '{"n":3,"text":"ok"} extra' },
+    { ...expected, plan: '{"n":3,"text":"ok","__proto__":{}}}' },
+    { ...expected, plan: '{"n":"3","text":"wrong scalar"}}' }]) assert.equal(send(args), null);
+});
+
 test("缺失、重复或未注册的正式出口不生成误导提示", () => {
   const base = { role: "reviewer", submitName: "finish", tools: [{ name: "finish" }] };
   for (const override of [{ tools: [] }, { tools: [{ name: "finish" }, { name: "finish" }] }, { alternativeTools: ["absent"] },

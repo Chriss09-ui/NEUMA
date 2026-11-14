@@ -1,11 +1,13 @@
 import type { ToolSchema, ToolResult } from "../contracts/tools.mjs";
 import type { NeumaTool } from "./execution-port.mjs";
 import { isPlainRecord, objectFields } from "./type-boundary.mjs";
+import { isDeepStrictEqual, types } from "node:util";
+import { MODEL_JSON_MAX_BYTES, recoverExtraJsonCloser, recoverJsonEnvelope } from "./model-json-recovery.mjs";
 
 const forbidden = new Set(["__proto__", "constructor", "prototype"]);
-const maxBytes = 256 * 1024;
+const maxBytes = MODEL_JSON_MAX_BYTES;
 export const MODEL_FORMAT_REJECTION_LIMIT = 3;
-const formatReasons = new Set(["required_field", "unknown_field", "invalid_type", "invalid_contract", "sdk_validation", "invalid_value", "size_limit",
+const formatReasons = new Set(["required_field", "unknown_field", "invalid_type", "invalid_contract", "invalid_json", "sdk_validation", "invalid_value", "size_limit",
   "invalid_request", "path_missing", "reference_path_missing", "reference_id_ambiguous",
   "required", "additionalProperties", "type", "anyOf", "oneOf", "enum", "const", "pattern", "uniqueItems",
   "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minProperties", "maxProperties", "multipleOf"]);
@@ -62,7 +64,11 @@ interface ContainerSchema {
 
 /** Only decode explicit container slots in model submissions. Business values and free text stay literal. */
 export function modelSubmissionArguments(input: unknown, schema: ContainerSchema): unknown {
-  let bytes = 0, nodes = 0, exceeded = false;
+  return inspectModelSubmissionArguments(input, schema).value;
+}
+
+export function inspectModelSubmissionArguments(input: unknown, schema: ContainerSchema): { value: unknown; restored: boolean } {
+  let bytes = 0, nodes = 0, exceeded = false, restored = false;
   const withinBudget = (depth: number) => {
     if (++nodes > 100_000 || depth > 32 || bytes > maxBytes) exceeded = true;
     return !exceeded;
@@ -70,16 +76,20 @@ export function modelSubmissionArguments(input: unknown, schema: ContainerSchema
   const safe = (value: unknown, depth: number): boolean => {
     if (!withinBudget(depth)) return false;
     if (typeof value === "number") return Number.isFinite(value);
-    return !value || typeof value !== "object" || Object.entries(value).every(([key, item]) => !forbidden.has(key) && safe(item, depth + 1));
+    return !value || typeof value !== "object" || !types.isProxy(value) && (Array.isArray(value) || isPlainRecord(value))
+      && Object.entries(Object.getOwnPropertyDescriptors(value)).every(([key, descriptor]) => !forbidden.has(key)
+        && Object.hasOwn(descriptor, "value") && safe(descriptor.value, depth + 1));
+  };
+  const resolve = (rule: ContainerSchema | boolean) => {
+    if (typeof rule === "boolean" || typeof rule.$ref !== "string") return rule;
+    const name = /^#\/definitions\/([\w-]+)$/u.exec(rule.$ref)?.[1], definitions = schema.definitions;
+    return name && isPlainRecord(definitions) && Object.hasOwn(definitions, name) && isPlainRecord(definitions[name])
+      ? definitions[name] as ContainerSchema : false;
   };
   function decode(value: unknown, rule: ContainerSchema | boolean, depth: number): unknown {
-    if (!withinBudget(depth) || typeof rule === "boolean") return value;
-    if (typeof rule.$ref === "string") {
-      const name = /^#\/definitions\/([\w-]+)$/u.exec(rule.$ref)?.[1];
-      const definitions = schema.definitions;
-      if (!name || !isPlainRecord(definitions) || !Object.hasOwn(definitions, name) || !isPlainRecord(definitions[name])) return value;
-      rule = definitions[name] as ContainerSchema;
-    }
+    if (!withinBudget(depth) || value && typeof value === "object" && types.isProxy(value)) return value;
+    rule = resolve(rule);
+    if (typeof rule === "boolean") return value;
     if (rule.type !== "object" && rule.type !== "array") return value;
     if (typeof value === "string") {
       const prefix = rule.type === "array" ? "[" : "{";
@@ -87,8 +97,11 @@ export function modelSubmissionArguments(input: unknown, schema: ContainerSchema
       bytes += Buffer.byteLength(value, "utf8");
       if (bytes > maxBytes) { exceeded = true; return value; }
       let parsed: unknown;
-      try { parsed = JSON.parse(value); } catch { return value; }
+      let repaired = false;
+      try { parsed = JSON.parse(value); }
+      catch { parsed = recoverExtraJsonCloser(value, rule.type); repaired = parsed !== undefined; }
       if (!(rule.type === "array" ? Array.isArray(parsed) : isPlainRecord(parsed)) || !safe(parsed, depth)) return value;
+      restored ||= repaired;
       value = parsed;
     }
     if (Array.isArray(value) && rule.type === "array" && rule.items) {
@@ -101,16 +114,40 @@ export function modelSubmissionArguments(input: unknown, schema: ContainerSchema
       return copy ?? value;
     }
     if (!isPlainRecord(value) || rule.type !== "object" || !rule.properties) return value;
+    let record = value;
+    if (rule.additionalProperties === false && !rule.anyOf && !rule.oneOf && !rule.allOf) {
+      const proposals: { value: Record<string, unknown>; bytes: number }[] = [];
+      for (const [field, rawRule] of Object.entries(rule.properties)) {
+        const child = Object.getOwnPropertyDescriptor(record, field), childRule = resolve(rawRule);
+        if (!child || !Object.hasOwn(child, "value") || typeof child.value !== "string" || typeof childRule === "boolean"
+          || !["object", "array"].includes(String(childRule.type)) || child.value.length > maxBytes) continue;
+        try { JSON.parse(child.value); continue; } catch { /* Only malformed container text is eligible. */ }
+        const envelopeBytes = Buffer.byteLength(child.value);
+        if (envelopeBytes > maxBytes) continue;
+        const wrapper = recoverJsonEnvelope(child.value, field);
+        if (!isPlainRecord(wrapper) || !Object.hasOwn(wrapper, field) || !safe(wrapper, depth)
+          || !(childRule.type === "object" ? isPlainRecord(wrapper[field]) : Array.isArray(wrapper[field]))
+          || Object.keys(wrapper).some(key => !Object.hasOwn(rule.properties!, key))) continue;
+        const consistent = Object.entries(wrapper).every(([key, member]) => {
+          if (key === field || !Object.hasOwn(record, key)) return true;
+          const existing = Object.getOwnPropertyDescriptor(record, key)!;
+          return Object.hasOwn(existing, "value") && safe(existing.value, depth + 1) && isDeepStrictEqual(existing.value, member);
+        });
+        if (consistent && safe(record, depth)) proposals.push({ value: { ...record, ...wrapper }, bytes: envelopeBytes });
+      }
+      if (proposals.length === 1) { record = proposals[0]!.value; bytes += proposals[0]!.bytes; restored = true; }
+      if (bytes > maxBytes) exceeded = true;
+    }
     let copy: Record<string, unknown> | undefined;
     for (const [key, childRule] of Object.entries(rule.properties)) {
-      if (forbidden.has(key) || !Object.hasOwn(value, key)) continue;
-      const next = decode(value[key], childRule, depth + 1);
-      if (next !== value[key]) (copy ??= { ...value })[key] = next;
+      if (forbidden.has(key) || !Object.hasOwn(record, key)) continue;
+      const next = decode(record[key], childRule, depth + 1);
+      if (next !== record[key]) (copy ??= { ...record })[key] = next;
     }
-    return copy ?? value;
+    return copy ?? record;
   }
   const result = decode(input, schema, 0);
-  return exceeded ? input : result;
+  return exceeded ? { value: input, restored: false } : { value: result, restored };
 }
 
 /** Resolve declared patch slots only. Ambiguous branches and arbitrary business keys stay literal. */

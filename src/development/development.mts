@@ -1201,7 +1201,7 @@ export class DevelopmentController {
             : errorField(error, "name") === "ServiceError" ? serviceErrorMessage(String(errorField(error, "reason"))) : "研发未完成，检查点已保留，可继续并核实当前步骤。" });
       ctx.record.diagnostic = ctx.signal.aborted ? { stage: "development", phase: ctx.record.phase, reason: "cancelled" }
         : error instanceof Stop && error.diagnostic ? error.diagnostic
-          : ["content_rejection_limit", "repeated_tool_error", "review_judgment_format"].includes(String(objectFields(errorField(error, "diagnostic")).reason))
+          : ["content_rejection_limit", "repeated_tool_error", "review_judgment_format", "submission_replay_rejected"].includes(String(objectFields(errorField(error, "diagnostic")).reason))
             ? { stage: "development", phase: ctx.record.phase, ...objectFields(errorField(error, "diagnostic")),
               reason: objectFields(errorField(error, "diagnostic")).reason }
           : { stage: errorField(error, "name") === "ServiceError" ? "runtime" : "development", phase: ctx.record.phase,
