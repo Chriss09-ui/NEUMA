@@ -184,6 +184,12 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
       remedy: (numericLocation ? `解析器定位第 ${numericLocation.line} 行、第 ${numericLocation.column} 列（字符偏移 ${numericLocation.offset}）。` : "")
         + (remedies[String(code)] ?? "检查规划索引和所引用文件后重新提交，不改变验收要求。") }];
   }
+  if (root === "plan" && schema.properties?.plan?.properties?.application) {
+    const structural = toolInputValidation(input, schema, { root });
+    if (!structural.valid) return structural.issues.map(entry => ({ ...entry,
+      remedy: schemaIssue(input, entry.path, entry.reason).remedy }));
+    return submissionIssues(raw.plan, schema.properties.plan, { root, error: errorInput, sdk, architecture });
+  }
   if (root === "plan" && Number(raw.schemaVersion) >= 2 && Object.hasOwn(schema.properties ?? {}, "application")) {
     const application = diagnoseApplicationManifest(raw.application, { schema: schema.properties?.application, plan: raw });
     if (!application.valid) return application.issues;

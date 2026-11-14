@@ -6,7 +6,8 @@ import { failureFields } from "../helpers/failure-fields.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
-import { PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, WORK_SCHEMA, validatePlan } from "../../src/development/development-contract.mjs";
+import { PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, WORK_SCHEMA, validatePlan, validatePlanningFragment } from "../../src/development/development-contract.mjs";
+import { ensureDevelopmentPolicy } from "../../src/development/development-policy.mjs";
 import { submissionIssues, planningToolIssues } from "../../src/development/development-diagnostics.mjs";
 import { DevelopmentController } from "../../src/development/development.mjs";
 import { developmentArchitecture, developmentPlan, developmentWork } from "../helpers/development.mjs";
@@ -272,4 +273,57 @@ test("提交工具向模型反馈同份安全诊断，同时保存拒绝且不�
   });
   assert.equal(objectFields(objectFields(objectFields(record).submissionCounts).planner).rejected, 2); assert.equal(next.submitted, false); assert.equal(counter.turns, 3);
   callFixture(controller.dispose, controller, [ctx, next]);
+});
+
+for (const next of ["content", "format"] as const) test(`分组规划的应用字段错误沿原会话累计格式次数，后续${next}退回独立计数`, async t => {
+  const { architecture, plan } = fixture(true);
+  const record = { id: "dev_nested_diagnostics", agentId: "nested_diagnostics", architecture,
+    architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash }, phase: "planning", revision: 0,
+    budgets: { corrections: 0, planRevisions: 0, integrationRepairs: 0 }, tasks: [], planAttempts: [] };
+  const policy = callFixture(ensureDevelopmentPolicy, undefined, [record]);
+  let options: PiSessionOptions | undefined;
+  const controller = Reflect.construct(DevelopmentController, [{ config: {}, cwd: "/tmp", dataDir: "/tmp",
+    workspace: { workspacePath: async () => "/tmp" }, storage: { directory: async () => "/tmp" },
+    store: { save: async (value: object) => ({ ...value, revision: Number(objectFields(value).revision) + 1 }) },
+    sessionFactory: async (input: PiSessionOptions) => { options = input; return { subscribe: () => () => {}, dispose() {} }; } }]);
+  assert.ok(controller instanceof DevelopmentController);
+  const ctx = { record, signal: new AbortController().signal, writes: Promise.resolve(), handles: new Set() };
+  callFixture(controller.active.set, controller.active, [record.agentId, ctx]);
+  const role = { kind: "planner", scope: { work: "planning_outline" }, counter: { turns: 1 }, limit: null,
+    submission: { name: "submit_development_plan_part", schema: { type: "object", properties: { plan: PLAN_V3_SCHEMA }, required: ["plan"], additionalProperties: false }, instruction: "提交规划骨架" },
+    validate: (input: unknown) => validatePlanningFragment(objectFields(input).plan, { architecture }) };
+  let handle = await callFixture(controller.role, controller, [ctx, role]);
+  t.after(() => { callFixture(controller.dispose, controller, [ctx, handle]); });
+  const invalid = await callFixture(options!.rawInputValidators!.submit_development_plan_part!, undefined,
+    [{ args: { plan: 42 }, toolCallId: "malformed" }]);
+  assert.equal(invalid.valid, false); assert.equal(handle.reference.toolInputFailure!.count, 1);
+  const mixed = fixture().plan; mixed.schemaVersion = 3; Reflect.set(mixed.application!, "service", {});
+  handle.accepting = true;
+  await assert.rejects(fixtureTools(options!.customTools).submit_development_plan_part!.execute("mixed", { plan: mixed }), error => {
+    assert.ok(error instanceof InputError);
+    assert.match(error.message, /plan\.application\.service \[additionalProperties\]/);
+    assert.doesNotMatch(error.message, /service\.(?:schemaVersion|language|operations)/);
+    return true;
+  });
+  assert.equal(handle.reference.toolInputFailure!.count, 2);
+  assert.deepEqual(policy.content, {}, "应用字段错误不能计入内容退回，也不能清除前一次格式错误");
+  const reference = structuredClone(handle.reference);
+  callFixture(controller.dispose, controller, [ctx, handle]);
+  handle = await callFixture(controller.role, controller, [ctx, { ...role, counter: { turns: 0 } }]);
+  assert.deepEqual(handle.reference, reference, "重开同一责任会话沿用已发生的计数");
+  handle.accepting = true;
+  const submit = fixtureTools(options!.customTools).submit_development_plan_part!;
+  if (next === "format") {
+    await assert.rejects(submit.execute("still-mixed", { plan: mixed }), /additionalProperties/);
+    assert.equal(handle.reference.toolInputFailure!.count, 3); assert.deepEqual(policy.content, {});
+    assert.throws(() => handle.checkToolInputs!(), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
+    await assert.rejects(submit.execute("too-late", { plan }), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
+    assert.equal(handle.submitted, false); assert.equal(handle.reference.toolInputFailure!.count, 3);
+  } else {
+    delete mixed.application!.service;
+    await assert.rejects(submit.execute("wrong-execution", { plan: mixed }), /execution_mismatch/);
+    assert.equal(policy.content.plan!.count, 1); assert.equal(handle.reference.toolInputFailure, undefined);
+    await submit.execute("corrected", { plan });
+    assert.equal(handle.submitted, true); assert.equal(policy.content.plan!.count, 1);
+  }
 });

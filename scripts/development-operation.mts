@@ -1,5 +1,6 @@
 import { setTimeout as pause } from "node:timers/promises";
 import { objectFields } from "../src/runtime/type-boundary.mjs";
+import { InputError } from "../src/requirements/core.mjs";
 import type { OperationReference } from "../src/runtime/operation-view.mjs";
 
 export interface DevelopmentOperationSnapshot {
@@ -15,6 +16,13 @@ interface ContinueOptions {
   onRetry?(event: { phase: "submit" | "observe"; attempt: number; error: unknown }): void | Promise<void>;
 }
 class HttpFailure extends Error { constructor(readonly status: number) { super(`后台研发接口返回 HTTP ${status}`); } }
+
+/** Live observers must leave recoverable rejections to the controller and its persisted counters. */
+export function classifyDevelopmentToolError(error: unknown): "validation" | "limit" | "execution" {
+  const reason = objectFields(objectFields(error).diagnostic).reason;
+  if (["content_rejection_limit", "repeated_tool_error", "review_judgment_format"].includes(String(reason))) return "limit";
+  return error instanceof InputError ? "validation" : "execution";
+}
 
 /** Request retries locate the same accepted task; observing never resumes or cancels it. */
 export async function continueDevelopmentOperation(options: ContinueOptions): Promise<DevelopmentOperationSnapshot> {

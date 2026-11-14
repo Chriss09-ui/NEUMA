@@ -116,7 +116,11 @@ export function diagnoseApplicationManifest(value: unknown, { root = "plan.appli
   const fields = (current: unknown, allowed: string[], path: string) => {
     if (!plain(current)) { add(path, "type", { expectedType: "object" }); return; }
     for (const key of allowed) if (!Object.hasOwn(current, key)) add(`${path}.${key}`, "required");
-    if (Object.keys(current).some((key) => !allowed.includes(key))) add(path, "additionalProperties");
+    for (const key of Object.keys(current).filter(key => !allowed.includes(key))) {
+      if (path === root && key === "service") add(`${path}.service`, "additionalProperties", {
+        remedy: "protocolVersion=2的node-action清单不接受service。按已评审的运行方式提交完整配置：内置动作用2/node-action；托管服务用3/managed-service并填写完整service。不能混用两套字段。" });
+      else add(path, "additionalProperties");
+    }
   };
   const serviceProbe = (candidate: unknown, path: string, extra?: UnknownRecord) => { try { validateServiceManifest(candidate); } catch (error) {
     if (typeof objectFields(error).reason === "string" && Object.hasOwn(SERVICE_REMEDIES, String(objectFields(error).reason))) add(path, String(objectFields(error).reason), extra);
@@ -161,7 +165,7 @@ export function diagnoseApplicationManifest(value: unknown, { root = "plan.appli
   fields(value, ["protocolVersion", "runtime", "entrypoint", "page", "actions", "stateVersion", "evidenceIds", ...(managed ? ["service"] : [])], root);
   const host = typeof service.host === "string" && SERVICE_HOSTS.includes(service.host) ? service.host : "managed", base = serviceBase(language, host);
   const extensions = language === "python" ? [".py"] : [".mjs", ".js", ".cjs"];
-  if (managed || rawService !== undefined) {
+  if (managed) {
     structural(rawService, SERVICE_MANIFEST_SCHEMA, `${root}.service`);
     if (plain(rawService)) {
       for (const field of ["schemaVersion", "language", "host"]) serviceProbe({ ...base, [field]: service[field] }, `${root}.service.${field}`,

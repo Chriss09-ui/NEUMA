@@ -7,10 +7,17 @@ import { AgentOperations } from "../../src/agents/agent-operations.mjs";
 import { AgentStorage } from "../../src/agents/agent-storage.mjs";
 import { createAgentRuntime } from "../../public/agent-runtime.js";
 import type { OperationReference } from "../../public/operation-view.js";
-import { emptyDraft } from "../../src/requirements/core.mjs";
+import { emptyDraft, InputError } from "../../src/requirements/core.mjs";
 import { createServer } from "node:http";
 import { createRequestHandler } from "../../src/server.mjs";
-import { continueDevelopmentOperation } from "../../scripts/development-operation.mjs";
+import { continueDevelopmentOperation, classifyDevelopmentToolError } from "../../scripts/development-operation.mjs";
+
+test("续测观察器按实际输入错误类型允许重交，额度停止和执行故障仍终止", () => {
+  assert.equal(classifyDevelopmentToolError(new InputError("提交未通过")), "validation");
+  assert.equal(classifyDevelopmentToolError(Object.assign(new Error("存储失败"), { name: "InputError" })), "execution");
+  for (const reason of ["content_rejection_limit", "repeated_tool_error", "review_judgment_format"])
+    assert.equal(classifyDevelopmentToolError(Object.assign(new InputError("已达到控制器上限"), { diagnostic: { reason } })), "limit");
+});
 
 test("制作任务持久接受、重复提交及旧代次停止共用同一次执行，快照读取不执行业务", async t => {
   const root = await mkdtemp(join(tmpdir(), "neuma-operation-")), storage = new AgentStorage({ dataDir: root });
