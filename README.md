@@ -1,13 +1,32 @@
-# NEUMA
+<div align="center">
 
-![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
-![Node.js](https://img.shields.io/badge/Node.js-339933?style=flat-square&logo=nodedotjs&logoColor=white)
-![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-black?style=flat-square&logo=apple&logoColor=white)
-[![GitHub Stars](https://img.shields.io/github/stars/Chriss09-ui/NEUMA?style=flat-square&logo=github&label=Stars)](https://github.com/Chriss09-ui/NEUMA/stargazers)
+<h1>NEUMA</h1>
 
-NEUMA（纽玛）是一个本机智能体工作台。你可以在主对话里描述一项反复要做的工作，例如把每周的零散记录整理成周报。NEUMA 会和你一起确定输入和交付格式，再制作一个可以反复使用的助手。已有的助手可以组成群组，共享材料、分工并汇总结果。
+<p><strong>纽玛 · 本机智能体工作台</strong><br>把反复要做的工作，变成可以复用的助手。</p>
 
-[快速开始](#快速开始) · [工作台入口](#工作台入口) · [源码开发](#源码开发) · [详细使用指南](docs/user-guide.md)
+<p>
+  <a href="#源码开发"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&amp;logo=typescript&amp;logoColor=white" alt="TypeScript" height="24"></a>
+  &nbsp;
+  <a href="#快速开始"><img src="https://img.shields.io/badge/Node.js-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white" alt="Node.js" height="24"></a>
+  &nbsp;
+  <a href="#快速开始"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-black?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="macOS · Apple Silicon" height="24"></a>
+  &nbsp;
+  <a href="https://github.com/Chriss09-ui/NEUMA/stargazers"><img src="https://img.shields.io/github/stars/Chriss09-ui/NEUMA?style=flat-square&amp;logo=github&amp;label=Stars" alt="GitHub Stars" height="24"></a>
+</p>
+
+<p>
+  <a href="#快速开始"><strong>快速开始</strong></a>
+  &nbsp; · &nbsp;
+  <a href="#工作台入口">工作台入口</a>
+  &nbsp; · &nbsp;
+  <a href="#源码开发">源码开发</a>
+  &nbsp; · &nbsp;
+  <a href="docs/user-guide.md">详细使用指南</a>
+</p>
+
+</div>
+
+你可以在主对话里描述一项反复要做的工作，例如把每周的零散记录整理成周报。NEUMA 会和你一起确定输入和交付格式，再制作一个可以反复使用的助手。已有的助手可以组成群组，共享材料、分工并汇总结果。
 
 ![NEUMA 主对话正在澄清周报需求，右侧的需求说明显示每次输入、核心任务和输出结果](docs/images/readme-workspace.jpg)
 
