@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
 import { objectFields, errorField } from "./type-boundary.mjs";
+import { readFormatRecovery, formatRecoveryExhausted, type FormatRecovery } from "./format-recovery.mjs";
 
 export interface RepairIssue { id: string; description: string; remedy: string; paths: string[]; owner: string; afterOwners?: string[] }
 export interface RepairUpdate { path: string; value: unknown }
@@ -12,12 +13,12 @@ export interface ReviewSubmissionReplay { version: 1; sourceCheckpointHash: stri
 export interface TaskRejection { fingerprint: string; modelContractHash: string; protocolVersion?: number; count: number }
 export interface RepairGroup { id: string; issueIds: string[]; paths: string[]; wave: number; calls: number;
   dependsOn: string[]; sessionFile: string | null; inputHash: string | null; result: RepairResult | null; history?: RepairHistory[]; rejection?: TaskRejection;
-  submissionReplay?: ReviewSubmissionReplay }
+  submissionReplay?: ReviewSubmissionReplay; formatRecovery?: FormatRecovery }
 export interface RepairCheckpoint<Limit extends number | null = number> { version: 1 | 2 | 3 | 4; bindingHash: string; baseHash: string; issues: RepairIssue[];
   calls: number; callLimit: Limit; groupCallLimit: Limit; concurrency: number; groups: RepairGroup[]; hash: string; previousQuota?: RepairCheckpoint }
 export interface RepairWorker<Limit extends number | null = number> { group: RepairGroup; issues: RepairIssue[]; base: unknown; baseHash: string;
   callLimit: Limit; onSession(file: string): Promise<void>; onCall(retryAttempt?: number): Promise<void>;
-  onRejection?(value: TaskRejection): Promise<void>; submit(value: unknown): Promise<RepairResult> }
+  onRejection?(value: TaskRejection): Promise<void>; onFormatRecovery?(value: FormatRecovery): Promise<void>; submit(value: unknown): Promise<RepairResult> }
 export const repairHash = (value: unknown) => {
   const canonical = (item: unknown): string => {
     if (item === null || typeof item === "string" || typeof item === "boolean" || typeof item === "number" && Number.isFinite(item)) return JSON.stringify(item);
@@ -178,6 +179,7 @@ function readCheckpoint(input: unknown, review: boolean, development = false): R
         || ![rejection.modelContractHash, rejection.fingerprint].every(hash => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash))
         || rejection.protocolVersion !== undefined && (!Number.isSafeInteger(rejection.protocolVersion) || rejection.protocolVersion < 1)) fail();
     }
+    if (group.formatRecovery !== undefined) { if (state.version !== 4) fail(); readFormatRecovery(group.formatRecovery); }
     const owned = state.issues.filter(issue => group.issueIds.includes(issue.id));
     const history = group.history ?? [];
     if (Array.isArray(history)) for (const entry of history) checkReplay(entry.submissionReplay, entry.result);
@@ -294,11 +296,11 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
     const settled = await Promise.allSettled(groups.filter(group => !group.result).map(async original => {
       const current = () => state.groups.find(group => group.id === original.id)!;
       const limit = workerLimit(quotas.get(original.id), state);
-      if (current().rejection?.count === 3) {
-        if (state.version === 4) throw Object.assign(new InputError("本研发子组已连续三次格式错误，原会话和计数保留。"),
-          { diagnostic: { stage: "development", phase: "repair", reason: "repeated_tool_error", attempts: 3 } });
-        fail("子任务连续三次因同一问题提交失败。");
-      }
+      if (state.version !== 4 && current().rejection?.count === 3) fail("子任务连续三次因同一问题提交失败。");
+      const exhausted = formatRecoveryExhausted(current().formatRecovery);
+      if (state.version === 4 && exhausted) throw Object.assign(new InputError("本研发子组收到反馈后已实际纠正三次仍不合格，原会话和记录保留。"),
+        { diagnostic: { stage: "development", phase: "repair", reason: "repeated_tool_error", attempts: 3,
+          counting: "corrections_after_feedback", toolName: exhausted.toolName, issues: exhausted.failures.at(-1)!.issues } });
       if (limit !== null && current().calls >= limit || state.callLimit !== null && state.calls >= state.callLimit) fail("修复子任务额度已用完，已完成组保留，不能重新分派刷新额度。");
       await options.run({ group: clone(original), base: clone(base), baseHash: repairHash(base),
         issues: clone(state.issues.filter(issue => original.issueIds.includes(issue.id))), callLimit: limit,
@@ -319,6 +321,12 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
           if (![3, 4].includes(next.version) || !group.sessionFile || !group.calls || group.result) fail();
           group.rejection = clone(value);
         }),
+        ...(state.version === 4 ? { onFormatRecovery: (value: FormatRecovery) => update(next => {
+          readFormatRecovery(value);
+          const group = next.groups.find(group => group.id === original.id)!;
+          if (!group.sessionFile) fail();
+          group.formatRecovery = clone(value);
+        }) } : {}),
         submit: async value => {
           active(); const result = validateRepairResult(value, current(), base);
           try { await options.validateCandidate?.(applyRepairUpdates(base, result.updates), false); }

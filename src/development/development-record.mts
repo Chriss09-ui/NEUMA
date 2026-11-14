@@ -11,6 +11,7 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { DevelopmentRunRecord, DevelopmentDeliveryRecord } from "./development-controller-types.mjs";
 import { readDevelopmentPolicy } from "./development-policy.mjs";
 import { readDevelopmentJudgment } from "./development-review-judgment.mjs";
+import { readFormatRecovery } from "../runtime/format-recovery.mjs";
 
 const string = { type: "string" }, integer = { type: "integer" }, boolean = { type: "boolean" };
 const array = (items: ToolSchema): ToolSchema => ({ type: "array", items });
@@ -109,6 +110,7 @@ export function readDevelopmentRunRecord(value: unknown): DevelopmentRunRecord {
       { reason: "development_record_invalid", diagnostic: { path: error?.instancePath || "/", keyword: error?.keyword ?? "schema" } });
   }
   if (value.retryPolicy !== undefined) readDevelopmentPolicy(value.retryPolicy);
+  for (const session of Object.values(value.sessions ?? {})) if (session.formatRecovery !== undefined) readFormatRecovery(session.formatRecovery);
   if (value.reviewJudgments !== undefined) {
     if (!value.reviewJudgments || typeof value.reviewJudgments !== "object" || Array.isArray(value.reviewJudgments)) throw new InputError("研发 JEV 记录无效。");
     for (const judgment of Object.values(value.reviewJudgments)) readDevelopmentJudgment(judgment);

@@ -8,6 +8,7 @@ import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DevelopmentController, type DevelopmentExecutorPort } from "../../src/development/development.mjs";
+import { createDevelopmentHistoryTool } from "../../src/development/development-history.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
 import { compactDevelopmentContext, createContextReadTool, developmentContextMessage, restoreDevelopmentContext } from "../../src/development/development-context.mjs";
 import { developmentArchitecture, developmentPlan, developmentReview, developmentWork } from "../helpers/development.mjs";
@@ -61,7 +62,10 @@ async function fixture(t: test.TestContext, { interruptDeveloper = false, interr
     else if (readHistory && payload.task?.id === "core" && !body.messages.some(message => message.tool_calls?.some(call => call.function.name === "read_development_history")))
       tool = { name: "read_development_history", arguments: JSON.stringify({ requests: [{ section: "sessionIndex", limit: 10000 }] }) };
     else {
-      const latestUser = body.messages.findLastIndex((item: { role: string; }) => item.role === "user");
+      const latestUser = body.messages.findLastIndex(item => {
+        if (item.role !== "user") return false;
+        try { return !JSON.parse(textOf(item.content)).formatCorrection; } catch { return true; }
+      });
       const writes = (compactBeforeResume || compactDuringResume ? body.messages : body.messages.slice(latestUser + 1))
         .flatMap((item) => item.tool_calls ?? []).filter((call: { function: { name: string; }; }) => call.function.name === "write_code_file");
       const nextFile = payload.task!.files[writes.length];
@@ -171,6 +175,16 @@ test("真实Pi保留原会话但不自动发送旧轮次，模型按需读取历
   assert.ok(f.requests.some(entry => entry.body.messages.some(message => message.role === "tool" && textOf(message.content).includes("developer-interruption-history-marker"))), "旧记录只有实际读取后才进入上下文");
   assert.equal(resumed.tasks[0]!.attempts, 1);
   assert.ok(Object.values(resumed.sessions!).find((entry) => entry.file === reference!.file)!.turns > reference!.turns);
+  const planner = f.sessions.find(entry => objectFields(entry.options.sessionStorage!.binding).role === "planner")!;
+  const plannerRef = Object.values(resumed.sessions!).find(entry => entry.role === "planner")!;
+  const history = createDevelopmentHistoryTool(resumed, plannerRef, planner.options.cwd, planner.options.sessionStorage!, new AbortController().signal);
+  const pages = JSON.parse(toolText(await history.execute("history", { requests: [{ section: "latestSubmission" }, { section: "sessionIndex" }] }))).results;
+  assert.equal(pages[0].nextRequest, null);
+  const latest = JSON.parse(pages[0].text);
+  assert.equal(latest.toolName, "submit_development_plan"); assert.deepEqual(latest.arguments, developmentPlan(f.architecture));
+  const entry = JSON.parse(pages[1].text).find((row: { tools: string[] }) => row.tools.includes("submit_development_plan"));
+  const selected = JSON.parse(JSON.parse(toolText(await history.execute("selected", { requests: [entry.readRequest] }))).results[0].text);
+  assert.ok(selected.message.content.some((block: { type: string; name?: string }) => block.type === "toolCall" && block.name === "submit_development_plan"));
 });
 
 test("真实Pi同绑定恢复重投当前材料，不依赖已从请求中移除的旧消息", async (t) => {

@@ -442,7 +442,7 @@ test("独立研发评审请求关闭可选思考后，长度不足仍不能接�
   assert.equal(result.status, "failed"); assert.equal(result.diagnostic!.reason, "repeated_tool_error");
   assert.equal(result.diagnostic!.role, "reviewer"); assert.equal(result.plan, null); assert.equal(result.package, null);
   assert.deepEqual(sessions.map((item) => item.options.reasoningMode), ["auto", "off"] as const);
-  assert.equal(sessions[1]!.options.maxOutputTokens, 4096); assert.equal(sessions[1]!.prompts.length, 3);
+  assert.equal(sessions[1]!.options.maxOutputTokens, 4096); assert.equal(sessions[1]!.prompts.length, 4);
   assert.equal(executor.calls.verify.length, 0);
 });
 

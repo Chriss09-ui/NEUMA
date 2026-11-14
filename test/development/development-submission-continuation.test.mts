@@ -43,7 +43,7 @@ async function fixture(t: test.TestContext, { role = "planner", alwaysText = fal
     const key = `${kind}:${payload.subjectHash ?? payload.task?.id ?? "plan"}`;
     const index = attempts.get(key) ?? 0; attempts.set(key, index + 1);
     if (kind === role && !target) target = key;
-    requests.push({ role: kind, key, body, payload, continuation: users.at(-1)?.submissionContinuation });
+    requests.push({ role: kind, key, body, payload, continuation: users.findLast((value: { submissionContinuation?: unknown }) => value.submissionContinuation)?.submissionContinuation });
     const calls: { name: string; arguments: string }[] = [], shouldText = !structuredResults && key === target && (alwaysText || index === (draftBeforeText ? 1 : 0) || rejectedFirst && index === 1);
     if (cancel && key === target) abort.abort();
     if (changedArchitecture && key === target) architecture.version++;
@@ -51,7 +51,10 @@ async function fixture(t: test.TestContext, { role = "planner", alwaysText = fal
       if (kind === "planner") calls.push({ name: names.planner!, arguments: JSON.stringify(developmentPlan(architecture)) });
       else if (kind === "reviewer") calls.push({ name: names.reviewer!, arguments: JSON.stringify(developmentReview(payload.subjectHash)) });
       else {
-        const latestUser = body.messages.findLastIndex((message: { role: string; }) => message.role === "user");
+        const latestUser = body.messages.findLastIndex((message: { role: string; content: unknown }) => {
+          if (message.role !== "user") return false;
+          try { return !JSON.parse(String(textOf(message.content))).formatCorrection; } catch { return true; }
+        });
         const writes = body.messages.slice(draftBeforeText ? 0 : latestUser + 1).flatMap((message: { tool_calls: unknown; }) => message.tool_calls ?? [])
           .filter((call: { function: { name: string; }; }) => call.function.name === "write_code_file").length;
         const path = payload.task.files[writes];
@@ -127,9 +130,9 @@ for (const role of Object.keys(names)) test(`真实Pi ${role}正常文字结束�
   else assert.doesNotMatch(contract, /submit_development_blocker/u);
   assert.equal(session!.prompts.length, 2); assert.equal(objectFields(session!.prompts[1]).requirements, undefined);
   const feedback = objectFields(session!.prompts[1]).submissionContinuation;
-  assert.equal(objectFields(feedback).requiredTool, names[role]); assert.equal(objectFields(feedback).attempt, 1); assert.equal(objectFields(feedback).maximum, 2);
+  assert.equal(objectFields(feedback).requiredTool, names[role]); assert.equal(objectFields(feedback).counting, "corrections_after_feedback"); assert.equal(objectFields(feedback).maximum, 3);
   assert.deepEqual(objectFields(feedback).modelBudget, { limit: null, used: 1, remaining: null, accountingOnly: true });
-  assert.match(fixtureText(objectFields(feedback).instruction), /已保存草稿和已有工具拒绝反馈/);
+  assert.match(fixtureText(objectFields(feedback).instruction), /formatCorrection/);
   const second = f.requests.find((entry) => entry.key === f.target() && entry.continuation);
   assert.ok(recordArray(objectFields(second!.body).messages).some((message) => message.role === "assistant" && textOf(message.content).includes("稍后正式提交")));
   const reference = Object.values(result.sessions!).find((entry) => entry.file === session!.session.sessionFile!.split("/").at(-1));
@@ -158,34 +161,34 @@ test("开发先保存代码再文字结束，续接直接提交同一草稿，�
   assert.equal(await readFile(join(result.package!.snapshot.path, "main.mjs"), "utf8"), 'console.log(JSON.stringify({ok:true}));\n');
 });
 
-for (const role of Object.keys(names)) test(`${role}连续三次仅文字后停止并保留格式计数`, { timeout: 15000 }, async (t) => {
+for (const role of Object.keys(names)) test(`${role}收到反馈后纠正三次仍仅文字才停止并保留记录`, { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { role, alwaysText: true }), result = await f.controller().run(f.architecture);
   assert.equal(result.status, "failed"); assert.equal(result.diagnostic!.reason, "repeated_tool_error");
   assert.equal(result.diagnostic!.role, role);
-  assert.equal(f.requests.filter((entry) => entry.key === f.target()).length, 3);
-  assert.equal(f.sessions.find((entry) => entry.role === role)!.prompts.length, 3);
-  assert.equal(Object.values(result.sessions!).find((entry) => entry.role === role)!.turns, 3);
+  assert.equal(f.requests.filter((entry) => entry.key === f.target()).length, 4);
+  assert.equal(f.sessions.find((entry) => entry.role === role)!.prompts.length, 4);
+  assert.equal(Object.values(result.sessions!).find((entry) => entry.role === role)!.turns, 4);
 });
 
 test("旧请求配置为一轮也允许三次格式纠错，重建后保留格式锁定", { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { alwaysText: true, limits: { reviewerTurns: 1 } });
   const initial = await f.controller().run(f.architecture);
   assert.equal(initial.status, "failed"); assert.equal(initial.diagnostic!.reason, "repeated_tool_error");
-  assert.equal(f.requests.length, 3); assert.equal(f.sessions[0]!.prompts.length, 3);
+  assert.equal(f.requests.length, 4); assert.equal(f.sessions[0]!.prompts.length, 4);
   const before = f.requests.length, resumed = await f.controller({ reviewerTurns: 12 }).run(f.architecture, { resume: true });
   assert.equal(resumed.status, "failed"); assert.equal(resumed.diagnostic!.reason, "repeated_tool_error");
   assert.equal(f.requests.length, before);
   const reference = Object.values(resumed.sessions!).find((entry) => entry.role === "planner");
-  assert.equal(reference!.turns!, 3); assert.equal(reference!.limit!, undefined); assert.equal(reference!.submissionContinuations!, 2);
+  assert.equal(reference!.turns!, 4); assert.equal(reference!.limit!, undefined); assert.equal(reference!.submissionContinuations!, 3);
 });
 
-test("重启保留三次格式错误、累计请求和同一个原生会话文件", { timeout: 15000 }, async (t) => {
+test("重启保留三次实际纠正、累计请求和同一个原生会话文件", { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { alwaysText: true, limits: { reviewerTurns: 2 } });
   const initial = await f.controller().run(f.architecture), original = Object.values(initial.sessions!)[0];
-  assert.equal(initial.diagnostic!.reason, "repeated_tool_error"); assert.equal(original!.turns!, 3);
+  assert.equal(initial.diagnostic!.reason, "repeated_tool_error"); assert.equal(original!.turns!, 4);
   const resumed = await f.controller().run(f.architecture, { resume: true }), current = Object.values(resumed.sessions!)[0];
-  assert.equal(resumed.diagnostic!.reason, "repeated_tool_error"); assert.equal(f.requests.length, 3);
-  assert.equal(current!.turns!, 3); assert.equal(current!.file!, original!.file!); assert.equal(current!.submissionContinuations!, 2);
+  assert.equal(resumed.diagnostic!.reason, "repeated_tool_error"); assert.equal(f.requests.length, 4);
+  assert.equal(current!.turns!, 4); assert.equal(current!.file!, original!.file!); assert.equal(current!.submissionContinuations!, 3);
 });
 
 for (const stopReason of ["error", "aborted"]) test(`${stopReason}停止不触发提交续接`, { timeout: 15000 }, async (t) => {
@@ -196,11 +199,11 @@ for (const stopReason of ["error", "aborted"]) test(`${stopReason}停止不触�
   assert.notEqual(result.diagnostic!.reason, "repeated_tool_error");
 });
 
-test("提醒后的原生length计入独立格式纠错，第三次失败停止", { timeout: 15000 }, async (t) => {
+test("提醒后的原生length计入独立格式纠错，第三次实际纠正失败才停止", { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { alwaysText: true, lengthAfterReminder: true }), result = await f.controller().run(f.architecture);
   assert.equal(result.status, "failed"); assert.equal(result.diagnostic!.reason, "repeated_tool_error");
-  assert.equal(f.requests.length, 3); assert.equal(f.sessions[0]!.prompts.length, 3);
-  assert.equal(Object.values(result.sessions!)[0]!.turns, 3);
+  assert.equal(f.requests.length, 4); assert.equal(f.sessions[0]!.prompts.length, 4);
+  assert.equal(Object.values(result.sessions!)[0]!.turns, 4);
 });
 
 test("真实取消和架构版本守卫都在续接前停止，不将技术中断改成业务缺口", { timeout: 15000 }, async (t) => {
@@ -215,7 +218,7 @@ test("真实取消和架构版本守卫都在续接前停止，不将技术中�
 test("旧注入会话每次prompt只扣一轮，续接不因turn_end重复扣费", { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { accounted: false }), result = await f.controller().run(f.architecture);
   assert.equal(result.diagnostic!.reason, "repeated_tool_error");
-  assert.equal(f.sessions[0]!.prompts.length, 3); assert.equal(Object.values(result.sessions!)[0]!.turns, 3);
+  assert.equal(f.sessions[0]!.prompts.length, 4); assert.equal(Object.values(result.sessions!)[0]!.turns, 4);
 });
 
 for (const role of Object.keys(names)) test(`通用结构化提交通道保留${role}真实工具工作和独立评审，无多余提交回合`, { timeout: 15000 }, async (t) => {

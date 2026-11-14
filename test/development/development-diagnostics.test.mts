@@ -275,7 +275,7 @@ test("提交工具向模型反馈同份安全诊断，同时保存拒绝且不�
   callFixture(controller.dispose, controller, [ctx, next]);
 });
 
-for (const next of ["content", "format"] as const) test(`分组规划的应用字段错误沿原会话累计格式次数，后续${next}退回独立计数`, async t => {
+test("分组规划的应用字段错误保留原反馈，结构修好后内容退回独立计数", async t => {
   const { architecture, plan } = fixture(true);
   const record = { id: "dev_nested_diagnostics", agentId: "nested_diagnostics", architecture,
     architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash }, phase: "planning", revision: 0,
@@ -296,7 +296,7 @@ for (const next of ["content", "format"] as const) test(`分组规划的应用�
   t.after(() => { callFixture(controller.dispose, controller, [ctx, handle]); });
   const invalid = await callFixture(options!.rawInputValidators!.submit_development_plan_part!, undefined,
     [{ args: { plan: 42 }, toolCallId: "malformed" }]);
-  assert.equal(invalid.valid, false); assert.equal(handle.reference.toolInputFailure!.count, 1);
+  assert.equal(invalid.valid, false); assert.equal(handle.reference.formatRecovery!.episodes[0]!.failures.length, 1);
   const mixed = fixture().plan; mixed.schemaVersion = 3; Reflect.set(mixed.application!, "service", {});
   handle.accepting = true;
   await assert.rejects(fixtureTools(options!.customTools).submit_development_plan_part!.execute("mixed", { plan: mixed }), error => {
@@ -305,7 +305,8 @@ for (const next of ["content", "format"] as const) test(`分组规划的应用�
     assert.doesNotMatch(error.message, /service\.(?:schemaVersion|language|operations)/);
     return true;
   });
-  assert.equal(handle.reference.toolInputFailure!.count, 2);
+  assert.equal(handle.reference.formatRecovery!.episodes[0]!.failures.length, 2);
+  assert.equal(handle.reference.formatRecovery!.episodes[0]!.corrections.length, 0);
   assert.deepEqual(policy.content, {}, "应用字段错误不能计入内容退回，也不能清除前一次格式错误");
   const reference = structuredClone(handle.reference);
   callFixture(controller.dispose, controller, [ctx, handle]);
@@ -313,17 +314,9 @@ for (const next of ["content", "format"] as const) test(`分组规划的应用�
   assert.deepEqual(handle.reference, reference, "重开同一责任会话沿用已发生的计数");
   handle.accepting = true;
   const submit = fixtureTools(options!.customTools).submit_development_plan_part!;
-  if (next === "format") {
-    await assert.rejects(submit.execute("still-mixed", { plan: mixed }), /additionalProperties/);
-    assert.equal(handle.reference.toolInputFailure!.count, 3); assert.deepEqual(policy.content, {});
-    assert.throws(() => handle.checkToolInputs!(), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-    await assert.rejects(submit.execute("too-late", { plan }), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-    assert.equal(handle.submitted, false); assert.equal(handle.reference.toolInputFailure!.count, 3);
-  } else {
-    delete mixed.application!.service;
-    await assert.rejects(submit.execute("wrong-execution", { plan: mixed }), /execution_mismatch/);
-    assert.equal(policy.content.plan!.count, 1); assert.equal(handle.reference.toolInputFailure, undefined);
-    await submit.execute("corrected", { plan });
-    assert.equal(handle.submitted, true); assert.equal(policy.content.plan!.count, 1);
-  }
+  delete mixed.application!.service;
+  await assert.rejects(submit.execute("wrong-execution", { plan: mixed }), /execution_mismatch/);
+  assert.equal(policy.content.plan!.count, 1); assert.ok(handle.reference.formatRecovery!.episodes[0]!.closed);
+  await submit.execute("corrected", { plan });
+  assert.equal(handle.submitted, true); assert.equal(policy.content.plan!.count, 1);
 });

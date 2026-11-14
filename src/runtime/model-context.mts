@@ -71,7 +71,7 @@ export function createModelContextReader(getSource: () => UnknownRecord | Promis
   { resolvePointer }: { resolvePointer?: ModelContextPointerResolver | undefined } = {}): NeumaTool {
   const request = { type: "object", additionalProperties: false, required: ["section"], properties: {
     section: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]{0,79}$" },
-    pointer: { type: "string", maxLength: 500 }, offset: { type: "integer", minimum: 0 },
+    pointer: { type: "string", maxLength: 500, description: "JSON Pointer路径，例如/0或/plan；空字符串表示整个section。不能只填数字，优先复制目录提供的readRequest。" }, offset: { type: "integer", minimum: 0 },
     limit: { type: "integer", minimum: 1, maximum: MODEL_CONTEXT_PAGE_CHARACTERS, description: "旧参数兼容；通常省略，由程序控制页长。" },
     cursor: { type: "string", maxLength: 4096, description: "使用上次返回的nextRequest续读，不与offset、limit、expectedHash混用。" },
     expectedHash: { type: "string", pattern: "^[a-f0-9]{64}$" },

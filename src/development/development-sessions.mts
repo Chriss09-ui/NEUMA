@@ -4,6 +4,7 @@ import type { DevelopmentArchitecture } from "../contracts/development.mjs";
 import type { AgentStorage } from "../agents/agent-storage.mjs";
 import { objectFields, isInteger, isArray, errorField } from "../runtime/type-boundary.mjs";
 export interface DevelopmentSessionReference { bindingHash: string; role: string; file: string | null; turns: number; contextDelivery?: ContextDelivery | undefined; limit?: number; retryAttempts?: number; compactions?: number; submissionContinuations?: number;
+  formatRecovery?: import("../runtime/format-recovery.mjs").FormatRecovery;
   toolInputFailure?: { toolName: string; fingerprint: string; schemaHash?: string; callHash: string; count: number };
   pendingResult?: { result: unknown; subjectHash: unknown; planHash: string | null; codeHash: string | null } }
 export interface DevelopmentSessionIdentity { id: string; agentId: string; architectureRef: unknown; architecture?: unknown }

@@ -15,13 +15,14 @@ import { developmentArchitecture } from "../helpers/development.mjs";
 
 const textOf = (value: unknown) => typeof value === "string" ? value : recordArray(value).filter((entry) => entry.type === "text").map((entry) => entry.text).join("\n");
 
-async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, count: number) => unknown, { extraTools = [], repeatedCallId = false, turns = 12, boundedWorkload = false }: {extraTools?: NeumaTool[];repeatedCallId?:boolean;turns?:number;boundedWorkload?:boolean} = {}) {
+async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, count: number) => unknown, { extraTools = [], repeatedCallId = false, turns = 12, boundedWorkload = false, failAt }: {extraTools?: NeumaTool[];repeatedCallId?:boolean;turns?:number;boundedWorkload?:boolean;failAt?:number} = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-tool-inputs-")), requests: FixtureChatRequest[] = [], executed: unknown[] = [];
   let serverError: unknown; const capture: {current?: PiSessionOptions} = {};
   const server = createServer(async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")); requests.push(body);
+      if (requests.length === failAt) { response.writeHead(503, { "content-type": "application/json" }); response.end('{"error":{"message":"temporary fixture failure"}}'); return; }
       const replyValue = reply(body, requests.length), calls = Array.isArray(replyValue) ? recordArray(replyValue) : [];
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(`data: ${JSON.stringify({ id: "local-tool-input", choices: [{ index: 0, delta: { role: "assistant", ...(Array.isArray(replyValue) ? { tool_calls: calls.map((call, index) => ({
@@ -80,57 +81,90 @@ test("研发真实Pi原始参数不被强转，下一请求包含具体字段诊
   assert.ok(Object.keys(f.captured!.rawInputValidators!).includes("read_development_context"));
 });
 
-test("研发相同错误原参数三次后在下一请求前停止，持久记录不保存参数正文", async (t) => {
-  const f = await fixture(t, () => [{ name: "change_input", args: { value: { private: "PRIVATE_INPUT_BODY" } } }]);
+test("首次错误后明确反馈并给满三次实际纠正机会，重启不重新领取，记录不保存参数正文", async (t) => {
+  const f = await fixture(t, (body, count) => {
+    if (count > 1) {
+      const feedback = JSON.parse(textOf(body.messages.findLast(row => row.role === "user")!.content)).formatCorrection;
+      assert.equal(feedback.outstanding[0].toolName, "change_input");
+      assert.equal(feedback.outstanding[0].correctionsUsed, count - 2);
+      assert.equal(feedback.outstanding[0].issues[0].path, "change_input.value");
+      assert.ok(feedback.outstanding[0].issues[0].remedy);
+    }
+    return [{ name: "change_input", args: { value: { private: "PRIVATE_INPUT_BODY" } } }];
+  });
   await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), (error) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 3); assert.equal(f.counter.turns, 3); assert.deepEqual<NonNullable<typeof f>["executed"]>(f.executed, []);
-  assert.equal(f.handle.reference.toolInputFailure!.count, 3); assert.match(f.handle.reference.toolInputFailure!.fingerprint, /^[a-f0-9]{64}$/u);
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 4); assert.equal(f.counter.turns, 4); assert.deepEqual<NonNullable<typeof f>["executed"]>(f.executed, []);
+  const recovery = structuredClone(f.handle.reference.formatRecovery!);
+  assert.equal(recovery.episodes[0]!.failures.length, 4); assert.equal(recovery.episodes[0]!.corrections.length, 3);
   assert.doesNotMatch(JSON.stringify(f.handle.reference), /PRIVATE_INPUT_BODY|"private"/u);
   await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), (error) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-  assert.equal(f.requests.length, 3, "继续原会话不能重新消耗请求");
+  assert.equal(f.requests.length, 4, "继续原会话不能重新消耗请求");
   callFixture(f.controller.dispose, f.controller, [f.ctx, f.handle]);
   const resumed = await callFixture(f.controller.role, f.controller, [f.ctx, { kind: "developer", tools: f.tools, scope: {}, counter: { turns: 0 }, limit: 12, validate: (value: unknown) => value }]);
   try {
-    assert.equal(resumed.counter.turns, 3); assert.equal(resumed.reference.toolInputFailure!.count, 3);
+    assert.equal(resumed.counter.turns, 4); assert.deepEqual(resumed.reference.formatRecovery, recovery);
     await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, resumed, {}]), (error) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-    assert.equal(f.requests.length, 3, "重新创建原会话仍保留相同错误止损和原预算");
+    assert.equal(f.requests.length, 4, "重新创建原会话仍保留相同错误止损和原预算");
   } finally { callFixture(f.controller.dispose, f.controller, [f.ctx, resumed]); }
   const changedTools = f.tools.map((tool) => ({ ...tool, parameters: { ...tool.parameters, properties: { value: { type: "string", maxLength: 200 } } } }));
   const changed = await callFixture(f.controller.role, f.controller, [f.ctx, { kind: "developer", tools: changedTools, scope: {}, counter: { turns: 0 }, limit: 12, validate: (value: unknown) => value }]);
   try {
-    assert.equal(changed.counter.turns, 3); assert.equal(changed.reference.toolInputFailure!.count, 3, "修改字段契约不能清零已发生的格式错误");
+    assert.equal(changed.counter.turns, 4); assert.deepEqual(changed.reference.formatRecovery, recovery, "修改字段契约不能清零已发生的纠正尝试");
   } finally { callFixture(f.controller.dispose, f.controller, [f.ctx, changed]); }
 });
 
-test("同回复三次相同错误锁定停止，后排有效工具不能清零或写入", async (t) => {
-  const f = await fixture(t, () => [...Array.from({ length: 3 }, () => ({ name: "change_input", args: { value: 7 } })),
-    { name: "change_input", args: { value: "queued-valid" } }]);
-  await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), (error) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 1); assert.equal(f.handle.reference.toolInputFailure!.count, 3);
-  assert.deepEqual<NonNullable<typeof f>["executed"]>(f.executed, []);
+test("同一回复多处错误未收到反馈，不冒充三次纠正机会，合法结果仍可提交", async (t) => {
+  const f = await fixture(t, (_body, count) => count === 1
+    ? [...Array.from({ length: 3 }, () => ({ name: "change_input", args: { value: 7 } })), { name: "change_input", args: { value: "queued-valid" } }]
+    : [{ name: "submit_development_work", args: { summary: "完成", changedFiles: [], knownIssues: [], nextAction: "验收", continue: false } }]);
+  await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]);
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 2);
+  const episode = f.handle.reference.formatRecovery!.episodes[0]!;
+  assert.equal(episode.failures.length, 3); assert.equal(episode.corrections.length, 0); assert.ok(episode.closed);
+  assert.deepEqual(f.executed, ["queued-valid"]);
 });
 
 test("供应商跨请求复用callId仍分别计数，同一回复重复校验保持去重", async (t) => {
   const f = await fixture(t, () => [{ name: "change_input", args: { value: 7 } }], { repeatedCallId: true });
   await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), (error) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 3); assert.equal(f.handle.reference.toolInputFailure!.count, 3);
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 4); assert.equal(f.handle.reference.formatRecovery!.episodes[0]!.corrections.length, 3);
   assert.deepEqual<NonNullable<typeof f>["executed"]>(f.executed, []);
 });
 
-test("不同参数与不同工具的格式错误连续累计，同callId预检去重，正常读取不清零", async (t) => {
-  const f = await fixture(t, () => []);
-  const validate = f.captured!.rawInputValidators!.change_input!;
-  assert.equal((await callFixture(validate, undefined, [{ args: { value: 7 }, toolCallId: "same" }])).valid, false);
-  await callFixture(validate, undefined, [{ args: { value: 7 }, toolCallId: "same" }]);
-  assert.equal(f.handle.reference.toolInputFailure!.count, 1);
-  await callFixture(validate, undefined, [{ args: { value: 8 }, toolCallId: "changed" }]);
-  assert.equal(f.handle.reference.toolInputFailure!.count, 2);
-  f.handle.accepting = true; f.handle.payload = { report: { status: "fixed-local-read" } };
-  await fixtureTools(f.captured!.customTools).read_development_context!.execute("read", { section: "report", offset: 0, limit: 1000 });
-  assert.equal(f.handle.reference.toolInputFailure!.count, 2);
-  await callFixture(f.captured!.rawInputValidators!.read_development_context!, undefined, [{ args: { requests: "invalid" }, toolCallId: "third" }]);
-  await assert.rejects(async () => await f.captured!.onModelCall!({}), (error: unknown) => failureFields(error).diagnostic?.reason === "repeated_tool_error");
-  assert.equal(f.counter.turns, 0); assert.equal(f.requests.length, 0);
+test("反馈请求连接失败未得到模型纠正输出，不扣机会；恢复后仍有三次实际尝试", async t => {
+  const f = await fixture(t, () => [{ name: "change_input", args: { value: 7 } }], { failAt: 2 });
+  await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), error => failureFields(error).diagnostic?.reason === "api_unavailable");
+  assert.equal(f.handle.reference.formatRecovery!.episodes[0]!.corrections.length, 0);
+  callFixture(f.controller.dispose, f.controller, [f.ctx, f.handle]);
+  const resumed = await callFixture(f.controller.role, f.controller, [f.ctx, { kind: "developer", tools: f.tools, scope: {}, counter: { turns: 0 }, limit: null, validate: (value: unknown) => value }]);
+  try {
+    await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, resumed, {}]), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
+    assert.equal(f.error(), undefined); assert.equal(f.requests.length, 5);
+    assert.equal(resumed.reference.formatRecovery!.episodes[0]!.corrections.length, 3);
+  } finally { callFixture(f.controller.dispose, f.controller, [f.ctx, resumed]); }
+});
+
+test("修好一项后新的读取错误得到自己的反馈和纠正机会，正常读取不扣机会", async (t) => {
+  const f = await fixture(t, (body, count) => {
+    if (count === 1) return [{ name: "change_input", args: { value: 7 } }];
+    if (count === 2) return [{ name: "read_development_context", args: { requests: [{ section: "report" }] } }];
+    if (count === 3) {
+      const feedback = JSON.parse(textOf(body.messages.findLast(row => row.role === "user")!.content)).formatCorrection;
+      assert.equal(feedback.outstanding[0].correctionsUsed, 0);
+      return [{ name: "change_input", args: { value: "fixed" } }, { name: "read_development_context", args: { requests: [{ section: "report", pointer: "0" }] } }];
+    }
+    if (count === 5) return "已完成正式提交。";
+    assert.equal(count, 4);
+    const feedback = JSON.parse(textOf(body.messages.findLast(row => row.role === "user")!.content)).formatCorrection;
+    assert.equal(feedback.outstanding.length, 1); assert.equal(feedback.outstanding[0].toolName, "read_development_context");
+    assert.equal(feedback.outstanding[0].correctionsUsed, 0); assert.match(feedback.outstanding[0].issues[0].remedy, /JSON Pointer/);
+    return [{ name: "read_development_context", args: { requests: [{ section: "report", pointer: "/0" }] } },
+      { name: "submit_development_work", args: { summary: "完成", changedFiles: [], knownIssues: [], nextAction: "验收", continue: false } }];
+  });
+  try { await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, { report: ["current"] }]); }
+  catch (error) { throw f.error() ?? error; }
+  assert.equal(f.error(), undefined); assert.equal(f.requests.length, 5);
+  assert.deepEqual(f.handle.reference.formatRecovery!.episodes.map(row => row.corrections.map(value => value.outcome)), [["accepted"], ["accepted"]]);
 });
 
 test("大量结构问题回执保留具体字段和截断计数，不超过原始工具拦截消息额度", async (t) => {

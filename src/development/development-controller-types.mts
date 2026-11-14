@@ -69,6 +69,7 @@ export interface DevelopmentHandle<Result = unknown> {
   turnsInPrompt: number; disposed: boolean; submissionCalls: Map<string, { value: unknown; recorded: boolean }>; planningBlocker?: unknown;
   checkToolInputs?: () => void; charge: (options?: { purpose?: string; retryAttempt?: number }) => Promise<void>;
   noteFormatFailure?: (id: string, reason: string) => Promise<void>;
+  formatFeedback?: () => ReturnType<typeof import("../runtime/format-recovery.mjs").formatCorrectionFeedback>;
   reference: DevelopmentSessionReference; validate: (value: unknown) => Result | Promise<Result>; session: DevelopmentSession; unsubscribe?: () => void;
   payload: DevelopmentContextPayload; contextMessage?: PreparedDevelopmentContext; contextMaxChars: number; structuredSubmissionTools: NeumaTool[];
   historyProjection?: ReturnType<typeof import("../runtime/work-round-context.mjs").createWorkRoundProjection>;

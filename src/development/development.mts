@@ -1,4 +1,6 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { createFormatRecovery, readFormatRecovery, noteFormatRejection, resolveFormatRecovery, deliverFormatFeedback,
+  formatCorrectionFeedback, formatRecoveryExhausted, formatFailureCount, type FormatIssue } from "../runtime/format-recovery.mjs";
 import { needsDevelopmentRepairDispatch, repairDevelopmentPlan, repairDevelopmentCode } from "./development-repair.mjs";
 import { repairableDevelopmentReport } from "./development-failures.mjs";
 import { planDevelopmentParts, shouldDistributeDevelopmentPlanning, planningResolverTools } from "./development-planning-dispatch.mjs";
@@ -153,8 +155,10 @@ export function developmentSummary(record: DevelopmentRunRecord | DevelopmentSum
       || record.budgets?.planRevisions === 0 && record.reviews?.findLast((entry) => entry.mode === "plan")?.verdict === "revise"
       || exhaustedWork || exhaustedRepairs || !record.workloadPolicyVersion && Object.values(record.sessions ?? {}).some((entry) => entry.role === "planner" && isInteger(entry.limit)
         && entry.limit > 0 && entry.turns >= entry.limit));
-  const cannotResume = !freshPlanningRound && (exhaustedWork || exhaustedRepairs
-    || ["content_rejection_limit", "repeated_tool_error", "review_judgment_format", ...(!record.retryPolicy ? ["turn_limit", "correction_limit"] : [])].includes(String(record.diagnostic?.reason)));
+  const formatLocked = Object.values(record.sessions ?? {}).some(session => formatRecoveryExhausted(session.formatRecovery))
+    || Object.values(record.repairBatches ?? {}).some(batch => batch.checkpoint.groups.some(group => formatRecoveryExhausted(group.formatRecovery)));
+  const cannotResume = !freshPlanningRound && (exhaustedWork || exhaustedRepairs || formatLocked
+    || ["content_rejection_limit", "review_judgment_format", ...(!record.retryPolicy ? ["turn_limit", "correction_limit"] : [])].includes(String(record.diagnostic?.reason)));
   return clone({ id: record.id, agentId: record.agentId, name: record.name, version: record.version,
     architectureRef: record.architectureRef, status: record.status, phase: record.phase, summary: record.summary,
     diagnostic: record.diagnostic ?? null,
@@ -302,31 +306,34 @@ export class DevelopmentController {
       throw new InputError("研发历史用量记录无效");
     handle.limit = limit;
     counter.turns = Math.max(counter.turns, persistent.reference.turns);
-    const rejectedInputCalls = new Set();
-    const noteFormat = async (toolName: string, id: string, fingerprint: string) => {
+    const recovery = persistent.reference.formatRecovery ??= createFormatRecovery(persistent.reference.toolInputFailure);
+    readFormatRecovery(recovery);
+    if (!recovery.episodes.length && recovery.legacy) noteFormatRejection(recovery,
+      String(recovery.legacy.toolName ?? name), counter.turns, String(recovery.legacy.callHash), [{ path: String(recovery.legacy.toolName ?? name),
+        reason: "legacy_format_error", remedy: "上次工具参数或输出未通过检查。原失败次数已归档；先按当前工具契约和原会话最后的错误回执修正，首次收到本规则反馈后才计算实际纠正轮次。" }]);
+    let preparedFeedbackId: string | undefined;
+    handle.formatFeedback = () => { const feedback = formatCorrectionFeedback(recovery); preparedFeedbackId = feedback?.feedbackId; return feedback; };
+    const noteFormat = async (toolName: string, id: string, issues: FormatIssue[]) => {
       const callHash = hashValue({ toolName, toolCallId: id, turn: counter.turns });
-      if (rejectedInputCalls.has(callHash)) return;
-      rejectedInputCalls.add(callHash);
-      const previous = persistent.reference.toolInputFailure;
-      if (previous?.count === 3) return;
-      persistent.reference.toolInputFailure = { toolName, fingerprint, callHash, count: (previous?.count ?? 0) + 1 };
-      await this.save(ctx);
+      if (noteFormatRejection(recovery, toolName, counter.turns, callHash, issues)) await this.save(ctx);
     };
     const checkToolInputs = () => {
-      if (persistent.reference.toolInputFailure?.count === 3) throw new Stop("本任务连续三次格式或参数错误，原会话、稿件和具体诊断已保存。", "failed", {
+      const exhausted = formatRecoveryExhausted(recovery);
+      if (exhausted) throw new Stop("模型收到具体错误反馈后已实际纠正三次，仍未通过；原会话、稿件和全部失败记录已保存。", "failed", {
         stage: "development", phase: ctx.record.phase, role: kind, reason: "repeated_tool_error", attempts: 3,
+        counting: "corrections_after_feedback", toolName: exhausted.toolName, issues: exhausted.failures.at(-1)!.issues,
+        corrections: exhausted.corrections,
       });
       if (ctx.record.retryPolicy && kind !== "reviewer") checkContent(ctx,
         kind === "planner" ? "plan" : ctx.record.tasks.find(task => task.id === ctx.record.currentTaskId)?.integration ? "integration" : `task:${ctx.record.currentTaskId}`);
     };
-    const clearToolInputFailure = async (toolName: string) => {
-      const failure = persistent.reference.toolInputFailure;
-      if (!failure || failure.count === 3 || ![name, "submit_development_blocker"].includes(toolName)) return;
-      delete persistent.reference.toolInputFailure;
-      await this.save(ctx);
+    const clearToolInputFailure = async (toolName: string, submitted = false) => {
+      if (resolveFormatRecovery(recovery, toolName, counter.turns, submitted)) await this.save(ctx);
     };
     handle.checkToolInputs = checkToolInputs;
-    handle.noteFormatFailure = (id, reason) => noteFormat(name, id, hashValue({ reason }));
+    handle.noteFormatFailure = (id, reason) => noteFormat(name, id, [{ path: name, reason,
+      remedy: reason === "output_limit" ? "上次输出达到额度而未完成正式提交。继续已有稿件，精简重复说明，按本轮终止工具参数提交完整结果。"
+        : "上次回复没有可解析的正式提交。请调用本轮指定的终止工具，或按其完整参数提交唯一JSON对象，不能只回复进度文字。" }]);
     const charge = async ({ purpose = "agent", retryAttempt = 0 } = {}) => {
       this.guard(ctx);
       checkToolInputs();
@@ -338,6 +345,7 @@ export class DevelopmentController {
         persistent.reference.turns = counter.turns;
         if (purpose === "compaction") persistent.reference.compactions = (persistent.reference.compactions ?? 0) + 1;
       }
+      if (purpose === "agent") deliverFormatFeedback(recovery, counter.turns, preparedFeedbackId);
       await onModelCall?.({ purpose, retryAttempt });
       await this.save(ctx);
     };
@@ -345,7 +353,7 @@ export class DevelopmentController {
     handle.reference = persistent.reference;
     handle.validate = validate;
     const budget = () => ({ limit: null, used: counter.turns, remaining: null, accountingOnly: true,
-      guidance: "模型请求只记录用量；内容退回五次、格式错误连续三次分别计数。读取不占内容退回。" });
+      guidance: "模型请求只记录用量；内容退回五次另计。格式错误先明确反馈，再给三次实际纠正机会，首次错误、普通读取和连接重试不扣纠正机会。" });
     const root = kind === "planner" ? "plan" : kind === "developer" ? "work" : "review";
     const noteSubmission = async (id: string, value: unknown, { status, stage = "contract", error, diagnosticIssues }: { status: "accepted" | "rejected"; stage?: string; error?: unknown; diagnosticIssues?: SubmissionIssue[] }) => {
       const call = handle.submissionCalls.get(id);
@@ -359,7 +367,7 @@ export class DevelopmentController {
         const formatReasons = new Set(["required", "additionalProperties", "type", "enum", "minLength", "maxLength", "minItems", "maxItems",
           "uniqueItems", "pattern", "minimum", "maximum", "const", "anyOf", "oneOf", "invalid_json", "planning_artifact_invalid", "sdk_validation", "work_file_unauthorized", "invalid_reference"]);
         if (kind !== "planner" || stage === "sdk" || issues.some(issue => formatReasons.has(issue.reason)))
-          await noteFormat(name, id, hashValue({ issues }));
+          await noteFormat(name, id, issues);
         else if (ctx.record.retryPolicy && objectFields(error).reason !== "repair_content_rejected") {
           await clearToolInputFailure(name);
           noteDevelopmentRejection(ctx.record, "plan", { formalSubmission: id, session: persistent.key, turn: counter.turns });
@@ -410,7 +418,7 @@ export class DevelopmentController {
           throw new InputError(`提交未通过：${(issues ?? []).map((item) => `${item.path} [${item.reason}]：${item.remedy}`).join("；") || "请按当前提交契约修正后重交。"}`);
         }
         rejectedPlanningMaterial = null;
-        await clearToolInputFailure(name);
+        await clearToolInputFailure(name, true);
         await noteSubmission(_id, value, { status: "accepted" });
         this.guard(ctx);
         if (artifact) ctx.record.planningArtifact = artifact.snapshot;
@@ -434,7 +442,7 @@ export class DevelopmentController {
         if (!handle.accepting || handle.submitted) throw new InputError("本阶段已提交或失效，不能提交规划阻断");
         await this.current(ctx);
         const report = planningBlocker.submit(value, ctx.record);
-        await clearToolInputFailure("submit_development_blocker");
+        await clearToolInputFailure("submit_development_blocker", true);
         Object.assign(ctx.record, { status: "blocked", delivery: "blocked", summary: report.summary,
           feedback: { report }, diagnostic: { stage: "development", phase: "planning", role: "planner", reason: "planning_blocked",
             trust: "untrusted-reference", issueKinds: [...new Set(report.issues.map((issue) => issue.kind))] } });
@@ -455,19 +463,24 @@ export class DevelopmentController {
       let result;
       try { result = await tool.execute(args[0], args[1], args[2], args[3], args[4]); }
       catch (error) {
-        if (error instanceof InputError) await noteFormat(tool.name, args[0], hashValue({ tool: tool.name, error: error.message }));
+        if (error instanceof InputError) await noteFormat(tool.name, args[0], [{ path: tool.name, reason: "tool_input_invalid",
+          remedy: "本次工具调用未通过输入检查。请按该工具公开参数及刚返回的错误回执修正后重试，不要重复发送未修改的参数。" }]);
         throw error;
       }
       this.guard(ctx);
+      let readRejected = false;
       if (["read_development_context", "read_development_history"].includes(tool.name)) {
         const first = result.content.find(block => block.type === "text");
         if (first?.type === "text") {
           const data = objectFields(JSON.parse(first.text));
-          if (Array.isArray(data.results) && data.results.some(row => objectFields(row).error))
-            await noteFormat(tool.name, args[0], hashValue({ tool: tool.name, reason: "context_read_rejected" }));
+          const issues = (Array.isArray(data.results) ? data.results : []).flatMap((row, index) => objectFields(row).error ? [{
+            path: `${tool.name}.requests[${index}]`, reason: "context_read_rejected",
+            remedy: String(objectFields(objectFields(row).error).message ?? "读取参数无效。")
+              + " pointer使用以/开头的JSON Pointer（例如/0），空字符串表示整项；历史目录可直接使用readRequest，长内容原样使用nextRequest续读。" }] : []);
+          if (issues.length) { readRejected = true; await noteFormat(tool.name, args[0], issues); }
         }
       }
-      await clearToolInputFailure(tool.name);
+      if (!readRejected) await clearToolInputFailure(tool.name);
       let draftCheck, fileState;
       if (filePlan && ["write", "edit", "save_plan_cases", "edit_plan_cases", "save_plan_json", "update_plan_json", "restore_plan_file"].includes(tool.name)) {
         const parameters = objectFields(args[1]);
@@ -542,13 +555,18 @@ export class DevelopmentController {
         + (webTools.length ? "\n" + WEB_RUNTIME_PROMPT : "")
         + "\n" + renderPiSubmissionContract({ role: kind, submitName: name, tools: sessionTools, alternativeTools: blockerTool ? [blockerTool.name] : [], structuredResponse: true }),
       customTools: sessionTools, sessionStorage: persistent.options, onModelCall: charge,
-      transformContext: (messages) => handle.contextMessage
-        ? restoreDevelopmentContext(handle.historyProjection?.(messages, handle.contextMessage.message) ?? projectWorkRound(messages, handle.contextMessage.message), handle.payload, handle.contextMaxChars, handle.contextMessage) : messages,
+      transformContext: (messages) => {
+        const projected = handle.contextMessage ? restoreDevelopmentContext(handle.historyProjection?.(messages, handle.contextMessage.message)
+          ?? projectWorkRound(messages, handle.contextMessage.message), handle.payload, handle.contextMaxChars, handle.contextMessage) : messages;
+        const feedback = handle.formatFeedback!();
+        return feedback ? [...projected, { role: "user" as const, content: [{ type: "text" as const,
+          text: JSON.stringify({ formatCorrection: feedback }) }] }] : projected;
+      },
       rawInputValidators: Object.fromEntries(sessionTools.map((tool) => [tool.name, async ({ args, toolCallId }) => {
         const feedback = inputFeedback(tool.name, args);
         if (!feedback) return { valid: true };
         if (typeof toolCallId === "string" && toolCallId.length <= 512)
-          await noteFormat(tool.name, toolCallId, hashValue({ toolName: tool.name, schema: tool.parameters, args }));
+          await noteFormat(tool.name, toolCallId, feedback.issues);
         return { valid: false, reason: JSON.stringify(feedback) };
       }])),
       toolErrorResult: ({ toolName, args }) => {
@@ -649,10 +667,14 @@ export class DevelopmentController {
       await this.save(ctx);
       let message = prepared.message;
       for (;;) {
-        if (!handle.session.modelCallAccounting) await handle.charge();
+        if (!handle.session.modelCallAccounting) {
+          const feedback = handle.formatFeedback?.();
+          if (feedback) message = JSON.stringify({ ...objectFields(JSON.parse(message)), formatCorrection: feedback });
+          await handle.charge();
+        }
         handle.turnsInPrompt = 0; handle.lastAssistant = undefined;
         const messageCount = handle.session.messages?.length ?? 0;
-        const formatBefore = handle.reference.toolInputFailure?.count ?? 0;
+        const formatBefore = formatFailureCount(handle.reference.formatRecovery!);
         try { await handle.session.prompt(message); }
         catch (error) {
           if (!ctx.signal.aborted && handle.submitted && isPlanningBlockerOutcome(handle.result)) {
@@ -683,16 +705,17 @@ export class DevelopmentController {
         if (!["stop", "length"].includes(last?.stopReason ?? "")) throw new Stop("本阶段没有提交有效的结构化结果，不能推进", "failed", {
           stage: "development", phase: ctx.record.phase, role: handle.kind, reason: "submission_incomplete",
         });
-        if ((handle.reference.toolInputFailure?.count ?? 0) === formatBefore)
+        if (formatFailureCount(handle.reference.formatRecovery!) === formatBefore)
           await handle.noteFormatFailure?.(`incomplete_${handle.counter.turns}`, last?.stopReason === "length" ? "output_limit" : "submission_incomplete");
         handle.checkToolInputs?.();
         await this.current(ctx);
         handle.reference.submissionContinuations = (handle.reference.submissionContinuations ?? 0) + 1;
         await this.save(ctx);
-        message = JSON.stringify({ submissionContinuation: { reason: "submission_incomplete", attempt: handle.reference.toolInputFailure?.count ?? 1, maximum: 2,
+        message = JSON.stringify({ submissionContinuation: { reason: last?.stopReason === "length" ? "output_limit" : "submission_incomplete",
+          maximum: 3, counting: "corrections_after_feedback",
           requiredTool: handle.submitName,
           ...(handle.planningBlocker ? { allowedTerminalTools: [handle.submitName, "submit_development_blocker"] } : {}),
-          instruction: "上一轮正常结束但尚未正式提交。继续当前会话、已保存草稿和已有工具拒绝反馈，完成当前阶段后调用指定提交工具；若有allowedTerminalTools，也可按公开证据契约正式提交规划技术阻断。不能以文字说明代替提交，不改变冻结需求、授权和验收。完整资料仍可用read_development_context分页读取，无需从头重写。",
+          instruction: "上一轮没有完成有效的正式提交。请先按formatCorrection列出的具体错误纠正，继续当前稿件并调用指定终止工具；也可按allowedTerminalTools提交合法技术阻断。不能以进度文字代替提交；资料仍可按需读取。首次错误不扣机会，收到反馈后的实际纠正才累计，最多三次。",
           modelBudget: { limit: null, used: handle.counter.turns, remaining: null, accountingOnly: true },
           ...(handle.payload.feedback || handle.payload.issues ? { existingFailureFeedback: compactDevelopmentContext({
             ...(handle.payload.feedback ? { feedback: handle.payload.feedback } : {}),
@@ -1183,7 +1206,8 @@ export class DevelopmentController {
               reason: objectFields(errorField(error, "diagnostic")).reason }
           : { stage: errorField(error, "name") === "ServiceError" ? "runtime" : "development", phase: ctx.record.phase,
             reason: error instanceof InputError ? "invalid_result" : errorField(error, "name") === "ServiceError" ? errorField(error, "reason") : "execution_failed" };
-      const submission = !ctx.signal.aborted && lastSubmissionDiagnostic(ctx.record, ctx.record.diagnostic!.role ?? ctx.lastRole);
+      const submission = !ctx.signal.aborted && ctx.record.diagnostic!.reason !== "repeated_tool_error"
+        && lastSubmissionDiagnostic(ctx.record, ctx.record.diagnostic!.role ?? ctx.lastRole);
       if (submission) ctx.record.diagnostic!.submission = submission;
       if (!ctx.signal.aborted && unacceptedPlanning(ctx.record) && Number(ctx.record.architecture.design.schemaVersion) >= 2) {
         try {

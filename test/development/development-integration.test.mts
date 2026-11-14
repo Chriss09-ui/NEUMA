@@ -304,7 +304,8 @@ test("真实Pi结构化计划被程序拒绝时不能继续开发或用自然语
   assert.equal(fixture.sessions[0]!.disposed, true);
   assert.deepEqual(result.submissionCounts!.planner, { attempts: 1, accepted: 0, rejected: 1 });
   assert.equal(result.submissionAttempts![0]!.stage, "contract");
-  assert.equal(objectFields(objectFields(objectFields(result.diagnostic!.submission).issues)[0]).reason, "invalid_entrypoint");
+  assert.equal(result.submissionAttempts![0]!.issues[0]!.reason, "invalid_entrypoint");
+  assert.equal(recordArray(result.diagnostic!.issues)[0]!.reason, "submission_incomplete", "停止原因应指向最新纠正仍未提交，而不是附带旧入口诊断");
 });
 
 test("真实SDK在执行前拒绝的计划也保存安全诊断，修复后继续独立验收", { timeout: 20_000 }, async (t) => {
@@ -325,7 +326,7 @@ test("真实SDK在执行前拒绝的计划也保存安全诊断，修复后继�
   assert.doesNotMatch(JSON.stringify(fixture.progress), /PRIVATE_SUBMISSION_VALUE|Received arguments/);
 });
 
-test("真实SDK连续三次格式拒绝时保留字段原因，不把原始参数输出界面", { timeout: 20_000 }, async (t) => {
+test("真实SDK反馈后实际纠正三次仍失败时保留最新字段原因，不把原始参数输出界面", { timeout: 20_000 }, async (t) => {
   const fixture = await sdkFixture(t, { sdkInvalidPlan: true, limits: { reviewerTurns: 2 } });
   const result = await fixture.run();
   assert.deepEqual(fixture.errors, []);
@@ -333,9 +334,9 @@ test("真实SDK连续三次格式拒绝时保留字段原因，不把原始参�
   assert.equal(result.plan, null); assert.equal(result.package, null);
   assert.equal(result.diagnostic!.reason, "repeated_tool_error");
   assert.deepEqual(result.retryPolicy!.content, {}, "结构拒绝不计内容退回");
-  assert.ok(fixtureNumber(objectFields(result.diagnostic!.submission).rejected) >= 2);
-  assert.equal(objectFields(objectFields(objectFields(result.diagnostic!.submission).issues)[0]).path, "plan.summary");
-  assert.equal(objectFields(objectFields(objectFields(result.diagnostic!.submission).issues)[0]).reason, "maxLength");
+  assert.equal(result.submissionCounts!.planner!.rejected, 4);
+  assert.equal(objectFields(recordArray(result.diagnostic!.issues)[0]).path, "plan.summary");
+  assert.equal(objectFields(recordArray(result.diagnostic!.issues)[0]).reason, "maxLength");
   assert.equal(result.planAttempts.length, 0);
   assert.ok(result.submissionAttempts!.length >= 2);
   const summary = await fixture.controller.get(architecture.agentId);
