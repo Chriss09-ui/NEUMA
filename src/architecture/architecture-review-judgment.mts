@@ -8,6 +8,8 @@ import { objectFields } from "../runtime/type-boundary.mjs";
 import { modelContextValue } from "../runtime/model-context.mjs";
 import { repairHash } from "../runtime/repair-scheduler.mjs";
 import { ARCHITECTURE_JEV_SCOPE } from "./architecture-prompts.mjs";
+import { FAILURE_ACCEPTANCE_GUIDE } from "../verification/acceptance-contract.mjs";
+import { architectureFailureDependencies } from "./architecture-stage-semantics.mjs";
 
 export interface JudgmentGroup { id: string; assignment: { field: string; ids: string[] }; parts: ReviewParts }
 interface Score { score: number; probabilities: Record<string, number>; confidence: number }
@@ -16,7 +18,7 @@ interface Objection { key: string; field: keyof Omit<ReviewParts, "candidateHash
 interface Receipt { stateHash: string; attempts: number; response: unknown; responses: unknown[]; assessment: Assessment | null; formatFailures: number }
 interface JudgmentRound { parts: ReviewParts; receipts: Record<string, Receipt> }
 interface GroupCheckpoint { sourceHash: string; rounds: JudgmentRound[]; recheckCalls: number; recheckRejection?: ReviewDiagnostic["repeatedFailure"]; recheckSession?: string }
-type PolicyVersion = 1 | 2 | 3;
+type PolicyVersion = 1 | 2 | 3 | 4;
 export interface ReviewJudgmentCheckpoint { version: PolicyVersion; bindingHash: string; candidateHash: string; completedReviewHash: string | null;
   groups: Record<string, GroupCheckpoint>; previousPolicy?: ReviewJudgmentCheckpoint; hash: string }
 
@@ -51,7 +53,8 @@ const routing = { reviseNecessityAtLeast: 75, reviseStrictnessBelow: 50,
 const rubric = { ...stageRubric, version: "group-jev-v3", routing,
   questions: { ...stageRubric.questions, basis: { ...stageRubric.questions.basis,
     instructions: stageRubric.questions.basis.instructions + " 此项只记录依据状态，不单独触发补查或暂停；影响当前总体方案的真实缺口计入必要性评分。" } } };
-const rubrics = { 1: legacyRubric, 2: stageRubric, 3: rubric };
+const currentRubric = { ...rubric, version: "group-jev-v4", failureAcceptanceGuide: FAILURE_ACCEPTANCE_GUIDE };
+const rubrics = { 1: legacyRubric, 2: stageRubric, 3: rubric, 4: currentRubric };
 const rows = (value: unknown): UnknownRecord[] => Array.isArray(value) ? value.map(objectFields) : [];
 const seal = (value: Omit<ReviewJudgmentCheckpoint, "hash">): ReviewJudgmentCheckpoint => ({ ...value, hash: repairHash(value) });
 function stop(reason: string, message: string, details: UnknownRecord = {}): never {
@@ -64,7 +67,7 @@ export function architectureGroupJevEnabled(config: ModelConfig) {
 
 export function judgmentApprovesReview(record: unknown, review: unknown): boolean {
   const source = objectFields(record), value = objectFields(source.reviewJudgmentCheckpoint), { hash, ...body } = value;
-  return (value.version === 1 || value.version === 2 || value.version === 3) && value.candidateHash === source.candidateHash && hash === repairHash(body)
+  return (value.version === 1 || value.version === 2 || value.version === 3 || value.version === 4) && value.candidateHash === source.candidateHash && hash === repairHash(body)
     && value.completedReviewHash === repairHash(review) && objectFields(review).verdict === "pass";
 }
 
@@ -90,7 +93,7 @@ function assess(response: unknown, version: PolicyVersion): Assessment {
     || Object.values(p).some(value => typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)
     || Math.abs(Object.values(p).reduce<number>((sum, value) => sum + Number(value), 0) - 1) > .02)
     throw new InputError("JEV 依据判断结构无效。");
-  if (version === 3) return { necessity, strictness, basis: String(basis.choice),
+  if (version >= 3) return { necessity, strictness, basis: String(basis.choice),
     route: necessity.score >= routing.reviseNecessityAtLeast && strictness.score < routing.reviseStrictnessBelow ? "revise" : "pass" };
   // Kept only to verify historical receipts. Current decisions never enter this branch.
   let route: Assessment["route"] = "recheck";
@@ -167,7 +170,7 @@ function judgmentState(group: JudgmentGroup, objection: Objection, context: unkn
       verification: ["acceptance"], acceptance_quality: ["acceptance"] };
     for (const section of sections[String(value.id)] ?? ["components", "steps"]) if (Object.hasOwn(candidate, section)) add("candidate", `/${section}`);
   }
-  if (version === 3) {
+  if (version >= 3) {
     const sections: Record<string, string[]> = { requirements: ["coverage", "components", "interaction"], requirement_sufficiency: ["coverage", "unknowns", "selectionBasis"],
       feasibility: ["capabilities", "execution", "decisions", "platformClaims"], minimality: ["components", "steps"],
       interfaces: ["components", "steps", "interaction", "failureHandling"], failure_handling: ["components", "failureHandling", "steps"],
@@ -189,7 +192,10 @@ function judgmentState(group: JudgmentGroup, objection: Objection, context: unkn
     deferredVerifications: source.deferredVerifications, priorFindings: objection.field === "priorFindingDecisions" ? priorFindings : null,
     acceptanceIndex: rows(candidate.acceptance).map(row => ({ id: row.id, requirementIds: row.requirementIds, input: row.input, expected: row.expected })),
     programFacts: arithmeticFacts(candidate), instruction: "只决定本组这一条意见是否应阻塞当前架构；其他组没有被授权通过。不要把评审意见当原始需求；不要假设本次资料中未出现的事实。",
-    ...(version === 1 ? {} : { architectureScope: ARCHITECTURE_JEV_SCOPE }), ...(version === 3 ? { routing } : {}) };
+    ...(version === 1 ? {} : { architectureScope: ARCHITECTURE_JEV_SCOPE }), ...(version >= 3 ? { routing } : {}),
+    ...(version >= 4 ? { failureAcceptanceGuide: FAILURE_ACCEPTANCE_GUIDE,
+      failureDependencies: architectureFailureDependencies(rows(candidate.capabilities).map(row => ({ id: String(row.id), status: String(row.status) })),
+        { connections: rows(candidate.connections).map(row => ({ id: String(row.id), purpose: String(row.purpose) })), runtimeCapabilities: source.runtimeCapabilities }) } : {}) };
   if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024)
     stop("review_judgment_material_capacity", "这一条争议所需原文过多，需要缩小问题范围；未截断材料或自动放行。", { groupId: group.id, objection: objection.key });
   return state;
@@ -205,8 +211,8 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
   const read = (input: unknown): ReviewJudgmentCheckpoint => {
     const saved = objectFields(input), { hash, ...body } = saved;
     const keys = ["bindingHash", "candidateHash", "completedReviewHash", "groups", "hash", "version",
-      ...((saved.version === 2 || saved.version === 3) && saved.previousPolicy !== undefined ? ["previousPolicy"] : [])].sort().join();
-    if ((saved.version !== 1 && saved.version !== 2 && saved.version !== 3) || saved.bindingHash !== binding(saved.version as PolicyVersion)
+      ...((saved.version === 2 || saved.version === 3 || saved.version === 4) && saved.previousPolicy !== undefined ? ["previousPolicy"] : [])].sort().join();
+    if ((saved.version !== 1 && saved.version !== 2 && saved.version !== 3 && saved.version !== 4) || saved.bindingHash !== binding(saved.version as PolicyVersion)
       || saved.candidateHash !== options.candidateHash || hash !== repairHash(body) || Object.keys(saved).sort().join() !== keys
       || !saved.groups || typeof saved.groups !== "object" || Array.isArray(saved.groups))
       stop("review_judgment_binding", "JEV 原判定与候选、分组、模型或评分规则不符；不能清零后重跑。");
@@ -276,7 +282,7 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
     verifyGroups(checkpoint);
   };
   let checkpoint = options.checkpoint === undefined
-    ? seal({ version: 3, bindingHash: binding(3), candidateHash: options.candidateHash, completedReviewHash: null, groups: {} })
+    ? seal({ version: 4, bindingHash: binding(4), candidateHash: options.candidateHash, completedReviewHash: null, groups: {} })
     : read(options.checkpoint);
   verifyHistory(checkpoint);
   const migrated = checkpoint.version < 3 && checkpoint.completedReviewHash === null;
@@ -394,10 +400,10 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
       check.sufficient = !scopeIssues(effective, check.acceptanceId, options.context).length;
       if (check.sufficient) check.reason = "本项具体阻塞意见已逐条由 JEV 撤销或降为建议；原判断保留在判定记录。";
     }
-    if (checkpoint.version === 3) for (const check of effective.checks) {
+    if (checkpoint.version >= 3) for (const check of effective.checks) {
       if (effective.issues.some(issue => issue.blocking && issue.checkId === check.id)) check.passed = false;
     }
-    options.validate(group, effective, checkpoint.version === 3);
+    options.validate(group, effective, checkpoint.version >= 3);
     approvals.push({ groupId: group.id, by: objections(round.parts, options.context).length ? "jev" : "reviewer", status: objections(effective, options.context).length ? "revise" : "pass" });
     for (const field of ["checks", "issues", "acceptanceScopeChecks", "priorFindingDecisions"] as const)
       (result[field] as unknown[]).push(...effective[field]);

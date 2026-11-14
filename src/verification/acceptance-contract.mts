@@ -15,6 +15,8 @@ import { INPUT_REJECTION_TARGETS, INPUT_REJECTION_RESULT_CONTRACT, INPUT_REJECTI
   INPUT_REJECTION_EXPECTED_EVIDENCE } from "./input-rejection-contract.mjs";
 import { TEST_FIXTURE_SCHEMA, FIXTURE_LIMITS } from "../development/development-fixtures.mjs";
 
+export const FAILURE_ACCEPTANCE_GUIDE = "失败验收依据确认需求、实际依赖和负责层。待开发代码、平台运行器和网关机制不自动产生业务工具故障；真实工具/连接的失败响应、用户明确要求的异常处理和恢复仍须保留。平台自身故障由平台处理，应用不重复制造。架构说明失败来源、负责方和验证方向即可，脚本和夹具留给研发。模拟只替换实际调用的工具回执，不替换被测代码；缺少对应依赖或支持手段须纠正验收适用性，不能当成以后补材料。正式架构重查可纠正系统额外加入的技术验收，并同步职责和交接；用户要求不删减，研发不自行改写批准验收。";
+
 export const ACCEPTANCE_ADAPTERS: Readonly<Record<AcceptanceAdapterId, Readonly<AdapterInfo>>> = Object.freeze({
   action: Object.freeze({ stage: "development", owner: "generated-code", scope: "generated-action-execution" }),
   "input-contract": Object.freeze({ stage: "development", owner: "platform", scope: "action-input-admission" }),

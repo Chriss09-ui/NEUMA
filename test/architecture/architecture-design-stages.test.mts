@@ -4,7 +4,8 @@ import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
-import { designSubmissionSchema, designHash, validateDesign } from "../../src/architecture/architecture-contract.mjs";
+import { CAPABILITIES, designSubmissionSchema, designHash, validateDesign } from "../../src/architecture/architecture-contract.mjs";
+import { diagnoseArchitectureReferences } from "../../src/architecture/architecture-tool-diagnostics.mjs";
 import { createArchitectureStageSchemas, architectureBlueprintWriter, readArchitectureBlueprintStructure, validateArchitectureBlueprint, validateArchitectureModule,
   assembleArchitectureCandidate, applyArchitectureIntegration, prepareArchitectureIntegration, readArchitectureIntegrationStructure, diagnoseBlueprintAssignments } from "../../src/architecture/architecture-design-stages.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
@@ -103,11 +104,37 @@ test("新蓝图省略已确认的操作开关时宿主绑定真值，冲突声�
   assert.deepEqual(undecided.validate(blueprint), blueprint);
 });
 
+test("专属代码和平台运行器不强制业务工具故障，真实依赖仍须验收且显式用户义务不丢失", () => {
+  const f = obligationFixture();
+  const runtime = { id: "future_runtime", version: 1, status: "available", scope: "平台交付机制" };
+  const context = { ...f, capabilities: [...CAPABILITIES, runtime], runtimeCapabilities: { hostDeliveryCapabilities: [runtime] } };
+  const validation = { requirements: f.requirements, capabilities: context.capabilities, runtimeCapabilities: context.runtimeCapabilities };
+  const module = f.modules[1]!;
+  module.capabilities = [{ id: "format_conversion_code", status: "needs_development", reason: "实现本地转换" },
+    { id: runtime.id, status: "available", reason: "运行代码" }];
+  module.acceptance = module.acceptance.filter(row => row.kind !== "tool_failure");
+  const moduleContext = { ...context, assignment: f.blueprint.modules[1]!, dependencyModules: [f.modules[0]!] };
+  assert.doesNotThrow(() => validateArchitectureModule(module, moduleContext));
+  const candidate = assembleArchitectureCandidate(context).candidate;
+  assert.doesNotThrow(() => validateDesign(candidate, validation));
+  assert.ok(!diagnoseArchitectureReferences(candidate, context).issues.some(row => row.missingKinds?.includes("tool_failure")));
+  const missingObligation = structuredClone(candidate);
+  missingObligation.acceptance = missingObligation.acceptance.filter(row => !row.requirementIds.includes("verification_execution"));
+  assert.throws(() => validateDesign(missingObligation, validation), /缺少验收/);
+  module.capabilities.push({ id: "read_workspace_file", status: "available", reason: "读取本任务资料" });
+  rejected(() => validateArchitectureModule(module, moduleContext), "module.acceptance");
+  const withTool = structuredClone(candidate); withTool.capabilities = structuredClone(module.capabilities);
+  rejected(() => validateDesign(withTool, validation), "design.acceptance");
+  assert.ok(diagnoseArchitectureReferences(withTool, context).issues.some(row => row.missingKinds?.includes("tool_failure")));
+  module.capabilities.at(-1)!.status = "needs_development";
+  rejected(() => validateArchitectureModule(module, moduleContext), "module.acceptance");
+});
+
 test("模块提交前拒绝自己负责的验收类型、真实动作、原阶段及必填清单缺项", async t => {
   const cases: { name: string; index: number; path: string; change(module: ArchitectureModule): void }[] = [
     ...["missing_input", "boundary"].map(kind => ({ name: `缺少${kind}`, index: 0, path: "module.acceptance",
       change(module: ArchitectureModule) { module.acceptance = module.acceptance.filter(row => row.kind !== kind); } })),
-    ...["success", "tool_failure"].map(kind => ({ name: `缺少${kind}`, index: 1, path: "module.acceptance",
+    ...["success"].map(kind => ({ name: `缺少${kind}`, index: 1, path: "module.acceptance",
       change(module: ArchitectureModule) { for (const row of module.acceptance) if (row.kind === kind) row.kind = "boundary"; } })),
     { name: "业务计算不能只留运行期观察", index: 1, path: "module.acceptance", change(module) {
       for (const row of module.acceptance) if (row.requirementIds.includes("task"))

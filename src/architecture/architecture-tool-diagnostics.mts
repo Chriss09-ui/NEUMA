@@ -60,7 +60,7 @@ export function architectureToolValidation(value: unknown, schema: ToolSchema, {
 }
 
 // This explains rejected candidates. It never accepts, repairs or changes the formal validation order.
-export function diagnoseArchitectureReferences(input: unknown, { requirements = [], capabilities = CAPABILITIES, evidence = [], schema, limit = 40 }: { requirements?: Pick<RequirementItem, "id">[]; capabilities?: readonly Pick<Capability, "id" | "status">[]; evidence?: Pick<EvidenceItem, "id">[]; schema?: ToolSchema; limit?: number } = {}) {
+export function diagnoseArchitectureReferences(input: unknown, { requirements = [], capabilities = CAPABILITIES, evidence = [], schema, limit = 40, runtimeCapabilities }: { requirements?: Pick<RequirementItem, "id">[]; capabilities?: readonly Pick<Capability, "id" | "status">[]; evidence?: Pick<EvidenceItem, "id">[]; schema?: ToolSchema; limit?: number; runtimeCapabilities?: unknown } = {}) {
   const value = objectFields(input);
   const issues: ReferenceIssue[] = [], seen = new Set<string>();
   let total = 0, retainedCharacters = 0;
@@ -141,7 +141,8 @@ export function diagnoseArchitectureReferences(input: unknown, { requirements = 
   for (const [index, item] of groups.decisions.entries()) for (const [child, id] of entries(item?.evidenceIds).entries())
     reference(id, evidenceIds, `design.decisions[${index}].evidenceIds[${child}]`, { host: true, declaredPath: declared.evidenceIds });
   const kinds = new Set(groups.acceptance.map((item) => item?.kind));
-  const requiredKinds = requiredArchitectureAcceptanceKinds(groups.capabilities.map(item => ({ id: String(item?.id) })));
+  const requiredKinds = requiredArchitectureAcceptanceKinds(groups.capabilities.map(item => ({ id: String(item.id), status: String(item.status) })),
+    { runtimeCapabilities, capabilities, connections: entries(value.connections).map(objectFields).map(item => ({ id: String(item.id), purpose: String(item.purpose) })) });
   const missingKinds = requiredKinds.filter((kind) => !kinds.has(kind));
   if (missingKinds.length) add({ path: "design.acceptance", reason: "missing_acceptance_kind", missingKinds, remedy: "补齐这些实际验收场景，不能用重复成功场景代替。" });
   for (const [index, item] of groups.acceptance.entries()) if (requirementIds.size) for (const [child, id] of entries(item?.requirementIds).entries())

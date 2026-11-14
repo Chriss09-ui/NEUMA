@@ -431,8 +431,8 @@ export function validateDesign(input: unknown, { requirements, capabilities = CA
   uniqueIds(evidence, "evidence");
   validateArchitectureDecisionReferences(value, { evidence, confirmedRequirementContext, deferredVerifications, requirements });
   const kinds = new Set<string>(value.acceptance.map((item) => item.kind));
-  const missingKinds = requiredArchitectureAcceptanceKinds(value.capabilities).filter(kind => !kinds.has(kind));
-  if (missingKinds.length) fail(missingKinds[0] === "tool_failure" ? "使用工具时必须提供 tool_failure 验收场景" : `缺少 ${missingKinds[0]} 验收场景`,
+  const missingKinds = requiredArchitectureAcceptanceKinds(value.capabilities, { connections: value.connections ?? [], runtimeCapabilities, capabilities }).filter(kind => !kinds.has(kind));
+  if (missingKinds.length) fail(missingKinds[0] === "tool_failure" ? "实际依赖工作工具或业务连接时必须提供 tool_failure 验收场景" : `缺少 ${missingKinds[0]} 验收场景`,
     { path: "design.acceptance", reason: "missing_acceptance_kind", missingKinds });
   const tested = new Set();
   for (const [index, acceptance] of value.acceptance.entries()) {

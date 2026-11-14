@@ -229,7 +229,7 @@ ${pipelineStage ? "本阶段提交契约已完整提供在提交工具参数中�
 ${pipelineStage === "blueprint" && flatHandoffs ? "优先直接提交顶层全局字段、modules和handoffText（设计依据）。程序组装global对象。旧global对象形式也可单独使用。" : ""}
 ${pipelineStage === "blueprint" && !flatHandoffs ? "蓝图提交的global是对象、modules是数组，不能编码成字符串；selectionBasis直接放在global内。仅负责全局选择、职责划分与冲突裁决；模块细节留给模块设计者。存在多个独立技术难点且提供consult_architecture时，按问题及责任需求分组委派专项分析；简单任务直接提交。子分析是建议，不能替代原始需求、平台事实或正式验收。" : ""}
 ${pipelineStage === "blueprint" ? BLUEPRINT_ASSIGNMENT_RULE : ""}
-${pipelineStage === "blueprint" ? "需求分工还决定系统验收责任：task主责承担成功及业务动作验收，inputSource主责承担缺少输入与边界验收，deliverable主责承担代码或业务连接的失败验收及整体失败处理。纯工具方案中选用新能力的模块承担其失败验收。没有对应标准需求时按模块顺序分配，宿主会生成明确moduleObligations；不为这些义务新增业务模块。" : ""}
+${pipelineStage === "blueprint" ? "需求分工还决定系统验收责任：task主责承担成功及业务动作验收，inputSource主责承担缺少输入与边界验收。实际业务连接的失败响应由deliverable主责统筹，工作工具的失败响应由使用它的模块承担；写代码或使用平台运行器本身不增加故障验收。没有对应标准需求时按模块顺序分配，宿主会生成明确moduleObligations；不为这些义务新增业务模块。" : ""}
 ${pipelineStage === "blueprint" ? "interaction.assistant仅指托管页面的浮窗助手，不是普通对话入口；未确认启用则不得添加，启用必须page=true且保留用途。profile=workflow表示需要持久检查点的流程，不能配builtin；单次专属代码动作按实际需求选择custom。Python不能配builtin；无代码必须none/builtin。保持已确认的默认入口、页面和操作交付。" : ""}
 ${pipelineStage === "module" ? "capabilities中status=available的id必须逐字来自本轮能力目录，不能为已有能力另起别名；平台交付机制不等于新工具编号。专属待开发代码单独标needs_development，不把目录已可用的运行器改标为待开发。" : ""}
 ${pipelineStage === "module" ? "moduleId和blueprintHash由宿主在正式提交时绑定本次assignment，无需复制历史摘要。遵守moduleCapacity的本模块条数额度，保留完整业务义务，合并重复表达而不截断内容。" : ""}

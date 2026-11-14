@@ -294,7 +294,7 @@ function validationRecovery(record: Partial<StoredArchitectureRecord>, checkpoin
   if (!record.draft || !record.requirements) return null;
   const plan = architectureStageRepairPlan(checkpoint, { draft: record.draft, requirements: record.requirements,
     candidateSchema: designSubmissionSchema(record.draft, { requirements: record.requirements }), ...stageOptions(checkpoint),
-    deferredVerifications: record.deferredVerifications,
+    deferredVerifications: record.deferredVerifications, runtimeCapabilities: record.runtimeCapabilities,
     capabilities: record.platformSnapshot ? platformCapabilityCatalog(record.platformSnapshot, { runtimeCapabilities: record.runtimeCapabilities }) : CAPABILITIES });
   if (!plan) return null;
   const targets = stages(checkpoint).filter(item => plan.targets.includes(item.entry.key));
@@ -421,7 +421,7 @@ export function architectureDesignRecovery(record: Partial<StoredArchitectureRec
     const localCompletion = integrationReady && record.draft?.taskSpec && Array.isArray(record.requirements)
       && Boolean(programIntegration(checkpoint, { requirements: record.requirements,
         draft: record.draft, capabilities: record.platformSnapshot ? platformCapabilityCatalog(record.platformSnapshot, { runtimeCapabilities: record.runtimeCapabilities }) : CAPABILITIES,
-        evidence: record.evidence ?? [], confirmedRequirementContext: record.confirmedRequirementContext, deferredVerifications: record.deferredVerifications,
+        evidence: record.evidence ?? [], confirmedRequirementContext: record.confirmedRequirementContext, deferredVerifications: record.deferredVerifications, runtimeCapabilities: record.runtimeCapabilities,
         candidateSchema: designSubmissionSchema(record.draft, { requirements: record.requirements }) }));
     const target = exhausted ?? continuing ?? (integrationReady ? { stage: "integration", entry: checkpoint.integration } : null);
     if (!target) return null;

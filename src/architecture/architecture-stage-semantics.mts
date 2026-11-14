@@ -5,8 +5,21 @@ import { validateConnectionDefinition } from "../connections/connection-contract
 
 export interface StageSemanticIssue { path: string; reason: string; message: string; allowedReferences?: string[]; missingReferences?: string[]; missingKinds?: string[]; ownerModuleId?: string }
 
-export function requiredArchitectureAcceptanceKinds(capabilities: readonly { id: string }[]): ArchitectureAcceptance["kind"][] {
-  return ["success", "missing_input", "boundary", ...(capabilities.some(item => item.id !== "conversation") ? ["tool_failure" as const] : [])];
+export function architectureFailureDependencies(capabilities: readonly { id: string; status?: string }[],
+  { connections = [], runtimeCapabilities, capabilities: catalog = [] }: { connections?: readonly { id?: string; purpose?: string }[]; runtimeCapabilities?: unknown; capabilities?: readonly Pick<Capability, "id">[] | undefined } = {}) {
+  const hostCapabilities = objectFields(runtimeCapabilities).hostDeliveryCapabilities;
+  // Use the caller's frozen host catalog; platform mechanisms are not business tool calls.
+  const hostIds = new Set(Array.isArray(hostCapabilities) ? hostCapabilities.map(item => objectFields(item).id) : []);
+  const knownIds = new Set(catalog.map(item => item.id));
+  return { toolIds: capabilities.filter(item => item.id !== "conversation" && !hostIds.has(item.id)
+      && (item.status !== "needs_development" || knownIds.has(item.id))).map(item => item.id),
+    connectionIds: connections.filter(item => item.purpose === "business").map(item => item.id) };
+}
+
+export function requiredArchitectureAcceptanceKinds(capabilities: readonly { id: string; status?: string }[],
+  context: Parameters<typeof architectureFailureDependencies>[1] = {}): ArchitectureAcceptance["kind"][] {
+  const dependencies = architectureFailureDependencies(capabilities, context);
+  return ["success", "missing_input", "boundary", ...(dependencies.toolIds.length || dependencies.connectionIds.length ? ["tool_failure" as const] : [])];
 }
 
 /** These checks need only global choices, so they can run before any module is designed. */

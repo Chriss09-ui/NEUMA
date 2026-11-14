@@ -62,6 +62,9 @@ test("每组独立判定：评审通过不请求JEV；过严意见可撤销，�
     request: async args => {
       const state = objectFields(args.state), id = String(state.groupId); calls.push(id);
       await args.onAttempt(1);
+      assert.equal(f.saved().version, 4);
+      assert.match(String(state.failureAcceptanceGuide), /用户明确要求的异常处理/);
+      assert.deepEqual(state.failureDependencies, { toolIds: [], connectionIds: [] });
       assert.equal(f.saved().groups[id]!.rounds[0]!.receipts["issues/0"]!.attempts, 1, "发送前持久记录实际调用");
       assert.equal((state.programFacts as { sum: number }[])[0]!.sum, 0, "实际输入由程序计算而非复述评审意见");
       return id === "interfaces" ? response(1, 3) : id === "failure" ? response(3, 1) : response(2, 0);

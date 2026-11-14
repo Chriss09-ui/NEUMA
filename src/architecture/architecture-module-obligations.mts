@@ -4,7 +4,7 @@ import { requiredArchitectureAcceptanceKinds, type StageSemanticIssue } from "./
 import type { ArchitectureAcceptance } from "../contracts/architecture.mjs";
 import { requiredActionAcceptanceRequirementIds, requiredAcceptanceStages, validateAcceptanceVerification } from "../verification/acceptance-contract.mjs";
 
-export const MODULE_OBLIGATION_RULE = "moduleObligations由冻结分工与最终校验规则生成，不是新增业务需求。必须完成本模块acceptanceKinds、minimumItems、actionRequirementIds和stageRequirements；验收只引用自己主责编号。conditionalAcceptanceKinds在本模块实际选用对话之外能力时必须补齐；处理办法不能替代具体输入、可观察预期及正确验证阶段的验收用例。其他模块承担的义务不必重复。";
+export const MODULE_OBLIGATION_RULE = "moduleObligations由冻结分工与最终校验规则生成，不是新增业务需求。必须完成本模块acceptanceKinds、minimumItems、actionRequirementIds和stageRequirements；验收只引用自己主责编号。conditionalAcceptanceKinds仅在本模块实际依赖工作工具或业务连接时补齐；待开发代码和平台运行器不自动产生工具故障义务。用户明确要求的失败处理仍须保留。验收说明业务场景、可观察预期及正确负责阶段，其他模块承担的义务不必重复。";
 
 /** Derived obligations have explicit owners without changing the frozen blueprint or its wire schema. */
 export function architectureModuleObligations(blueprint: ArchitectureBlueprint, context: StageSchemaOptions, knownModules: readonly ArchitectureModule[] = []) {
@@ -16,14 +16,12 @@ export function architectureModuleObligations(blueprint: ArchitectureBlueprint, 
   }]));
   const kindOwners: Record<ArchitectureAcceptance["kind"], string> = { success: task, missing_input: input,
     boundary: owner("inputSource", last), tool_failure: delivery };
-  const kinds = requiredArchitectureAcceptanceKinds([]);
-  const usesCode = blueprint.global.execution?.language !== undefined && blueprint.global.execution.language !== "none";
-  const plannedExecution = usesCode || blueprint.global.connections?.some(connection => connection.purpose === "business");
-  if (plannedExecution) kinds.push("tool_failure");
+  const kinds = requiredArchitectureAcceptanceKinds([], { connections: blueprint.global.connections ?? [], runtimeCapabilities: context.runtimeCapabilities });
   for (const kind of kinds) result[kindOwners[kind]]!.acceptanceKinds.push(kind);
-  if (!plannedExecution) for (const assignment of blueprint.modules) {
+  for (const assignment of blueprint.modules) {
+    if (result[assignment.id]!.acceptanceKinds.includes("tool_failure")) continue;
     const selected = knownModules.find(module => module.moduleId === assignment.id)?.capabilities ?? [];
-    (requiredArchitectureAcceptanceKinds(selected).includes("tool_failure")
+    (requiredArchitectureAcceptanceKinds(selected, { runtimeCapabilities: context.runtimeCapabilities, capabilities: context.capabilities }).includes("tool_failure")
       ? result[assignment.id]!.acceptanceKinds : result[assignment.id]!.conditionalAcceptanceKinds).push("tool_failure");
   }
   for (const [field, id] of [["capabilities", input], ["decisions", owner("task", last)], ["failureHandling", delivery]] as const) {

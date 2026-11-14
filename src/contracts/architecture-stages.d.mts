@@ -13,7 +13,7 @@ export interface ArchitectureModule { moduleId: string; blueprintHash: string; i
 export interface ResolvedArchitectureModule extends Omit<ArchitectureModule, "steps" | "coverage"> { steps: ArchitectureBase["steps"]; coverage: ArchitectureBase["coverage"] }
 export interface ArchitectureConflict { path: string; reason: string; relatedPaths: string[]; moduleIds: string[] }
 export interface StageSchema extends ToolSchema { properties?: Record<string, StageSchema>; items?: StageSchema; anyOf?: StageSchema[]; maxItems?: number; minItems?: number; maxLength?: number }
-export interface StageSchemaOptions { candidateSchema: StageSchema; requirements?: RequirementItem[]; legacyBlueprint?: boolean; textHandoffs?: boolean; compactSubmissions?: boolean; moduleLimit?: number | undefined; draft?: unknown; capabilities?: readonly import("./architecture.mjs").Capability[] | undefined; deferredVerifications?: unknown }
+export interface StageSchemaOptions { candidateSchema: StageSchema; requirements?: RequirementItem[]; legacyBlueprint?: boolean; textHandoffs?: boolean; compactSubmissions?: boolean; moduleLimit?: number | undefined; draft?: unknown; capabilities?: readonly import("./architecture.mjs").Capability[] | undefined; deferredVerifications?: unknown; runtimeCapabilities?: unknown }
 export interface ArchitectureModuleObligations { moduleId: string; acceptanceKinds: ArchitectureAcceptance["kind"][];
   conditionalAcceptanceKinds: ArchitectureAcceptance["kind"][];
   minimumItems: Partial<Record<"capabilities" | "decisions" | "failureHandling", number>>;

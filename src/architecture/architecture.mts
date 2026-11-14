@@ -1026,7 +1026,7 @@ export class ArchitectureDesigner {
             if (diagnostic?.allowedReferences) error.message += `；允许引用的编号：${diagnostic.allowedReferences.join("、")}`;
             if (role === "designer" && submitName === "submit_architecture") {
               lastSubmissionDiagnostics = diagnoseArchitectureReferences(value, { schema: parameters, requirements: payload.requirements ?? [],
-                capabilities: payload.capabilities ?? CAPABILITIES, evidence: payload.evidence ?? [] });
+                capabilities: payload.capabilities ?? CAPABILITIES, evidence: payload.evidence ?? [], runtimeCapabilities: payload.runtimeCapabilities });
               if (lastSubmissionDiagnostics.total) error.message += "；本候选全部可独立确定的引用与覆盖问题：" + JSON.stringify(lastSubmissionDiagnostics);
             }
             if (role === "reviewer" && Array.isArray(error.validationIssues)) {

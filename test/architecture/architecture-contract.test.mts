@@ -83,6 +83,9 @@ test("v3通用连接的自由接口schema与参数映射可同时通过SDK和架
     connections: [connection, { id: "local_mcp", purpose: "business", required: false, description: "授权的本机MCP", protocol: "mcp",
       operations: [{ id: "lookup", tool: "lookup", inputSchema: { type: "object", properties: { keyword: { type: "string" } } } }] }] });
   assert.equal(new Ajv({ strict: false }).compile(DESIGN_V3_SCHEMA)(value), true);
+  assert.throws(() => validateDesign(value, context), /业务连接时必须提供 tool_failure/);
+  value.acceptance.push({ id: "search_failure", kind: "tool_failure", requirementIds: ["task"], input: "授权检索接口返回失败",
+    expected: "说明检索失败，不编造检索结果", verification: { stage: "development", owner: "generated-code", adapterId: "action" } });
   assert.doesNotThrow(() => validateDesign(value, context));
   assert.equal(checkDesign(value, context).issues.some((issue) => issue.blocking), false);
   const invalid = structuredClone(value); invalid.connections[0]!.operations[0]!.timeoutMs = 0;

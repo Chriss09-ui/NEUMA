@@ -7,11 +7,13 @@ import type { DevelopmentReview, DevelopmentPlan } from "../contracts/developmen
 import type { DevelopmentController } from "./development.mjs";
 import type { DevelopmentContext, DevelopmentEvidence, TaskProgress } from "./development-controller-types.mjs";
 import type { DevelopmentSnapshot } from "./development-workspace.mjs";
+import { FAILURE_ACCEPTANCE_GUIDE } from "../verification/acceptance-contract.mjs";
+import { developmentTestCapabilities } from "./development-test-capabilities.mjs";
 
 interface Assessment { necessity: number; strictness: number; basis: string; route: "pass" | "revise" }
 interface Receipt { stateHash: string; attempts: number; formatFailures: number; responses: unknown[]; assessment: Assessment | null }
 export interface DevelopmentJudgmentCheckpoint {
-  version: 1; bindingHash: string; original: DevelopmentReview; receipts: Record<string, Receipt>;
+  version: 1 | 2; bindingHash: string; original: DevelopmentReview; receipts: Record<string, Receipt>;
   effective: DevelopmentReview | null; hash: string;
 }
 const rubric = { version: "development-group-jev-v1", necessityAtLeast: 75, strictnessBelow: 50, questions: {
@@ -22,6 +24,7 @@ const rubric = { version: "development-group-jev-v1", necessityAtLeast: 75, stri
   basis: { type: "choice", instructions: "记录材料是否支持本条意见。只记录依据，不另设补查、置信度或暂停出口；合法评分仅产生通过或打回修改。程序实际测试结果保持原状。",
     criteria: { supported: "材料支持意见所述事实。", contradicted: "材料反证全部阻断主张。", unproven: "现有材料不足以确认意见。" } },
 } };
+const rubrics = { 1: rubric, 2: { ...rubric, version: "development-group-jev-v2", failureAcceptanceGuide: FAILURE_ACCEPTANCE_GUIDE } };
 
 function assess(response: unknown): Assessment {
   const answers = objectFields(objectFields(response).answers);
@@ -50,7 +53,7 @@ const seal = (value: DevelopmentJudgmentCheckpoint) => {
 };
 export function readDevelopmentJudgment(value: DevelopmentJudgmentCheckpoint) {
   const { hash, ...body } = value;
-  if (value.version !== 1 || hash !== hashValue(body) || !/^[a-f0-9]{64}$/u.test(value.bindingHash)
+  if ((value.version !== 1 && value.version !== 2) || hash !== hashValue(body) || !/^[a-f0-9]{64}$/u.test(value.bindingHash)
     || !value.receipts || !value.original || !Array.isArray(value.original.issues)) throw new InputError("研发 JEV 判定记录无效。");
   for (const [id, receipt] of Object.entries(value.receipts)) {
     if (!value.original.issues.some(issue => issue.id === id && issue.blocking)
@@ -69,10 +72,12 @@ export async function judgeDevelopmentReview(controller: DevelopmentController, 
   snapshot?: DevelopmentSnapshot, scope?: { kind: string; ids: string[] }): Promise<DevelopmentReview> {
   const key = hashValue({ subjectHash: original.subjectHash, original }), saved = ctx.record.reviewJudgments?.[key];
   if (!controller.config?.jevApiKey && !saved) return original;
-  const bindingHash = hashValue({ runId: ctx.record.id, architectureRef: ctx.record.architectureRef, groupId, mode, rubric,
+  const version = saved ? readDevelopmentJudgment(saved).version : 2;
+  const selectedRubric = rubrics[version];
+  const bindingHash = hashValue({ runId: ctx.record.id, architectureRef: ctx.record.architectureRef, groupId, mode, rubric: selectedRubric,
     subjectHash: original.subjectHash, planHash: payload.planHash, codeHash: snapshot?.hash ?? null, reportId: payload.report?.id ?? null,
     model: controller.config.jevModel || "jev-1.14.0", original });
-  const checkpoint = saved ? readDevelopmentJudgment(saved) : seal({ version: 1, bindingHash, original: structuredClone(original), receipts: {}, effective: null, hash: "" });
+  const checkpoint = saved ? readDevelopmentJudgment(saved) : seal({ version, bindingHash, original: structuredClone(original), receipts: {}, effective: null, hash: "" });
   if (checkpoint.bindingHash !== bindingHash) throw new InputError("研发 JEV 判定与当前计划、代码或报告不一致，原用量保留。");
   const persist = async () => {
     controller.guard(ctx); (ctx.record.reviewJudgments ??= {})[key] = seal(checkpoint); await controller.save(ctx);
@@ -103,6 +108,7 @@ export async function judgeDevelopmentReview(controller: DevelopmentController, 
       }) : [],
       currentTaskId: payload.task?.id ?? null, completedTaskIds: ctx.record.tasks.filter(task => task.status === "verified").map(task => task.id),
       report, runtimeCapabilities: ctx.record.architecture.runtimeCapabilities ?? null,
+      ...(version === 2 ? { failureAcceptanceGuide: FAILURE_ACCEPTANCE_GUIDE, testCapabilities: developmentTestCapabilities() } : {}),
       programFacts: { admissionFacts: payload.admissionFacts ?? null, caseFacts: payload.caseFacts ? { ...facts,
         cases: Array.isArray(facts.cases) ? facts.cases.filter(row => caseIds.has(String(objectFields(row).caseId))) : [] } : null },
       routing: { necessityAtLeast: 75, strictnessBelow: 50, otherwise: "pass" },
@@ -114,7 +120,7 @@ export async function judgeDevelopmentReview(controller: DevelopmentController, 
     while (!receipt.assessment && receipt.formatFailures < 3) {
       let response: unknown;
       try {
-        response = await requestJevDecision({ config: controller.config, state, questions: rubric.questions, signal: ctx.signal,
+        response = await requestJevDecision({ config: controller.config, state, questions: selectedRubric.questions, signal: ctx.signal,
           onAttempt: async () => { receipt.attempts++; await persist(); } });
       } catch (error) {
         if (objectFields(objectFields(error).diagnostic).reason !== "invalid_json") throw error;

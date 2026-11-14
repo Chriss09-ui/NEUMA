@@ -127,11 +127,11 @@ test("整合前完整预检失败时保留模块成果且零整合调用", async
   assert.equal(cp.modelCalls, 3); assert.equal(cp.integration.modelCalls, 0); assert.equal(cp.integration.sessionRef, null);
 });
 
-test("历史工具失败验收漏项只复核责任模块与下游，保留兄弟成果和原总账", async () => {
+test("实际使用工具的模块漏掉失败验收时只复核责任模块与下游，保留兄弟成果和原总账", async () => {
   const f = fixture();
   f.blueprint.global.profile = "custom";
   f.blueprint.global.execution = { language: "javascript", hosting: "builtin", reason: "执行专属代码并保存结果" };
-  f.modules[0]!.capabilities.push({ id: "write_workspace_file", status: "available", reason: "保存工作记录" });
+  f.modules[1]!.capabilities.push({ id: "write_workspace_file", status: "available", reason: "保存工作记录" });
   f.modules[1]!.acceptance.push({ id: "save_failure", kind: "tool_failure", requirementIds: ["req_1"],
     input: "文件工具返回明确保存失败", expected: "报告保存失败，不声称已交付文件",
     verification: { stage: "runtime", owner: "conversation", adapterId: "conversation" } });
