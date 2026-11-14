@@ -40,6 +40,10 @@ const remedies: Readonly<Record<string, string>> = Object.freeze({
   action_missing: "用例 actionId 必须匹配实际动作，并为每个公开动作安排验收。",
   mock_capability_invalid: "只使用平台已列出的能力替身，参数与结果填写合法 JSON。",
   task_acceptance_mismatch: "用例 acceptanceId 必须已分配给其 taskId 对应任务。",
+  acceptance_owner_mismatch: "将该项移出研发任务 acceptanceIds，保留相关业务实现及原架构验收，由原负责方在原阶段检查；不要改标签或删除义务。",
+  action_owner_invalid: "actionOwners 为每个公开动作及迁移/验证动作各指定一个负责的 taskId/acceptanceId 组合。同一动作只列一次；其他测试场景交给用例组，不逐场景重复分配动作。",
+  action_owner_acceptance_invalid: "actionOwners 的 acceptanceId 必须属于所选 taskId，且使用 action 验证；不能用平台审核或入口拒绝验收代替真实动作测试。",
+  activation_scope_invalid: "activationScopes 只为原架构 adapterId=host-business 的验收各列一项。原架构没有这类验收时提交 []；delivery-review 等独立检查不放入此处，保留其原责任和阶段。",
   dependency_cycle: "移除循环依赖，使每个任务可以按前置任务顺序执行。",
   assertion_path_invalid: "断言路径使用空字符串或安全属性路径，禁止原型属性和重复路径。",
   unsafe_path: "使用工作区内安全相对路径，禁止隐藏目录、凭据和依赖目录。",
@@ -188,6 +192,13 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
     const structural = toolInputValidation(input, schema, { root });
     if (!structural.valid) return structural.issues.map(entry => ({ ...entry,
       remedy: schemaIssue(input, entry.path, entry.reason).remedy }));
+    const outlineRules = new Map<string, [string, string]>([
+      ["每个公开动作及迁移/验证动作必须恰有一项研发任务与验收归属。", ["actionOwners", "action_owner_invalid"]],
+      ["动作必须分配给负责真实action验收的任务组合。", ["actionOwners", "action_owner_acceptance_invalid"]],
+      ["启用前验证作用域必须完整且仅覆盖原host-business验收。", ["activationScopes", "activation_scope_invalid"]],
+    ]);
+    const rule = outlineRules.get(String(error.message ?? ""));
+    if (rule) return [issue(...rule)];
     return submissionIssues(raw.plan, schema.properties.plan, { root, error: errorInput, sdk, architecture });
   }
   if (root === "plan" && Number(raw.schemaVersion) >= 2 && Object.hasOwn(schema.properties ?? {}, "application")) {
@@ -199,6 +210,19 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
     remedy: schemaIssue(input, entry.path, entry.reason).remedy }));
   // Semantic diagnostics below run only after the registered submission schema accepts the shape.
   const value = input as DevelopmentPlan;
+  if (root === "plan" && architecture && objectFields(error.developmentIssue).reason === "acceptance_owner_mismatch") {
+    const allowed = new Set(developmentAcceptanceItems(architecture).map(item => item.id));
+    const misplaced: SubmissionIssue[] = [];
+    for (const [taskIndex, task] of (value.tasks ?? []).entries()) for (const [index, id] of task.acceptanceIds.entries()) {
+      const item = architecture.design?.acceptance?.find(item => item.id === id);
+      if (!item || allowed.has(id)) continue;
+      const entry = issue(`plan.tasks[${taskIndex}].acceptanceIds[${index}]`, "acceptance_owner_mismatch");
+      const verification = objectFields(item.verification);
+      misplaced.push({ ...entry, referenceId: id, remedy: `该项原验证为 ${verification.stage}/${verification.owner}/${verification.adapterId}。${entry.remedy}` });
+      if (misplaced.length === 12) return misplaced;
+    }
+    if (misplaced.length) return misplaced;
+  }
   if (root === "work" && error?.reason === "work_file_unauthorized") return [issue("work.changedFiles", "work_file_unauthorized")];
   if (root === "plan" && error?.reason === "fixture_json_required"
     && isInteger(error.fixtureCaseIndex) && error.fixtureCaseIndex >= 0 && error.fixtureCaseIndex < 200

@@ -60,6 +60,28 @@ test("真实规划契约拒绝映射具体字段及固定修复建议，不再�
   }
 });
 
+test("规划误把平台独立检查分给研发任务时，一次指出全部错配且保留真实验证责任", () => {
+  const { plan, architecture, schema } = fixture(true);
+  const reviews = ["delivery_review", "routing_review"];
+  for (const id of reviews) architecture.design.acceptance.push({ id, kind: "success", input: "检查交付",
+    expected: "平台独立检查", requirementIds: [architecture.requirements[0]!.id],
+    verification: { stage: "development", owner: "platform", adapterId: "delivery-review" } });
+  assert.doesNotThrow(() => validatePlanningFragment({ ...plan, cases: [] }, { architecture }));
+  for (const [index, id] of reviews.entries()) plan.tasks[index]!.acceptanceIds.push(id);
+  let error;
+  try { validatePlanningFragment({ ...plan, cases: [] }, { architecture }); } catch (caught) { error = caught; }
+  assert.ok(error);
+  const issues = submissionIssues(plan, schema, { root: "plan", error, architecture });
+  assert.deepEqual(issues.map(({ path, reason, referenceId }) => ({ path, reason, referenceId })), reviews.map((referenceId, index) => ({
+    path: `plan.tasks[${index}].acceptanceIds[${plan.tasks[index]!.acceptanceIds.length - 1}]`,
+    reason: "acceptance_owner_mismatch", referenceId,
+  })));
+  assert.ok(issues.every(row => /delivery-review/.test(row.remedy) && /保留/.test(row.remedy)));
+  for (const [index, id] of reviews.entries()) plan.tasks[index]!.acceptanceIds = plan.tasks[index]!.acceptanceIds.filter(value => value !== id);
+  assert.doesNotThrow(() => validatePlanningFragment({ ...plan, cases: [] }, { architecture }));
+  assert.deepEqual(architecture.design.acceptance.slice(-2).map(row => row.id), reviews);
+});
+
 test("应用及服务动作结构用现有校验器定位inputSchema/outputSchema，不输出动态字段或参数", () => {
   for (const managed of [false, true]) {
     const { plan, architecture, schema } = fixture(managed);

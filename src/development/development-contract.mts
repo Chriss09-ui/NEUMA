@@ -415,11 +415,13 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
   const coveredRequirements = new Set();
   const coveredAcceptance = new Set();
   const files = new Set();
-  for (const task of value.tasks) {
+  for (const [taskIndex, task] of value.tasks.entries()) {
     for (const id of task.requirementIds) { referenced(id, requirementIds, "task.requirementIds"); coveredRequirements.add(id); }
-    for (const id of task.acceptanceIds) {
+    for (const [acceptanceIndex, id] of task.acceptanceIds.entries()) {
       referenced(id, acceptanceIds, "task.acceptanceIds");
-      if (!developmentAcceptanceIds.has(id)) fail(`验收 ${id} 由宿主或运行阶段负责，不能用研发任务代替实际验证`);
+      if (!developmentAcceptanceIds.has(id)) fail(`验收 ${id} 由宿主或运行阶段负责，不能用研发任务代替实际验证`, {
+        path: `plan.tasks[${taskIndex}].acceptanceIds[${acceptanceIndex}]`, reason: "acceptance_owner_mismatch", referenceId: id,
+      });
       coveredAcceptance.add(id);
     }
     for (const id of task.dependsOn) referenced(id, taskIds, "task.dependsOn");

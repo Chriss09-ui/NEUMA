@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
+import * as sdk from "@earendil-works/pi-coding-agent";
 import type { ValueSchema } from "../../src/contracts/application.mjs";
 import type { SessionFactory, SessionMessage } from "../../src/runtime/execution-port.mjs";
 import { DevelopmentController } from "../../src/development/development.mjs";
@@ -12,9 +13,13 @@ import { developmentArchitecture, developmentReview, developmentWork, developmen
 import { validDesign, passingReview } from "../helpers/architecture.mjs";
 import { fixtureTools, toolText } from "../helpers/m7-test-boundaries.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
-import type { TaskProgress, PassedDevelopmentArchitecture } from "../../src/development/development-controller-types.mjs";
+import { piSessionManager } from "../../src/runtime/pi-session-state.mjs";
+import { createDevelopmentTaskCheckpoint, repairHash, runDevelopmentTaskSchedule } from "../../src/runtime/repair-scheduler.mjs";
+import { runDevelopmentParts, type DevelopmentPart } from "../../src/development/development-dispatch.mjs";
+import { developmentSessionBinding } from "../../src/development/development-sessions.mjs";
+import type { TaskProgress, PassedDevelopmentArchitecture, DevelopmentContext } from "../../src/development/development-controller-types.mjs";
 
-async function fixture(t: test.TestContext, interrupt = false, activation = false, objection = false) {
+async function fixture(t: test.TestContext, interrupt = false, activation = false, objection = false, rejectOutline = false) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-dispatch-")), executor = new DevelopmentExecutor();
   const availability = await executor.probe();
   if (!availability.available) { await rm(root, { recursive: true, force: true }); t.skip(availability.reason); return; }
@@ -60,7 +65,11 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
             assert.doesNotMatch(guide, /\bsubmit_development_plan\b|\bsubmit_development_review\b|save_plan_cases|save_plan_json/);
           }
           if (tools.submit_development_plan_part) {
-            if (id === "outline") await tools.submit_development_plan_part.execute("outline", outline);
+            if (id === "outline") {
+              const submitted = structuredClone(outline);
+              if (rejectOutline && !interrupted) { interrupted = true; submitted.actionOwners.push({ ...submitted.actionOwners[0]! }); }
+              await tools.submit_development_plan_part.execute("outline", submitted);
+            }
             else {
               if (interrupt && !interrupted && id === "cases_1") { interrupted = true; throw new Error("controlled planning interruption"); }
               const assignment = objectFields(payload.caseAssignments), prefix = `g${id.slice("cases_".length)}_`;
@@ -156,6 +165,81 @@ test("规划分组中断后重建控制器仅续跑未完成组，原调用与�
   const resumed = Object.values(result.workDispatches!).find(item => item.dispatch.groups.length === 3)!.dispatch;
   assert.equal(resumed.calls, 4); assert.equal(resumed.callLimit, checkpoint.callLimit);
   assert.equal(result.budgets.corrections, stopped.budgets.corrections);
+});
+
+test("内容退回改变计数后仍沿原骨架会话恢复，历史退回和实际调用继续累计", async t => {
+  const f = await fixture(t, false, false, false, true); if (!f) return;
+  const stopped = await f.controller.run(f.architecture);
+  assert.equal(stopped.status, "failed");
+  assert.equal(stopped.retryPolicy!.content.plan!.count, 1);
+  const previous = structuredClone(stopped.workDispatches!.planning_outline!);
+  const originalSessions = structuredClone(stopped.sessions);
+  const result = await f.restart().run(f.architecture, { resume: true });
+  assert.equal(result.status, "completed", result.summary);
+  assert.deepEqual(result.retryPolicy!.content, stopped.retryPolicy!.content);
+  const current = result.workDispatches!.planning_outline!;
+  assert.equal(current.bindingHash, previous.bindingHash);
+  assert.equal(current.dispatch.groups[0]!.sessionFile, previous.dispatch.groups[0]!.sessionFile);
+  assert.equal(current.dispatch.calls, previous.dispatch.calls + 1);
+  for (const [key, session] of Object.entries(originalSessions!)) {
+    assert.equal(result.sessions![key]!.file, session.file);
+    assert.ok(result.sessions![key]!.turns >= session.turns);
+  }
+});
+
+test("旧分组从绑定原生开场核验历史计数，保留旧绑定；真实材料变化仍拒绝恢复", async t => {
+  const f = await fixture(t, false, false, false, true); if (!f) return;
+  const record = await f.controller.run(f.architecture);
+  assert.equal(record.retryPolicy!.content.plan!.count, 1);
+  const controller = new AbortController(), ctx: DevelopmentContext = { controller, signal: controller.signal, record,
+    onProgress() {}, handles: new Set(), writes: Promise.resolve(), done: Promise.resolve(), finish() {} };
+  f.controller.active.set(record.agentId, ctx);
+  t.after(() => { f.controller.active.delete(record.agentId); });
+  const key = "legacy_binding", binding = { architectureRef: record.architectureRef }, part: DevelopmentPart<unknown> = {
+    id: "legacy_outline", role: "planner", instruction: "固定历史骨架", schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+    payload: { design: { source: "approved" }, remaining: { contentRejections: {} } }, validate: value => value,
+  };
+  const identity = { binding, assignments: [{ id: part.id, role: part.role, schema: part.schema, instruction: part.instruction,
+    payload: part.payload, allowBlocker: false }], callLimit: 6 }, bindingHash = repairHash(identity), base = { parts: { [part.id]: null } };
+  const issues = [{ id: part.id, owner: part.id, paths: [`/parts/${part.id}`], description: part.instruction, remedy: "只提交本组结果，其他分组由独立会话处理。" }];
+  let nativeFile = "";
+  await assert.rejects(runDevelopmentTaskSchedule({ checkpoint: createDevelopmentTaskCheckpoint(identity, base, issues), binding: identity, base,
+    validateCandidate: value => value, save: async dispatch => {
+      record.workDispatches![key] = { version: 1, bindingHash, dispatch };
+      if (!record.dispatchedWork!.includes(key)) record.dispatchedWork!.push(key);
+      await f.controller.save(ctx);
+    }, run: async worker => {
+      const sessionBinding = developmentSessionBinding(record, part.role, { work: key, bindingHash, partId: part.id, baseHash: worker.baseHash });
+      const sessionKey = repairHash(sessionBinding), directory = await f.controller.storage.directory(record.agentId, `development/sessions/${record.id}/${sessionKey}`, { create: true });
+      const cwd = await f.controller.workspace.workspacePath(record.agentId, record.id);
+      const native = await piSessionManager(sdk, { cwd, storage: { directory, binding: sessionBinding } });
+      native.manager.appendMessage({ role: "user", content: JSON.stringify({ ...part.payload, workAssignment: { id: part.id } }), timestamp: 0 });
+      native.manager.appendMessage({ role: "assistant", api: "openai-completions", provider: "openai", model: "fixture", content: [{ type: "text", text: "合成历史开场" }],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 1 });
+      nativeFile = native.manager.getSessionFile()!;
+      record.sessions![sessionKey] = { bindingHash: sessionKey, role: part.role, file: basename(nativeFile), turns: 1 };
+      await worker.onSession(basename(nativeFile)); await worker.onCall();
+      throw new Error("controlled legacy interruption");
+    } }), /controlled legacy interruption/);
+  const legacy = structuredClone(record.workDispatches![key]!), before = await readFile(nativeFile), accounting = structuredClone(record.retryPolicy);
+  part.payload.remaining = { contentRejections: { plan: 1 } };
+  const reached = new Error("reached original role");
+  t.mock.method(f.controller, "role", async (_ctx: DevelopmentContext, options: Parameters<DevelopmentController["role"]>[1]) => {
+    assert.deepEqual(options.scope, { work: key, bindingHash, partId: part.id, baseHash: legacy.dispatch.baseHash });
+    throw reached;
+  });
+  await assert.rejects(runDevelopmentParts(f.controller, ctx, key, binding, [part]), error => error === reached);
+  assert.equal(record.workDispatches![key]!.version, 2);
+  assert.equal(record.workDispatches![key]!.bindingHash, bindingHash);
+  assert.deepEqual(record.workDispatches![key]!.dispatch, legacy.dispatch);
+  assert.deepEqual(record.retryPolicy, accounting);
+  assert.deepEqual(await readFile(nativeFile), before);
+  await assert.rejects(runDevelopmentParts(f.controller, ctx, key, binding, [part]), error => error === reached);
+  part.payload.design = { source: "changed" };
+  await assert.rejects(runDevelopmentParts(f.controller, ctx, key, binding, [part]), /材料已变化/);
+  record.workDispatches![key] = legacy;
+  await assert.rejects(runDevelopmentParts(f.controller, ctx, key, binding, [part]), /材料已变化或原会话计量无法核验/);
+  assert.deepEqual(await readFile(nativeFile), before);
 });
 
 test("v3分组规划保留独立激活用例及共享作用域，研发通过不冒充启用验证", async t => {

@@ -4,31 +4,96 @@ import type { UnknownRecord } from "../contracts/json.mjs";
 import type { RegisteredTool } from "../runtime/execution-port.mjs";
 import { createDevelopmentTaskCheckpoint, readDevelopmentTaskCheckpoint, repairHash, runDevelopmentTaskSchedule, type RepairCheckpoint } from "../runtime/repair-scheduler.mjs";
 import { objectFields } from "../runtime/type-boundary.mjs";
+import { readExecutionHistory } from "../runtime/execution-history.mjs";
 import { InputError } from "../requirements/core.mjs";
 import type { DevelopmentController } from "./development.mjs";
 import type { DevelopmentContext, DevelopmentRole } from "./development-controller-types.mjs";
 import { isPlanningBlockerOutcome } from "./development-planning-blocker.mjs";
 import { noteDevelopmentRejection, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
+import { developmentSessionBinding } from "./development-sessions.mjs";
 
-export interface DevelopmentWorkCheckpoint { version: 1; bindingHash: string; dispatch: RepairCheckpoint<null> }
+interface AccountingSnapshot { id: string; remaining?: unknown; omitUnresolved?: true }
+interface WorkIdentity { binding: unknown; assignments: { id: string; role: DevelopmentRole; schema: ToolSchema;
+  instruction: string; payload: UnknownRecord; allowBlocker: boolean }[]; callLimit: number }
+export type DevelopmentWorkCheckpoint = { version: 1; bindingHash: string; dispatch: RepairCheckpoint<null> }
+  | { version: 2; bindingHash: string; materialHash: string; originalAccounting?: AccountingSnapshot[]; dispatch: RepairCheckpoint<null> };
 export interface DevelopmentPart<T> { id: string; role: DevelopmentRole; instruction: string; schema: ToolSchema;
   payload: UnknownRecord; tools?: RegisteredTool[]; allowBlocker?: boolean; validate(value: unknown): T }
 
 export function readDevelopmentWorkCheckpoint(value: unknown): DevelopmentWorkCheckpoint {
   const raw = objectFields(value);
-  if (Object.keys(raw).sort().join() !== "bindingHash,dispatch,version" || raw.version !== 1 || typeof raw.bindingHash !== "string")
+  const keys = Object.keys(raw).sort().join(), hash = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (!hash(raw.bindingHash) || !(raw.version === 1 && keys === "bindingHash,dispatch,version"
+    || raw.version === 2 && hash(raw.materialHash) && ["bindingHash,dispatch,materialHash,version", "bindingHash,dispatch,materialHash,originalAccounting,version"].includes(keys)))
     throw new InputError("研发分组检查点无效，不能重新领取额度。");
   const dispatch = readDevelopmentTaskCheckpoint(raw.dispatch);
   if (dispatch.bindingHash !== raw.bindingHash) throw new InputError("研发分组绑定不一致。");
-  return { version: 1, bindingHash: raw.bindingHash, dispatch };
+  if (raw.version === 1) return { version: 1, bindingHash: String(raw.bindingHash), dispatch };
+  if (raw.originalAccounting !== undefined) {
+    if (!Array.isArray(raw.originalAccounting) || raw.originalAccounting.length !== dispatch.issues.length
+      || repairHash(raw.originalAccounting.map(row => objectFields(row).id).sort()) !== repairHash(dispatch.issues.map(row => row.id).sort())
+      || raw.originalAccounting.some(row => { const entry = objectFields(row); return Object.keys(entry).some(key => !["id", "remaining", "omitUnresolved"].includes(key))
+        || entry.omitUnresolved !== undefined && (entry.omitUnresolved !== true || !dispatch.previousQuota); })) throw new InputError("研发历史计量绑定无效。");
+  } else if (raw.bindingHash !== raw.materialHash) throw new InputError("研发历史计量绑定缺失。");
+  return { version: 2, bindingHash: String(raw.bindingHash), materialHash: String(raw.materialHash), dispatch,
+    ...(raw.originalAccounting === undefined ? {} : { originalAccounting: structuredClone(raw.originalAccounting) as AccountingSnapshot[] }) };
+}
+
+function materialIdentity(identity: WorkIdentity) {
+  const result = structuredClone(identity);
+  for (const part of result.assignments) delete part.payload.remaining;
+  return result;
+}
+
+function originalIdentity(material: WorkIdentity, accounting: AccountingSnapshot[]) {
+  const result = structuredClone(material);
+  for (const part of result.assignments) {
+    const row = accounting.find(row => row.id === part.id);
+    if (!row) throw new InputError("研发历史计量绑定缺少原分组。");
+    if (Object.hasOwn(row, "remaining")) part.payload.remaining = structuredClone(row.remaining);
+    if (row.omitUnresolved) delete part.payload.unresolvedIssues;
+  }
+  return result;
+}
+
+/** Only recover accounting from a bound native opening; the old full hash must still match. */
+async function historicalIdentity(controller: DevelopmentController, ctx: DevelopmentContext, key: string,
+  identity: WorkIdentity, checkpoint: DevelopmentWorkCheckpoint): Promise<WorkIdentity> {
+  for (const part of identity.assignments) {
+    const group = checkpoint.dispatch.groups.find(group => group.issueIds.includes(part.id));
+    if (!group?.sessionFile || !group.inputHash) continue;
+    const binding = developmentSessionBinding(ctx.record, part.role, { work: key, bindingHash: checkpoint.bindingHash, partId: part.id, baseHash: group.inputHash });
+    const sessionKey = repairHash(binding), reference = ctx.record.sessions?.[sessionKey];
+    if (!reference || reference.bindingHash !== sessionKey || reference.role !== part.role || reference.file !== group.sessionFile) continue;
+    const directory = await controller.storage.directory(ctx.record.agentId, `development/sessions/${ctx.record.id}/${sessionKey}`);
+    const cwd = await controller.workspace.workspacePath(ctx.record.agentId, ctx.record.id);
+    const native = await readExecutionHistory({ cwd, storage: { directory, file: reference.file, binding }, signal: ctx.signal });
+    for (const { message } of native.entries) {
+      if (message.role !== "user") continue;
+      const content = typeof message.content === "string" ? message.content : Array.isArray(message.content)
+        ? message.content.filter(block => block.type === "text").map(block => objectFields(block).text).join("\n") : "";
+      let opening: UnknownRecord;
+      try { opening = objectFields(JSON.parse(content)); } catch { continue; }
+      if (objectFields(opening.workAssignment).id !== part.id) continue;
+      const recovered = structuredClone(identity);
+      for (const assignment of recovered.assignments) {
+        delete assignment.payload.remaining;
+        if (Object.hasOwn(opening, "remaining")) assignment.payload.remaining = structuredClone(opening.remaining);
+      }
+      if (repairHash(recovered) === checkpoint.bindingHash) return recovered;
+      break;
+    }
+  }
+  throw new InputError("研发分组材料已变化或原会话计量无法核验，原会话、结果和次数保留。");
 }
 
 /** Fixed assignments, independent sessions, bounded concurrency, and results accepted before merging. */
 export async function runDevelopmentParts<T>(controller: DevelopmentController, ctx: DevelopmentContext, key: string,
   binding: unknown, parts: DevelopmentPart<T>[], callLimit = 6, validateCombined?: (results: T[]) => unknown): Promise<T[]> {
-  let identity: unknown = JSON.parse(JSON.stringify({ binding, assignments: parts.map(part => ({ id: part.id, role: part.role, schema: part.schema,
+  const supplied: WorkIdentity = JSON.parse(JSON.stringify({ binding, assignments: parts.map(part => ({ id: part.id, role: part.role, schema: part.schema,
     instruction: part.instruction, payload: part.payload, allowBlocker: part.allowBlocker === true })), callLimit }));
-  let bindingHash = repairHash(identity);
+  const material = materialIdentity(supplied), materialHash = repairHash(material);
+  let identity = material;
   const base = { parts: Object.fromEntries(parts.map(part => [part.id, null])) };
   const issues = parts.map(part => ({ id: part.id, owner: part.id, paths: [`/parts/${part.id}`],
     description: part.instruction, remedy: "只提交本组结果，其他分组由独立会话处理。" }));
@@ -36,21 +101,34 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
   let checkpoint: DevelopmentWorkCheckpoint;
   if (saved) {
     checkpoint = readDevelopmentWorkCheckpoint(saved);
-    if (checkpoint.bindingHash !== bindingHash && checkpoint.dispatch.previousQuota && ctx.record.retryPolicy) {
-      const legacy = structuredClone(objectFields(identity));
-      for (const raw of legacy.assignments as unknown[]) {
-        const payload = objectFields(objectFields(raw).payload);
-        delete payload.unresolvedIssues;
-        payload.remaining = structuredClone(ctx.record.retryPolicy.legacy.budgets);
+    if (!ctx.record.dispatchedWork?.includes(key) || repairHash(checkpoint.dispatch.issues) !== repairHash(issues))
+      throw new InputError("研发分组材料已变化，不能重建会话刷新额度。");
+    if (checkpoint.version === 1) {
+      identity = supplied;
+      let omitUnresolved = false;
+      if (repairHash(identity) !== checkpoint.bindingHash && checkpoint.dispatch.previousQuota && ctx.record.retryPolicy) {
+        const legacy = structuredClone(supplied);
+        for (const part of legacy.assignments) {
+          delete part.payload.unresolvedIssues;
+          part.payload.remaining = structuredClone(ctx.record.retryPolicy.legacy.budgets);
+        }
+        if (repairHash(legacy) === checkpoint.bindingHash) { identity = legacy; omitUnresolved = true; }
       }
-      if (repairHash(legacy) === checkpoint.bindingHash) { identity = legacy; bindingHash = checkpoint.bindingHash; }
+      if (repairHash(identity) !== checkpoint.bindingHash) identity = await historicalIdentity(controller, ctx, key, supplied, checkpoint);
+      const originalAccounting = identity.assignments.map(part => ({ id: part.id,
+        ...(Object.hasOwn(part.payload, "remaining") ? { remaining: structuredClone(part.payload.remaining) } : {}),
+        ...(omitUnresolved ? { omitUnresolved: true as const } : {}) }));
+      checkpoint = { version: 2, bindingHash: checkpoint.bindingHash, materialHash, originalAccounting, dispatch: checkpoint.dispatch };
+    } else {
+      if (checkpoint.materialHash !== materialHash) throw new InputError("研发分组材料已变化，不能重建会话刷新额度。");
+      if (checkpoint.originalAccounting) identity = originalIdentity(material, checkpoint.originalAccounting);
     }
-    if (checkpoint.bindingHash !== bindingHash || !ctx.record.dispatchedWork?.includes(key)
-      || repairHash(checkpoint.dispatch.issues) !== repairHash(issues)) throw new InputError("研发分组材料已变化，不能重建会话刷新额度。");
+    if (repairHash(identity) !== checkpoint.bindingHash) throw new InputError("研发历史计量与原材料绑定不一致。");
   } else {
     if (ctx.record.dispatchedWork?.includes(key)) throw new InputError("已分派研发的检查点缺失，不能重新领取额度。");
-    checkpoint = { version: 1, bindingHash, dispatch: createDevelopmentTaskCheckpoint(identity, base, issues) };
+    checkpoint = { version: 2, bindingHash: materialHash, materialHash, dispatch: createDevelopmentTaskCheckpoint(identity, base, issues) };
   }
+  const bindingHash = checkpoint.bindingHash;
   const validate = (value: unknown, final = false) => {
     const values = objectFields(objectFields(value).parts);
     if (Object.keys(objectFields(value)).join() !== "parts" || repairHash(Object.keys(values).sort()) !== repairHash(parts.map(part => part.id).sort()))
@@ -77,10 +155,10 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
     },
     save: async dispatch => {
       controller.guard(ctx);
-      (ctx.record.workDispatches ??= {})[key] = { version: 1, bindingHash, dispatch };
+      checkpoint = { ...checkpoint, dispatch };
+      (ctx.record.workDispatches ??= {})[key] = checkpoint;
       if (!(ctx.record.dispatchedWork ??= []).includes(key)) ctx.record.dispatchedWork.push(key);
       await controller.save(ctx);
-      checkpoint = { version: 1, bindingHash, dispatch };
     },
     run: async worker => {
       const part = parts.find(part => worker.group.issueIds.includes(part.id));
