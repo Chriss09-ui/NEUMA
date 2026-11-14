@@ -19,6 +19,7 @@ import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { piSessionManager } from "../../src/runtime/pi-session-state.mjs";
 import { createDevelopmentTaskCheckpoint, repairHash, runDevelopmentTaskSchedule } from "../../src/runtime/repair-scheduler.mjs";
 import { runDevelopmentParts, type DevelopmentPart } from "../../src/development/development-dispatch.mjs";
+import { validatePlanningOutline } from "../../src/development/development-planning-dispatch.mjs";
 import { developmentSessionBinding } from "../../src/development/development-sessions.mjs";
 import type { TaskProgress, PassedDevelopmentArchitecture, DevelopmentContext } from "../../src/development/development-controller-types.mjs";
 
@@ -59,7 +60,7 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
       requirementIds: requirements.slice(index * 15, index * 15 + 15).map(row => row.id), acceptanceIds: design.acceptance.slice(index * 6, index * 6 + 6).map(row => row.id),
       dependsOn: index ? ["task_0"] : [], files: ["main.mjs"] })) },
     actionOwners: [{ actionId: "echo", taskId: "task_0", acceptanceId: "acceptance_0" }],
-    activationScopes: activation ? [{ acceptanceId: "activation_check", executionScope: "shared" }] : [] };
+    activationScopes: activation ? [{ acceptanceId: "activation_check", executionScope: "shared" as const }] : [] };
   const calls: { id: string; mode?: string; scope?: { kind: string; ids: string[] } }[] = [], failures: string[] = [];
   let interrupted = false, active = 0, maxActive = 0, legacyEnabled = Boolean(legacy);
   const factory: SessionFactory = async options => {
@@ -206,6 +207,26 @@ test("明确的业务输入样本被入口挡住时先退回规划，恢复保�
     current.sessionFile === group.sessionFile && repairHash(current.result) === repairHash(group.result) && current.calls === group.calls)));
   assert.equal(result.reports.at(-1)!.status, "passed");
   assert.ok(result.plan!.cases.some(row => row.input === '{"n":"bad"}' && row.kind === "action"));
+});
+
+test("骨架修订允许同步说明及标题，仍阻止权限、验收分配和运行配置越界", async t => {
+  const f = await fixture(t); if (!f) return;
+  await f.controller.store.ready;
+  const original = structuredClone(f.outline), revised = structuredClone(original);
+  revised.plan.summary = "接口修订：原始输入由业务代码校验";
+  revised.plan.application.actions[0]!.title = "整数检查与返回";
+  revised.plan.application.actions[0]!.inputSchema.properties!.n = {};
+  for (const task of revised.plan.tasks) { task.title += "（接口同步）"; task.description = "使用当前原始数据输入契约，业务含义和验收归属保持。"; }
+  assert.deepEqual(validatePlanningOutline(revised, f.architecture, original), revised);
+  assert.deepEqual(f.outline, original);
+  const change = (mutate: (draft: typeof revised) => void) => {
+    const draft = structuredClone(revised); mutate(draft);
+    assert.throws(() => validatePlanningOutline(draft, f.architecture, original), /planning_scope_changed/);
+  };
+  change(draft => draft.plan.tasks[0]!.files.push("extra.mjs"));
+  change(draft => { draft.plan.tasks[1]!.dependsOn = []; });
+  change(draft => { draft.actionOwners[0]!.acceptanceId = "acceptance_1"; });
+  change(draft => { draft.plan.application.stateVersion = 2; });
 });
 
 test("用例组的输入错误用冻结接口定位具体用例，不再误报整个应用配置", async t => {

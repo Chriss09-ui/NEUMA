@@ -30,6 +30,12 @@ function savedOutlines(ctx: DevelopmentContext) {
 
 function outlineResponsibilities(outline: Outline) {
   const copy = structuredClone(outline), application = copy.plan.application!;
+  // Explanatory prose follows the interface revision; assignments and executable configuration remain bound.
+  Reflect.deleteProperty(copy.plan, "summary");
+  for (const task of copy.plan.tasks) {
+    Reflect.deleteProperty(task, "title"); Reflect.deleteProperty(task, "description");
+  }
+  for (const action of application.actions) Reflect.deleteProperty(action, "title");
   for (const action of [...application.actions, ...application.service?.operations ?? []]) {
     Reflect.deleteProperty(action, "inputSchema"); Reflect.deleteProperty(action, "outputSchema");
   }
@@ -64,7 +70,7 @@ export function planningResolverTools(controller: DevelopmentController, ctx: De
       controller.services!.resolveDockerImage({ image: value.image, signal: ctx.signal }))];
 }
 
-function outlineSchema(schema: ToolSchema) {
+export function outlineSchema(schema: ToolSchema) {
   const plan = structuredClone(schema);
   for (const key of ["cases", "activationCases", "activationChecks"]) delete plan.properties![key];
   plan.required = plan.required!.filter(key => !["cases", "activationCases", "activationChecks"].includes(key));
@@ -98,48 +104,52 @@ function caseGroups(outline: Outline) {
   return groups;
 }
 
+export function validatePlanningOutline(input: unknown, architecture: DevelopmentContext["record"]["architecture"], previous?: Outline): Outline {
+  const schema = outlineSchema(architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA);
+  const activation = activationBusinessAcceptanceItems(architecture);
+  check(input, schema);
+  const outline = input as Outline;
+  if (Buffer.byteLength(JSON.stringify(outline)) > 1024 * 1024) throw new InputError("规划骨架超过1 MiB，请缩小重复说明。");
+  const plan = validatePlanningFragment({ ...outline.plan, cases: [] }, { architecture });
+  if (previous && outlineResponsibilities(previous) !== outlineResponsibilities(outline)) throw new PlanningInputConflict([{
+    path: "plan", reason: "planning_scope_changed", remedy: "本轮可修正输入输出契约、摘要、标题和任务说明；保留任务编号、依赖、动作、文件授权、运行配置和验收分配，避免使已收分组失去归属。" }]);
+  checkPlanningInputAdmission(plan, architecture);
+  if (new Set(plan.tasks.flatMap(task => task.files)).size > 200) throw new InputError("任务授权文件合计不能超过200个。");
+  const requiredActions = [...plan.application!.actions.map(action => action.id), ...Object.values(plan.application!.service?.migration ?? {})
+    .filter((value): value is string => typeof value === "string")];
+  if (new Set(outline.actionOwners.map(owner => owner.actionId)).size !== outline.actionOwners.length
+    || hashValue(outline.actionOwners.map(owner => owner.actionId).sort()) !== hashValue([...new Set(requiredActions)].sort()))
+    throw new InputError("每个公开动作及迁移/验证动作必须恰有一项研发任务与验收归属。");
+  for (const owner of outline.actionOwners) {
+    const task = plan.tasks.find(task => task.id === owner.taskId), acceptance = architecture.design.acceptance.find(item => item.id === owner.acceptanceId);
+    if (!task?.acceptanceIds.includes(owner.acceptanceId) || acceptance?.verification && acceptance.verification.adapterId !== "action")
+      throw new InputError("动作必须分配给负责真实action验收的任务组合。");
+  }
+  if (new Set(outline.activationScopes.map(row => row.acceptanceId)).size !== outline.activationScopes.length
+    || hashValue(outline.activationScopes.map(row => row.acceptanceId).sort()) !== hashValue(activation.map(row => row.id).sort()))
+    throw new InputError("启用前验证作用域必须完整且仅覆盖原host-business验收。");
+  const pending = plan.tasks.map(task => ({ ...task, status: "pending" })), available = new Set<string>();
+  for (let index = 0; index < pending.length; index++) {
+    const task = nextReadyDevelopmentTask(pending)!; task.files.forEach(file => available.add(file));
+    if (task.acceptanceIds.some(id => !["input-contract", "page-resources"].includes(architecture.design.acceptance.find(row => row.id === id)?.verification?.adapterId ?? "action"))
+      && !available.has(plan.entrypoint)) throw new InputError(`任务${task.id}需要执行代码，入口必须包含在当前或已完成任务的文件授权中。`);
+    task.status = "verified";
+  }
+  caseGroups(outline);
+  return structuredClone(outline);
+}
+
 export async function planDevelopmentParts(controller: DevelopmentController, ctx: DevelopmentContext) {
   const architecture = ctx.record.architecture, planSchema = architecture.design.schemaVersion === 3 ? PLAN_V3_SCHEMA : PLAN_V2_SCHEMA;
-  const schema = outlineSchema(planSchema), activation = activationBusinessAcceptanceItems(architecture);
+  const schema = outlineSchema(planSchema);
   const previous = savedOutlines(ctx).at(-1);
-  const validateOutline = (input: unknown): Outline => {
-    check(input, schema);
-    const outline = input as Outline;
-    if (Buffer.byteLength(JSON.stringify(outline)) > 1024 * 1024) throw new InputError("规划骨架超过1 MiB，请缩小重复说明。");
-    const plan = validatePlanningFragment({ ...outline.plan, cases: [] }, { architecture });
-    if (previous && outlineResponsibilities(previous) !== outlineResponsibilities(outline)) throw new PlanningInputConflict([{
-      path: "plan", reason: "planning_scope_changed", remedy: "本轮只修正相关输入输出契约；保留原任务、动作、文件授权和验收分配，避免使已收分组失去归属。" }]);
-    checkPlanningInputAdmission(plan, architecture);
-    if (new Set(plan.tasks.flatMap(task => task.files)).size > 200) throw new InputError("任务授权文件合计不能超过200个。");
-    const requiredActions = [...plan.application!.actions.map(action => action.id), ...Object.values(plan.application!.service?.migration ?? {})
-      .filter((value): value is string => typeof value === "string")];
-    if (new Set(outline.actionOwners.map(owner => owner.actionId)).size !== outline.actionOwners.length
-      || hashValue(outline.actionOwners.map(owner => owner.actionId).sort()) !== hashValue([...new Set(requiredActions)].sort()))
-      throw new InputError("每个公开动作及迁移/验证动作必须恰有一项研发任务与验收归属。");
-    for (const owner of outline.actionOwners) {
-      const task = plan.tasks.find(task => task.id === owner.taskId), acceptance = architecture.design.acceptance.find(item => item.id === owner.acceptanceId);
-      if (!task?.acceptanceIds.includes(owner.acceptanceId) || acceptance?.verification && acceptance.verification.adapterId !== "action")
-        throw new InputError("动作必须分配给负责真实action验收的任务组合。");
-    }
-    if (new Set(outline.activationScopes.map(row => row.acceptanceId)).size !== outline.activationScopes.length
-      || hashValue(outline.activationScopes.map(row => row.acceptanceId).sort()) !== hashValue(activation.map(row => row.id).sort()))
-      throw new InputError("启用前验证作用域必须完整且仅覆盖原host-business验收。");
-    const pending = plan.tasks.map(task => ({ ...task, status: "pending" })), available = new Set<string>();
-    for (let index = 0; index < pending.length; index++) {
-      const task = nextReadyDevelopmentTask(pending)!; task.files.forEach(file => available.add(file));
-      if (task.acceptanceIds.some(id => !["input-contract", "page-resources"].includes(architecture.design.acceptance.find(row => row.id === id)?.verification?.adapterId ?? "action"))
-        && !available.has(plan.entrypoint)) throw new InputError(`任务${task.id}需要执行代码，入口必须包含在当前或已完成任务的文件授权中。`);
-      task.status = "verified";
-    }
-    caseGroups(outline);
-    return structuredClone(outline);
-  };
+  const validateOutline = (input: unknown) => validatePlanningOutline(input, architecture, previous);
   const binding = { runId: ctx.record.id, architectureHash: hashValue(architecture), kind: "initial_planning" };
   const [outline] = await runDevelopmentParts(controller, ctx, "planning_outline", binding, [{ id: "outline", role: "planner", schema,
     instruction: "仅规划全局接口和可运行任务骨架，不写用例或文件。plan不能包含cases、activationCases或activationChecks。每任务最多24条需求、6项验收；按模块拆分。actionOwners为每个公开动作和迁移/验证动作指定taskId与acceptanceId。activationScopes逐项声明真实启用验收的isolated/shared范围。用例交由后续独立Agent设计。直接调用submit_development_plan_part提交。",
     payload: { ...controller.base(ctx), planSchema: schema },
     ...(previous ? { delivery: { previousPlan: previous.plan,
-      planningRepair: "继续原骨架，只修正输入输出契约。错误输入要能到达约定的检查方，错误结果也须能通过输出契约；相关既有样本和预期按需读取。其他任务与验收分配保持。" } } : {}),
+      planningRepair: "沿用最新稿修正输入输出契约，可同步摘要、标题和任务说明。错误输入要能到达约定的检查方，错误结果也须能通过输出契约；相关既有样本和预期按需读取。任务编号、依赖、动作、文件授权、运行配置及验收分配保持。" } } : {}),
     tools: planningResolverTools(controller, ctx), allowBlocker: true, validate: validateOutline }], 12);
   // Bind groups to their original assignments; deliver the latest validated interface and recheck saved results against it.
   const original = savedOutlines(ctx)[0] ?? outline!, groups = caseGroups(original), outlineHash = hashValue(original);
