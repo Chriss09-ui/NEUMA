@@ -30,6 +30,7 @@ const normalEdges = [
   edge("src/installation/installation-runtime.mts", "src/server.mts"),
   edge("src/server.mts", "src/installation/installation-runtime.mts"),
   edge("scripts/start-source.mts", "src/server.mts"),
+  edge("scripts/resume-development.mts", "src/server.mts"),
   edge("scripts/run-tests.mts", "scripts/build.mjs"),
 ];
 const normalNonLiteral: [string, number][] = [["src/runtime/model-profile.mts", 1], ["src/runtime/pi-runtime.mts", 4],
@@ -74,7 +75,7 @@ test("未登记运行时环被报告，登记环与入口/跨域例外失效时�
   const brokenPair = checkGraphRules(graphFrom([edge("src/server.mts", "src/installation/installation-runtime.mts")])).violations;
   assert.ok(brokenPair.some((violation) => violation.rule === "依赖/运行时环例外失效" && violation.file === "src/installation/installation-runtime.mts"));
   const stale = checkGraphRules(graphFrom([], { nonLiteral: normalNonLiteral })).violations;
-  assert.equal(stale.filter((violation) => violation.rule === "依赖/入口例外失效").length, 2);
+  assert.equal(stale.filter((violation) => violation.rule === "依赖/入口例外失效").length, 3);
   assert.equal(stale.filter((violation) => violation.rule === "依赖/跨域例外失效").length, 1);
   assert.equal(stale.filter((violation) => violation.rule === "依赖/运行时环例外失效").length, 0);
 });

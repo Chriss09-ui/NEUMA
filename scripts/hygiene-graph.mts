@@ -126,6 +126,7 @@ export async function buildDependencyGraph(root: string, { projects = PROJECTS, 
 const ENTRY_IMPORT_RULES: { target: string; allowed: { importer: string; reason: string }[] }[] = [
   { target: "src/server.mts", allowed: [
     { importer: "src/installation/installation-runtime.mts", reason: "独立实例服务运行时懒加载复用请求处理器" },
+    { importer: "scripts/resume-development.mts", reason: "显式续测入口组装原后台任务服务和故障观察器，不修改业务控制器" },
     { importer: "scripts/start-source.mts", reason: "开发启动器从源码树直接启动服务器" }] },
   { target: "bin/neuma.cts", allowed: [] },
 ];

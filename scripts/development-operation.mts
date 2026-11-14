@@ -14,6 +14,7 @@ interface ContinueOptions {
   baseUrl: string; agentId: string; mutationId: string; signal?: AbortSignal;
   onView?(view: DevelopmentOperationView): void | Promise<void>;
   onRetry?(event: { phase: "submit" | "observe"; attempt: number; error: unknown }): void | Promise<void>;
+  onRequestError?(event: { phase: "submit" | "observe"; attempt: number; retry: boolean; error: unknown }): void | Promise<void>;
 }
 class HttpFailure extends Error { constructor(readonly status: number) { super(`后台研发接口返回 HTTP ${status}`); } }
 
@@ -41,12 +42,14 @@ export async function continueDevelopmentOperation(options: ContinueOptions): Pr
         if (!response.ok) { await response.body?.cancel(); throw new HttpFailure(response.status); }
         return await response.json() as unknown;
       } catch (error) {
-        signal?.throwIfAborted();
         const transient = error instanceof TypeError || error instanceof Error && error.name === "TimeoutError"
           || error instanceof HttpFailure && [408, 429, 500, 502, 503, 504].includes(error.status);
-        if (!transient || attempt >= 3) throw error;
+        await options.onRequestError?.({ phase, attempt, retry: transient && !signal?.aborted, error });
+        signal?.throwIfAborted();
+        if (!transient) throw error;
         await options.onRetry?.({ phase, attempt, error });
-        await pause(500 * attempt, undefined, { signal });
+        // Transport retries only locate this accepted operation; they consume no business retries.
+        await pause(Math.min(500 * attempt, 5_000), undefined, { signal });
       }
     }
   };

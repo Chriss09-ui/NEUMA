@@ -100,7 +100,12 @@ export class AgentOperations {
     }
   }
   async view(agentId: string, id: string, after?: string | null) {
-    const receipt = await this.read(agentId, id), active = this.active.get(agentId);
+    let receipt = await this.read(agentId, id), active = this.active.get(agentId);
+    // A read can open the old receipt just before completion replaces it and releases the slot.
+    if (!receipt.settledAt && active?.receipt.generation !== receipt.generation) {
+      receipt = await this.read(agentId, id);
+      active = this.active.get(agentId);
+    }
     const result = await this.owner.snapshot(agentId, receipt);
     const running = active?.receipt.generation === receipt.generation;
     const snapshot = { running, interrupted: !running && !receipt.settledAt, error: receipt.error ?? null,

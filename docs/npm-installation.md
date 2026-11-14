@@ -95,6 +95,8 @@ neuma --data-dir <同一目标目录>
 
 测试按领域放在 `test/` 子目录，由 `scripts/run-tests.mts` 显式登记并递归发现；Node 测试文件并发为 1。构建失败、源码变化或产物摘要不匹配会阻止使用过期产物。外部浏览器只在明确启用时运行，规则见 AGENTS.md。
 
+源码维护的真实研发续测使用编译后的 `scripts/resume-development.mjs`，参数、后台查询和日志说明见[研发检查点与恢复](development-layer-design.md#7-检查点恢复与关闭)。它需要显式指定原数据目录和研发编号，不属于安装版自动启动或恢复流程。
+
 发布包只包括白名单中的编译后程序、前端与运行资源、命令入口、必要发布检查、README 演示图和依赖清单。实际文件检查拒绝 TypeScript 源码、用户数据、凭据、会话、材料、测试、开发日志及捆绑的本机 `node_modules`。依赖通过 npm-shrinkwrap 锁定，保留 SDK 正常 ESM 布局。
 
 `package:pack` 本身不上传 npm。源码根直接 `npm pack` / `npm publish` 会被保护入口拒绝。独立临时安装会下载生产依赖；复用本机依赖的 smoke 检查不能代替它。每次准备发布都要检查实际包，不能用此前同名包或相同版本号代替当前产物。
