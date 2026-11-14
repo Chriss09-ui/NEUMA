@@ -8,7 +8,12 @@ import { designHash, reviewSubmissionSchema } from "../../src/architecture/archi
 import { architectureReviewEvidenceContext } from "../../src/architecture/architecture-review-evidence.mjs";
 import { requestJevDecision } from "../../src/requirements/providers.mjs";
 import { objectFields } from "../../src/runtime/type-boundary.mjs";
-import { validDesign, passingReview } from "../helpers/architecture.mjs";
+import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
+import { fixtureTools } from "../helpers/m7-test-boundaries.mjs";
+import { fixtureMaterialSources } from "../helpers/model-context.mjs";
+import { prepareExecutionHistory } from "../../src/runtime/execution-history.mjs";
+import { InputError } from "../../src/requirements/core.mjs";
+import { failureFields } from "../helpers/failure-fields.mjs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -322,4 +327,56 @@ test("小组汇总替代主模型重审，零主评审调用可持久恢复，�
     else await assert.rejects(run, /范围|scope/);
     assert.equal(fidelityCalls, 1);
   }
+});
+
+test("汇总校验中断后沿原小组与JEV结果续接，损坏记录不能重开设计", async t => {
+  const root = await mkdtemp(join(tmpdir(), "neuma-aggregate-resume-")), calls: string[] = [];
+  const definition = { id: "aggregate_resume", name: "恢复汇总", draft: validDraft(), fingerprint: "confirmed" };
+  const designer = new ArchitectureDesigner({ config: { llmConfigured: true, model: "fixture-model", jevApiKey: "fixture-only" }, cwd: root, dataDir: root,
+    sessionFactory: async options => {
+      const native = await prepareExecutionHistory({ cwd: root, storage: options.sessionStorage });
+      const tools = fixtureTools(options.customTools);
+      return { modelCallAccounting: true, sessionFile: native.file, messages: [], subscribe: () => () => {}, dispose() {}, async abort() {},
+        async prompt(text: string) {
+          await options.onModelCall!();
+          const payload = fixtureMaterialSources(JSON.parse(text));
+          calls.push(String(objectFields(options.sessionStorage?.binding).role));
+          if (tools.submit_architecture) {
+            const requirements = payload.requirements as { id: string; text: string }[];
+            const design = validDesign(requirements, { schemaVersion: 3, connections: [],
+              interaction: { defaultEntry: "conversation", page: false, operations: false, inputs: "原始记录", results: "完整结果", persistentData: "无" },
+              execution: { language: "none", hosting: "builtin", reason: "已有文本能力" },
+              selectionBasis: { capacity: "当前输入", process: "完整处理", quality: "核对原文", requirementIds: requirements.map(row => row.id), assumptions: [] } });
+            return tools.submit_architecture.execute("design", design);
+          }
+          const assignment = payload.assignment as { field: "checks" | "acceptanceScopeChecks"; ids: string[] };
+          const complete = passingReview(String(payload.candidateHash), payload.design as ReturnType<typeof validDesign>);
+          const rows = assignment.field === "checks" ? complete.checks.filter(row => assignment.ids.includes(row.id))
+            : complete.acceptanceScopeChecks!.filter(row => assignment.ids.includes(row.acceptanceId));
+          return tools.submit_architecture_review_slice!.execute("slice", { summary: "本组已核对", issues: [], [assignment.field]: rows });
+        } };
+    } });
+  t.after(async () => { await designer.persistence; await rm(root, { recursive: true, force: true }); });
+  const role = designer.role.bind(designer);
+  designer.role = options => role(options.assembledReview === undefined ? options : { ...options,
+    validate: () => { throw new InputError("模拟旧版本仅在汇总才发现的检查错误"); } });
+  await assert.rejects(designer.design(definition), error => failureFields(error).diagnostic?.reason === "invalid_result");
+  designer.role = role;
+  const stopped = (await designer.get(definition.id))!, before = structuredClone(stopped), modelCalls = calls.length;
+  assert.equal(stopped.diagnostic!.modelCalls, 0);
+  assert.ok(stopped.reviewJudgmentCheckpoint);
+  const get = designer.get.bind(designer);
+  for (const field of ["reviewJudgmentCheckpoint", "reviewDispatchCheckpoint", "reviewProgressCheckpoint"] as const) {
+    const corrupt = structuredClone(stopped); objectFields(corrupt)[field] = null;
+    designer.get = async () => corrupt;
+    await assert.rejects(designer.design(definition));
+    assert.equal(calls.length, modelCalls);
+  }
+  designer.get = get;
+  const resumed = await designer.design(definition);
+  assert.equal(resumed.status, "passed"); assert.equal(resumed.version, stopped.version + 1);
+  assert.equal(calls.length, modelCalls, "已完成设计、小组和JEV不重新请求");
+  assert.deepEqual(resumed.reviewDispatchCheckpoint, stopped.reviewDispatchCheckpoint);
+  assert.deepEqual(resumed.reviewJudgmentCheckpoint, stopped.reviewJudgmentCheckpoint);
+  assert.deepEqual(await designer.getVersion(definition.id, stopped.version), before);
 });

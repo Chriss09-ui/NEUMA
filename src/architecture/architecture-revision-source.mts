@@ -22,6 +22,7 @@ import { readReviewProgressCheckpoint, readLegacyReviewProgressCheckpoint } from
 import { readArchitectureFidelityProgress } from "./architecture-fidelity-progress.mjs";
 import { readArchitectureFidelityRevision } from "./architecture-fidelity-revision.mjs";
 import { readReviewTaskCheckpoint } from "../runtime/repair-scheduler.mjs";
+import { assembleArchitectureGroupReview, judgmentApprovesReview } from "./architecture-review-judgment.mjs";
 import { readArchitectureRejectedFidelityReference } from "./architecture-fidelity-rejected-reference.mjs";
 
 const object = <T extends Record<string, ToolSchema>>(properties: T, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
@@ -402,12 +403,27 @@ function architectureInterruptionReason(reason: unknown) {
     "api_rejected", "api_stream_interrupted", "api_protocol", "api_connection", "api_idle_timeout"].some(value => value === reason);
 }
 
+function interruptedGroupAssembly(record: StoredArchitectureRecord) {
+  const diagnostic = record.diagnostic;
+  if (diagnostic?.reason !== "invalid_result" || diagnostic.modelCalls !== 0 || diagnostic.submissionAttempts !== 0
+    || !Object.hasOwn(record, "reviewJudgmentCheckpoint")) return false;
+  const progress = readReviewProgressCheckpoint(record), saved = objectFields(record.reviewDispatchCheckpoint);
+  const dispatch = readReviewTaskCheckpoint(saved.dispatch);
+  if (saved.version !== 1 || saved.candidateHash !== record.candidateHash || saved.bindingHash !== record.reviewDispatchSource
+    || dispatch.bindingHash !== saved.bindingHash || !dispatch.groups.length || dispatch.groups.some(group => !group.result)
+    || !progress?.parts || progress.review !== null || progress.modelCalls !== 0
+    || !judgmentApprovesReview(record, assembleArchitectureGroupReview(progress.parts)))
+    throw new InputError("汇总停点的原小组结果或判定绑定无效，不能重开设计清空进度。");
+  return true;
+}
+
 export function interruptedArchitectureReviewSeed(previous: StoredArchitectureRecord | null | undefined, definition: Definition, context: RevisionContext, revisionSeed: RevisionSeed | null | undefined): RevisionSeed | null {
   if (!previous || objectFields(revisionSeed?.source).candidateTrust === "unreviewed-reference") return null;
   const diagnostic = previous?.diagnostic;
   if (!["failed", "cancelled"].includes(previous?.status) || diagnostic?.stage !== "architecture"
     || diagnostic.role !== "reviewer" || diagnostic.phase !== "evaluating"
-    || !(architectureInterruptionReason(diagnostic.reason) || diagnostic.reason === "api_error" && !Object.hasOwn(previous, "developmentRevision"))
+    || !(architectureInterruptionReason(diagnostic.reason) || interruptedGroupAssembly(previous)
+      || diagnostic.reason === "api_error" && !Object.hasOwn(previous, "developmentRevision"))
     || previous.review !== null || !previous.runtimeCapabilities || previous.reviewEvidence?.version !== 2
     || !previous.reviewEvidence.snapshot || !Array.isArray(previous.attempts) || !Array.isArray(previous.issues)
     || previous.attempts.some((attempt) => attempt?.review && attempt.candidateHash === previous.candidateHash)) return null;
@@ -523,6 +539,10 @@ export function hasNewPendingFeedback(previous: StoredArchitectureRecord | null 
   const oldDevelopment = previous?.developmentRevision ? developmentReviewFeedback(previous.developmentRevision) : null;
   const before = previous?.feedbackLedger ? architectureFeedbackContext(feedbackLedger(previous.feedbackLedger))!.findings
     : [...(feedbackFindings(objectFields(previous?.priorFindings).findings ?? [])), ...(oldDevelopment?.findings ?? [])];
+  // A closure invalidated by this candidate may already be assigned to its frozen pending review.
+  if (previous && feedbackReviewCheckpoint(previous)
+    && objectFields(objectFields(previous.priorFindings).current).candidateHash === previous.candidateHash)
+    before.push(...feedbackFindings(objectFields(previous.priorFindings).findings ?? []));
   const fingerprint = (finding: UnknownRecord) => designHash({ findingId: finding.findingId,
     source: finding.source ?? finding.developmentSource ?? null, issue: finding.issue ?? finding.diagnostic ?? null });
   const known = new Set(before.map(fingerprint));

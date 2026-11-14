@@ -21,6 +21,7 @@ import { createArchitectureEvidenceReader } from "../../src/architecture/archite
 import { createArchitectureReviewParts, canonicalArchitectureReviewParts } from "../../src/architecture/architecture-review-parts.mjs";
 import { runArchitectureReviewDispatch, revalidateArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "../../src/architecture/architecture-review-dispatch.mjs";
 import { nextReviewRejection } from "../../src/architecture/architecture-review-protocol.mjs";
+import { validateArchitecturePriorFindings } from "../../src/architecture/architecture-prior-findings.mjs";
 import type { SessionMessage } from "../../src/runtime/execution-port.mjs";
 import type { ReviewSliceRole, ReviewDispatchCheckpoint } from "../../src/architecture/architecture-review-dispatch.mjs";
 import { createReviewProgressCheckpoint, readReviewProgressCheckpoint, reviewProgressCheckpointMatches,
@@ -226,6 +227,56 @@ test("复杂评审按主题与验收分组，独立会话最多三并发，中�
   const broken = { ...record }; delete broken.reviewDispatchCheckpoint;
   await assert.rejects(runArchitectureReviewDispatch({ ...options, record: broken }), /检查点缺失/u);
   assert.equal(started.length, calls);
+});
+
+test("历史意见小组先核对关闭依据，明确位置只写一次即可汇总，续接保留兄弟组及计数", async () => {
+  const f = material(), findingId = "historical_location", paths = ["/components/0", "/acceptance/0"];
+  const priorFindings = { current: { candidateHash: f.candidateHash,
+    guideHash: f.context.contextManifest.acceptanceAdapterGuide!.sha256, contextManifestHash: designHash(f.context.contextManifest) },
+    sameReviewObject: false, findings: [{ findingId, kind: "historical-review-opinion", closureEvidenceRequired: true, issue: { kind: "design" } }] };
+  const schema = reviewSubmissionSchema({ evidenceRequired: true, priorFindingsRequired: true });
+  const record: Record<string, unknown> = {}, started: string[] = [];
+  let corrected = false;
+  const runRole = async (node: ReviewSliceRole) => {
+    started.push(node.assignment.id);
+    await node.worker.onSession(node.worker.group.sessionFile ?? `${node.assignment.id}.jsonl`);
+    await node.worker.onCall();
+    const history = node.assignment.field === "priorFindingDecisions";
+    const input = { summary: "核对本组当前材料", issues: history ? [{ id: findingId, blocking: false,
+      checkId: "verification", kind: "design", description: "当前职责与验收支持撤销旧意见。", remedy: "按现有方案继续验证。",
+      candidatePaths: corrected ? paths : ["/instructions"], references: [{ source: "requirements", path: "/0" }] }] : [],
+      [node.assignment.field]: node.assignment.field === "checks" ? f.review.checks.filter(row => node.assignment.ids.includes(row.id))
+        : node.assignment.field === "acceptanceScopeChecks" ? f.review.acceptanceScopeChecks!.filter(row => node.assignment.ids.includes(row.acceptanceId))
+          : [{ findingId, status: "unsupported", reason: "当前两处条款已说明业务要求。", checkIds: ["verification"], candidatePaths: paths }] };
+    const value = node.validate(input);
+    if (history) assert.deepEqual(value.parts.issues[0]!.references, [{ source: "requirements", path: "/0" }], "读取位置不改写原报告");
+    await node.worker.submit({ baseHash: node.worker.baseHash, issueIds: node.worker.group.issueIds, summary: value.summary,
+      updates: [{ path: node.worker.group.paths[0]!, value }] });
+  };
+  const options = { record, candidateHash: f.candidateHash, platformHash: "a".repeat(64), context: f.context, priorFindings,
+    schema, runRole, save: async (_checkpoint: ReviewDispatchCheckpoint) => {} };
+  await assert.rejects(runArchitectureReviewDispatch(options), error => {
+    assert.deepEqual(failureFields(error).validationIssues!.map(issue => issue.candidatePath).sort(), [...paths].sort());
+    return true;
+  });
+  const stopped = structuredClone(record.reviewDispatchCheckpoint) as ReviewDispatchCheckpoint;
+  const pending = stopped.dispatch.groups.filter(group => !group.result);
+  assert.equal(pending.length, 1); assert.equal(pending[0]!.calls, 1);
+  corrected = true;
+  const before = started.length, result = await runArchitectureReviewDispatch(options);
+  assert.deepEqual(started.slice(before), ["review_priorFindingDecisions_0"]);
+  const saved = record.reviewDispatchCheckpoint as ReviewDispatchCheckpoint;
+  assert.equal(saved.dispatch.calls, stopped.dispatch.calls + 1);
+  for (const previous of stopped.dispatch.groups) {
+    const next = saved.dispatch.groups.find(group => group.id === previous.id)!;
+    assert.equal(next.sessionFile, previous.sessionFile);
+    if (previous.result) assert.deepEqual(next, previous);
+  }
+  const review = validateReview({ ...result.parts, verdict: "pass", summary: "逐组完整核对" },
+    { candidateHash: f.candidateHash, schemaVersion: 3, evidenceContext: f.context });
+  assert.doesNotThrow(() => validateArchitecturePriorFindings(review, priorFindings, f.design, { evidenceContext: f.context }));
+  const calls = started.length;
+  await runArchitectureReviewDispatch(options); assert.equal(started.length, calls, "完成后恢复不重跑小组");
 });
 
 test("评审子组不能代交其他组，分项未通过也不能在主评审中被当作整体通过", async () => {

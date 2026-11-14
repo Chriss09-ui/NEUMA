@@ -105,6 +105,7 @@ test("反证必须对应同一缺陷、当前实质候选内容，不能只引�
   const reason = fixture(); reason.row.candidatePaths = ["/decisions/0/reason"];
   rejects(reason, "repair_candidate_basis_missing");
   const unrelated = fixture(); unrelated.explanation.references[0] = { source: "candidate", path: "/instructions", quote: unrelated.candidate.instructions };
+  unrelated.explanation.candidatePaths = ["/instructions"];
   rejects(unrelated, "repair_candidate_reference_unrelated");
   const idQuote = fixture(); idQuote.row.candidatePaths = ["/decisions/0"];
   idQuote.explanation.candidatePaths = ["/decisions/0"];
@@ -120,21 +121,20 @@ test("原意见确实错误时可用当前双来源反证推翻，无需伪造�
   rejects(f, "reference_quote_mismatch");
 });
 
-test("逐条指出关闭说明缺失的关联与原文引用，不把引用问题归到状态字段", () => {
+test("逐条指出关闭说明完全缺失的位置，不要求在两栏重复列齐", () => {
   const f = fixture({ status: "unsupported" });
   f.finding.kind = "historical-review-opinion"; f.finding.closureEvidenceRequired = true; f.finding.issue = { kind: "design" };
   const paths = ["/acceptance/0", "/acceptance/1", "/acceptance/2"];
   f.row.candidatePaths = paths;
-  f.explanation.candidatePaths = paths.slice(0, 2);
+  f.explanation.candidatePaths = paths.slice(0, 1);
   const references = paths.map((path, index) => ({ source: "candidate", path: path + "/expected", quote: f.candidate.acceptance[index]!.expected }));
   f.explanation.references = references.slice(0, 1);
   assert.throws(f.validate, error => {
-    assert.equal(failureFields(error).validationIssueTotal, 3);
+    assert.equal(failureFields(error).validationIssueTotal, 2);
     assert.equal(failureFields(error).validationIssuesTruncated, false);
     assert.deepEqual(failureFields(error).validationIssues!.map(({ path, candidatePath }) => ({ path, candidatePath })), [
-      { path: "review.issues[0].references", candidatePath: paths[1] },
+      { path: "review.issues[0].candidatePaths", candidatePath: paths[1] },
       { path: "review.issues[0].candidatePaths", candidatePath: paths[2] },
-      { path: "review.issues[0].references", candidatePath: paths[2] },
     ]);
     assert.ok(failureFields(error).validationIssues!.every((issue) => issue.reason === "repair_candidate_reference_unrelated"));
     assert.ok(!failureFields(error).message!.includes(references[0]!.quote), "错误只定位条款，不复制业务正文");
@@ -148,7 +148,7 @@ test("最终分项集中反馈关闭缺项与范围矛盾，保留草稿后局�
   const f = fixture({ status: "unsupported" });
   f.finding.kind = "historical-review-opinion"; f.finding.closureEvidenceRequired = true; f.finding.issue = { kind: "design" };
   const paths = ["/acceptance/0", "/acceptance/1", "/acceptance/2"];
-  f.row.candidatePaths = paths; f.explanation.candidatePaths = paths;
+  f.row.candidatePaths = paths; f.explanation.candidatePaths = paths.slice(0, 1);
   const references = paths.map((path, index) => ({ source: "candidate", path: path + "/expected", quote: f.candidate.acceptance[index]!.expected }));
   f.explanation.references = references.slice(0, 1);
   const context = f.context(), candidateHash = designHash(f.candidate), rejected: unknown[] = [];
@@ -165,7 +165,7 @@ test("最终分项集中反馈关闭缺项与范围矛盾，保留草稿后局�
     const closure = failureFields(error).validationIssues!.filter((issue) => issue.reason === "repair_candidate_reference_unrelated");
     assert.deepEqual(closure.map((issue) => [issue.findingId, issue.candidatePath]),
       [[f.finding.findingId, paths[1]], [f.finding.findingId, paths[2]]]);
-    assert.ok(closure.every((issue) => issue.path === "review.issues[0].references"));
+    assert.ok(closure.every((issue) => issue.path === "review.issues[0].candidatePaths"));
     assert.ok(failureFields(error).validationIssues!.some((issue) => issue.reason === "missing_scope_issue"
       && issue.path === "review.acceptanceScopeChecks[0].sufficient"), "最终提交同时返回完整报告矛盾，不等引用补齐后才报");
     return true;
@@ -178,7 +178,7 @@ test("最终分项集中反馈关闭缺项与范围矛盾，保留草稿后局�
   assert.ok(restored.reference().rejectedPartsIssues!.some(issue => issue.reason === "missing_scope_issue"),
     "旧完整拒稿恢复时就指出报告矛盾，无须再消耗一轮才发现");
   const repaired = await parts.finalize({ candidateHash, progressHash: parts.reference().progressHash,
-    rejectedPartsHash: parts.reference().rejectedPartsHash, issues: [{ ...f.explanation, references }],
+    rejectedPartsHash: parts.reference().rejectedPartsHash, issues: [{ ...f.explanation, candidatePaths: paths }],
     acceptanceScopeChecks: [review.acceptanceScopeChecks![0]], verdict: "pass", summary: "逐条补齐后重验" });
   assert.deepEqual(repaired.priorFindingDecisions, [f.row]); assert.deepEqual(repaired.checks, review.checks);
   assert.equal(parts.rejectedSnapshot(), null);

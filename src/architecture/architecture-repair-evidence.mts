@@ -144,16 +144,17 @@ export function validateHistoricalRepairDecision(row: PriorDecision, finding: Re
   if (!explanation) fail(`${path}.status`, "repair_counterevidence_missing",
     "关闭历史意见必须有id等于findingId的非阻断解释，关联本轮检查并提供当前候选及平台事实的逐字依据；一句reason不足以关闭。");
   validateArchitectureReviewEvidence({ checks: [], issues: [explanation], acceptanceScopeChecks: [] }, context, { partial: true });
-  const missing = selected.flatMap((anchor) => [
-    ...(!explanation.candidatePaths?.some((pointer) => materialPath(pointer, anchor)) ? [{
-      path: `review.issues[${explanationIndex}].candidatePaths`, reason: "repair_candidate_reference_unrelated", candidatePath: anchor.path,
-      remedy: `关闭说明尚未关联当前条款 ${anchor.path}；在本说明的 candidatePaths 中关联该条款的实际功能字段。`,
-    }] : []),
-    ...(!explanation.references?.some((reference) => materialReference(reference, anchor, candidate)) ? [{
-      path: `review.issues[${explanationIndex}].references`, reason: "repair_candidate_reference_unrelated", candidatePath: anchor.path,
-      remedy: `关闭说明缺少当前条款 ${anchor.path} 的功能原文依据；在 references 中提供 source=candidate 的对应实际字段及逐字引用，不能只引用编号或其他条款。`,
-    }] : []),
-  ]);
+  const missing = selected.flatMap((anchor) => {
+    const explicit = explanation.references?.filter(reference => reference.source === "candidate" && materialPath(reference.path, anchor)) ?? [];
+    // A declared candidate path already identifies the frozen file content. Keep stored reports unchanged;
+    // an explicit excerpt still limits its own evidence and cannot be replaced by a broader implicit read.
+    const references = explicit.length ? explicit : (explanation.candidatePaths ?? []).map(path => ({ source: "candidate", path }));
+    return references.some(reference => materialReference(reference, anchor, candidate)) ? [] : [{
+      path: `review.issues[${explanationIndex}].${explicit.length ? "references" : "candidatePaths"}`,
+      reason: "repair_candidate_reference_unrelated", candidatePath: anchor.path,
+      remedy: `关闭说明缺少当前条款 ${anchor.path} 的功能内容依据；在 candidatePaths 或 references 中给出对应实际功能位置即可，不必重复填写。若附摘录，须包含功能正文，不能只引编号。`,
+    }];
+  });
   if (missing.length) {
     const issues = missing.slice(0, 64);
     throw Object.assign(new InputError("历史问题关闭依据未逐条对应：" + JSON.stringify({ issues, total: missing.length, truncated: missing.length > issues.length })), {

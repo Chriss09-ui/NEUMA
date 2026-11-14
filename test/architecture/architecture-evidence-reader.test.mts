@@ -702,8 +702,11 @@ test("真实Pi批读取候选需求和指南并以回执定位修订，非候选
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")), isDesigner = body.tools!.some((item) => item.function.name === "submit_architecture");
-      const content = body.messages.findLast((message) => message.role === "user")!.content;
-      const payload:ModelPayload = fixtureMaterialSources(JSON.parse(typeof content === "string" ? content : content!.filter((part) => part.type === "text").map((part) => part.text).join(""))) as ModelPayload;
+      const packets = body.messages.filter(message => message.role === "user").map(message => {
+        const content = message.content;
+        return JSON.parse(typeof content === "string" ? content : content!.filter(part => part.type === "text").map(part => part.text).join(""));
+      });
+      const payload = fixtureMaterialSources(packets.findLast(packet => packet.contextIndex)) as ModelPayload;
       let name:string|undefined,args:ReturnType<typeof passingReview>|ReturnType<typeof validDesign>|undefined,toolCalls:{name:string|undefined;args:unknown}[]|undefined;
       if (isDesigner) {
         designs++; calls.push("designer"); name = "submit_architecture";

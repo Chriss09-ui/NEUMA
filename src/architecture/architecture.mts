@@ -1733,6 +1733,12 @@ export class ArchitectureDesigner {
           candidateHash: original.candidateHash, bindingHash: checkpoint.bindingHash, modelCalls: checkpoint.modelCalls } } };
       record.revisionSource = structuredClone(revisionSeed.source);
     }
+    const frozenReviewSource = revisionSeed?.reviewPending
+      ? this.records.get(`${definition.id}:${revisionSeed.source.version}`) : undefined;
+    if (frozenReviewSource && frozenReviewSource.candidateHash === designHash(revisionSeed!.design)) {
+      if (frozenReviewSource.feedbackLedger !== undefined) record.feedbackLedger = structuredClone(frozenReviewSource.feedbackLedger);
+      else delete record.feedbackLedger;
+    }
     if (reviewRetry) {
       if (!revisionSeed?.reviewPending) throw new InputError("方案已有新的待修问题，不能用手动续评跳过修订。");
       // Persist the authorization together with the exact frozen review and its cumulative progress.
@@ -2058,7 +2064,8 @@ export class ArchitectureDesigner {
           deferredVerifications: record.deferredVerifications ?? null }) : null;
         const previousAttempt = record.attempts.at(-1);
         const priorFindings = revisionWaived ? structuredClone(reviewRevisionSource!.priorFindings ?? null)
-          : reviewRetry ? structuredClone(previous!.priorFindings) : evidenceContext ? architecturePriorFindings(previousAttempt
+          : reviewRetry ? structuredClone(previous!.priorFindings)
+            : resumeReview && frozenReviewSource ? structuredClone(frozenReviewSource.priorFindings ?? null) : evidenceContext ? architecturePriorFindings(previousAttempt
           ? { version: record.version, ...previousAttempt } : revisionSeed?.previousReview,
         { candidateHash: record.candidateHash, guideHash: evidenceContext.contextManifest.acceptanceAdapterGuide!.sha256,
           contextManifestHash: designHash(evidenceContext.contextManifest) }, { developmentRevision: record.developmentRevision, candidate: design,

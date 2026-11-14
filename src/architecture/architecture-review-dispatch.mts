@@ -101,7 +101,7 @@ function prepareDispatch(options: DispatchInputs) {
     const raw = objectFields(value);
     if (Object.keys(raw).sort().join() !== "parts,summary" || typeof raw.summary !== "string" || !raw.summary.trim() || raw.summary.length > 1500)
       fail("评审分组必须提交完整分项及有界摘要。");
-    const parts = canonicalArchitectureReviewParts(raw.parts, { schema, candidateHash, context, priorFindings, signal });
+    const parts = canonicalArchitectureReviewParts(raw.parts, { schema, candidateHash, context, priorFindings, signal, completeClosures: true });
     for (const field of Object.keys(rowId) as SliceField[]) {
       const ids = parts[field].map(row => String(objectFields(row)[rowId[field]]));
       const expected = field === assignment.field ? assignment.ids : [];

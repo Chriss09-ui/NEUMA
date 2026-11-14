@@ -95,10 +95,12 @@ export function canonicalArchitectureReviewPartsDraft(value: unknown, { schema, 
 }
 
 /** Saved rows contain exact canonical evidence, never live receipts or a final verdict. */
-export function canonicalArchitectureReviewParts(value: unknown, { schema, candidateHash, context, priorFindings, signal }: PartOptions) {
+export function canonicalArchitectureReviewParts(value: unknown, { schema, candidateHash, context, priorFindings, signal, completeClosures = false }:
+  PartOptions & { completeClosures?: boolean }) {
   signal?.throwIfAborted();
   const parts = canonicalArchitectureReviewPartsDraft(value, { schema, candidateHash });
-  validatePartIssues(parts, { context, priorFindings });
+  validatePartIssues(parts, { context, priorFindings }, completeClosures
+    ? architecturePriorFindingClosureIssues(parts, priorFindings, objectFields(context).candidate, context) : []);
   signal?.throwIfAborted();
   return parts;
 }

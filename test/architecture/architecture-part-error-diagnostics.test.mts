@@ -30,12 +30,12 @@ test("恢复历史关闭缺项用规范草稿定位，仅补说明行即可保�
   const priorFindings = { current: { candidateHash, guideHash: context.contextManifest.acceptanceAdapterGuide!.sha256,
     contextManifestHash: designHash(context.contextManifest) }, sameReviewObject: false, findings: [finding] };
   const explanation = { id: findingId, blocking: false, checkId: "verification", kind: "design", description: "三条均已修复",
-    remedy: "核对实际执行依据", candidatePaths: paths,
+    remedy: "核对实际执行依据", candidatePaths: paths.slice(0, 1),
     references: [{ source: "candidate", path: "/acceptance/0/expected", quote: design.acceptance[0]!.expected }], factClaims: [] };
   const other = { ...structuredClone(explanation), id: "other", description: "另一项说明" };
   const rejectedParts = { candidateHash, checks: [], issues: [other, explanation], acceptanceScopeChecks: [],
     priorFindingDecisions: [{ findingId, status: "resolved", reason: "三条均有真实修订", checkIds: ["verification"], candidatePaths: paths }] };
-  const diagnostics = paths.slice(1).map(candidatePath => ({ path: "review.issues[1].references",
+  const diagnostics = paths.slice(1).map(candidatePath => ({ path: "review.issues[1].candidatePaths",
     reason: "repair_candidate_reference_unrelated", candidatePath }));
   const rejectedInput = { toolName: "submit_architecture_review_parts", input: { ...structuredClone(rejectedParts),
     issues: [explanation, other], progressHash: "a".repeat(64), rejectedPartsHash: "b".repeat(64), verdict: "pass", summary: "旧草稿" } };
@@ -52,7 +52,7 @@ test("恢复历史关闭缺项用规范草稿定位，仅补说明行即可保�
           const tool = fixtureTools(options.customTools).save_architecture_review_parts;
           await assert.rejects(tool!.execute("still-missing-evidence", { candidateHash, progressHash: payload.reviewParts.progressHash,
             rejectedPartsHash: payload.reviewParts.rejectedPartsHash, issues: [explanation] }), error => {
-            assert.equal(failureFields(error).validationIssue!.path, "review.issues[1].references");
+            assert.equal(failureFields(error).validationIssue!.path, "review.issues[1].candidatePaths");
             const marker = failureFields(error).message!.lastIndexOf('{"referenceHints":');
             assert.ok(marker >= 0);
             const feedback = recordArray(JSON.parse(failureFields(error).message!.slice(marker)).referenceHints);

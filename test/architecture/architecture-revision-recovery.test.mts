@@ -57,7 +57,8 @@ async function fixture(t: test.TestContext, { failedRole = "designer", reason = 
   if (failedRole === "designer") { assert.equal(interrupted!.design, null); assert.equal(interrupted!.candidateHash, null); }
   else { assert.ok(interrupted!.design); assert.notEqual(interrupted!.candidateHash, prior.candidateHash); }
   assert.equal(interrupted!.review, null); assert.deepEqual<NonNullable<NonNullable<typeof interrupted>>["attempts"]>(interrupted!.attempts, []);
-  assert.equal(interrupted!.diagnostic!.modelCalls, reason === "submission_incomplete" ? 2 : 1);
+  // Run 1 already revised this same base once; persisted designer usage remains part of the task.
+  assert.equal(interrupted!.diagnostic!.modelCalls, (reason === "submission_incomplete" ? 2 : 1) + (failedRole === "designer" ? 1 : 0));
   assert.equal(interrupted!.diagnostic!.submissionAttempts, 0);
   return { designer, definition, prompts, prior, interrupted, continue: async (next = definition) => {
     run = 3; const result = await designer.design(next);
@@ -77,7 +78,7 @@ test("真实连续三次design在首候选前自然中断后只读恢复历史�
   assert.equal(payload!.revisionSource.interruptedVersion, f.interrupted!.version);
   assert.equal(payload!.revisionSource.historicalOnly, true);
   assert.deepEqual(await historyHashes(), before);
-  assert.equal((await f.designer.getVersion(f.definition.id, f.interrupted!.version))!.diagnostic!.modelCalls, 2);
+  assert.equal((await f.designer.getVersion(f.definition.id, f.interrupted!.version))!.diagnostic!.modelCalls, 3);
 });
 
 const controlledFailures: [string,string|undefined][] = [
@@ -108,8 +109,9 @@ for (const failedRole of ["designer", "reviewer"]) for (const [reason, modelErro
     const firstPayload = payload ?? reviewPayload;
     assert.equal(firstPayload!.revisionSource.interruptedVersion, f.interrupted!.version);
     assert.equal(firstPayload!.revisionSource.historicalOnly, true); assert.equal(firstPayload!.modelBudget.limit, failedRole === "reviewer" ? null : 5);
-    const carriedCalls = failedRole === "reviewer" ? fixtureNumber(f.interrupted!.reviewProgressCheckpoint!.modelCalls) : 0;
-    assert.equal(firstPayload!.modelBudget.used, carriedCalls + 1); assert.equal(firstPayload!.modelBudget.remaining, failedRole === "reviewer" ? undefined : 4);
+    const carriedCalls = failedRole === "reviewer" ? fixtureNumber(f.interrupted!.reviewProgressCheckpoint!.modelCalls) : failedCalls!;
+    assert.equal(firstPayload!.modelBudget.used, carriedCalls + 1);
+    assert.equal(firstPayload!.modelBudget.remaining, failedRole === "reviewer" ? undefined : 5 - carriedCalls - 1);
     const reviews = f.prompts.filter((item) => item.run === 3 && !item.isDesign);
     assert.equal(reviews.length, 1); assert.equal(reviews[0]!.payload.candidateHash, result.candidateHash);
     assert.equal(result.attempts.length, 1); assert.equal(objectFields(result.attempts[0]!.review).verdict, "pass");

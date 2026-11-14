@@ -71,6 +71,13 @@ export function judgmentApprovesReview(record: unknown, review: unknown): boolea
     && value.completedReviewHash === repairHash(review) && objectFields(review).verdict === "pass";
 }
 
+export function assembleArchitectureGroupReview(parts: ReviewParts): ArchitectureReview {
+  const failed = parts.checks.some(row => !row.passed) || parts.issues.some(row => row.blocking)
+    || parts.acceptanceScopeChecks.some(row => !row.sufficient) || parts.priorFindingDecisions.some(row => !["resolved", "unsupported"].includes(row.status));
+  return { ...parts, verdict: failed ? "revise" : "pass", summary: failed
+    ? "各组分别检查和复核后，仍有必须修改的问题。" : "各组已分别通过，程序汇总完成；仍须独立需求范围复核。" };
+}
+
 function score(value: unknown): Score {
   const answer = objectFields(value), probabilities = objectFields(answer.probabilities);
   if (answer.type !== "score" || Object.keys(probabilities).sort().join() !== "0,1,2,3,4"
@@ -412,10 +419,7 @@ export async function judgeArchitectureReviewGroups(options: { config: ModelConf
     const retained = result.issues.filter(issue => issue.blocking && issue.checkId === check.id);
     if (retained.length) { check.passed = false; check.evidence = `相关小组仍保留阻塞意见：${retained.map(issue => issue.id).join("、")}`; }
   }
-  const failed = result.checks.some(row => !row.passed) || result.issues.some(row => row.blocking)
-    || result.acceptanceScopeChecks.some(row => !row.sufficient) || result.priorFindingDecisions.some(row => !["resolved", "unsupported"].includes(row.status));
-  const review: ArchitectureReview = { ...result, verdict: failed ? "revise" : "pass", summary: failed
-    ? "各组分别检查和复核后，仍有必须修改的问题。" : "各组已分别通过，程序汇总完成；仍须独立需求范围复核。" };
+  const review = assembleArchitectureGroupReview(result);
   if (checkpoint.completedReviewHash !== null && checkpoint.completedReviewHash !== repairHash(review))
     stop("review_judgment_binding", "保存的汇总结论与本组判定不一致。");
   checkpoint.completedReviewHash = repairHash(review); await persist();

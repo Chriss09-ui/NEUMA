@@ -10,6 +10,8 @@ import { architectureReviewEvidenceContext } from "../../src/architecture/archit
 import { designHash, validateReview } from "../../src/architecture/architecture-contract.mjs";
 import { ACCEPTANCE_ADAPTER_GUIDE } from "../../src/verification/acceptance-contract.mjs";
 import { validDesign, passingReview } from "../helpers/architecture.mjs";
+import { createReviewProgressCheckpoint } from "../../src/architecture/architecture-review-progress.mjs";
+import { hasNewPendingFeedback } from "../../src/architecture/architecture-revision-source.mjs";
 
 function closedFixture() {
   const context = { requirements: [], runtimeCapabilities: { version: 1 }, acceptanceAdapterGuide: structuredClone(ACCEPTANCE_ADAPTER_GUIDE) };
@@ -49,8 +51,31 @@ function closedFixture() {
       agentId: architecture.agentId, candidate: next, ...context });
     return architectureFeedbackFindings(current, next, context);
   };
-  return { original, candidate, closed, reopen };
+  return { original, candidate, closed, reopen, context, architecture };
 }
+
+test("候选变化后已交给当前评审的旧问题不再冒充新反馈，来源或绑定改变仍拒绝复用", () => {
+  const f = closedFixture(), candidate = structuredClone(f.candidate);
+  candidate.decisions[1]!.choice += "；补充当前业务说明";
+  const candidateHash = designHash(candidate), context = architectureReviewEvidenceContext({ design: candidate, ...f.context });
+  const priorFindings = architecturePriorFindings(null, { candidateHash, guideHash: context.contextManifest.acceptanceAdapterGuide!.sha256,
+    contextManifestHash: designHash(context.contextManifest) }, { candidate, evidenceContext: context, feedbackLedger: f.closed });
+  assert.equal(priorFindings!.findings.length, 1);
+  const record = { ...f.architecture, version: 2, design: candidate, candidateHash, feedbackLedger: f.closed, priorFindings };
+  const ledger = createArchitectureFeedbackLedger(record, { agentId: record.agentId, candidate, ...f.context });
+  assert.equal(callFixture(hasNewPendingFeedback, undefined, [record, ledger]), true, "没有当前评审绑定时仍须处理重开的旧问题");
+  const pending = { ...record, reviewProgressCheckpoint: createReviewProgressCheckpoint(record, null, 0) };
+  assert.ok(pending.reviewProgressCheckpoint);
+  const before = structuredClone(pending);
+  assert.equal(callFixture(hasNewPendingFeedback, undefined, [pending, ledger]), false);
+  assert.deepEqual(pending, before);
+  const changed = structuredClone(record);
+  changed.priorFindings!.findings[0]!.issue!.description += "另一种问题";
+  const rebound = { ...changed, reviewProgressCheckpoint: createReviewProgressCheckpoint(changed, null, 0) };
+  assert.equal(callFixture(hasNewPendingFeedback, undefined, [rebound, ledger]), true, "同编号不同问题不算已经分派");
+  pending.reviewProgressCheckpoint!.hash = "0".repeat(64);
+  assert.throws(() => callFixture(hasNewPendingFeedback, undefined, [pending, ledger]));
+});
 
 test("原决策恢复旧错误时，无关正确副本不能维持历史问题关闭", () => {
   const f = closedFixture(), candidate = structuredClone(f.candidate), before = structuredClone(f.closed);
