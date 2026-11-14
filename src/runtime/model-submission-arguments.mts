@@ -8,7 +8,7 @@ const forbidden = new Set(["__proto__", "constructor", "prototype"]);
 const maxBytes = MODEL_JSON_MAX_BYTES;
 export const MODEL_FORMAT_REJECTION_LIMIT = 3;
 const formatReasons = new Set(["required_field", "unknown_field", "invalid_type", "invalid_contract", "invalid_json", "sdk_validation", "invalid_value", "size_limit",
-  "invalid_request", "path_missing", "reference_path_missing", "reference_id_ambiguous",
+  "invalid_request", "path_missing", "reference_path_missing", "reference_id_ambiguous", "assertion_path_invalid",
   "required", "additionalProperties", "type", "anyOf", "oneOf", "enum", "const", "pattern", "uniqueItems",
   "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minProperties", "maxProperties", "multipleOf"]);
 export function isModelSubmissionFormatIssue(issue: unknown): boolean {

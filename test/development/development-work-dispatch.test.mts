@@ -102,7 +102,7 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
               if (interrupt && !interrupted && id === "cases_1") { interrupted = true; throw new Error("controlled planning interruption"); }
               const part = fixtureCases(id, payload);
               if (inputConflict) for (const row of part.cases) if (row.acceptanceId === "acceptance_0") {
-                row.input = '{"n":"bad"}'; row.assertions = [{ path: "error", expectedJson: '"invalid_integer"' }];
+                row.input = '{"n":"bad"}'; row.assertions = [{ path: "/error", expectedJson: '"invalid_integer"' }];
               }
               await tools.submit_development_plan_part.execute("cases", part);
             }
@@ -207,6 +207,7 @@ test("明确的业务输入样本被入口挡住时先退回规划，恢复保�
     current.sessionFile === group.sessionFile && repairHash(current.result) === repairHash(group.result) && current.calls === group.calls)));
   assert.equal(result.reports.at(-1)!.status, "passed");
   assert.ok(result.plan!.cases.some(row => row.input === '{"n":"bad"}' && row.kind === "action"));
+  assert.equal(result.plan!.cases.find(row => row.acceptanceId === "acceptance_0")!.assertions[0]!.path, "error");
 });
 
 test("骨架修订允许同步说明及标题，仍阻止权限、验收分配和运行配置越界", async t => {

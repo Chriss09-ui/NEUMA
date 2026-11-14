@@ -43,6 +43,27 @@ function managedFixture() {
   return { architecture, plan: Object.assign(plan, { application: Object.assign(plan.application, { service: plan.application.service! }) }), schema: PLAN_V3_SCHEMA };
 }
 
+test("规划接收将无歧义JSON Pointer断言转为点路径，诊断一致且原稿和业务数据不变", () => {
+  const { plan, schema, architecture } = fixture();
+  plan.summary = "说明中的 /value 不改写";
+  plan.cases[0]!.assertions = [{ path: "/value", expectedJson: "1" }, { path: "/items/0/code", expectedJson: '"/value"' }];
+  const original = structuredClone(plan);
+  const checked = validatePlan(plan, { architecture });
+  assert.deepEqual(checked.cases[0]!.assertions, [{ path: "value", expectedJson: "1" }, { path: "items.0.code", expectedJson: '"/value"' }]);
+  assert.equal(checked.summary, original.summary); assert.equal(checked.cases[0]!.input, original.cases[0]!.input);
+  assert.deepEqual(plan, original); assert.equal(diagnosePlanningPlan(plan, schema, { architecture }).total, 0);
+  assert.deepEqual(validatePlan(checked, { architecture, previousPlan: checked }), checked);
+  for (const path of ["/", "/value.with.dot", "/a~1b", "/__proto__/x", "/01", "/items/*", "items[0]"]) {
+    const invalid = structuredClone(plan); invalid.cases[0]!.assertions[0]!.path = path;
+    assert.throws(() => validatePlan(invalid, { architecture }), /验收断言路径/);
+    assert.ok(diagnosePlanningPlan(invalid, schema, { architecture }).issues.some(issue =>
+      issue.path === "plan.cases[0].assertions[0].path" && issue.reason === "assertion_path_invalid"));
+  }
+  const duplicate = structuredClone(plan); duplicate.cases[0]!.assertions[1]!.path = "value";
+  assert.throws(() => validatePlan(duplicate, { architecture }), /重复的断言路径/);
+  assert.ok(diagnosePlanningPlan(duplicate, schema, { architecture }).issues.some(issue => issue.path === "plan.cases[0].assertions[1].path"));
+});
+
 test("普通内部操作不额外要求直接用例，公开操作仍须真实执行且拒绝用例不能替代", () => {
   const { architecture, plan, schema } = managedFixture(), before = structuredClone(plan);
   assert.equal(diagnosePlanningPlan(plan, schema, { architecture }).total, 0);
@@ -121,7 +142,7 @@ test("分页首页同时显示所有独立问题分类，不让大量路径错�
   const page = pagePlanDiagnostics(result, { limit: 2 });
   assert.equal(page.issues.length, 2); assert.ok(page.nextOffset);
   const paths = page.issueGroups.find((item) => item.reason === "assertion_path_invalid");
-  assert.equal(paths!.count!, 30); assert.match(paths!.remedy!, /errors\.0\.code/u); assert.match(paths!.remedy!, /保留原预期值/u);
+  assert.equal(paths!.count!, 30); assert.match(paths!.remedy!, /result\.items\.0/u); assert.match(paths!.remedy!, /预期值不.*改变/u);
   assert.ok(page.issueGroups.some((item) => item.reason === "action_missing"));
   assert.deepEqual(plan, before); assert.throws(() => validatePlan(plan, { architecture }));
 });

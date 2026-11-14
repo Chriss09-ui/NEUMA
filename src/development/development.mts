@@ -1,4 +1,5 @@
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
+import { withAssertionPathGuide } from "./development-assertion-path.mjs";
 import { createFormatRecovery, readFormatRecovery, noteFormatRejection, resolveFormatRecovery, deliverFormatFeedback,
   formatCorrectionFeedback, formatRecoveryExhausted, formatFailureCount, type FormatIssue } from "../runtime/format-recovery.mjs";
 import { needsDevelopmentRepairDispatch, repairDevelopmentPlan, repairDevelopmentCode } from "./development-repair.mjs";
@@ -366,7 +367,7 @@ export class DevelopmentController {
         turn: counter.turns, stage, status, issues });
       if (status === "rejected") {
         const formatReasons = new Set(["required", "additionalProperties", "type", "enum", "minLength", "maxLength", "minItems", "maxItems",
-          "uniqueItems", "pattern", "minimum", "maximum", "const", "anyOf", "oneOf", "invalid_json", "planning_artifact_invalid", "sdk_validation", "work_file_unauthorized", "invalid_reference"]);
+          "uniqueItems", "pattern", "minimum", "maximum", "const", "anyOf", "oneOf", "invalid_json", "planning_artifact_invalid", "sdk_validation", "work_file_unauthorized", "invalid_reference", "assertion_path_invalid"]);
         if (kind !== "planner" || stage === "sdk" || issues.some(issue => formatReasons.has(issue.reason)))
           await noteFormat(name, id, issues);
         else if (ctx.record.retryPolicy && objectFields(error).reason !== "repair_content_rejected") {
@@ -521,7 +522,8 @@ export class DevelopmentController {
     } }));
     const planningTools = guardedTools.map(tool => ["save_plan_cases", "edit_plan_cases", "update_plan_json"].includes(tool.name) ? modelSubmissionTool(tool) : tool);
     handle.structuredSubmissionTools = [...(blockerTool ? [blockerTool] : []), submit].map(modelSubmissionTool);
-    const sessionTools = [...planningTools, ...handle.structuredSubmissionTools];
+    const sessionTools = [...planningTools, ...handle.structuredSubmissionTools].map(tool => ({ ...tool,
+      parameters: withAssertionPathGuide(tool.parameters as ToolSchema) }));
     const inputFeedback = (toolName: string, args: unknown) => {
       const tool = sessionTools.find((entry) => entry.name === toolName);
       if (!tool) return;
@@ -631,6 +633,7 @@ export class DevelopmentController {
     handle.checkToolInputs?.();
     ctx.lastRole = handle.kind;
     handle.payload = clone({ ...payload, ...(handle.planningBlocker ? { planningBlockerContract: handle.planningBlocker } : {}) });
+    if (handle.payload.planSchema) handle.payload.planSchema = withAssertionPathGuide(handle.payload.planSchema as ToolSchema);
     handle.payload.roleGuide = handle.nodeGuide ?? { planner: PLAN_PROMPT, developer: CODE_PROMPT, reviewer: REVIEW_PROMPT }[handle.kind];
     if (ctx.record.architecture.platformSnapshot) handle.payload.platformGuide = renderPlatformRules(ctx.record.architecture.platformSnapshot,
       { runtimeCapabilities: ctx.record.architecture.runtimeCapabilities });

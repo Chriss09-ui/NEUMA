@@ -13,6 +13,8 @@ import { MATERIAL_CHECKS_SCHEMA, assertCaseMaterials } from "./development-test-
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
 import { textLength, textWithinLimit } from "../runtime/text-length.mjs";
 
+import { isSafeAssertionPath, normalizeAssertionPath } from "./development-assertion-path.mjs";
+
 const text = (maxLength = 4000, minLength = 1) => ({ type: "string", minLength, maxLength });
 const identifier = { ...text(80), pattern: "^[A-Za-z][A-Za-z0-9_-]*$" };
 const choice = (...values: string[]) => ({ type: "string", enum: values });
@@ -192,12 +194,8 @@ function sameFrozenCaseInput(current: DevelopmentCase, previous: DevelopmentCase
   return first.fixture!.sha256 === second.fixture!.sha256;
 }
 
-function safeAssertionPath(value: string) {
-  if (value === "") return;
-  if (!/^(?:[A-Za-z_$][A-Za-z0-9_$-]*|0|[1-9][0-9]*)(?:\.(?:[A-Za-z_$][A-Za-z0-9_$-]*|0|[1-9][0-9]*))*$/.test(value)
-    || value.split(".").some((part) => ["__proto__", "prototype", "constructor"].includes(part))) {
-    fail("验收断言路径必须为空或安全的属性路径，如 result.items.0");
-  }
+function safeAssertionPath(value: string, path: string) {
+  if (!isSafeAssertionPath(value)) fail("验收断言路径必须为空或安全的属性路径，如 result.items.0", { path, reason: "assertion_path_invalid" });
 }
 
 export function activationCaseEntries(value: Pick<DevelopmentPlan, "cases" | "activationCases"> | null | undefined): { test: DevelopmentCase; source: "development" | "activation"; index: number }[];
@@ -330,8 +328,9 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
   validateSchema(input, fragmentBudget ? { ...schema, properties: { ...schema.properties,
     cases: { ...schema.properties.cases, minItems: 0 } } } : schema, "plan");
   // The schema check above establishes field types; semantic validation below retains all original gates.
-  const value = input as DevelopmentPlan;
+  const value = structuredClone(input) as DevelopmentPlan;
   const allCases = activationCaseEntries(value);
+  for (const { test } of allCases) for (const assertion of test.assertions) assertion.path = normalizeAssertionPath(assertion.path);
   if (allCases.length > 200) fail("研发与激活专用用例合计不能超过200例", { path: "plan.activationCases", reason: "case_limit" });
   const fixtureBudget: FixtureBudget = fragmentBudget ?? { bytes: 0 };
   for (const { test } of allCases) if (value.runtime === "node-json" || test.kind === "node-check")
@@ -447,7 +446,7 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
   const unavailableEntrypoint = freshWorkspace === true ? taskEntrypointIssues(value)[0] : null;
   if (unavailableEntrypoint) fail("任务实际执行时入口尚未包含在此前已完成任务或当前任务的文件授权中；请重整为可执行增量", unavailableEntrypoint);
   const testedTasks = new Set(), testedAcceptance = new Set(), testedPairs = new Set();
-  for (const test of value.cases) {
+  for (const [caseIndex, test] of value.cases.entries()) {
     referenced(test.taskId, taskIds, "case.taskId");
     referenced(test.acceptanceId, acceptanceIds, "case.acceptanceId");
     if (!acceptanceCaseMatches(acceptance.find((item) => item.id === test.acceptanceId), test))
@@ -457,9 +456,10 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
     testedTasks.add(test.taskId); testedAcceptance.add(test.acceptanceId);
     testedPairs.add(`${test.taskId}:${test.acceptanceId}`);
     const assertionPaths = new Set();
-    for (const assertion of test.assertions) {
-      safeAssertionPath(assertion.path); parsedExpected(assertion.expectedJson);
-      if (assertionPaths.has(assertion.path)) fail("同一用例包含重复的断言路径");
+    for (const [index, assertion] of test.assertions.entries()) {
+      const path = `plan.cases[${caseIndex}].assertions[${index}].path`;
+      safeAssertionPath(assertion.path, path); parsedExpected(assertion.expectedJson);
+      if (assertionPaths.has(assertion.path)) fail("同一用例包含重复的断言路径", { path, reason: "assertion_path_invalid" });
       assertionPaths.add(assertion.path);
     }
   }
@@ -467,9 +467,10 @@ function validatePlanValue(input: unknown, { architecture, previousPlan, freshWo
   for (const [index, test] of (value.activationCases ?? []).entries()) {
     if (test.taskId !== undefined) referenced(test.taskId, taskIds, "activationCase.taskId");
     const assertionPaths = new Set();
-    for (const assertion of test.assertions) {
-      safeAssertionPath(assertion.path); parsedExpected(assertion.expectedJson);
-      if (assertionPaths.has(assertion.path)) fail("同一用例包含重复的断言路径", { path: `plan.activationCases[${index}].assertions`, reason: "assertion_path_invalid" });
+    for (const [assertionIndex, assertion] of test.assertions.entries()) {
+      const path = `plan.activationCases[${index}].assertions[${assertionIndex}].path`;
+      safeAssertionPath(assertion.path, path); parsedExpected(assertion.expectedJson);
+      if (assertionPaths.has(assertion.path)) fail("同一用例包含重复的断言路径", { path, reason: "assertion_path_invalid" });
       assertionPaths.add(assertion.path);
     }
   }

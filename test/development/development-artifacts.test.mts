@@ -69,6 +69,20 @@ test("调度器合并的规划按原材料协议封存，原冻结用例和历�
   assert.deepEqual((await artifacts.validateSnapshot(original.snapshot)).plan, plan);
 });
 
+test("文件规划的路径转换在提交与快照读回中一致，原始用例文件不改写", async t => {
+  const { artifacts, tools, directory } = await fixture(t), architecture = developmentArchitecture(), plan = developmentPlan(architecture);
+  plan.cases[0]!.assertions = [{ path: "/verified", expectedJson: "true" }];
+  await savePlan(tools, plan);
+  const source = await readFile(join(directory, "cases/first.json"));
+  const expected = structuredClone(plan); expected.cases[0]!.assertions[0]!.path = "verified";
+  const submitted = await artifacts.submit("agent_one", "run_one", "index.json");
+  assert.deepEqual(submitted.plan, expected);
+  assert.deepEqual(validatePlan(submitted.plan, { architecture }), expected);
+  assert.deepEqual((await artifacts.validateSnapshot(submitted.snapshot)).plan, expected);
+  assert.deepEqual(await readFile(join(directory, "cases/first.json")), source);
+  assert.deepEqual(await readFile(join(submitted.snapshot.path, "cases/first.json")), source);
+});
+
 test("规划预览只捕获当前材料，不封存、不改变权限或接受正式计划", async (t) => {
   const { artifacts, tools, directory } = await fixture(t), architecture = developmentArchitecture(), plan = developmentPlan(architecture);
   await savePlan(tools, plan);

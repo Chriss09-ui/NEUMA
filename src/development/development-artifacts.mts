@@ -6,6 +6,7 @@ import type { DevelopmentPlan, DevelopmentCase, DevelopmentTask, DevelopmentAppl
 import type { NeumaTool, RegisteredTool } from "../runtime/execution-port.mjs";
 import type { PlanDiagnosticSource, PlanDiagnosticIssue } from "./development-plan-diagnostics.mjs";
 import { objectFields, isInteger, errorField } from "../runtime/type-boundary.mjs";
+import { normalizeAssertionPath } from "./development-assertion-path.mjs";
 interface PlanIndex extends UnknownRecord { caseFiles: string[]; activationCaseFiles?: string[] }
 export type PlanningSnapshot = { agentId: string; runId: string; path: string; hash: string; files: { path: string; size: number; hash: string }[]; indexPath: string };
 export type PlanningDraftSnapshot = PlanningSnapshot & { version: number; kind: string };
@@ -353,7 +354,13 @@ function assemble(contents: Map<string, Buffer>, indexPath: string): UnknownReco
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw artifactFailure("shape", fileField, fileIndex);
       if (typeof objectFields(entry).id === "string" && ids.has(String(objectFields(entry).id))) throw artifactFailure("duplicate", fileField, fileIndex);
       if (typeof objectFields(entry).id === "string") ids.add(String(objectFields(entry).id));
-      groups[caseField].push(objectFields(entry));
+      const test = objectFields(entry);
+      // Normalize the assembled view only; the source files and frozen snapshot bytes remain untouched.
+      if (Array.isArray(test.assertions) && test.assertions.length <= 40) test.assertions = test.assertions.map(assertion => {
+        const row = objectFields(assertion);
+        return typeof row.path === "string" ? { ...row, path: normalizeAssertionPath(row.path) } : assertion;
+      });
+      groups[caseField].push(test);
       if (++count > PLAN_ARTIFACT_LIMITS.cases) throw artifactFailure("limit", fileField, fileIndex);
     }
   }

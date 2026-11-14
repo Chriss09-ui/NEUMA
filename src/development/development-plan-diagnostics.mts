@@ -15,6 +15,7 @@ import { resolveTestJson, resolveCaseInput, FIXTURE_LIMITS, TEST_FIXTURE_SCHEMA,
 import { ACTION_CAPABILITIES } from "./node-action-bootstrap.mjs";
 import { activationCaseEntries, activationCheckIssues, actionExecutionIssues, hashValue, safeRelativePath, taskEntrypointIssues, validatePlan } from "./development-contract.mjs";
 import { submissionIssues } from "./development-diagnostics.mjs";
+import { ASSERTION_PATH_GUIDE, isSafeAssertionPath, normalizeAssertionPath } from "./development-assertion-path.mjs";
 import { diagnoseApplicationManifest } from "./application-manifest-diagnostics.mjs";
 import { auditCaseMaterials } from "./development-test-material-audit.mjs";
 export { planningAdmissionFacts } from "./development-fixtures.mjs";
@@ -59,7 +60,7 @@ const remedies: Readonly<Record<string, string>> = Object.freeze({
   input_encoding_mismatch: "input当前是JSON文本，解析一次后仍是fixture配方外壳，且不符合本动作输入契约。若本意为声明式夹具，主动将input保存为原生{fixture:{...}}对象；若本意为普通业务输入，按动作schema修正。宿主不会递归解码、替换输入或改断言。",
   task_entrypoint_unavailable: "按实际任务顺序，此任务需要执行代码，但全局入口不在已完成任务与当前任务的文件授权中。主动重整为含入口及必要helper的可执行增量，或让先前任务产出入口；不能只补验收ID或增加无页面node-check。",
   input_rejection_not_rejected: "该输入通过公开动作契约。业务拒绝应使用实际动作执行与业务断言。",
-  assertion_path_invalid: "断言路径只接受点分隔：对象字段如result.total，数组下标如errors.0.code；不接受errors[0].code、引号、通配符或原型字段。空路径表示整个结果。同一用例不能重复同一路径。主动修正路径，保留原预期值。",
+  assertion_path_invalid: ASSERTION_PATH_GUIDE,
   action_missing: "此处引用的动作未声明，或声明的操作没有实际执行用例。核对application.actions、service.operations及用例actionId的精确编号；每个公开操作须有对应的真实动作执行用例。不能用输入拒绝代替实际执行。",
   node_check_invalid: "node-check仅用于真实页面验收；无页面应用不能用独立脚本冒充业务、宿主或对话验收。",
   invalid_json: "修正该字段的JSON文本或声明式夹具，保留原测试规模和预期。",
@@ -319,9 +320,8 @@ export function diagnosePlanningPlan(input: unknown, schema: ToolSchema, { archi
       add(`${path}.${issue.path}`, issue.reason, { remedy: issue.remedy, ...(issue.measurement ? { measurement: issue.measurement } : {}) });
     const paths = new Set();
     for (const [assertionIndex, assertion] of list(test?.assertions).map(objectFields).entries()) {
-      const itemPath = assertion?.path;
-      if (typeof itemPath !== "string" || itemPath !== "" && (!/^(?:[A-Za-z_$][A-Za-z0-9_$-]*|0|[1-9][0-9]*)(?:\.(?:[A-Za-z_$][A-Za-z0-9_$-]*|0|[1-9][0-9]*))*$/.test(itemPath)
-        || itemPath.split(".").some((part) => ["__proto__", "prototype", "constructor"].includes(part))) || paths.has(itemPath)) add(`${path}.assertions[${assertionIndex}].path`, "assertion_path_invalid");
+      const itemPath = typeof assertion?.path === "string" ? normalizeAssertionPath(assertion.path) : assertion?.path;
+      if (!isSafeAssertionPath(itemPath) || paths.has(itemPath)) add(`${path}.assertions[${assertionIndex}].path`, "assertion_path_invalid");
       paths.add(itemPath);
     }
   }

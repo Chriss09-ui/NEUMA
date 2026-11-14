@@ -11,11 +11,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevelopmentController } from "../../src/development/development.mjs";
 import { createPiSession } from "../../src/runtime/pi-runtime.mjs";
-import { developmentArchitecture } from "../helpers/development.mjs";
+import { developmentArchitecture, developmentPlan } from "../helpers/development.mjs";
+import { LEGACY_PLAN_SCHEMA, validatePlan } from "../../src/development/development-contract.mjs";
+import { ensureDevelopmentPolicy } from "../../src/development/development-policy.mjs";
+import type { DevelopmentRunRecord } from "../../src/development/development-controller-types.mjs";
 
 const textOf = (value: unknown) => typeof value === "string" ? value : recordArray(value).filter((entry) => entry.type === "text").map((entry) => entry.text).join("\n");
 
-async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, count: number) => unknown, { extraTools = [], repeatedCallId = false, turns = 12, boundedWorkload = false, failAt }: {extraTools?: NeumaTool[];repeatedCallId?:boolean;turns?:number;boundedWorkload?:boolean;failAt?:number} = {}) {
+async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, count: number) => unknown, { extraTools = [], repeatedCallId = false, turns = 12, boundedWorkload = false, failAt, planning = false }: {extraTools?: NeumaTool[];repeatedCallId?:boolean;turns?:number;boundedWorkload?:boolean;failAt?:number;planning?:boolean} = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-tool-inputs-")), requests: FixtureChatRequest[] = [], executed: unknown[] = [];
   let serverError: unknown; const capture: {current?: PiSessionOptions} = {};
   const server = createServer(async (request, response) => {
@@ -34,6 +37,10 @@ async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, co
   const architecture = developmentArchitecture(), record = { id: "dev_inputs", agentId: "inputs", architecture,
     architectureRef: { version: architecture.version, candidateHash: architecture.candidateHash }, phase: "implementing", revision: 0,
     ...(boundedWorkload ? { workloadPolicyVersion: 1 as const } : {}) };
+  if (planning) {
+    Object.assign(record, { phase: "planning", tasks: [], planAttempts: [], budgets: { corrections: 6, planRevisions: 1, integrationRepairs: 2 } });
+    ensureDevelopmentPolicy(record as unknown as DevelopmentRunRecord);
+  }
   const controller = Reflect.construct(DevelopmentController, [{ cwd: root, dataDir: join(root, "data"),
     config: { llmConfigured: true, chatUrl: `http://127.0.0.1:${listeningAddress(server).port}/v1/chat/completions`, model: "local-model", apiKey: "local-only" },
     store: { save: async (value: object) => ({ ...value, revision: Number(objectFields(value).revision) + 1 }) },
@@ -44,10 +51,44 @@ async function fixture(t: test.TestContext, reply: (body: FixtureChatRequest, co
   const tool: NeumaTool = { name: "change_input", label: "本地结构测试", description: "只接受文本值", executionMode: "sequential",
     parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
     async execute(_id, args) { executed.push(objectFields(args).value); return { content: [{ type: "text", text: "saved" }], details: {} }; } };
-  const tools = [tool, ...extraTools], counter = { turns: 0 }, handle = await callFixture(controller.role, controller, [ctx, { kind: "developer", tools, scope: {}, counter, limit: turns, validate: (value: unknown) => value }]);
+  const tools = [tool, ...extraTools], counter = { turns: 0 }, handle = await callFixture(controller.role, controller, [ctx, {
+    kind: planning ? "planner" : "developer", tools, scope: {}, counter, limit: turns,
+    ...(planning ? { blocker: false, submission: { name: "submit_development_plan", schema: LEGACY_PLAN_SCHEMA, instruction: "提交当前规划" } } : {}),
+    validate: (value: unknown) => planning ? validatePlan(value, { architecture }) : value }]);
   t.after(async () => { callFixture(controller.dispose, controller, [ctx, handle]); server.closeAllConnections(); await new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve())); await rm(root, { recursive: true, force: true }); });
-  return { controller, ctx, handle, captured: capture.current, tools, requests, executed, counter, error: () => serverError };
+  return { controller, ctx, handle, captured: capture.current, tools, requests, executed, counter, architecture, error: () => serverError };
 }
+
+test("规划路径错误只给反馈后三次实际纠正，不扣内容次数，第三次仍可成功且耗尽后不能重领", async t => {
+  for (const correctLast of [false, true]) await t.test(correctLast ? "第三次纠正成功" : "三次纠正失败后停止", async t => {
+    const seen: unknown[] = [];
+    const f = await fixture(t, (body, count) => {
+      if (count > 1) seen.push(JSON.parse(textOf(body.messages.findLast(row => row.role === "user")!.content)).formatCorrection);
+      const plan = developmentPlan();
+      plan.cases[0]!.assertions[0]!.path = correctLast && count === 4 ? "/verified" : "/literal.key";
+      return [{ name: "submit_development_plan", args: plan }];
+    }, { planning: true });
+    if (correctLast) {
+      const plan = await callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]);
+      assert.equal((plan as ReturnType<typeof developmentPlan>).cases[0]!.assertions[0]!.path, "verified");
+    } else {
+      await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
+      await assert.rejects(callFixture(f.controller.ask, f.controller, [f.ctx, f.handle, {}]), error => failureFields(error).diagnostic?.reason === "repeated_tool_error");
+    }
+    assert.equal(f.error(), undefined); assert.equal(f.requests.length, 4);
+    const declaration = recordArray(f.requests[0]!.tools).map(row => objectFields(row.function)).find(row => row.name === "submit_development_plan")!;
+    assert.match(JSON.stringify(declaration.parameters), /result\.items\.0/);
+    assert.match(JSON.stringify(declaration.parameters), /\/result\/items\/0/);
+    assert.deepEqual(objectFields(objectFields(f.ctx.record).retryPolicy).content, {});
+    for (const [index, raw] of seen.entries()) {
+      const feedback = objectFields(raw), row = objectFields((feedback.outstanding as unknown[])[0]);
+      assert.equal(row.correctionsUsed, index); assert.equal(row.correctionsRemaining, 3-index);
+      assert.equal(objectFields((row.issues as unknown[])[0]).path, "plan.cases[0].assertions[0].path");
+    }
+    const episode = f.handle.reference.formatRecovery!.episodes[0]!;
+    assert.equal(episode.corrections.length, 3); assert.equal(Boolean(episode.closed), correctLast);
+  });
+});
 
 test("研发超过旧请求上限仍可读取再提交，只有用量累计", async t => {
   const f = await fixture(t, (body, count) => {

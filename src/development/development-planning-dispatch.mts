@@ -188,10 +188,10 @@ export async function planDevelopmentParts(controller: DevelopmentController, ct
             throw new InputError("本组缺少已分派的验收组合或动作实际执行用例。");
         }
         const budget: FixtureBudget = { bytes: 0 };
-        validatePlanningFragment({ ...outline!.plan, cases: part.cases, ...(part.activationCases.length ? { activationCases: part.activationCases } : {}) }, { architecture, freshWorkspace: true }, budget);
+        const checked = validatePlanningFragment({ ...outline!.plan, cases: part.cases, ...(part.activationCases.length ? { activationCases: part.activationCases } : {}) }, { architecture, freshWorkspace: true }, budget);
         if ((budget.bytes ?? 0) > expandedBytes || (budget.textBytes ?? 0) > expandedBytes)
           throw new InputError("本组夹具展开或文本工作量超过分配容量，请保留业务边界并减少重复样本。");
-        return structuredClone(part);
+        return { cases: checked.cases, activationCases: checked.activationCases ?? [] };
       } };
   });
   const assemble = (results: CasePart[]) => {

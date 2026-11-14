@@ -12,6 +12,7 @@ import { activationCaseEntries } from "./development-contract.mjs";
 import { developmentAcceptanceItems, requiredDevelopmentRequirementIds } from "../verification/acceptance-contract.mjs";
 import { diagnoseApplicationManifest } from "./application-manifest-diagnostics.mjs";
 import { PlanningInputConflict } from "./development-input-admission.mjs";
+import { ASSERTION_PATH_GUIDE } from "./development-assertion-path.mjs";
 
 const remedies: Readonly<Record<string, string>> = Object.freeze({
   required: "补齐提交工具列出的必填字段。", additionalProperties: "移除当前结构没有声明的字段。",
@@ -46,7 +47,7 @@ const remedies: Readonly<Record<string, string>> = Object.freeze({
   action_owner_acceptance_invalid: "actionOwners 的 acceptanceId 必须属于所选 taskId，且使用 action 验证；不能用平台审核或入口拒绝验收代替真实动作测试。",
   activation_scope_invalid: "activationScopes 只为原架构 adapterId=host-business 的验收各列一项。原架构没有这类验收时提交 []；delivery-review 等独立检查不放入此处，保留其原责任和阶段。",
   dependency_cycle: "移除循环依赖，使每个任务可以按前置任务顺序执行。",
-  assertion_path_invalid: "断言路径使用空字符串或安全属性路径，禁止原型属性和重复路径。",
+  assertion_path_invalid: ASSERTION_PATH_GUIDE,
   unsafe_path: "使用工作区内安全相对路径，禁止隐藏目录、凭据和依赖目录。",
   revision_frozen: "保留已确认用例的输入、入口、替身和断言；只能补充，不能删除或放宽。",
   workflow_case_invalid: "流程回复只引用冻结流程入口中的真实等待步骤，每个步骤只回复一次。",
@@ -234,6 +235,9 @@ export function submissionIssues(input: unknown, schema: ToolSchema, { root, err
   }
   if (error?.developmentIssue && Object.hasOwn(remedies, String(objectFields(error.developmentIssue).reason))) {
     const suppliedPath = String(objectFields(error.developmentIssue).path);
+    if (objectFields(error.developmentIssue).reason === "assertion_path_invalid"
+      && /^plan\.(?:cases|activationCases)\[(?:0|[1-9][0-9]{0,2})\]\.assertions\[(?:0|[1-9][0-9]?)\]\.path$/.test(suppliedPath))
+      return [issue(suppliedPath, "assertion_path_invalid")];
     if (["plan.runtime", "plan.application"].includes(suppliedPath)) return [issue(suppliedPath, String(objectFields(error.developmentIssue).reason))];
     if (/^plan\.activationChecks(?:\[(?:0|[1-9][0-9]?)\](?:\.(?:acceptanceId|caseIds)(?:\[(?:0|[1-9][0-9]{0,2})\])?)?)?$/.test(suppliedPath)) {
       const referenceId = objectFields(error.developmentIssue).referenceId;
