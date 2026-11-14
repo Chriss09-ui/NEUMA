@@ -11,6 +11,7 @@ import { resolveCaseValues, inputContractRejection } from "./development-fixture
 import { activationCaseEntries } from "./development-contract.mjs";
 import { developmentAcceptanceItems, requiredDevelopmentRequirementIds } from "../verification/acceptance-contract.mjs";
 import { diagnoseApplicationManifest } from "./application-manifest-diagnostics.mjs";
+import { PlanningInputConflict } from "./development-input-admission.mjs";
 
 const remedies: Readonly<Record<string, string>> = Object.freeze({
   required: "补齐提交工具列出的必填字段。", additionalProperties: "移除当前结构没有声明的字段。",
@@ -170,6 +171,7 @@ function actionInputIssues(value: DevelopmentPlan, root: string, { expectRejecti
 }
 
 export function submissionIssues(input: unknown, schema: ToolSchema, { root, error: errorInput, sdk = false, architecture }: { root: string; error?: unknown; sdk?: boolean; architecture?: DevelopmentArchitecture | undefined }): SubmissionIssue[] {
+  if (!sdk && errorInput instanceof PlanningInputConflict) return errorInput.issues;
   const error = objectFields(errorInput), raw = objectFields(input);
   if (error?.reason === "planning_artifact_invalid") {
     const detail = objectFields(error.artifactIssue), code = detail.parseError;

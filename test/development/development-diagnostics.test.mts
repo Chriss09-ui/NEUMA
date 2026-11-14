@@ -14,8 +14,27 @@ import { developmentArchitecture, developmentPlan, developmentWork } from "../he
 import type { RequirementDraft } from "../../public/ui-types.js";
 import type { RequirementItem,ArchitectureBase,ArchitectureReview } from "../../src/contracts/architecture.mjs";
 import type { ToolSchema } from "../../src/contracts/tools.mjs";
+import { checkPlanningInputAdmission } from "../../src/development/development-input-admission.mjs";
 
 const valueSchema = () => ({ type: "object", properties: {}, required: [], additionalProperties: false });
+
+test("骨架输入检查不猜测自然语言、多动作归属或原始数据封装，保留平台拒绝的分工", () => {
+  const { architecture, plan } = fixture();
+  const item = architecture.design.acceptance[0]!;
+  Object.assign(item, { input: '{"n":"bad"}', verification: { stage: "development", owner: "generated-code", adapterId: "action" } });
+  plan.tasks[0]!.acceptanceIds = [item.id];
+  const action = plan.application!.actions[0]!;
+  action.inputSchema = { type: "object", properties: { n: { type: "integer" } }, required: ["n"], additionalProperties: false };
+  assert.throws(() => checkPlanningInputAdmission(plan, architecture), /planning_input_conflict/);
+  for (const input of ["提交错误整数", "1", '{"raw":{"n":"bad"}}']) {
+    item.input = input; assert.doesNotThrow(() => checkPlanningInputAdmission(plan, architecture));
+  }
+  item.input = '{"n":"bad"}'; item.verification = { stage: "development", owner: "platform", adapterId: "input-contract" };
+  assert.doesNotThrow(() => checkPlanningInputAdmission(plan, architecture));
+  item.verification = { stage: "development", owner: "generated-code", adapterId: "action" };
+  plan.application!.actions.push({ ...action, id: "another" });
+  assert.doesNotThrow(() => checkPlanningInputAdmission(plan, architecture));
+});
 function fixture(managed = false) {
   const architecture = developmentArchitecture();
   Object.assign(architecture.design, { schemaVersion: managed ? 3 : 2, connections: [], interaction: { page: false },

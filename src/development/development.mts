@@ -42,6 +42,7 @@ interface RunOptions { signal?: AbortSignal | undefined; onProgress?: (value: Un
   activate?: (record: DevelopmentRunRecord, signal: AbortSignal) => Promise<ActivationResult> }
 type RoleOptions<T> = { kind: DevelopmentRole; tools?: RegisteredTool[]; validate: (value: unknown) => T | Promise<T>; counter: { turns: number }; limit: number | null; scope: unknown;
   submission?: { name: string; schema: ToolSchema; instruction: string }; blocker?: boolean; compaction?: false;
+  diagnose?: (value: unknown, error: unknown) => SubmissionIssue[];
   onModelCall?: (event: { purpose?: string; retryAttempt?: number }) => Promise<void> };
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
@@ -283,7 +284,7 @@ export class DevelopmentController {
   async role(ctx: DevelopmentContext, options: RoleOptions<DevelopmentPlan> & { kind: "planner" }): Promise<DevelopmentHandle<DevelopmentPlan | { report: PlanningBlockerReport }>>;
   async role(ctx: DevelopmentContext, options: RoleOptions<DevelopmentWork> & { kind: "developer" }): Promise<DevelopmentHandle<DevelopmentWork>>;
   async role(ctx: DevelopmentContext, options: RoleOptions<DevelopmentReview> & { kind: "reviewer" }): Promise<DevelopmentHandle<DevelopmentReview>>;
-  async role(ctx: DevelopmentContext, { kind, tools = [], validate, counter, limit, scope, submission, blocker, compaction, onModelCall }: RoleOptions<unknown>): Promise<DevelopmentHandle> {
+  async role(ctx: DevelopmentContext, { kind, tools = [], validate, counter, limit, scope, submission, blocker, compaction, onModelCall, diagnose }: RoleOptions<unknown>): Promise<DevelopmentHandle> {
     limit = null;
     validatePlatformMetadata(ctx.record.architecture);
     const platform = ctx.record.architecture.platformSnapshot;
@@ -359,7 +360,7 @@ export class DevelopmentController {
       const call = handle.submissionCalls.get(id);
       if (call?.recorded) return;
       if (call) call.recorded = true;
-      const issues = status === "rejected" ? diagnosticIssues ?? submissionIssues(value, stage === "sdk" ? submitSchema : resultSchema, {
+      const issues = status === "rejected" ? diagnosticIssues ?? (stage !== "sdk" ? diagnose?.(value, error) : undefined) ?? submissionIssues(value, stage === "sdk" ? submitSchema : resultSchema, {
         root, error, sdk: stage === "sdk", architecture: ctx.record.architecture }) : [];
       recordSubmission(ctx.record, { role: kind, phase: ctx.record.phase, taskId: ctx.record.currentTaskId,
         turn: counter.turns, stage, status, issues });

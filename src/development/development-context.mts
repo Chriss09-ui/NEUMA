@@ -200,11 +200,22 @@ export function compactDevelopmentContext(input: unknown, maxChars = 16_000): Pr
 export function developmentNodeContext(payload: DevelopmentContextPayload, kind: string) {
   const fields = ["architectureRef", "subjectHash", "mode", "modelBudget", "planningBlockerContract", "workAssignment", "caseAssignments", "reviewScope", "partSchema", "task", "feedback", "submissionFeedback", "issues", "remaining", "unresolvedIssues", "historyPolicy",
     "requirements", "design", "verificationAssignments", "entrypoint", "runtime", "application", "checkpoint", "planningWorkspace"];
-  if (kind === "planner") fields.push("previousPlan", "historicalPlanningDraft", "caseFacts", "completedTasks", "planningFiles");
+  if (kind === "planner") fields.push("previousPlan", "planningRepair", "historicalPlanningDraft", "caseFacts", "completedTasks", "planningFiles");
   if (payload.workAssignment) fields.push("plan");
   if (kind === "developer") fields.push("cases", "activationCases", "activationChecks");
   if (kind === "reviewer") fields.push("plan", "planHash", "report", "codeHash", "caseFacts", "admissionFacts");
   const result: DevelopmentContextPayload = Object.fromEntries(fields.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+  if (payload.caseAssignments && result.design) {
+    const rows = objectFields(payload.caseAssignments).rows;
+    if (Array.isArray(rows)) {
+      const acceptances = new Set(rows.map(row => objectFields(row).acceptanceId));
+      result.design = { ...Object.fromEntries(["profile", "execution", "interaction"].filter(key => objectFields(result.design)[key] !== undefined)
+        .map(key => [key, objectFields(result.design)[key]])), acceptance: result.design.acceptance?.filter(row => acceptances.has(row.id)) };
+      const plan = objectFields(result.plan), taskIds = new Set(rows.map(row => objectFields(row).taskId));
+      result.plan = { ...Object.fromEntries(["schemaVersion", "runtime", "entrypoint", "application"].filter(key => plan[key] !== undefined).map(key => [key, plan[key]])),
+        tasks: Array.isArray(plan.tasks) ? plan.tasks.filter(task => taskIds.has(objectFields(task).id)) : [] };
+    }
+  }
   if (result.task && payload.feedback && encoded(objectFields(result.task).feedback) === encoded(payload.feedback)) {
     const { feedback: _duplicate, ...task } = objectFields(result.task);
     result.task = task;

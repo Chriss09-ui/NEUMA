@@ -38,6 +38,22 @@ test("开发首包只给当前任务及依赖接口，完整回归和指南仍�
   assert.ok(JSON.stringify(packet).length <= 24000);
 });
 
+test("用例组首包只带本组任务、验收和当前接口，其他设计仍能按需读取", async () => {
+  const payload = { workAssignment: { id: "cases_0" }, caseAssignments: { rows: [{ taskId: "t1", acceptanceId: "a1" }] },
+    design: { profile: "custom", instructions: "全局细节不重复塞入", components: [{ id: "unrelated" }],
+      acceptance: [{ id: "a1", expected: "明确拒绝错误输入" }, { id: "a2", expected: "其他业务" }] },
+    plan: { runtime: "node-action", entrypoint: "main.mjs", application: { actions: [{ id: "run" }] },
+      tasks: [{ id: "t1", files: ["main.mjs"] }, { id: "t2", files: ["other.mjs"] }] } };
+  const packet = JSON.parse(developmentContextMessage(payload, 16000, { kind: "planner" }).message);
+  assert.deepEqual(packet.design.acceptance, [payload.design.acceptance[0]]);
+  assert.equal(packet.design.instructions, undefined); assert.equal(packet.design.components, undefined);
+  assert.deepEqual(packet.plan.tasks, [payload.plan.tasks[0]]); assert.deepEqual(packet.plan.application, payload.plan.application);
+  assert.equal(packet.contextSections.find((row: { section: string }) => row.section === "plan").delivery, "summary");
+  const tool = createContextReadTool(() => payload);
+  assert.deepEqual(JSON.parse((await call(tool, { section: "plan", pointer: "/tasks/1" })).text), payload.plan.tasks[1]);
+  assert.equal(JSON.parse((await call(tool, { section: "design", pointer: "/instructions" })).text), payload.design.instructions);
+});
+
 type ContextPage = { text: string; offset: number; totalChars: number } & ({ truncated: true; nextOffset: number } | { truncated: false; nextOffset: null });
 const call = async (tool: NeumaTool, params: unknown, signal?: AbortSignal): Promise<ContextPage> => {
   const page = fixtureJsonObject(toolText(await tool.execute("context-read", params, signal)));

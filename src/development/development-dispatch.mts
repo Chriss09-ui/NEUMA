@@ -12,6 +12,7 @@ import { isPlanningBlockerOutcome } from "./development-planning-blocker.mjs";
 import { noteDevelopmentRejection, DEVELOPMENT_CONTENT_LIMIT } from "./development-policy.mjs";
 import { developmentSessionBinding, type DevelopmentSessionReference } from "./development-sessions.mjs";
 import { prepareDevelopmentSubmissionReplay, readDevelopmentSubmissionReplays, type DevelopmentSubmissionReplay } from "./development-submission-replay.mjs";
+import type { SubmissionIssue } from "./development-diagnostics.mjs";
 
 interface AccountingSnapshot { id: string; remaining?: unknown; omitUnresolved?: true }
 interface WorkIdentity { binding: unknown; assignments: { id: string; role: DevelopmentRole; schema: ToolSchema;
@@ -20,7 +21,8 @@ export type DevelopmentWorkCheckpoint = { version: 1; bindingHash: string; dispa
   | { version: 2; bindingHash: string; materialHash: string; originalAccounting?: AccountingSnapshot[];
     submissionReplays?: DevelopmentSubmissionReplay[]; dispatch: RepairCheckpoint<null> };
 export interface DevelopmentPart<T> { id: string; role: DevelopmentRole; instruction: string; schema: ToolSchema;
-  payload: UnknownRecord; tools?: RegisteredTool[]; allowBlocker?: boolean; validate(value: unknown): T }
+  payload: UnknownRecord; tools?: RegisteredTool[]; allowBlocker?: boolean; validate(value: unknown): T;
+  delivery?: UnknownRecord; diagnose?(value: unknown, error: unknown): SubmissionIssue[] }
 
 export function readDevelopmentWorkCheckpoint(value: unknown, sessions?: Record<string, DevelopmentSessionReference>): DevelopmentWorkCheckpoint {
   const raw = objectFields(value);
@@ -165,8 +167,9 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
   for (;;) try {
   result = await runDevelopmentTaskSchedule({ checkpoint: checkpoint.dispatch, binding: identity, base, signal: ctx.signal,
     validateCandidate: validate,
-    onInvalidMerge: async (_ids, receiptHash) => {
-      if (parts.every(part => part.role === "reviewer")) return;
+    onInvalidMerge: async (_ids, receiptHash, phase) => {
+      // Rechecking an already recorded result is not another formal submission.
+      if (phase === "saved" || parts.every(part => part.role === "reviewer")) return;
       const count = noteDevelopmentRejection(ctx.record, "plan", { work: key, receiptHash });
       await controller.save(ctx);
       if (count >= DEVELOPMENT_CONTENT_LIMIT) throw Object.assign(new InputError("规划已累计五次内容退回，分组结果、会话及用量保留。"),
@@ -190,6 +193,7 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
         submission: { name: part.role === "reviewer" ? "submit_development_review_part" : "submit_development_plan_part",
           schema: part.schema, instruction: part.instruction }, blocker: part.allowBlocker === true, compaction: false, tools: part.tools ?? [],
         onModelCall: event => worker.onCall(event.retryAttempt),
+        ...(part.diagnose ? { diagnose: part.diagnose } : {}),
         validate: async value => {
           const checked = part.validate(value);
           await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: `已提交${part.id}，仍需程序合并检查`,
@@ -199,7 +203,7 @@ export async function runDevelopmentParts<T>(controller: DevelopmentController, 
       try {
         if (!handle.session.sessionFile) throw new InputError("研发子会话没有可恢复的历史引用。");
         await worker.onSession(basename(handle.session.sessionFile));
-        const accepted = await controller.ask(ctx, handle, { ...part.payload, workAssignment: { id: part.id, instruction: part.instruction },
+        const accepted = await controller.ask(ctx, handle, { ...part.payload, ...part.delivery, workAssignment: { id: part.id, instruction: part.instruction },
           ...(worker.group.history?.length ? { feedback: { reason: worker.group.history.at(-1)!.reason } } : {}) });
         if (isPlanningBlockerOutcome(accepted)) throw new InputError("规划技术阻断已保存，等待上游条件变化。");
         delete handle.reference.pendingResult;

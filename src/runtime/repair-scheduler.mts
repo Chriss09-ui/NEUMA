@@ -206,7 +206,7 @@ function readCheckpoint(input: unknown, review: boolean, development = false): R
 interface ScheduleOptions<L extends number | null> { checkpoint: RepairCheckpoint<L>; binding: unknown; base: unknown;
   save(state: RepairCheckpoint<L>): Promise<void>; run(worker: RepairWorker<L>): Promise<unknown>; signal?: AbortSignal | undefined;
   retryInvalidMerge?: boolean;
-  onInvalidMerge?: ((groupIds: string[], receiptHash: string) => Promise<void>) | undefined;
+  onInvalidMerge?: ((groupIds: string[], receiptHash: string, phase: "saved" | "submission" | "assembly") => Promise<void>) | undefined;
   validateCandidate?: ((candidate: unknown, final: boolean) => unknown | Promise<unknown>) | undefined }
 
 /** Workers only propose patches. A persisted wave is replayed before any new work is scheduled. */
@@ -234,7 +234,7 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
     writes = pending.catch(() => {}); return pending;
   };
   await update(() => {});
-  const reopen = async (ids: string[], wave: number, error: unknown) => {
+  const reopen = async (ids: string[], wave: number, error: unknown, phase: "saved" | "assembly") => {
     await update(next => {
     const reason = (error instanceof Error ? error.message : "合并校验未通过，须重新核对本组及下游补丁。").slice(0, 4000);
     for (const group of next.groups) if (ids.includes(group.id) || group.wave > wave) {
@@ -250,7 +250,7 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
       if (group.wave > wave) { group.wave = 0; group.inputHash = null; group.sessionFile = null; }
     }
     });
-    await options.onInvalidMerge?.(ids, state.hash);
+    await options.onInvalidMerge?.(ids, state.hash, phase);
   };
   let base = clone(options.base), wave = 1;
   for (;;) {
@@ -275,7 +275,7 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
     for (const group of groups.filter(group => group.result)) {
       const result = validateRepairResult(group.result, group, base);
       try { await options.validateCandidate?.(applyRepairUpdates(base, result.updates), false); }
-      catch (error) { await reopen([group.id], wave, error); }
+      catch (error) { await reopen([group.id], wave, error, "saved"); }
     }
     groups = state.groups.filter(group => group.wave === wave);
     const pending = groups.filter(group => !group.result), quotas = new Map(pending.map(group => [group.id, group.calls]));
@@ -332,7 +332,7 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
           try { await options.validateCandidate?.(applyRepairUpdates(base, result.updates), false); }
           catch (error) {
             if (state.version !== 4) throw error;
-            await options.onInvalidMerge?.([original.id], repairHash({ group: original.id, calls: current().calls, result }));
+            await options.onInvalidMerge?.([original.id], repairHash({ group: original.id, calls: current().calls, result }), "submission");
             throw Object.assign(error instanceof Error ? error : new InputError("本组内容未通过校验。"), { reason: "repair_content_rejected" });
           }
           await update(next => {
@@ -354,7 +354,7 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
       const ids = Array.isArray(requested) && requested.length && requested.every(id => typeof id === "string" && state.groups.some(group => group.id === id && group.wave > 0))
         ? requested as string[] : completed.map(group => group.id);
       const firstWave = Math.min(wave, ...state.groups.filter(group => ids.includes(group.id)).map(group => group.wave));
-      await reopen(ids, firstWave, error);
+      await reopen(ids, firstWave, error, "assembly");
       if (options.retryInvalidMerge) { base = clone(options.base); wave = 1; continue; }
       throw error;
     }

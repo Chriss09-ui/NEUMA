@@ -59,13 +59,20 @@ export async function prepareDevelopmentSubmissionReplay<T>(controller: Developm
   checkpoint: DevelopmentWorkCheckpoint, parts: DevelopmentPart<T>[], initialBase: unknown,
   validate: (value: unknown, final?: boolean) => unknown) {
   if (checkpoint.version !== 2) return null;
+  if (!checkpoint.dispatch.groups.some(group => !group.result && group.sessionFile
+    && Object.values(ctx.record.sessions ?? {}).some(reference => reference.file === group.sessionFile && formatRecoveryExhausted(reference.formatRecovery)))) return null;
   const copy = structuredClone(checkpoint), dispatch = copy.dispatch, sessions: Record<string, DevelopmentSessionReference> = {};
   let base = structuredClone(initialBase), recovered = 0;
   for (let wave = 1; wave <= Math.max(...dispatch.groups.map(group => group.wave)); wave++) {
     const groups = dispatch.groups.filter(group => group.wave === wave), baseHash = repairHash(base);
     for (const group of groups) {
       if (group.inputHash !== baseHash) failure("分组基底变化");
-      if (group.result) { validateRepairResult(group.result, group, base); validate(applyRepairUpdates(base, group.result.updates)); continue; }
+      if (group.result) {
+        validateRepairResult(group.result, group, base);
+        try { validate(applyRepairUpdates(base, group.result.updates)); }
+        catch (error) { if (error instanceof InputError) return null; throw error; }
+        continue;
+      }
       const part = parts.find(part => group.issueIds.length === 1 && group.issueIds[0] === part.id);
       if (!part) continue;
       const binding = developmentSessionBinding(ctx.record, part.role, { work: key, bindingHash: checkpoint.bindingHash, partId: part.id, baseHash });

@@ -33,7 +33,7 @@ function fixtureCases(id: string, payload: Record<string, unknown>) {
 }
 
 async function fixture(t: test.TestContext, interrupt = false, activation = false, objection = false, rejectOutline = false,
-  legacy?: { url: string; part: string }) {
+  legacy?: { url: string; part: string }, inputConflict = false) {
   const root = await mkdtemp(join(tmpdir(), "neuma-development-dispatch-")), executor = new DevelopmentExecutor();
   const availability = await executor.probe();
   if (!availability.available) { await rm(root, { recursive: true, force: true }); t.skip(availability.reason); return; }
@@ -48,6 +48,8 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
     design.acceptance.push({ id: "activation_check", kind: "success", requirementIds: requirements.map(row => row.id), input: "99", expected: "启用前真实验证整数返回值",
       verification: { stage: "activation", owner: "platform", adapterId: "host-business" } });
   }
+  if (inputConflict) Object.assign(design.acceptance[0]!, { input: '{"n":"bad"}', expected: "返回明确的非整数错误",
+    verification: { stage: "development", owner: "generated-code", adapterId: "action" } });
   const candidateHash = designHash(design), architecture = developmentArchitecture({ requirements, design, candidateHash, contractVersion: activation ? 3 : 2, review: passingReview(candidateHash) });
   const shape: ValueSchema = { type: "object", properties: { n: { type: "integer" } }, required: ["n"], additionalProperties: false };
   const outline = { plan: { schemaVersion: (activation ? 3 : 2) as 2 | 3, summary: "分成两个有依赖的可运行增量", runtime: "node-action" as const, entrypoint: "main.mjs",
@@ -87,12 +89,21 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
           if (tools.submit_development_plan_part) {
             if (id === "outline") {
               const submitted = structuredClone(outline);
+              if (inputConflict && calls.filter(row => row.id === "outline").length > 1) {
+                submitted.plan.application.actions[0]!.inputSchema.properties!.n = {};
+                submitted.plan.application.actions[0]!.outputSchema = { type: "object", properties: { n: { type: "integer" }, error: { type: "string" } }, required: [], additionalProperties: false };
+              }
               if (rejectOutline && !interrupted) { interrupted = true; submitted.actionOwners.push({ ...submitted.actionOwners[0]! }); }
               await tools.submit_development_plan_part.execute("outline", submitted);
             }
             else {
+              if (inputConflict) assert.equal(calls.filter(row => row.id === "outline").length, 2, "确定的输入冲突须在分派用例前交回规划者");
               if (interrupt && !interrupted && id === "cases_1") { interrupted = true; throw new Error("controlled planning interruption"); }
-              await tools.submit_development_plan_part.execute("cases", fixtureCases(id, payload));
+              const part = fixtureCases(id, payload);
+              if (inputConflict) for (const row of part.cases) if (row.acceptanceId === "acceptance_0") {
+                row.input = '{"n":"bad"}'; row.assertions = [{ path: "error", expectedJson: '"invalid_integer"' }];
+              }
+              await tools.submit_development_plan_part.execute("cases", part);
             }
           } else if (tools.submit_development_review_part) {
             const scope = payload.reviewScope as { kind: string; ids: string[] };
@@ -102,7 +113,9 @@ async function fixture(t: test.TestContext, interrupt = false, activation = fals
                 remedy: "改成另一套命名", taskIds: ["task_0"], files: ["main.mjs"] }] } : {}));
           } else if (tools.submit_development_work) {
             const task = payload.task as TaskProgress;
-            await tools.write!.execute("write", { path: "main.mjs", content: "export const actions={async echo(input){return {n:input.n};}};" });
+            await tools.write!.execute("write", { path: "main.mjs", content: inputConflict
+              ? "export const actions={async echo(input){return Number.isInteger(input.n)?{n:input.n}:{error:'invalid_integer'};}};"
+              : "export const actions={async echo(input){return {n:input.n};}};" });
             await tools.submit_development_work.execute("work", developmentWork(task));
           } else throw new Error("Unexpected unpartitioned model call");
           session.messages.push({ role: "assistant", stopReason: "stop", content: "controlled role; real controller validation and isolated execution" });
@@ -172,6 +185,37 @@ test("复杂研发拆为骨架、独立用例组及完整覆盖的评审组，�
   const planCases = f.calls.filter(call => call.mode === "plan" && call.scope?.kind === "cases").flatMap(call => call.scope!.ids);
   assert.deepEqual(planCases.sort(), result.plan!.cases.map(test => test.id).sort());
   assert.ok(f.calls.filter(call => call.scope?.kind === "cases").every(call => call.scope!.ids.length <= 6));
+});
+
+test("明确的业务输入样本被入口挡住时先退回规划，恢复保留已收用例与内容计数", async t => {
+  const f = await fixture(t, true, false, false, false, undefined, true); if (!f) return;
+  const rejected = await f.controller.run(f.architecture);
+  assert.equal(rejected.retryPolicy!.content.plan!.count, 1, JSON.stringify(f.failures));
+  assert.ok(rejected.submissionAttempts!.some(row => row.issues.some(issue => issue.reason === "planning_input_conflict")));
+  assert.equal(f.calls.filter(row => row.id.startsWith("cases_")).length, 0);
+  const stopped = await f.restart().run(f.architecture, { resume: true });
+  assert.equal(f.calls.filter(row => row.id === "outline").length, 2, JSON.stringify(f.failures));
+  assert.equal(stopped.retryPolicy!.content.plan!.count, 1);
+  const accepted = Object.values(stopped.workDispatches!).flatMap(row => row.dispatch.groups).filter(row => row.result && row.issueIds.some(id => id.startsWith("cases_")));
+  assert.ok(accepted.length);
+  const result = await f.restart().run(f.architecture, { resume: true });
+  assert.equal(result.status, "completed", JSON.stringify({ summary: result.summary, failures: f.failures }));
+  assert.equal(result.retryPolicy!.content.plan!.count, 1);
+  assert.equal(f.calls.filter(row => row.id === "outline").length, 2);
+  for (const group of accepted) assert.ok(Object.values(result.workDispatches!).some(row => row.dispatch.groups.some(current =>
+    current.sessionFile === group.sessionFile && repairHash(current.result) === repairHash(group.result) && current.calls === group.calls)));
+  assert.equal(result.reports.at(-1)!.status, "passed");
+  assert.ok(result.plan!.cases.some(row => row.input === '{"n":"bad"}' && row.kind === "action"));
+});
+
+test("用例组的输入错误用冻结接口定位具体用例，不再误报整个应用配置", async t => {
+  const f = await fixture(t); if (!f) return;
+  f.outline.plan.application.actions[0]!.inputSchema.properties!.n = { type: "integer", minimum: 100 };
+  const result = await f.controller.run(f.architecture);
+  const failures = result.submissionAttempts!.filter(row => row.status === "rejected");
+  assert.ok(failures.length);
+  assert.ok(failures.every(row => row.issues.length && row.issues.every(issue =>
+    /^plan\.cases\[\d+\]\.input$/.test(issue.path) && issue.reason === "action_input_invalid")), JSON.stringify(failures));
 });
 
 test("每个研发评审小组分别由JEV放行，真实代码通过后汇总，评分中断不重做已收分组", async t => {
