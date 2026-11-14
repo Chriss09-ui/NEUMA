@@ -121,6 +121,8 @@ class Stop extends Error {
   constructor(message: string, status = "blocked", diagnostic?: DevelopmentDiagnostic) { super(message); this.status = status; this.diagnostic = diagnostic; }
 }
 
+class StageSubmitted extends Error {}
+
 function checkContent(ctx: DevelopmentContext, owner: string) {
   const count = ctx.record.retryPolicy?.content[owner]?.count ?? 0;
   if (count >= developmentContentLimit(ctx.record, owner)) throw new Stop(`同一责任任务已累计 ${count} 次内容退回，原计数保留。`, "failed",
@@ -340,8 +342,9 @@ export class DevelopmentController {
         : "上次回复没有可解析的正式提交。请调用本轮指定的终止工具，或按其完整参数提交唯一JSON对象，不能只回复进度文字。" }]);
     const charge = async ({ purpose = "agent", retryAttempt = 0 } = {}) => {
       this.guard(ctx);
+      if (handle.submitted) throw new StageSubmitted("本阶段已完成交接，不再请求模型");
       checkToolInputs();
-      if (handle.submitted && isPlanningBlockerOutcome(handle.result)) throw new Stop("规划技术阻断已保存");
+      await onModelCall?.({ purpose, retryAttempt });
       if (retryAttempt > 0) {
         persistent.reference.retryAttempts = (persistent.reference.retryAttempts ?? 0) + 1;
       } else {
@@ -350,7 +353,6 @@ export class DevelopmentController {
         if (purpose === "compaction") persistent.reference.compactions = (persistent.reference.compactions ?? 0) + 1;
       }
       if (purpose === "agent") deliverFormatFeedback(recovery, counter.turns, preparedFeedbackId);
-      await onModelCall?.({ purpose, retryAttempt });
       await this.save(ctx);
     };
     handle.charge = charge;
@@ -384,6 +386,14 @@ export class DevelopmentController {
       parameters: submitSchema, executionMode: "sequential" as const, execute: async (_id: string, value: unknown) => {
         this.guard(ctx);
         checkToolInputs();
+        const calls = Array.isArray(handle.lastAssistant?.content) ? handle.lastAssistant.content.filter(part => part.type === "toolCall") : [];
+        if (planningBlocker && handle.accepting && calls.some(call => call.name === name && call.id === _id)
+          && calls.some(call => call.name === "submit_development_blocker")) {
+          // A companion plan is a recoverable draft, never authorization to bypass its problem report.
+          persistent.reference.planningDraftSubmission = { toolName: name, toolCallId: _id, turn: counter.turns, value: clone(value), trust: "unvalidated" };
+          await this.save(ctx);
+          return toolResult({ draftSaved: true, submitted: false, trust: "unvalidated", nextAction: "本轮问题报告仍须完整校验；草稿不代表计划通过。" });
+        }
         if (!handle.accepting || handle.submitted) throw new InputError("本阶段已提交，请结束本轮");
         let result, artifact;
         try {
@@ -445,7 +455,13 @@ export class DevelopmentController {
         checkToolInputs();
         if (!handle.accepting || handle.submitted) throw new InputError("本阶段已提交或失效，不能提交规划阻断");
         await this.current(ctx);
-        const report = planningBlocker.submit(value, ctx.record);
+        let report;
+        try { report = planningBlocker.submit(value, ctx.record); }
+        catch (error) {
+          if (!(error instanceof InputError)) throw error;
+          await noteFormat("submit_development_blocker", _id, [{ path: "planningBlocker", reason: "invalid_planning_blocker", remedy: error.message }]);
+          throw error;
+        }
         await clearToolInputFailure("submit_development_blocker", true);
         Object.assign(ctx.record, { status: "blocked", delivery: "blocked", summary: report.summary,
           feedback: { report }, diagnostic: { stage: "development", phase: "planning", role: "planner", reason: "planning_blocked",
@@ -559,7 +575,7 @@ export class DevelopmentController {
         + (submission ? "\n本次分派优先规则：" + submission.instruction : "")
         + (webTools.length ? "\n" + WEB_RUNTIME_PROMPT : "")
         + "\n" + renderPiSubmissionContract({ role: kind, submitName: name, tools: sessionTools, alternativeTools: blockerTool ? [blockerTool.name] : [], structuredResponse: true }),
-      customTools: sessionTools, sessionStorage: persistent.options, onModelCall: charge,
+      customTools: sessionTools, sessionStorage: persistent.options, onModelCall: charge, stopAfterTurn: () => handle.submitted,
       transformContext: (messages) => {
         const projected = handle.contextMessage ? restoreDevelopmentContext(handle.historyProjection?.(messages, handle.contextMessage.message)
           ?? projectWorkRound(messages, handle.contextMessage.message), handle.payload, handle.contextMaxChars, handle.contextMessage) : messages;
@@ -684,6 +700,9 @@ export class DevelopmentController {
         const formatBefore = formatFailureCount(handle.reference.formatRecovery!);
         try { await handle.session.prompt(message); }
         catch (error) {
+          if (!ctx.signal.aborted && handle.submitted && error instanceof StageSubmitted) {
+            await this.current(ctx); return handle.result!;
+          }
           if (!ctx.signal.aborted && handle.submitted && isPlanningBlockerOutcome(handle.result)) {
             await this.current(ctx); return handle.result;
           }

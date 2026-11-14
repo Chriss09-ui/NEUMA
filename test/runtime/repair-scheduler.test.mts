@@ -1,10 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRepairCheckpoint, runRepairSchedule, readReviewTaskCheckpoint, runReviewTaskSchedule, readRepairCheckpoint,
-  readDevelopmentTaskCheckpoint, runDevelopmentTaskSchedule } from "../../src/runtime/repair-scheduler.mjs";
+  readDevelopmentTaskCheckpoint, runDevelopmentTaskSchedule, createDevelopmentTaskCheckpoint } from "../../src/runtime/repair-scheduler.mjs";
 import type { RepairIssue, RepairWorker } from "../../src/runtime/repair-scheduler.mjs";
 
 const issue = (id: string, path: string, owner = id): RepairIssue => ({ id, paths: [path], owner, description: `修复${id}`, remedy: "保留原要求" });
+
+test("无限请求调度在结果已提交后明确拒绝续请求，不误报额度也不增加用量", async () => {
+  const base = { value: null }, binding = "submitted-result";
+  let checkpoint = createDevelopmentTaskCheckpoint(binding, base, [issue("value", "/value")]);
+  await runDevelopmentTaskSchedule({ checkpoint, binding, base, save: async value => { checkpoint = value; }, run: async worker => {
+    await worker.onSession("result.jsonl"); await worker.onCall();
+    await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "有效结果", updates: [{ path: "/value", value: "done" }] });
+    await assert.rejects(worker.onCall(), /已提交有效结果/);
+  } });
+  assert.equal(checkpoint.calls, 1); assert.equal(checkpoint.callLimit, null); assert.ok(checkpoint.groups[0]!.result);
+});
 async function submit(worker: RepairWorker, value: unknown) {
   await worker.onSession(worker.group.sessionFile ?? `${worker.group.id}.jsonl`); await worker.onCall();
   await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "局部修改，等待独立验证",

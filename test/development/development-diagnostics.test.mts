@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { InputError } from "../../src/requirements/core.mjs";
 import { PLAN_SCHEMA, PLAN_V2_SCHEMA, PLAN_V3_SCHEMA, WORK_SCHEMA, validatePlan, validatePlanningFragment } from "../../src/development/development-contract.mjs";
 import { ensureDevelopmentPolicy } from "../../src/development/development-policy.mjs";
-import { submissionIssues, planningToolIssues } from "../../src/development/development-diagnostics.mjs";
+import { submissionIssues, planningToolIssues, recordSubmission, lastSubmissionDiagnostic, type SubmissionRecord } from "../../src/development/development-diagnostics.mjs";
 import { DevelopmentController } from "../../src/development/development.mjs";
 import { developmentArchitecture, developmentPlan, developmentWork } from "../helpers/development.mjs";
 import type { RequirementDraft } from "../../public/ui-types.js";
@@ -17,6 +17,16 @@ import type { ToolSchema } from "../../src/contracts/tools.mjs";
 import { checkPlanningInputAdmission } from "../../src/development/development-input-admission.mjs";
 
 const valueSchema = () => ({ type: "object", properties: {}, required: [], additionalProperties: false });
+
+test("当前提交成功后不再把历史拒绝作为当前失败原因，原回执仍保留", () => {
+  const record: SubmissionRecord = {};
+  recordSubmission(record, { role: "planner", phase: "planning", turn: 1, stage: "contract", status: "rejected",
+    issues: [{ path: "plan", reason: "mock_capability_invalid", remedy: "检查真实工具名" }] });
+  assert.ok(lastSubmissionDiagnostic(record, "planner"));
+  recordSubmission(record, { role: "planner", phase: "planning", turn: 2, stage: "contract", status: "accepted", issues: [] });
+  assert.equal(lastSubmissionDiagnostic(record, "planner"), undefined);
+  assert.equal(record.submissionAttempts![0]!.status, "rejected"); assert.equal(record.submissionCounts!.planner!.rejected, 1);
+});
 
 test("骨架输入检查不猜测自然语言、多动作归属或原始数据封装，保留平台拒绝的分工", () => {
   const { architecture, plan } = fixture();

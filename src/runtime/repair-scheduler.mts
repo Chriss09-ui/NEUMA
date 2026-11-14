@@ -313,7 +313,9 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
         onCall: (retryAttempt = 0) => update(next => {
           const group = next.groups.find(group => group.id === original.id)!;
           if (retryAttempt > 0) return;
-          if (!group.sessionFile || group.result || limit !== null && group.calls >= limit || next.callLimit !== null && next.calls >= next.callLimit) fail("修复调用额度已耗尽。");
+          if (!group.sessionFile) fail("修复会话尚未绑定，不能请求模型。");
+          if (group.result) fail("本组已提交有效结果，不能继续请求模型。");
+          if (limit !== null && group.calls >= limit || next.callLimit !== null && next.calls >= next.callLimit) fail("修复调用额度已耗尽。");
           group.calls++; next.calls++;
         }),
         onRejection: value => update(next => {

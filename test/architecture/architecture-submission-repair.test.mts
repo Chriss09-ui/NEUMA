@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createArchitectureSubmissionRepair } from "../../src/architecture/architecture-submission-repair.mjs";
 import { runRepairAgent } from "../../src/runtime/repair-agent.mjs";
-import { createRepairCheckpoint, runRepairSchedule } from "../../src/runtime/repair-scheduler.mjs";
+import { createRepairCheckpoint, runRepairSchedule, createDevelopmentTaskCheckpoint, runDevelopmentTaskSchedule } from "../../src/runtime/repair-scheduler.mjs";
 import { architectureToolValidation } from "../../src/architecture/architecture-tool-diagnostics.mjs";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { designSubmissionSchema, requirementItems, validateDesign, reviewSubmissionSchema, validateReview, designHash } from "../../src/architecture/architecture-contract.mjs";
@@ -166,7 +166,8 @@ test("公开工具仅接收现版本CAS与局部替换，取消不创建或改�
   assert.equal(repair.reference()!.submissionHash, submissionHash);
 });
 
-async function actualPi(t:test.TestContext,respond:(body:FixtureChatRequest,turn:number)=>{name:string;args:unknown}|null|Promise<{name:string;args:unknown}|null>) {
+type NativeReply = { name: string; args: unknown } | { name: string; args: unknown }[] | null;
+async function actualPi(t:test.TestContext,respond:(body:FixtureChatRequest,turn:number)=>NativeReply|Promise<NativeReply>) {
   const root = await mkdtemp(join(tmpdir(), "neuma-submission-repair-sdk-")), requests:FixtureChatRequest[] = [], tools: (RegisteredTool[]|undefined)[] = [];
   const model = createServer(async (request, response) => {
     try {
@@ -174,10 +175,11 @@ async function actualPi(t:test.TestContext,respond:(body:FixtureChatRequest,turn
       const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")); requests.push(body);
       const call = await respond(body, requests.length);
       if (!call) { response.end(); return; }
+      const calls = Array.isArray(call) ? call : [call];
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(`data: ${JSON.stringify({ id: "repair-fixture", object: "chat.completion.chunk", model: "fixture-model", choices: [{ index: 0,
-        delta: { role: "assistant", tool_calls: [{ index: 0, id: `repair_${requests.length}`, type: "function",
-          function: { name: call.name, arguments: JSON.stringify(call.args) } }] }, finish_reason: "tool_calls" }] })}\n\n`);
+        delta: { role: "assistant", tool_calls: calls.map((entry, index) => ({ index, id: calls.length === 1 ? `repair_${requests.length}` : `repair_${requests.length}_${index}`, type: "function",
+          function: { name: entry.name, arguments: JSON.stringify(entry.args) } })) }, finish_reason: "tool_calls" }] })}\n\n`);
       response.end("data: [DONE]\n\n");
     } catch (error) { response.writeHead(500, { "content-type": "application/json" }); response.end(JSON.stringify({ error: { message: failureFields(error).message } })); }
   });
@@ -253,6 +255,22 @@ test("动态修复实际请求内联本组原文，批读使用同源游标且�
   }) });
   assert.deepEqual(result, { instructions: "保留原始记录，缺失项明确标注。" });
   assert.equal(checkpoint.calls, 3); assert.equal(f.requests.length, 3);
+});
+
+test("动态修复同轮读取后交稿也在原生批次结束，不再请求或误报阶段失败", async t => {
+  const binding = "repair-terminal-batch", base = { instructions: "原要求" };
+  let checkpoint = createDevelopmentTaskCheckpoint(binding, base, [{ id: "boundary", owner: "instructions", paths: ["/instructions"], description: "补齐说明", remedy: "保留要求" }]);
+  const f = await actualPi(t, (body, turn) => {
+    assert.equal(turn, 1);
+    const assignment = objectFields(requestPayload(body).repairAssignment);
+    return [{ name: "read_repair_context", args: { section: "base" } },
+      { name: "submit_repair_patch", args: { baseHash: assignment.baseHash, issueIds: ["boundary"], summary: "补齐说明",
+        updates: [{ path: "/instructions", value: "原要求与补充说明" }] } }];
+  });
+  const result = await runDevelopmentTaskSchedule({ checkpoint, binding, base, save: async value => { checkpoint = value; },
+    run: worker => runRepairAgent({ worker, binding, context: {}, config: f.designer.config, cwd: f.designer.cwd,
+      dataDir: f.designer.dataDir, sessionDirectory: join(f.designer.cwd, "repair-sessions"), sessionFactory: f.designer.sessionFactory, maxOutputTokens: 4096 }) });
+  assert.deepEqual(result, { instructions: "原要求与补充说明" }); assert.equal(f.requests.length, 1); assert.equal(checkpoint.calls, 1);
 });
 
 for (const remaining of [1, 2]) test(`真实修复剩${remaining}轮时预置事实与可编辑基底，末轮请求不再声明读取工具`, { timeout: 15000 }, async t => {

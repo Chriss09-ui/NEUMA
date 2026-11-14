@@ -344,8 +344,8 @@ export function recordSubmission(record: SubmissionRecord, { role, phase, taskId
 }
 
 export function lastSubmissionDiagnostic(record: SubmissionRecord, role: string | undefined) {
-  const last = record.submissionAttempts?.findLast((item) => item.role === role && item.status === "rejected");
-  if (!last) return undefined;
+  const last = record.submissionAttempts?.findLast((item) => item.role === role);
+  if (!last || last.status !== "rejected") return undefined;
   return { attempts: record.submissionCounts?.[role!]?.attempts ?? 0, rejected: record.submissionCounts?.[role!]?.rejected ?? 0,
     stage: last.stage, issues: last.issues.slice(0, 3) };
 }

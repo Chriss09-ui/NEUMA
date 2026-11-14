@@ -185,6 +185,61 @@ async function rejectedNativeFixture(t: test.TestContext, { part = "outline", in
   return { ...f, stopped, requests };
 }
 
+test("真实Pi同轮交稿与问题报告保留草稿并按报告结束，不受工具顺序影响", async t => {
+  for (const mode of ["plan-first", "blocker-first", "invalid-then-corrected", "invalid-exhausted", "plan-and-read"]) await t.test(mode, async t => {
+    let f: Awaited<ReturnType<typeof fixture>>, serverError: unknown, requests = 0;
+    const server = createServer(async (request, response) => {
+      try {
+        const chunks = []; for await (const chunk of request) chunks.push(chunk);
+        const body = fixtureChatRequest(Buffer.concat(chunks).toString("utf8")); requests++;
+        assert.ok(f); assert.ok(requests <= 4, "仅初次报错及三次实际纠正");
+        const tool = body.tools!.find(row => row.function.name === "submit_development_blocker")!.function;
+        const subjectHash = objectFields(objectFields(objectFields(objectFields(tool).parameters).properties).subjectHash).enum as string[];
+        const invalid = mode === "invalid-exhausted" || mode === "invalid-then-corrected" && requests === 1;
+        const blocker = { name: "submit_development_blocker", args: { subjectHash: subjectHash[0], summary: "当前验收方式需要上游核实",
+          issues: [{ id: "boundary", kind: "architecture", description: "测试手段与验收责任尚未对齐", remedy: "保留义务并由上游核对实际触发方式",
+            references: [{ source: "design", path: "/instructions", quote: invalid ? "不属于原文的引用" : f.architecture.design.instructions }] }] } };
+        const plan = { name: "submit_development_plan_part", args: f.outline };
+        const tools = mode === "plan-and-read" ? [plan, { name: "read_development_context", args: { section: "requirements" } }]
+          : mode === "blocker-first" ? [blocker, plan] : [plan, blocker];
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(`data: ${JSON.stringify({ id: "paired-result", choices: [{ index: 0, delta: { role: "assistant", tool_calls: tools.map((call, index) => ({
+          index, id: `paired_${requests}_${index}`, type: "function", function: { name: call.name, arguments: JSON.stringify(call.args) },
+        })) }, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`);
+      } catch (error) { serverError = error; response.writeHead(500); response.end(); }
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+    f = await fixture(t, false, false, false, false, { url: `http://127.0.0.1:${listeningAddress(server).port}/v1/chat/completions`, part: "outline" });
+    if (!f) return;
+    const result = await f.controller.run(f.architecture);
+    if (serverError) throw serverError;
+    const expectedRequests = mode === "invalid-exhausted" ? 4 : mode === "invalid-then-corrected" ? 2 : 1;
+    assert.equal(requests, expectedRequests);
+    assert.equal(result.status, mode === "plan-and-read" ? "completed" : mode === "invalid-exhausted" ? "failed" : "blocked", result.summary);
+    const work = result.workDispatches!.planning_outline!, group = work.dispatch.groups[0]!;
+    const reference = Object.values(result.sessions!).find(row => row.file === group.sessionFile)!;
+    assert.equal(group.calls, expectedRequests); assert.equal(reference.turns, expectedRequests);
+    const sessionDirectory = await f.controller.storage.directory(result.agentId, `development/sessions/${result.id}/${reference.bindingHash}`);
+    const nativeEntries = (await readFile(join(sessionDirectory, reference.file!), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    if (mode !== "invalid-exhausted") assert.equal(nativeEntries.filter(row => row.type === "message" && row.message.role === "assistant" && row.message.stopReason === "error").length, 0,
+      "有效交接应正常结束，不靠拦下一次请求制造失败回复收尾");
+    if (mode !== "plan-and-read") {
+      assert.equal(group.result, null); assert.equal(reference.pendingResult, undefined); assert.equal(result.plan, null);
+      const draft = objectFields(objectFields(reference).planningDraftSubmission);
+      assert.equal(draft.trust, "unvalidated"); assert.deepEqual(draft.value, f.outline);
+      assert.deepEqual(result.retryPolicy!.content, {});
+      assert.equal(result.diagnostic!.reason, mode === "invalid-exhausted" ? "repeated_tool_error" : "planning_blocked");
+      if (mode === "invalid-exhausted") assert.equal(reference.formatRecovery!.episodes[0]!.corrections.length, 3);
+      else {
+        assert.equal(objectFields(result.feedback!.report).type, "planning-blocker");
+        assert.equal(repairHash(await f.restart().run(f.architecture, { resume: true })), repairHash(result));
+        assert.equal(requests, expectedRequests, "原报告已存，重启不能再次付费生成");
+      }
+    }
+  });
+});
+
 test("复杂研发拆为骨架、独立用例组及完整覆盖的评审组，仍经过实际代码验收", async t => {
   const f = await fixture(t); if (!f) return;
   const result = await f.controller.run(f.architecture);

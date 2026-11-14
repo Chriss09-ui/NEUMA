@@ -57,6 +57,7 @@ const historicalReview = object({ sourceRunId: string, reviewedPlanHash: string,
 const draft = object({ bindingHash: string, snapshot: planningSnapshot, historicalReview }, ["bindingHash", "snapshot"]);
 const session = object({ bindingHash: string, role: string, file: nullable(string), turns: integer, limit: integer, retryAttempts: integer,
   compactions: integer, submissionContinuations: integer, pendingResult: object({ result: {}, subjectHash: nullable(string), planHash: nullable(string), codeHash: nullable(string) }, ["result", "subjectHash", "planHash", "codeHash"]),
+  planningDraftSubmission: object({ toolName: string, toolCallId: string, turn: integer, value: {}, trust: { const: "unvalidated" } }, ["toolName", "toolCallId", "turn", "value", "trust"]),
   toolInputFailure: object({ toolName: string, fingerprint: string, schemaHash: string, callHash: string, count: integer }, ["toolName", "fingerprint", "callHash", "count"]),
   contextDelivery: object({ version: integer, bindingHash: string, sections: array(object({ section: string, contentHash: string, messageHash: string }, ["section", "contentHash", "messageHash"])) }, ["version", "bindingHash", "sections"]) },
   ["bindingHash", "role", "file", "turns"]);

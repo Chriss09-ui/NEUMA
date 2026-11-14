@@ -170,7 +170,7 @@ export async function runRepairAgent(options: { worker: RepairWorker<number | nu
         const projected = projectHistoryRound?.(messages, opening) ?? projectWorkRound(messages, opening), correction = feedback();
         return correction ? [...projected, { role: "user" as const, content: [{ type: "text" as const, text: JSON.stringify({ formatCorrection: correction }) }] }] : projected;
       } } : {}),
-      customTools: tools, sessionStorage: { directory: options.sessionDirectory,
+      customTools: tools, stopAfterTurn: () => submitted, sessionStorage: { directory: options.sessionDirectory,
         binding: { version: 1, role: "repair", bindingHash: repairHash(options.binding), groupId: worker.group.id, baseHash: worker.baseHash },
         ...(worker.group.sessionFile ? { file: join(options.sessionDirectory, worker.group.sessionFile) } : {}) },
       rawInputValidators: Object.fromEntries(tools.map(tool => [tool.name, async ({ args, toolCallId }) => {

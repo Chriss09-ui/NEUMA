@@ -6,6 +6,7 @@ import { objectFields, isInteger, isArray, errorField } from "../runtime/type-bo
 export interface DevelopmentSessionReference { bindingHash: string; role: string; file: string | null; turns: number; contextDelivery?: ContextDelivery | undefined; limit?: number; retryAttempts?: number; compactions?: number; submissionContinuations?: number;
   formatRecovery?: import("../runtime/format-recovery.mjs").FormatRecovery;
   toolInputFailure?: { toolName: string; fingerprint: string; schemaHash?: string; callHash: string; count: number };
+  planningDraftSubmission?: { toolName: string; toolCallId: string; turn: number; value: unknown; trust: "unvalidated" };
   pendingResult?: { result: unknown; subjectHash: unknown; planHash: string | null; codeHash: string | null } }
 export interface DevelopmentSessionIdentity { id: string; agentId: string; architectureRef: unknown; architecture?: unknown }
 interface HistoricalPlanningRecord extends DevelopmentSessionIdentity { phase?: unknown; status?: unknown; delivery?: unknown; plan?: unknown; planHash?: unknown; package?: unknown; tasks?: unknown; deliveries?: unknown; sessions?: unknown }

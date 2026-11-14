@@ -232,7 +232,7 @@ function controlledResources(extensions: LoadExtensionsResult, systemPrompt: str
 }
 
 export async function createPiSession({ config, manager, turn, cwd, dataDir, customTools = createProjectTools(manager!, turn!), systemPrompt = SYSTEM_PROMPT,
-  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, toolAvailability, reasoningMode = "off" }: PiSessionOptions): Promise<NeumaPiSession> {
+  maxOutputTokens = modelOutputBudget(config), beforeModelRequest, onModelCall, stopAfterTurn, sessionStorage, onToolDiagnostic, toolErrorResult, rawInputValidators, transformContext, preparePrompt, toolAvailability, reasoningMode = "off" }: PiSessionOptions): Promise<NeumaPiSession> {
   if (!["off", "auto"].includes(reasoningMode)) throw new InputError("模型思考配置无效");
   if (transformContext !== undefined && typeof transformContext !== "function") throw new InputError("模型上下文投影配置无效");
   if (preparePrompt !== undefined && typeof preparePrompt !== "function") throw new InputError("模型首包投影配置无效");
@@ -376,6 +376,15 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
   secureHistory();
   const activeSession = Object.assign(session, { modelCallAccounting: typeof onModelCall === "function",
     modelProfile: profile, modelProfileHash: modelProfileHash(profile) }) as NeumaPiSession;
+  if (stopAfterTurn) {
+    const finishTurn = session.agent.finishTurn?.bind(session.agent);
+    session.agent.finishTurn = async (turn, signal) => {
+      const decision = await finishTurn?.(turn, signal);
+      // Keep native history/boundary processing; then end even if other tool receipts were non-terminal.
+      if (stopAfterTurn()) return { action: "end" };
+      return decision || undefined;
+    };
+  }
   Object.defineProperty(session, "modelRequestRejection", { get: () => lastRequestRejection && structuredClone(lastRequestRejection) });
   if (persisted.bindingHash) activeSession.sessionBindingHash = persisted.bindingHash;
   const protect = async <T,>(operation: () => Promise<T>): Promise<T> => {
