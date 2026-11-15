@@ -178,15 +178,15 @@ Node 动作和 `node-check` 使用真实操作系统隔离，只读代码快照�
 
 制作/研发页面先取得持久操作回执，再独立查看。关闭页面只解绑查看；明确停止才取消真实执行。操作索引保存架构版本和研发编号，不产生第二套业务终态或调度额度；重启不自动 resume。接口与快照规则见 [用户指南](user-guide.md)。
 
-真实续测使用 [resume-development.mts](../scripts/resume-development.mts) 的正式入口，复用 [development-operation.mts](../scripts/development-operation.mts) 的 `continueDevelopmentOperation({baseUrl,agentId,mutationId,onView,onRequestError})`。调用前保存本次 mutationId 和原 Agent 资料备份，核对当前研发编号、架构版本和摘要。提交回执丢失时沿同编号核对，查看失败只重试 GET，不重新领取业务次数。单次 HTTP 请求15秒超时，暂时性连接故障持续重试，退避最多5秒；每次错误独立记录，原生 `cause` 和底层错误码不丢失。鉴权、无效回执等非暂时错误报告到日志，任务状态未知时保留后台服务；只有具体任务问题已保存或用户明确停止，才可取消任务。旧 `development/stream` 保留断开取消语义，不用于长时间续测。
+真实续测使用 [resume-development.mts](../scripts/resume-development.mts) 的正式入口，复用 [development-operation.mts](../scripts/development-operation.mts) 的 `continueDevelopmentOperation({baseUrl,agentId,mutationId,onView,onRequestError})` 和 `cancelDevelopmentOperation`。任务进程是 [resume-development-service.mts](../scripts/resume-development-service.mts)，与观察进程分开，不共享内存。调用前保存本次 mutationId 和原 Agent 资料备份，核对当前研发编号、架构版本和摘要。提交回执丢失时沿同编号核对，查看失败只重试 GET，不重新领取业务次数。单次 HTTP 请求15秒超时，暂时性连接故障持续重试，退避最多5秒；每次错误独立记录，原生 `cause` 和底层错误码不丢失。任务进程退出会使观察停止重试。鉴权、无效回执等非暂时错误报告到日志。观察进程退出或状态未知时保留任务进程，不新建研发批次；只有具体任务问题已保存或用户明确停止，才可取消任务。旧 `development/stream` 保留断开取消语义，不用于长时间续测。
 
-在源码仓库根先运行 `npm run build`，再运行以下命令。四个参数必须指向当前停点，新日志目录不可复用；原会话、已收结果和计数由原控制器继续管理。日志目录含 `source.json`（请求编号）、`baseline-agent/`（原资料）、`service.json`、`operation.json`、`events.jsonl`、最终 `result.json`；有新问题时另存 `first-problem.json` 和最新研发记录。这里只执行一次显式继续，不自动重启已结算失败的任务。
+在源码仓库根先运行 `npm run build`，再运行以下命令。四个参数必须指向当前停点，新日志目录不可复用；原会话、已收结果和计数由原控制器继续管理。日志目录含 `source.json`（请求编号）、`baseline-agent/`（原资料）、`service.json`（任务地址和进程号）、`operation.json`（完整快照）、`events.jsonl`、最终 `result.json`；有新问题时另存 `first-problem.json` 和最新研发记录。观察失败时写 `observer-failure.json`，已提交的任务进程继续运行。这里只执行一次显式继续，不自动重启已结算失败的任务。对外命令仍是下面这一条，任务进程由它在内部启动。
 
 ```sh
 node dist/ts-build/package/scripts/resume-development.mjs <dataDir> <agentId> <developmentId> <新日志目录>
 ```
 
-观察器记录各层异常；先出现的 `aborted` 只作为事件，等待原模型调用抛出真正异常，不能先取消父会话再把取消当根因。SDK正在重连时不提前停止。根因保存后才按本次授权停止在新问题处；格式反馈仍继续原纠正流程，内容次数以控制器回执为准。日志不输出凭据或思考内容，不改写原始历史。
+观察器记录各层异常；先出现的 `aborted` 只作为事件，等待原模型调用抛出真正异常，不能先取消父会话再把取消当根因。SDK正在重连时不提前停止。根因保存后才按本次授权停止在新问题处；格式反馈仍继续原纠正流程，内容次数以控制器回执为准。日志不输出凭据或思考内容，不改写原始历史。会话事件中的长文本线性脱敏后截断；操作快照不截断架构正文。观察记录失败不能改变工具或模型结果。
 
 工具观察器使用同脚本的 `classifyDevelopmentToolError(error)`，先识别控制器的上限诊断，再按 `InputError` 实例识别可重交的校验反馈，不能根据 `error.name` 判断。校验反馈原样交回原会话；实际纠正三次仍不合格或累计五次内容退回时由控制器停止，其他执行故障单独定位。观察器不改业务计数。
 

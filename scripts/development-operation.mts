@@ -78,3 +78,15 @@ export async function continueDevelopmentOperation(options: ContinueOptions): Pr
     view = check(await request(query, "observe"));
   }
 }
+
+/** Explicit stop uses the accepted generation. Transport failure does not imply the task ended. */
+export async function cancelDevelopmentOperation(options: { baseUrl: string; agentId: string; mutationId: string; generation: string; signal?: AbortSignal }) {
+  const { agentId, mutationId, generation, signal } = options;
+  if (![agentId, mutationId, generation].every(value => /^[\w-]{1,100}$/.test(value))) throw new Error("停止研发任务的编号无效。");
+  const endpoint = new URL(`api/agents/${encodeURIComponent(agentId)}/operations/${encodeURIComponent(mutationId)}/cancel`, options.baseUrl);
+  const deadline = AbortSignal.timeout(15_000);
+  const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ generation }), signal: signal ? AbortSignal.any([signal, deadline]) : deadline });
+  if (!response.ok) { await response.body?.cancel(); throw new Error(`停止研发任务失败，HTTP ${response.status}`); }
+  await response.body?.cancel();
+}

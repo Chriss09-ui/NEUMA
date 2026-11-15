@@ -1,19 +1,16 @@
 import assert from "node:assert/strict";
+import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { startLocalApplication } from "../src/installation/installation-runtime.mjs";
-import { createRequestHandler } from "../src/server.mjs";
-import { PrototypeAgents } from "../src/agents/agent-prototype.mjs";
-import { createExecutionSession } from "../src/runtime/execution-runtime.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { objectFields } from "../src/runtime/type-boundary.mjs";
 import { readDevelopmentRunRecord } from "../src/development/development-record.mjs";
-import { InputError } from "../src/requirements/core.mjs";
-import { continueDevelopmentOperation } from "./development-operation.mjs";
-import { developmentDiagnostic, observeDevelopmentSessions } from "./development-observer.mjs";
+import { cancelDevelopmentOperation, continueDevelopmentOperation } from "./development-operation.mjs";
+import { developmentDiagnostic, developmentEventDiagnostic } from "./development-observer.mjs";
 
-/** Explicit maintenance entry: one continuation, one saved operation ID, original domain state. */
+/** Explicit maintenance entry: one continuation, one saved operation ID, original domain state.
+ * This process only watches over HTTP. The task process keeps running if observation stops. */
 export async function resumeDevelopment(args: string[]) {
   const [dataArgument, agentId, developmentId, outputArgument] = args;
   if (args.length !== 4 || !dataArgument || !outputArgument || !agentId || !developmentId
@@ -28,88 +25,120 @@ export async function resumeDevelopment(args: string[]) {
   const mutationId = `resume_${randomUUID().replaceAll("-", "")}`, secrets: string[] = [];
   const json = (value: unknown) => JSON.stringify(developmentDiagnostic(value, secrets), null, 2) + "\n";
   const save = (name: string, value: unknown) => writeFileSync(join(output, name), json(value), { mode: 0o600 });
-  // Refuse to overwrite an earlier attempt or silently issue it a different operation ID.
   writeFileSync(join(output, "source.json"), json({ at: new Date().toISOString(), dataDir, agentId, developmentId, mutationId,
     architectureRef: original.architectureRef, recordFile }), { flag: "wx", mode: 0o600 });
   cpSync(agentDir, join(output, "baseline-agent"), { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true });
+  let firstProblem: Record<string, unknown> | undefined, requests = 0, generation = "", running = false;
+  let operation: unknown, canceling: Promise<void> | undefined, serviceUrl = "", childExited = false, settled = false, submitted = false;
   const log = (type: string, details: Record<string, unknown> = {}) => {
-    const event = { at: new Date().toISOString(), type, ...details };
-    appendFileSync(join(output, "events.jsonl"), JSON.stringify(developmentDiagnostic(event, secrets)) + "\n", { mode: 0o600 });
+    const event = developmentEventDiagnostic({ at: new Date().toISOString(), type, ...details }, secrets);
+    appendFileSync(join(output, "events.jsonl"), JSON.stringify(event) + "\n", { mode: 0o600 });
     if (["service_ready", "progress", "model_request", "first_problem", "observation_error", "finished"].includes(type))
-      process.stdout.write(json(event));
+      process.stdout.write(JSON.stringify(event, null, 2) + "\n");
   };
-  let firstProblem: Record<string, unknown> | undefined, agents: PrototypeAgents | undefined, requests = 0;
-  const fail = (kind: string, details: Record<string, unknown>) => {
-    log("problem", { kind, ...details });
+  const noteProblem = (problem: unknown) => {
     if (firstProblem) return;
-    firstProblem = { at: new Date().toISOString(), kind, ...details, requests };
-    save("first-problem.json", firstProblem); log("first_problem", firstProblem);
+    firstProblem = objectFields(problem);
+    if (running && generation) requestCancel();
   };
-  const checkContent = (details: Record<string, unknown> = {}) => {
-    if (firstProblem) return;
-    const active = agents?.development.active.get(agentId)?.record;
-    if (!active) return;
-    assert.equal(active.id, developmentId, "续测不能切换研发批次");
-    for (const [owner, row] of Object.entries(active.retryPolicy?.content ?? {})) {
-      const before = original.retryPolicy?.content[owner]?.count ?? 0;
-      if (row.count > before) fail("new_content_rejection", { ...details, owner, before, after: row.count,
-        issues: active.retryPolicy?.unresolved[owner] });
-    }
+  const noteEvent = (event: unknown) => {
+    const value = objectFields(event);
+    if (value.type === "model_request") requests = Number(value.requests) || requests;
+    if (value.type === "first_problem") noteProblem(event);
+    appendFileSync(join(output, "events.jsonl"), JSON.stringify(event) + "\n", { mode: 0o600 });
+    if (typeof value.type === "string" && ["model_request", "first_problem"].includes(value.type))
+      process.stdout.write(JSON.stringify(event, null, 2) + "\n");
   };
-  const sessionFactory = observeDevelopmentSessions({ factory: createExecutionSession, fail, checkContent,
-    beforeRequest() { if (firstProblem) throw new InputError("续测已记录新问题，停止发起后续模型请求；原提交错误见本次日志。"); },
-    log(type, details) { if (type === "model_request") requests++; log(type, { ...details, requests }); },
+  const requestCancel = () => {
+    if (canceling || !serviceUrl || !generation) return;
+    log("explicit_stop", { reason: firstProblem?.kind, operation });
+    canceling = cancelDevelopmentOperation({ baseUrl: serviceUrl, agentId, mutationId, generation }).catch(error => {
+      log("observation_error", { phase: "cancel", error });
+    });
+  };
+  const child = fork(fileURLToPath(new URL("./resume-development-service.mjs", import.meta.url)),
+    [dataDir, agentId, developmentId, output, mutationId],
+    { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], cwd, env: process.env });
+  const observer = new AbortController();
+  const ready = new Promise<string>((resolveReady, rejectReady) => {
+    const timer = setTimeout(() => rejectReady(new Error("任务进程没有在时限内开始提供服务")), 180_000);
+    let pending = true;
+    const finish = (error?: Error, url?: string) => {
+      if (!pending) return;
+      pending = false;
+      clearTimeout(timer);
+      if (error) rejectReady(error); else resolveReady(url!);
+    };
+    child.on("message", (message) => {
+      const value = objectFields(message);
+      if (value.type === "service_ready" && typeof value.url === "string") {
+        serviceUrl = value.url;
+        if (Array.isArray(value.secrets)) for (const key of value.secrets) if (typeof key === "string" && key) secrets.push(key);
+        finish(undefined, value.url);
+      } else if (value.type === "fatal") {
+        save("startup-error.json", value.error);
+        finish(new Error("任务进程启动失败"));
+      } else if (value.type === "problem") noteProblem(value.problem);
+      else if (value.type === "event") noteEvent(value.event);
+    });
+    child.once("exit", (code) => {
+      childExited = true;
+      if (!settled) observer.abort();
+      if (!serviceUrl) finish(new Error(`任务进程在提供服务前退出（${code ?? "无退出码"}）`));
+    });
+    child.once("error", (error) => finish(error instanceof Error ? error : new Error("任务进程无法启动")));
   });
-  const app = await startLocalApplication({ dataDir, port: 0, envPath: join(cwd, ".env"), createHandler(options) {
-    for (const key of [options.config?.apiKey, options.config?.jevApiKey]) if (typeof key === "string" && key) secrets.push(key);
-    agents = new PrototypeAgents({ config: options.config ?? {}, cwd, dataDir, sessionFactory, enforceRequirementConfirmation: true });
-    return createRequestHandler({ ...options, prototypeAgents: agents });
-  } });
-  const owner = agents!;
-  let settled = false, submitted = false;
   try {
-    assert.equal((await owner.getDevelopment(agentId))?.id, developmentId, "当前研发编号与指定停点不同");
-    const architecture = objectFields(await owner.getArchitecture(agentId));
-    assert.equal(architecture.status, "passed", "架构必须已通过，不能隐式重建");
-    assert.equal(architecture.version, original.architectureRef.version);
-    assert.equal(architecture.candidateHash, original.architectureRef.candidateHash);
-    save("service.json", { url: app.url, mutationId, agentId, developmentId });
-    log("service_ready", { url: app.url, mutationId, developmentId });
+    const url = await ready;
+    log("service_ready", { url, mutationId, developmentId, pid: child.pid });
     submitted = true;
-    const final = await continueDevelopmentOperation({ baseUrl: app.url, agentId, mutationId,
+    const final = await continueDevelopmentOperation({ baseUrl: url, agentId, mutationId, signal: observer.signal,
       onRequestError(event) { log("observation_error", event); },
       async onView(view) {
-        if (view.snapshot) save("operation.json", view);
-        if (view.snapshot) log("progress", { phase: view.snapshot.phase, label: view.snapshot.label, running: view.snapshot.running,
-          development: view.snapshot.result.development });
-        checkContent();
-        if (firstProblem && view.snapshot?.running) {
-          // A concrete task failure has been saved. Transport errors never enter this path.
-          log("explicit_stop", { reason: firstProblem.kind, operation: view.operation });
-          await owner.cancelOperation(agentId, mutationId, view.operation.generation);
+        generation = view.operation.generation;
+        operation = view.operation;
+        if (view.snapshot) {
+          running = view.snapshot.running;
+          save("operation.json", view);
+          log("progress", { phase: view.snapshot.phase, label: view.snapshot.label, running: view.snapshot.running,
+            development: view.snapshot.result.development });
         }
-      },
-    });
+        if (firstProblem && view.snapshot?.running) { requestCancel(); await canceling; }
+      } });
     settled = true;
-    const development = await owner.readDevelopmentRun(developmentId);
+    running = false;
+    const development = readDevelopmentRunRecord(JSON.parse(readFileSync(recordFile, "utf8")));
     save("development-after.json", development);
-    if (!firstProblem && (final.error || final.interrupted || development?.status !== "completed"))
-      fail("development_stopped", { error: final.error, interrupted: final.interrupted, status: development?.status,
-        phase: development?.phase, diagnostic: development?.diagnostic, summary: development?.summary });
+    if (!firstProblem && (final.error || final.interrupted || development.status !== "completed")) {
+      firstProblem = { at: new Date().toISOString(), kind: "development_stopped", error: final.error, interrupted: final.interrupted,
+        status: development.status, phase: development.phase, diagnostic: development.diagnostic, summary: development.summary, requests };
+      save("first-problem.json", firstProblem);
+      log("first_problem", firstProblem);
+    }
     save("result.json", { status: firstProblem ? "stopped_on_new_problem" : "completed", dataDir, agentId, developmentId,
       mutationId, requests, firstProblem, final });
     log("finished", { status: firstProblem ? "stopped_on_new_problem" : "completed", developmentId, requests });
+    await stopTask(child);
   } catch (error) {
-    // An observation/protocol failure is not authorization to stop an accepted job.
-    log("observer_failed", { error, url: app.url, mutationId, taskMayBeRunning: submitted && !settled });
-    if (submitted && !settled) {
-      save("observer-failure.json", { error, url: app.url, agentId, mutationId,
-        instruction: "后台服务保留。查询原 operation，不能重开任务或关闭服务。" });
-    }
+    const keep = submitted && !settled && !childExited;
+    log("observer_failed", { error, url: serviceUrl, mutationId, taskMayBeRunning: keep });
+    save("observer-failure.json", { error, url: serviceUrl, agentId, mutationId, pid: child.pid,
+      instruction: keep ? "任务进程保留。查询原 operation，不能重开任务或关闭服务。"
+        : "不要新建研发批次或清零计数；先核对原研发记录和原会话。" });
+    if (keep) { child.disconnect(); child.unref(); }
+    else if (!childExited) await stopTask(child);
     throw error;
-  } finally {
-    if (settled || !submitted) await app.dispose();
   }
+}
+
+function stopTask(child: ChildProcess) {
+  return new Promise<void>(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+    const timer = setTimeout(() => { child.unref(); resolve(); }, 60_000);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+    try { child.send({ type: "shutdown" }); }
+    catch { clearTimeout(timer); try { child.kill("SIGTERM"); } catch { /* 进程已退出。 */ } resolve(); }
+  });
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url)

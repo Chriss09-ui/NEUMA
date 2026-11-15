@@ -30,7 +30,7 @@ const normalEdges = [
   edge("src/installation/installation-runtime.mts", "src/server.mts"),
   edge("src/server.mts", "src/installation/installation-runtime.mts"),
   edge("scripts/start-source.mts", "src/server.mts"),
-  edge("scripts/resume-development.mts", "src/server.mts"),
+  edge("scripts/resume-development-service.mts", "src/server.mts"),
   edge("scripts/run-tests.mts", "scripts/build.mjs"),
 ];
 const normalNonLiteral: [string, number][] = [["src/runtime/model-profile.mts", 1], ["src/runtime/pi-runtime.mts", 4],

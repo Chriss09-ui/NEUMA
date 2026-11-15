@@ -2,20 +2,125 @@ import type { SessionFactory, SessionMessage } from "../src/runtime/execution-po
 import { objectFields } from "../src/runtime/type-boundary.mjs";
 import { classifyDevelopmentToolError } from "./development-operation.mjs";
 
+const REGEX_TEXT_LIMIT = 8192;
+export const DEVELOPMENT_EVENT_TEXT_LIMIT = 4096;
+interface DiagnosticOptions { maxText?: number }
+
+function hideSecrets(text: string, secrets: readonly string[]) {
+  let next = text;
+  for (const secret of secrets) if (secret) next = next.split(secret).join("[已隐藏]");
+  return next;
+}
+
+function boundText(text: string, maxText: number | undefined) {
+  return maxText !== undefined && text.length > maxText ? `${text.slice(0, maxText)}…[已截断，原长 ${text.length}]` : text;
+}
+
+/** Advance through long text without compiling a global expression against it. */
+function replaceSpans(text: string, find: (value: string, from: number) => { start: number; end: number; replacement: string } | undefined) {
+  let result = "", index = 0;
+  while (index < text.length) {
+    const match = find(text, index);
+    if (!match || match.end <= index || match.end <= match.start) return result + text.slice(index);
+    result += text.slice(index, match.start) + match.replacement;
+    index = match.end;
+  }
+  return result;
+}
+
+function findPrivateKey(text: string, from: number) {
+  const begin = text.indexOf("-----BEGIN ", from);
+  if (begin < 0) return undefined;
+  const header = text.indexOf("-----", begin + 11);
+  if (header < 0 || !text.slice(begin + 11, header).toUpperCase().includes("PRIVATE KEY"))
+    return { start: begin, end: begin + 11, replacement: "-----BEGIN " };
+  const endLabel = text.indexOf("-----END ", header);
+  const close = endLabel < 0 ? -1 : text.indexOf("-----", endLabel + 9);
+  return { start: begin, end: close < 0 ? text.length : close + 5, replacement: "[已隐藏私钥]" };
+}
+
+function findBearer(text: string, from: number) {
+  const at = text.toLowerCase().indexOf("bearer", from);
+  if (at < 0) return undefined;
+  let cursor = at + 6;
+  if (cursor >= text.length || !/\s/.test(text[cursor]!)) return { start: at, end: cursor, replacement: text.slice(at, cursor) };
+  while (cursor < text.length && /\s/.test(text[cursor]!)) cursor++;
+  const value = cursor;
+  while (cursor < text.length && !" ,;\"'<>".includes(text[cursor]!)) cursor++;
+  if (cursor === value) return { start: at, end: at + 6, replacement: text.slice(at, at + 6) };
+  return { start: at, end: cursor, replacement: "Bearer [已隐藏]" };
+}
+
+function findUrlSecret(text: string, from: number) {
+  const marker = text.indexOf("://", from);
+  if (marker < 0) return undefined;
+  let start = marker;
+  while (start > from && /[a-z0-9+.-]/i.test(text[start - 1]!)) start--;
+  if (start === marker || !/[a-z]/i.test(text[start]!)) return { start: marker, end: marker + 3, replacement: "://" };
+  let end = marker + 3;
+  const user = end;
+  while (end < text.length && !/[\s/@]/.test(text[end]!)) end++;
+  if (end === user || text[end] !== "@") return { start: marker, end: marker + 3, replacement: "://" };
+  return { start: user, end, replacement: "[已隐藏]" };
+}
+
+function findSk(text: string, from: number) {
+  const at = text.indexOf("sk-", from);
+  if (at < 0) return undefined;
+  if (at > 0 && /[A-Za-z0-9_]/.test(text[at - 1]!)) return { start: at, end: at + 3, replacement: "sk-" };
+  let end = at + 3;
+  while (end < text.length && /[A-Za-z0-9_-]/.test(text[end]!)) end++;
+  if (end - at - 3 < 8) return { start: at, end: at + 3, replacement: "sk-" };
+  return { start: at, end, replacement: "[已隐藏]" };
+}
+
+function findAssignment(text: string, from: number) {
+  const lower = text.toLowerCase();
+  let best = -1, keyLength = 0;
+  for (const key of ["authorization", "api_key", "api-key", "apikey", "password", "secret", "token"]) {
+    const at = lower.indexOf(key, from);
+    if (at >= 0 && (best < 0 || at < best)) { best = at; keyLength = key.length; }
+  }
+  if (best < 0) return undefined;
+  let cursor = best + keyLength;
+  if (text[cursor] === "'" || text[cursor] === '"') cursor++;
+  while (cursor < text.length && /\s/.test(text[cursor]!)) cursor++;
+  if (text[cursor] !== ":" && text[cursor] !== "=") return { start: best, end: best + keyLength, replacement: text.slice(best, best + keyLength) };
+  cursor++;
+  while (cursor < text.length && /\s/.test(text[cursor]!)) cursor++;
+  const value = cursor;
+  const quote = text[cursor];
+  if (quote === '"' || quote === "'") {
+    cursor++;
+    while (cursor < text.length && text[cursor] !== quote && text[cursor] !== "\n" && text[cursor] !== "\r") cursor++;
+    if (text[cursor] === quote) cursor++;
+  } else while (cursor < text.length && !" ,;&}".includes(text[cursor]!) && !/\s/.test(text[cursor]!)) cursor++;
+  if (cursor === value) return { start: best, end: best + keyLength, replacement: text.slice(best, best + keyLength) };
+  return { start: value, end: cursor, replacement: "[已隐藏]" };
+}
+
+function redactLongText(text: string, secrets: readonly string[]) {
+  let next = hideSecrets(text, secrets);
+  for (const find of [findPrivateKey, findBearer, findUrlSecret, findSk, findAssignment]) next = replaceSpans(next, find);
+  return next;
+}
+
+function redactText(text: string, secrets: readonly string[], maxText: number | undefined) {
+  const hidden = hideSecrets(text, secrets);
+  const redacted = hidden.length > REGEX_TEXT_LIMIT ? redactLongText(hidden, []) : hidden
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[已隐藏私钥]")
+    .replace(/Bearer\s+[^\s,;"'<>]+/gi, "Bearer [已隐藏]")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[已隐藏]@")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[已隐藏]")
+    .replace(/((?:api[_-]?key|token|password|secret|authorization)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,;&}\s]+)/gi, "$1[已隐藏]");
+  return boundText(redacted, maxText);
+}
+
 /** Error properties are non-enumerable: JSON.stringify(error) loses the transport cause. */
-export function developmentDiagnostic(input: unknown, secrets: readonly string[] = []): unknown {
+export function developmentDiagnostic(input: unknown, secrets: readonly string[] = [], options: DiagnosticOptions = {}): unknown {
   const seen = new Set<object>();
   const visit = (value: unknown, depth: number): unknown => {
-    if (typeof value === "string") {
-      let text = value;
-      for (const secret of secrets) if (secret) text = text.replaceAll(secret, "[已隐藏]");
-      return text
-        .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[已隐藏私钥]")
-        .replace(/Bearer\s+[^\s,;"'<>]+/gi, "Bearer [已隐藏]")
-        .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[已隐藏]@")
-        .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[已隐藏]")
-        .replace(/((?:api[_-]?key|token|password|secret|authorization)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,;&}\s]+)/gi, "$1[已隐藏]");
-    }
+    if (typeof value === "string") return redactText(value, secrets, options.maxText);
     if (!value || typeof value !== "object") return value;
     if (depth > 12 || seen.has(value)) return "[嵌套或循环引用]";
     seen.add(value);
@@ -35,6 +140,11 @@ export function developmentDiagnostic(input: unknown, secrets: readonly string[]
   return visit(input, 0);
 }
 
+/** Session events stay bounded so a long tool result is not copied through a global expression. */
+export function developmentEventDiagnostic(input: unknown, secrets: readonly string[] = []) {
+  return developmentDiagnostic(input, secrets, { maxText: DEVELOPMENT_EVENT_TEXT_LIMIT });
+}
+
 interface ObserverOptions {
   factory: SessionFactory;
   log(type: string, details: Record<string, unknown>): void;
@@ -49,7 +159,9 @@ export function observeDevelopmentSessions(observer: ObserverOptions): SessionFa
   return async options => {
     observer.beforeRequest();
     const node = { session: ++sequence, binding: options.sessionStorage?.binding };
-    const log = (type: string, details: Record<string, unknown> = {}) => observer.log(type, { node, ...details });
+    const log = (type: string, details: Record<string, unknown> = {}) => {
+      try { observer.log(type, { node, ...details }); } catch { /* 观察记录失败不能改变工具或模型结果。 */ }
+    };
     const fail = (kind: string, details: Record<string, unknown>) => observer.fail(kind, { node, ...details });
     const session = await observer.factory({ ...options,
       ...(options.customTools ? { customTools: options.customTools.map(tool => ({ ...tool, async execute(...args) {

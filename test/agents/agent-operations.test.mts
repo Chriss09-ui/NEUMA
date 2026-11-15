@@ -10,8 +10,8 @@ import type { OperationReference } from "../../public/operation-view.js";
 import { emptyDraft, InputError } from "../../src/requirements/core.mjs";
 import { createServer } from "node:http";
 import { createRequestHandler } from "../../src/server.mjs";
-import { continueDevelopmentOperation, classifyDevelopmentToolError } from "../../scripts/development-operation.mjs";
-import { developmentDiagnostic, observeDevelopmentSessions } from "../../scripts/development-observer.mjs";
+import { cancelDevelopmentOperation, continueDevelopmentOperation, classifyDevelopmentToolError } from "../../scripts/development-operation.mjs";
+import { developmentDiagnostic, developmentEventDiagnostic, observeDevelopmentSessions } from "../../scripts/development-observer.mjs";
 import type { ExecutionSession, SessionEvent } from "../../src/runtime/execution-port.mjs";
 
 test("续测观察器按实际输入错误类型允许重交，额度停止和执行故障仍终止", () => {
@@ -163,7 +163,8 @@ test("真实HTTP续测丢失接受回执及查看连接后仍沿同一后台任�
       submitOperation: (kind, input, options) => {
         const { mutationId, ...body } = input;
         return operations.submit(String(input.id), kind, body, mutationId, options?.signal);
-      }, operation: (id, operationId, after) => operations.view(id, operationId, after) } });
+      }, operation: (id, operationId, after) => operations.view(id, operationId, after),
+      cancelOperation: (id, operationId, generation) => operations.cancel(id, operationId, generation) } });
   let lostSubmit = false, lostQueries = 0;
   const server = createServer((request, response) => {
     if (request.method === "POST" && !lostSubmit) {
@@ -198,6 +199,7 @@ test("真实HTTP续测丢失接受回执及查看连接后仍沿同一后台任�
   assert.equal(completed.running, false); assert.equal(completed.interrupted, false); assert.equal(completed.error, null);
   assert.deepEqual(completed.result, { development: { id: "existing_development", status: "completed", requests: 6 } });
   assert.ok((await operations.read("one", "continue_original")).settledAt);
+  await cancelDevelopmentOperation({ ...options, generation: (await operations.view("one", "continue_original")).operation.generation });
 });
 
 test("续测保留 aborted 后真正抛出的底层异常，不提前取消父会话且日志隐藏密钥", async () => {
@@ -265,5 +267,39 @@ test("内容退回通知携带本次提交的具体异常，不拿旧检查点�
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0]!.toolCallId, "current_submission");
   assert.equal(notifications[0]!.error, inputError);
+  await session.dispose();
+});
+
+test("长文本诊断去掉凭据并限制事件体积", () => {
+  const secret = "configured-key";
+  const marker = "MARKER-PRIVATE-BODY";
+  const sensitive = `-----BEGIN RSA PRIVATE KEY-----\n${marker}\n-----END RSA PRIVATE KEY-----\nBearer standalone-token https://user:pass@example.com api_key=another-secret-value sk-abcdefghijklmnop ${secret}`;
+  const payload = `${sensitive}\n${"a".repeat(1_000_000)}`;
+  const started = Date.now();
+  const full = String(developmentDiagnostic(payload, [secret]));
+  const event = String(developmentEventDiagnostic(payload, [secret]));
+  assert.ok(Date.now() - started < 2_000);
+  for (const leaked of [secret, marker, "standalone-token", "user:pass", "another-secret-value", "sk-abcdefghijklmnop"]) {
+    assert.equal(full.includes(leaked), false, leaked);
+    assert.equal(event.includes(leaked), false, leaked);
+  }
+  assert.match(full, /已隐藏私钥/);
+  assert.match(full, /Bearer \[已隐藏\]/);
+  assert.match(full, /https:\/\/\[已隐藏\]@example\.com/);
+  assert.match(event, /已截断/);
+  assert.ok(event.length < 4_300);
+});
+
+test("观察日志失败不改变工具返回值", async () => {
+  const factory = observeDevelopmentSessions({
+    factory: options => ({ async prompt() { return options.customTools![0]!.execute("call", {}); }, abort() {}, dispose() {} }),
+    beforeRequest() {}, checkContent() {}, fail() {},
+    log() { throw new Error("log failed"); },
+  });
+  const session = await factory({ config: {}, cwd: ".", dataDir: ".", customTools: [{
+    name: "echo", label: "回显", description: "回显", parameters: { type: "object" },
+    async execute() { return { content: [{ type: "text", text: "kept" }], details: {} }; },
+  }] });
+  assert.deepEqual(await session.prompt("go"), { content: [{ type: "text", text: "kept" }], details: {} });
   await session.dispose();
 });
