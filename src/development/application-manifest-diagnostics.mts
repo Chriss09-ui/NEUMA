@@ -11,6 +11,7 @@ import { validateServiceManifest, SERVICE_MANIFEST_SCHEMA, SERVICE_CAPABILITIES 
 import { SERVICE_HOSTS, SERVICE_LANGUAGES } from "../services/service-runtime-options.mjs";
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false }), validators = new WeakMap<ToolSchema, ValidateFunction>();
+const propertyNamePattern = new RegExp(VALUE_SCHEMA_RULES.propertyNamePattern);
 const plain = isPlainRecord;
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 const jsonSchema = () => ({ type: "object", properties: {}, required: [], additionalProperties: false });
@@ -152,7 +153,7 @@ export function diagnoseApplicationManifest(value: unknown, { root = "plan.appli
       const properties = plain(current.properties) ? Object.fromEntries(Object.keys(current.properties).slice(0, 100).map((key) => [key, {}])) : {};
       valueProbe({ ...jsonSchema(), properties, required: current.required }, `${path}.required`, depth);
       for (const [index, [key, child]] of Object.entries(plain(current.properties) ? current.properties : {}).slice(0, 100).entries()) {
-        if (!new RegExp(VALUE_SCHEMA_RULES.propertyNamePattern).test(key) || VALUE_SCHEMA_RULES.forbiddenPropertyNames.includes(key))
+        if (!propertyNamePattern.test(key) || VALUE_SCHEMA_RULES.forbiddenPropertyNames.includes(key))
           add(`${path}.properties[${index}]`, "schema_property_invalid");
         valueIssues(child, `${path}.properties[${index}]`, depth + 1);
       }

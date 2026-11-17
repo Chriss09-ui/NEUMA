@@ -283,7 +283,7 @@ test("复杂研发拆为骨架、独立用例组及完整覆盖的评审组，�
   assert.equal(result.plan!.cases.length, 12); assert.ok(result.reports.every(report => report.status === "passed"));
   assert.equal(f.calls.filter(call => call.id === "outline").length, 1);
   assert.equal(f.calls.filter(call => call.id.startsWith("cases_")).length, 3);
-  assert.ok(f.maxActive() > 1 && f.maxActive() <= 3);
+  assert.equal(f.maxActive(), 1);
   const planCases = f.calls.filter(call => call.mode === "plan" && call.scope?.kind === "cases").flatMap(call => call.scope!.ids);
   assert.deepEqual(planCases.sort(), result.plan!.cases.map(test => test.id).sort());
   assert.ok(f.calls.filter(call => call.scope?.kind === "cases").every(call => call.scope!.ids.length <= 6));

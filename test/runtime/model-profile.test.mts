@@ -78,10 +78,12 @@ test("有效能力hash稳定且所有实际能力变动都改变绑定", () => {
   assert.deepEqual(readModelProfile(JSON.stringify(a)), a); assert.equal(readModelProfile(""), null);
 });
 
-test("角色请求量不等同模型能力上限，网关和官方模型复用相同计算", () => {
+test("已核实模型的共享输出预算使用能力上限，未知模型仍用调用方保守额度", () => {
   const config = { ...target, modelProfile: checkedModelProfile(explicit()) };
-  assert.equal(modelOutputBudget(config), 4096); assert.equal(modelOutputBudget(config, 8192), 8192);
+  assert.equal(modelOutputBudget(config), 12000); assert.equal(modelOutputBudget(config, 1024), 12000);
+  assert.equal(modelOutputBudget(config, 8192), 12000);
   assert.equal(modelOutputBudget(config, 30000), 12000);
+  assert.equal(modelOutputBudget(target), 4096); assert.equal(modelOutputBudget(target, 8192), 8192);
   assert.equal(architectureModelOutputBudget(config, "designer"), 12000);
   assert.equal(architectureModelOutputBudget(config, "reviewer"), 12000);
   assert.equal(developmentModelOutputBudget(config, "developer"), 12000);

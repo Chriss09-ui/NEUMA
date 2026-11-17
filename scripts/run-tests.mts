@@ -88,7 +88,7 @@ export const TEST_LAYERS = Object.freeze({
     "requirements/input-framing-integration.test.mjs", "requirements/requirement-calculation-integration.test.mjs",
     "requirements/requirement-consultation-history.test.mjs", "requirements/requirement-consultation.test.mjs", "requirements/requirement-limits.test.mjs",
     "requirements/requirement-sessions.test.mjs", "requirements/unicode-text-contract.test.mjs", "runtime/materials-runner.test.mjs",
-    "runtime/model-connection.test.mjs", "runtime/model-context-native.test.mjs", "runtime/model-idle-timeout.test.mjs", "runtime/model-profile.test.mjs",
+    "runtime/model-connection.test.mjs", "runtime/model-context-native.test.mjs", "runtime/model-idle-timeout.test.mjs", "runtime/model-profile.test.mjs", "runtime/model-stream-bounds.test.mjs",
     "runtime/pi-runtime.test.mjs", "runtime/pi-session-state.test.mjs", "runtime/pi-submission-contract.test.mjs", "runtime/tool-input-diagnostics.test.mjs",
     "services/agent-services-ui.test.mjs", "services/connections-protocols.test.mjs", "services/managed-application.test.mjs", "services/managed-services.test.mjs",
     "services/python-gateway-integration.test.mjs", "services/service-data-migrations.test.mjs", "services/service-dependencies.test.mjs",

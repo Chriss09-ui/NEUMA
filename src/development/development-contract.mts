@@ -11,7 +11,7 @@ import { testJsonSchema, resolveTestJson, resolveCaseInput, resolveCaseValues, i
 import { acceptanceCaseMatches, activationBusinessAcceptanceItems, developmentAcceptanceItems, requiredDevelopmentRequirementIds, validateAcceptanceCoverage, validateAcceptanceVerification } from "../verification/acceptance-contract.mjs";
 import { MATERIAL_CHECKS_SCHEMA, assertCaseMaterials } from "./development-test-material-audit.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
-import { textLength, textWithinLimit } from "../runtime/text-length.mjs";
+import { SCHEMA_PATTERN_MAX_CHARS, schemaPatternMatches, textLength, textWithinLimit } from "../runtime/text-length.mjs";
 
 import { isSafeAssertionPath, normalizeAssertionPath } from "./development-assertion-path.mjs";
 import { developmentExecutionConfig } from "./development-execution-config.mjs";
@@ -135,9 +135,13 @@ function validateSchema(value: unknown, schema: ToolSchema, path: string): void 
   } else if (schema.type === "string") {
     if (typeof value !== "string" || value.includes("\0")
       || (schema.minLength && !value.trim()) || textLength(value) < Number(schema.minLength ?? 0)
-      || (schema.maxLength && !textWithinLimit(value, Number(schema.maxLength)))
-      || (schema.pattern && !new RegExp(String(schema.pattern)).test(value))
-      || (schema.enum && !schema.enum.includes(value))) fail(`${path} 文本或取值无效`);
+      || (schema.maxLength && !textWithinLimit(value, Number(schema.maxLength)))) fail(`${path} 文本或取值无效`);
+    if (schema.pattern) {
+      const pattern = String(schema.pattern);
+      if (pattern.length > SCHEMA_PATTERN_MAX_CHARS) fail(`${path} 文本规则过长`);
+      if (!schemaPatternMatches(pattern, value)) fail(`${path} 文本或取值无效`);
+    }
+    if (schema.enum && !schema.enum.includes(value)) fail(`${path} 文本或取值无效`);
   } else if (schema.type === "integer") {
     if (!isInteger(value) || (schema.enum && !schema.enum.includes(value))
       || (schema.minimum !== undefined && value < Number(schema.minimum))) fail(`${path} 版本无效`);

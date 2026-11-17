@@ -4,6 +4,7 @@ import type { PiSessionPort, SessionFactory, Progress } from "../runtime/executi
 import { objectFields } from "../runtime/type-boundary.mjs";
 import { ProviderError } from "../requirements/core.mjs";
 import { classifyModelFailure } from "../runtime/pi-runtime.mjs";
+import { modelOutputBudget } from "../runtime/model-limits.mjs";
 
 export const REQUIREMENT_ROUTING_PROMPT = `你是只读的需求回合寻址器，不和用户对话。只决定本轮消息属于哪个流程，不回答业务、不执行任务、不改需求。
 当前有一项尚未确认的智能体需求。用户回答上一追问、补充材料、纠正内容、指定输出格式/深度/边界、询问这份草稿或要求继续时，选择 continue；即使文字是“给我一份清单”“保存成文件”，在回答需求问题时仍是 continue，不能直接替用户执行将来的任务。
@@ -21,7 +22,7 @@ export async function classifyRequirementInput({ config, cwd, dataDir, sessionFa
   const abort = () => { void session?.abort?.(); };
   signal?.addEventListener("abort", abort, { once: true });
   try {
-    session = await sessionFactory({ config, cwd, dataDir, systemPrompt: REQUIREMENT_ROUTING_PROMPT, maxOutputTokens: 1024,
+    session = await sessionFactory({ config, cwd, dataDir, systemPrompt: REQUIREMENT_ROUTING_PROMPT, maxOutputTokens: modelOutputBudget(config, 1024),
       customTools: [{ name: "submit_requirement_route", label: "确认需求消息去向", description: "只读提交本轮是否继续当前需求，不执行操作。",
         parameters: PARAMETERS, executionMode: "sequential", execute: async (_id: string, input: unknown): Promise<ToolResult> => {
           const value = objectFields(input);

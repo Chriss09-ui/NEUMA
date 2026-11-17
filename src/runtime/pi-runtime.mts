@@ -19,6 +19,7 @@ import { safeDiagnosticText } from "../projects/project-diagnostics.mjs";
 import { resolvedModelProfile, modelProfileHash, modelOutputBudget } from "./model-limits.mjs";
 import { piSessionManager, piSessionPolicy } from "./pi-session-state.mjs";
 import { modelIdleTimeoutMs, withModelIdleTimeout } from "./model-idle-timeout.mjs";
+import { boundModelResponse } from "./model-stream-bounds.mjs";
 import { admitModelRequest } from "./model-admission.mjs";
 import type { ExecutionSession } from "./execution-port.mjs";
 type Failure = ReturnType<typeof classifyModelFailure>;
@@ -86,6 +87,8 @@ export function classifyModelFailure(value: unknown = "") {
     return { reason: "api_unavailable", message: "模型服务暂时不可用，请稍后再试" };
   if (/context.{0,40}(length|window|overflow)|maximum.{0,15}context|too many tokens|prompt.{0,20}too long/i.test(text))
     return { reason: "api_context", message: "模型接口无法接收当前上下文，请检查模型的上下文配置" };
+  if (text.includes("NEUMA_MODEL_STREAM_LIMIT"))
+    return { reason: "api_output_limit", message: "这一轮模型回复过长，已停止接收；已保存进度保留" };
   if (/truncated response|output.{0,20}(limit|tokens)|max(?:imum)?.{0,15}(?:completion|output).{0,15}tokens/i.test(text))
     return { reason: "api_output_limit", message: "本轮模型输出额度已用完，完整结果尚未提交；请先检查思考设置、材料规模和请求额度" };
   if (/finish_reason:\s*content_filter/i.test(text))
@@ -307,7 +310,8 @@ export async function createPiSession({ config, manager, turn, cwd, dataDir, cus
     secureHistory();
     const headers = anonymousModel ? new Headers(options?.headers ?? (objectFields(input).headers as RequestInit["headers"])) : undefined;
     headers?.delete("authorization");
-    return fetchWithIdleTimeout(input, { ...options, ...(headers ? { headers } : {}) });
+    const response = await fetchWithIdleTimeout(input, { ...options, ...(headers ? { headers } : {}) });
+    return response instanceof Response ? boundModelResponse(response) : response;
   };
   try {
   const persisted = await piSessionManager(sdk, { cwd, storage: sessionStorage });

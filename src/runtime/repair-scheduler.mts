@@ -205,6 +205,7 @@ function readCheckpoint(input: unknown, review: boolean, development = false): R
 
 interface ScheduleOptions<L extends number | null> { checkpoint: RepairCheckpoint<L>; binding: unknown; base: unknown;
   save(state: RepairCheckpoint<L>): Promise<void>; run(worker: RepairWorker<L>): Promise<unknown>; signal?: AbortSignal | undefined;
+  inFlight?: number;
   retryInvalidMerge?: boolean;
   onInvalidMerge?: ((groupIds: string[], receiptHash: string, phase: "saved" | "submission" | "assembly") => Promise<void>) | undefined;
   validateCandidate?: ((candidate: unknown, final: boolean) => unknown | Promise<unknown>) | undefined }
@@ -217,7 +218,8 @@ export function runReviewTaskSchedule(options: ScheduleOptions<null>) {
   return runSchedule(options, readReviewTaskCheckpoint(options.checkpoint), () => null);
 }
 export function runDevelopmentTaskSchedule(options: ScheduleOptions<null>) {
-  return runSchedule(options, readDevelopmentTaskCheckpoint(options.checkpoint), () => null);
+  // The sealed wave still admits up to three groups. One live model session keeps the task heap recoverable.
+  return runSchedule({ ...options, inFlight: 1 }, readDevelopmentTaskCheckpoint(options.checkpoint), () => null);
 }
 
 async function runSchedule<L extends number | null>(options: ScheduleOptions<L>, state: RepairCheckpoint<L>,
@@ -279,6 +281,8 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
     }
     groups = state.groups.filter(group => group.wave === wave);
     const pending = groups.filter(group => !group.result), quotas = new Map(pending.map(group => [group.id, group.calls]));
+    const inFlight = options.inFlight ?? state.concurrency;
+    if (!Number.isSafeInteger(inFlight) || inFlight < 1 || inFlight > state.concurrency) fail();
     const { callLimit, groupCallLimit } = state;
     if (callLimit !== null && groupCallLimit !== null) {
       const reserve = state.version === 2 ? Math.min(2, groupCallLimit) : 1;
@@ -293,7 +297,9 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
         if (!assigned) break;
       }
     }
-    const settled = await Promise.allSettled(groups.filter(group => !group.result).map(async original => {
+    const settled: PromiseSettledResult<unknown>[] = [];
+    for (let offset = 0; offset < pending.length; offset += inFlight) {
+      settled.push(...await Promise.allSettled(pending.slice(offset, offset + inFlight).map(async original => {
       const current = () => state.groups.find(group => group.id === original.id)!;
       const limit = workerLimit(quotas.get(original.id), state);
       if (state.version !== 4 && current().rejection?.count === 3) fail("子任务连续三次因同一问题提交失败。");
@@ -344,9 +350,10 @@ async function runSchedule<L extends number | null>(options: ScheduleOptions<L>,
           }); return result;
         } });
       if (!current().result) fail("子 Agent 尚未提交完整修复结果，进度已保存。");
-    }));
+      })));
+    }
     active(); const failure = settled.find(result => result.status === "rejected");
-    if (failure) throw failure.reason;
+    if (failure?.status === "rejected") throw failure.reason;
     const completed = state.groups.filter(group => group.wave === wave);
     for (const group of completed) validateRepairResult(group.result, group, base);
     const candidate = applyRepairUpdates(base, completed.flatMap(group => group.result!.updates));

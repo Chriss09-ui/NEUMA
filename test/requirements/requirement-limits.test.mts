@@ -1,7 +1,7 @@
 import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { textLength, textWithinLimit, truncateText } from "../../src/runtime/text-length.mjs";
+import { SCHEMA_PATTERN_MAX_CHARS, schemaPatternMatches, textLength, textWithinLimit, truncateText } from "../../src/runtime/text-length.mjs";
 import { assertRequirementDraftSize, REQUIREMENT_DRAFT_MAX_BYTES, REQUIREMENT_RECORD_MAX_BYTES,
   REQUIREMENT_CONVERSATION_MAX_BYTES, REQUIREMENT_LIMITS } from "../../src/requirements/requirement-limits.mjs";
 import { requirementItems } from "../../src/architecture/architecture-contract.mjs";
@@ -34,4 +34,12 @@ test("正式需求文字预算覆盖上游合法交互JSON的控制字符转义�
   const normalized = normalizeDraft(draft), item = requirementItems(normalized).find(item => item.id === "interaction");
   assert.ok(item!.text!.length > 24_000); assert.ok(textWithinLimit(item!.text!, REQUIREMENT_LIMITS.formalTextCharacters));
   assert.equal(item!.text!.includes("\u0001"), false); assert.equal(JSON.parse(String(item!.text!.slice(3))).inputs, normalized.interaction!.inputs);
+});
+
+test("短文本规则可以匹配，超过256个字符的规则直接拒绝", () => {
+  assert.equal(schemaPatternMatches("^[A-Za-z]+$", "Ab"), true);
+  assert.equal(schemaPatternMatches("^[A-Za-z]+$", "1"), false);
+  const long = "(?:a)?".repeat(43);
+  assert.ok(long.length > SCHEMA_PATTERN_MAX_CHARS);
+  assert.equal(schemaPatternMatches(long, "a"), false);
 });

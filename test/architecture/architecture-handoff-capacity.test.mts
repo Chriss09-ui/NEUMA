@@ -159,17 +159,24 @@ test("动态条数不放宽整份证据字节限额，超量反馈要求精简�
   assert.equal(diagnoseRequirementFidelitySubmission(expanded, short).valid, true, "显式选择必要摘录后可完整提交全部项，不自动截断原文");
 });
 
-test("范围复核输出按当前条目有界估算且受模型声明额度约束，小需求不增额", async () => {
-  for (const [count, limit, expected] of [[8, 65536, 8192], [80, 65536, 10240], [254, 65536, 32768], [254, 8192, 8192]] as const) {
+test("已核实模型的范围复核请求该模型最高输出，未知模型仍按条目估算", async () => {
+  for (const [count, limit] of [[8, 65536], [80, 65536], [254, 65536], [254, 8192]] as const) {
     const context = fidelityContext(count, true), value = narrowed(context), config: ModelConfig = { chatUrl: "http://127.0.0.1:9/v1/chat/completions", model: "fixed" };
     config.modelProfile = { schemaVersion: 1, target: { chatUrl: config.chatUrl, model: config.model }, api: "openai-completions",
       contextWindow: 131072, maxOutputTokens: limit, reasoning: false, input: ["text"], compat: {} };
     const result = await verifyRequirementFidelity({ context, config, cwd: "/tmp", dataDir: "/tmp", sessionFactory: async (options) => {
-      assert.equal(options.maxOutputTokens, expected);
+      assert.equal(options.maxOutputTokens, limit);
       return { modelCallAccounting: true, dispose() {}, async prompt() { await callFixture(options.onModelCall!, options, []); await fixtureToolAt(options.customTools).execute("scope", value); } };
     } });
-    assert.equal(result.modelCalls, 1); assert.equal(result.fidelityDiagnostic.requestedMaxOutputTokens, expected);
+    assert.equal(result.modelCalls, 1); assert.equal(result.fidelityDiagnostic.requestedMaxOutputTokens, limit);
   }
+  const unknownContext = fidelityContext(80, true), unknownValue = narrowed(unknownContext);
+  const unknown = await verifyRequirementFidelity({ context: unknownContext, config: { chatUrl: "http://127.0.0.1:9/v1/chat/completions", model: "unlisted" },
+    cwd: "/tmp", dataDir: "/tmp", sessionFactory: async (options) => {
+      assert.equal(options.maxOutputTokens, 10240);
+      return { modelCallAccounting: true, dispose() {}, async prompt() { await callFixture(options.onModelCall!, options, []); await fixtureToolAt(options.customTools).execute("scope", unknownValue); } };
+    } });
+  assert.equal(unknown.fidelityDiagnostic.requestedMaxOutputTokens, 10240);
   const context = fidelityContext(REQUIREMENT_LIMITS.formalItems, true), config: ModelConfig = { chatUrl: "http://127.0.0.1:9/v1/chat/completions", model: "fixed" };
   config.modelProfile = { schemaVersion: 1, target: { chatUrl: config.chatUrl, model: config.model }, api: "openai-completions",
     contextWindow: 131072, maxOutputTokens: 8192, reasoning: false, input: ["text"], compat: {} };

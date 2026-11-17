@@ -208,6 +208,21 @@ for (const textarea of document.querySelectorAll<HTMLTextAreaElement>(".composer
     textarea.style.height = "auto";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
   };
+  const inherited = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), "value");
+  if (inherited?.get && inherited.set) {
+    Object.defineProperty(textarea, "value", {
+      configurable: true, enumerable: true,
+      get() { return inherited.get!.call(this); },
+      set(next: string) { inherited.set!.call(this, next); resize(); },
+    });
+  } else {
+    let current = textarea.value;
+    Object.defineProperty(textarea, "value", {
+      configurable: true, enumerable: true,
+      get() { return current; },
+      set(next: string) { current = String(next); resize(); },
+    });
+  }
   textarea.addEventListener("input", resize);
   textarea.addEventListener("keydown", (event) => {
     const choosingMention = textarea.getAttribute("aria-autocomplete") === "list" && textarea.getAttribute("aria-expanded") === "true";

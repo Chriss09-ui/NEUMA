@@ -2,6 +2,23 @@ import type { ExecutionSession, ExecutionOptions, SessionEvent, SessionMessage }
 import { createPiSession } from "./pi-runtime.mjs";
 export { classifyModelFailure } from "./pi-runtime.mjs";
 
+const HOST_EVENT_KEYS = ["message", "errorMessage", "finalError", "toolName", "toolCallId", "args", "isError", "success", "attempt", "maxAttempts", "delayMs", "willRetry", "result"] as const;
+
+/** Streaming updates carry the whole growing reply. Copy the delta only, so each token does not retain another full copy. */
+export function hostSessionEvent(event: { type: SessionEvent["type"] } & Record<string, unknown>): SessionEvent {
+  const mapped = { type: event.type } as SessionEvent;
+  if (event.type !== "message_update") {
+    for (const key of HOST_EVENT_KEYS) if (key in event) Reflect.set(mapped, key, structuredClone(event[key]));
+  }
+  if (event.type === "message_update") {
+    const update = event.assistantMessageEvent;
+    if (!update || typeof update !== "object") throw new TypeError("模型流事件缺少增量");
+    const fields = update as { type?: unknown; delta?: unknown };
+    mapped.assistantMessageEvent = { type: typeof fields.type === "string" ? fields.type : "", ...(typeof fields.delta === "string" ? { delta: fields.delta } : {}) };
+  }
+  return mapped;
+}
+
 /** Deliberately exposes no SDK manager/settings or mutable native event objects. */
 export async function createExecutionSession(options: ExecutionOptions): Promise<ExecutionSession> {
   const native = await createPiSession(options);
@@ -20,16 +37,6 @@ export async function createExecutionSession(options: ExecutionOptions): Promise
     abort: () => native.abort(), dispose: () => native.dispose(),
     setAutoCompactionEnabled: enabled => native.setAutoCompactionEnabled(enabled),
     getLastAssistantText: () => native.getLastAssistantText(),
-    subscribe: listener => native.subscribe(event => {
-      const mapped: SessionEvent = { type: event.type };
-      // Copy only host contract fields, including unknown usage as absent rather than zero.
-      for (const key of ["message", "errorMessage", "finalError", "toolName", "toolCallId", "args", "isError", "success", "attempt", "maxAttempts", "delayMs", "willRetry", "result"] as const)
-        if (key in event) Reflect.set(mapped, key, structuredClone(Reflect.get(event, key)));
-      if (event.type === "message_update") {
-        const update = event.assistantMessageEvent;
-        mapped.assistantMessageEvent = { type: update.type, ...("delta" in update && typeof update.delta === "string" ? { delta: update.delta } : {}) };
-      }
-      listener(mapped);
-    }),
+    subscribe: listener => native.subscribe(event => { listener(hostSessionEvent(event)); }),
   };
 }

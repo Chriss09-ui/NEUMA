@@ -16,7 +16,7 @@ test("无限请求调度在结果已提交后明确拒绝续请求，不误报�
   } });
   assert.equal(checkpoint.calls, 1); assert.equal(checkpoint.callLimit, null); assert.ok(checkpoint.groups[0]!.result);
 });
-async function submit(worker: RepairWorker, value: unknown) {
+async function submit(worker: RepairWorker<number | null>, value: unknown) {
   await worker.onSession(worker.group.sessionFile ?? `${worker.group.id}.jsonl`); await worker.onCall();
   await worker.submit({ baseHash: worker.baseHash, issueIds: worker.group.issueIds, summary: "局部修改，等待独立验证",
     updates: [{ path: worker.group.paths[0]!, value }] });
@@ -55,6 +55,24 @@ test("十个独立问题动态分派，最多三个子Agent同时工作，全部
   assert.deepEqual(output, Object.fromEntries(Object.keys(base).map(key => [key, "after"])));
   assert.equal(maximum, 3); assert.equal(checkpoint.calls, 10);
   assert.equal(checkpoint.groups.filter(group => group.result).length, 10);
+});
+
+test("研发分组检查点仍是一波三组，任务进程一次只执行一个会话", async () => {
+  const base = { a: "old", b: "old", c: "old" };
+  const issues = ["a", "b", "c"].map(id => issue(id, `/${id}`));
+  let checkpoint = createDevelopmentTaskCheckpoint("serial-wave", base, issues);
+  assert.equal(checkpoint.concurrency, 3);
+  let active = 0, maximum = 0;
+  const result = await runDevelopmentTaskSchedule({ checkpoint, binding: "serial-wave", base, save: async value => { checkpoint = value; },
+    run: async worker => {
+      active++; maximum = Math.max(maximum, active);
+      await new Promise(resolve => setImmediate(resolve));
+      await submit(worker, "done");
+      active--;
+    } });
+  assert.equal(maximum, 1);
+  assert.equal(checkpoint.concurrency, 3);
+  assert.deepEqual(result, { a: "done", b: "done", c: "done" });
 });
 
 test("新版本可完整调度二百个独立问题，旧版本容量与预算保持不变", async () => {

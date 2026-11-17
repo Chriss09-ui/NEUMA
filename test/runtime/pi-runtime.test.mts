@@ -83,10 +83,11 @@ test("运行时拒绝无效输出预算，避免把预算错误发送到模型�
     await assert.rejects(callFixture(createPiSession, undefined, [{ config, customTools: [], maxOutputTokens }]), /输出预算应为 256 到 131072/);
 });
 
-test("共享输出预算使用调用方任务预算并受模型能力上限约束", () => {
+test("已核实模型的共享输出预算使用能力上限，未知模型仍受调用方保守额度约束", () => {
   for (const config of [mimoConfig, flashConfig]) {
-    assert.equal(modelOutputBudget(config), 4096);
-    assert.equal(modelOutputBudget(config, 8192), 8192);
+    assert.equal(modelOutputBudget(config), 131_072);
+    assert.equal(modelOutputBudget(config, 1024), 131_072);
+    assert.equal(modelOutputBudget(config, 8192), 131_072);
     assert.equal(modelOutputBudget(config, 999_999), 131_072);
     assert.equal(architectureModelOutputBudget(config, "designer"), 131072);
     assert.equal(architectureModelOutputBudget(config, "reviewer"), 131072);
@@ -109,7 +110,7 @@ test("共享输出预算使用调用方任务预算并受模型能力上限约�
   }
 });
 
-test("MiMo 默认发送任务预算 4096，显式短探针仍发送 512且能力上限独立保存", async (t) => {
+test("MiMo 未指定输出时请求模型最高额度，显式短探针仍发送 512且能力上限独立保存", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "neuma-pi-max-output-"));
   const requests: FixtureModelRequest[] = [];
   const model = createServer(async (request, response) => {
@@ -125,12 +126,12 @@ test("MiMo 默认发送任务预算 4096，显式短探针仍发送 512且能力
     const session = await createPiSession({ config, cwd: root, dataDir: join(root, "data"),
       customTools: [], systemPrompt: "fixture", ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }) });
     try {
-      const expected = maxOutputTokens ?? 4096;
+      const expected = maxOutputTokens ?? 131_072;
       assert.equal(session.model!.maxTokens, expected);
       assert.equal(session.modelProfile.maxOutputTokens, 131_072);
       assert.equal(session.modelProfileHash, modelProfileHash(resolvedModelProfile(config)));
       assert.equal(session.settingsManager.getCompactionSettings(session.model).reserveTokens,
-        16_384);
+        maxOutputTokens === undefined ? 135_168 : 16_384);
       // Exercise the real SDK request with the registered MiMo profile against this local fixture.
       await session.setModel({ ...session.model!, baseUrl: `http://127.0.0.1:${listeningAddress(model).port}/v1` });
       await session.prompt("生成方案");

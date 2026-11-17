@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { objectFields } from "../src/runtime/type-boundary.mjs";
@@ -56,9 +56,10 @@ export async function resumeDevelopment(args: string[]) {
       log("observation_error", { phase: "cancel", error });
     });
   };
+  const taskStderr = openSync(join(output, "task-stderr.log"), "a", 0o600);
   const child = fork(fileURLToPath(new URL("./resume-development-service.mjs", import.meta.url)),
     [dataDir, agentId, developmentId, output, mutationId],
-    { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], cwd, env: process.env });
+    { detached: true, stdio: ["ignore", "ignore", taskStderr, "ipc"], cwd, env: process.env });
   const observer = new AbortController();
   const ready = new Promise<string>((resolveReady, rejectReady) => {
     const timer = setTimeout(() => rejectReady(new Error("任务进程没有在时限内开始提供服务")), 180_000);

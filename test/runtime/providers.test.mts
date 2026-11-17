@@ -191,7 +191,7 @@ test("小米 MiMo 使用 JSON 模式并关闭需求提取时的深度思考", as
     chatUrl: "https://api.xiaomimimo.com/v1/chat/completions", model: "mimo-v2.6-pro" }, fetchImpl);
   await callFixture(generateDraft!, undefined, [{ message: "做周报助手", previousDraft: {}, lastQuestion: "" }]);
   assert.equal(body!.model, "mimo-v2.6-pro");
-  assert.equal(body!.max_completion_tokens, 8192);
+  assert.equal(body!.max_completion_tokens, 131072);
   assert.equal(body!.max_tokens, undefined);
   assert.deepEqual(body!.response_format, { type: "json_object" });
   assert.deepEqual(body!.thinking, { type: "disabled" });
@@ -820,7 +820,7 @@ test("取消短流 Retry-After 等待立即停止，不再发起请求", async (
   assert.equal(calls, 1);
 });
 
-test("已确认 MiMo 模型的需求和正式回复使用各自任务预算", async () => {
+test("已确认 MiMo 模型的需求草稿和正式回复都请求模型最高输出", async () => {
   const bodies: ProviderBody[] = [];
   const provider = makeProviders({ ...config, chatUrl: "https://api.xiaomimimo.com/v1/chat/completions", model: "mimo-v2.6-pro" },
     async (_url, init) => {
@@ -832,7 +832,7 @@ test("已确认 MiMo 模型的需求和正式回复使用各自任务预算", as
   await provider.streamReply!(turnInput);
   assert.equal(bodies.length, 2);
   for (const [index, body] of bodies.entries()) {
-    assert.equal(body.max_completion_tokens, index === 0 ? 8192 : 2048);
+    assert.equal(body.max_completion_tokens, 131072);
     assert.equal(body.max_tokens, undefined);
   }
 });

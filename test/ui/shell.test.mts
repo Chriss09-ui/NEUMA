@@ -514,6 +514,19 @@ test("提及候选打开时全局回车让给选择器，选择完成后的下�
   input.dispatchEvent({ ...key(), defaultPrevented: true }); assert.equal(input.submissions, 1);
 });
 
+test("输入框被程序清空后回到当前内容的高度", () => {
+  const { get } = setup();
+  const input = get("main-message");
+  let height = 96;
+  Object.defineProperty(input, "scrollHeight", { get() { return height; } });
+  input.value = "很长的一段话";
+  assert.equal(input.style.height, "96px");
+  height = 34;
+  input.value = "";
+  assert.equal(input.style.height, "34px");
+  assert.equal(input.value, "");
+});
+
 test("Agent 与群输入框随宽度重新增高，同宽高度通知不递归，隐藏后恢复仍重新计算", () => {
   const { get, resizeObservers } = setup({ resizeObserver: true });
   assert.equal(resizeObservers.length, 2);

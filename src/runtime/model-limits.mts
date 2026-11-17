@@ -8,11 +8,15 @@ export function knownModelLimits(config: ModelConfig = {}) {
 }
 
 export function modelOutputBudget(config: ModelConfig, fallback = 4096) {
-  return Math.min(resolvedModelProfile(config).maxOutputTokens, fallback);
+  const profile = resolvedModelProfile(config);
+  // 已核实能力时请求该模型最高输出；未知模型才使用调用方给出的保守额度。
+  if (profile.source.kind !== "fallback") return profile.maxOutputTokens;
+  return Math.min(profile.maxOutputTokens, fallback);
 }
 
 export function reasoningModelOutputBudget(config: ModelConfig, base = 4096) {
-  return modelOutputBudget(config, resolvedModelProfile(config).reasoning ? base * 4 : base);
+  const profile = resolvedModelProfile(config);
+  return modelOutputBudget(config, profile.source.kind === "fallback" && profile.reasoning ? base * 4 : base);
 }
 
 export function architectureModelOutputBudget(config: ModelConfig, role: string) {

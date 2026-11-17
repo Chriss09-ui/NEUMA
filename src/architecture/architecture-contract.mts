@@ -14,7 +14,7 @@ import { ACCEPTANCE_VERIFICATION_SCHEMA, ACCEPTANCE_ADAPTER_GUIDE, validateAccep
 import { hostDeliveryCapabilityCatalog, runtimeCapabilityContract } from "../runtime/runtime-capability-contract.mjs";
 import { PLATFORM_CLAIMS_SCHEMA, validateArchitecturePlatformClaims } from "./architecture-platform-claims.mjs";
 import { REQUIREMENT_LIMITS } from "../requirements/requirement-limits.mjs";
-import { textLength } from "../runtime/text-length.mjs";
+import { SCHEMA_PATTERN_MAX_CHARS, schemaPatternMatches, textLength } from "../runtime/text-length.mjs";
 import { architectureGlobalIssues, architectureCapabilityIssues, requiredArchitectureAcceptanceKinds } from "./architecture-stage-semantics.mjs";
 import type { StageSemanticIssue } from "./architecture-stage-semantics.mjs";
 
@@ -252,9 +252,12 @@ function validateSchema(value: unknown, schema: Schema, path = "design"): void {
   } else if (schema.type === "string") {
     if (typeof value !== "string" || (schema.minLength !== 0 && !value.trim()) || value.includes("\0")
         || (schema.maxLength !== undefined && textLength(value) > schema.maxLength)
-        || (schema.minLength !== undefined && textLength(value) < schema.minLength)
-        || (schema.pattern && !new RegExp(schema.pattern).test(value))
-        || (schema.enum && !schema.enum.includes(value))) fail(`${path} 文本或取值无效`);
+        || (schema.minLength !== undefined && textLength(value) < schema.minLength)) fail(`${path} 文本或取值无效`);
+    if (schema.pattern) {
+      if (schema.pattern.length > SCHEMA_PATTERN_MAX_CHARS) fail(`${path} 文本规则过长`);
+      if (!schemaPatternMatches(schema.pattern, value)) fail(`${path} 文本或取值无效`);
+    }
+    if (schema.enum && !schema.enum.includes(value)) fail(`${path} 文本或取值无效`);
   } else if (schema.type === "integer") {
     if (!isInteger(value)) fail(`${path} 必须为整数`);
     if (schema.minimum !== undefined && value < schema.minimum || schema.maximum !== undefined && value > schema.maximum)
