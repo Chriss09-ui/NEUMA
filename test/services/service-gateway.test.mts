@@ -100,6 +100,9 @@ test("gateway is opt-in and grants only explicit actions with one-time token dis
   assert.equal((await fetch(`${configured.apiUrl}/actions`)).status, 401);
   const catalog = await (await fetch(`${configured.apiUrl}/actions`, { headers: headers(configured.token) })).json();
   assert.deepEqual(catalog.actions.map((action:{id:string}) => action.id), ["analyze"]); assert.equal(catalog.deliveryVersion, "delivery-one");
+  const conversation = await fetch(`${configured.apiUrl}/turns`, { method: "POST", headers: headers(configured.token),
+    body: JSON.stringify({ deliveryVersion: "delivery-one", mutationId: "ask-agent-request", message: "处理任务" }) });
+  assert.equal(conversation.status, 403); assert.equal((await conversation.json()).reason, "conversation_not_shared");
   assert.equal((await fetch(`${configured.apiUrl}/tasks`, { method: "POST", headers: headers(configured.token), body: JSON.stringify({ actionId: "delete", input: {}, mutationId: "request-one", deliveryVersion: "delivery-one" }) })).status, 403);
   assert.equal((await fetch(`${configured.apiUrl!.replace('/v1/agents/alpha', '')}/api/agents`, { headers: headers(configured.token) })).status, 404);
 });

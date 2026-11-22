@@ -36,6 +36,10 @@ export interface PrototypeOptions { config: ModelConfig; cwd: string; dataDir: s
   connectionOptions?: Omit<ConstructorParameters<typeof AgentConnectionStore>[0], "dataDir" | "storage">; web?: WebCapabilityPort; applications?: ApplicationService;
   services?: ManagedServiceManager; enforceRequirementConfirmation?: boolean }
 export interface PromptInput { agentId: string; sessionId: string; message?: string; history?: unknown; attachments?: unknown; applicationContext?: unknown; source?: unknown; scope?: unknown }
-export interface PromptOptions { signal?: AbortSignal | undefined; activityScope?: { kind: string; conversationId: string }; taskAllowNetwork?: boolean }
+export interface GatewayPromptScope {
+  conversationId: string; scope: string; root: string; materials: MaterialStore;
+  check(): Promise<void>; publish(file: unknown, written?: Buffer): Promise<{ name: string | undefined; size: number; sha256: string }>;
+}
+export interface PromptOptions { signal?: AbortSignal | undefined; activityScope?: { kind: string; conversationId: string }; taskAllowNetwork?: boolean; gateway?: GatewayPromptScope }
 export interface CollaborationOptions { agentId: string; revision: number; capabilityVersion?: string | undefined; taskAllowNetwork?: boolean; sessionId: string; message: string;
   systemContext?: string; customTools?: MaterialTool[]; allowBusinessTools?: boolean; role?: string; maxTurns?: number; scope: { groupId: string; taskId: string } }

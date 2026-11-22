@@ -48,12 +48,13 @@ import { isHostDeliveryCapability } from "../runtime/runtime-capability-contract
 import { AgentConnectionStore } from "./agent-connections.mjs";
 import { WebCapabilities, createWebTools, networkAllowed, WEB_RUNTIME_PROMPT, PUBLIC_CAPABILITY_VERSION } from "../runtime/web-capabilities.mjs";
 import { ApplicationService } from "../applications/application-service.mjs";
-import { readTaskArtifactSnapshot, removeTaskArtifact, saveTaskArtifact } from "../applications/task-artifacts.mjs";
+import { readTaskArtifactSnapshot, registerTaskArtifact, removeTaskArtifact, saveTaskArtifact } from "../applications/task-artifacts.mjs";
 import { validateApplicationManifest } from "../applications/application-contract.mjs";
 import { authorizeConfirmedRequirement, validateRequirementReceipt } from "../requirements/consultation.mjs";
 import { contentHash } from "../requirements/task-spec.mjs";
 import { ManagedServiceManager } from "../services/managed-service-manager.mjs";
 import { ServiceGateway } from "../services/service-gateway.mjs";
+import { GatewayTurns } from "../services/gateway-turns.mjs";
 import { ServiceDataMigrations } from "../services/service-data-migrations.mjs";
 import { openOAuthBrowser } from "../connections/oauth.mjs";
 import { groupCapabilityFacts } from "./agent-capabilities.mjs";
@@ -155,6 +156,15 @@ function buildInput(input: unknown = {}) {
   return { id: validId(id), name: name.trim(), draft: source, fingerprint };
 }
 
+async function protectMaterialCopy(file: unknown, find: (id: string) => Promise<unknown>) {
+  if (typeof file !== "string") return;
+  const parts = file.split("/").filter(part => part && part !== ".");
+  if (parts[0]?.toLowerCase() !== "inputs" || !/^[a-f0-9-]{36}$/i.test(parts[1] ?? "")) return;
+  try { await find(parts[1]!.toLowerCase()); }
+  catch (error) { if (errorField(error, "reason") === "material_missing") return; throw error; }
+  throw new InputError("上传的输入材料不能覆盖，请将修改另存为任务产物");
+}
+
 function safeHistory(history: unknown, revision: number) {
   if (history === undefined) return [];
   if (!Array.isArray(history) || history.length > 80) throw new InputError("已保存的对话格式无效");
@@ -253,7 +263,9 @@ export class PrototypeAgents {
     this.persistence = Promise.resolve();
     this.ready = this.load();
     this.applications = applications ?? new ApplicationService({ agents: this });
-    this.gateway = new ServiceGateway({ agents: this });
+    const gatewayTurns = new GatewayTurns(this);
+    this.gateway = new ServiceGateway({ agents: this, turns: gatewayTurns });
+    this.onLifecycle(({ agentId }) => gatewayTurns.interrupt(agentId));
     this.runtimeReady = this.ready.then(() => this.services.restore({ isActive: async ({ agentId, deliveryVersion }) => {
       const agent = this.agents.get(agentId);
       return agent?.execution?.kind === "managed-service" && `${agent.developmentRef!.id}:${agent.execution!.codeHash}` === deliveryVersion;
@@ -1007,12 +1019,7 @@ export class PrototypeAgents {
     const root = workspaceRoot ?? await this.workspace(agent.id);
     const guardWrite = async (file: unknown) => {
       if (workspaceRoot) return;
-      if (typeof file !== "string") return;
-      const parts = file.split("/").filter((part) => part && part !== ".");
-      if (parts[0]?.toLowerCase() !== "inputs" || !/^[a-f0-9-]{36}$/i.test(parts[1] ?? "")) return;
-      try { await this.materials.get(agent.id, parts[1]!.toLowerCase()); }
-      catch (error) { if (errorField(error, "reason") === "material_missing") return; throw error; }
-      throw new InputError("上传的输入材料不能覆盖，请将修改另存为任务产物");
+      await protectMaterialCopy(file, id => this.materials.get(agent.id, id));
     };
     const tools = createWorkspaceTools(root, { guardWrite }).filter((tool) => agent.toolIds?.includes(tool.name));
     if (["node-action", "managed-service"].includes(agent.execution?.kind ?? "")) tools.push(...await this.applications.tools(agent, { workspaceRoot: root, ...applicationScope }));
@@ -1057,19 +1064,15 @@ export class PrototypeAgents {
     };
   }
 
-  async applicationCapabilities({ task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, signal, check, execution }: { task: Pick<ApplicationTask, "id" | "agentId" | "source" | "input" | "allowNetwork">; descriptor: { agent: Pick<AgentDefinition, "draft">; manifest: { stateVersion: number }; architecture?: { design?: { connections?: (ConnectionDefinition | LegacyArchitectureConnection)[] } | null | undefined } | null }; action: Pick<ApplicationAction, "connectionIds">; connectionSnapshot: ConnectionSnapshot; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; signal: AbortSignal; check: () => unknown | Promise<unknown>; execution?: () => ExecutionDispatch | undefined }): Promise<(input: CapabilityInput) => Promise<unknown>> {
+  async applicationCapabilities({ task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, signal, check, execution, onFileWritten }: { task: Pick<ApplicationTask, "id" | "agentId" | "source" | "input" | "allowNetwork">; descriptor: { agent: Pick<AgentDefinition, "draft">; manifest: { stateVersion: number }; architecture?: { design?: { connections?: (ConnectionDefinition | LegacyArchitectureConnection)[] } | null | undefined } | null }; action: Pick<ApplicationAction, "connectionIds">; connectionSnapshot: ConnectionSnapshot; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; signal: AbortSignal; check: () => unknown | Promise<unknown>; execution?: () => ExecutionDispatch | undefined; onFileWritten?: ((file: string, bytes: Buffer) => Promise<unknown>) | undefined }): Promise<(input: CapabilityInput) => Promise<unknown>> {
     const root = workspaceRoot ?? await this.workspace(task.agentId);
+    const materials: MaterialTool[] = materialTools ?? (task.source.scope === "private" ? this.materials.tools(task.agentId) : []);
     const guardWrite = async (file: unknown) => {
-      if (task.source.scope !== "private") return;
-      const parts = String(file).split("/").filter((part) => part && part !== ".");
-      if (parts[0]?.toLowerCase() === "inputs" && /^[a-f0-9-]{36}$/i.test(parts[1] ?? "")) {
-        try { await this.materials.get(task.agentId, parts[1]!); }
-        catch (error) { if (errorField(error, "reason") === "material_missing") return; throw error; }
-        throw new InputError("上传的输入材料不能覆盖，请另存产物");
-      }
+      if (task.source.scope === "private") return protectMaterialCopy(file, id => this.materials.get(task.agentId, id));
+      const resolve = materials.find(tool => tool.name === "read_material")?.resolveFile;
+      if (resolve) await protectMaterialCopy(file, id => resolve(id, signal));
     };
     const files = createWorkspaceTools(root, { guardWrite });
-    const materials: MaterialTool[] = materialTools ?? (task.source.scope === "private" ? this.materials.tools(task.agentId) : []);
     const names: Record<string, string> = { "files.list": "list_workspace_files", "files.read": "read_workspace_file", "files.write": "write_workspace_file",
       "material.list": "list_materials", "material.read": "read_material", "material.image": "read_material_image" };
     const stateOptions = { kind: "business", scope: task.source.scope, stateVersion: descriptor.manifest.stateVersion };
@@ -1094,8 +1097,8 @@ export class PrototypeAgents {
               const id = reference.slice(9);
               if (task.source.scope === "private") source = await this.materials.raw(task.agentId, id);
               else {
-                const reader = materials.find((tool) => tool.name === "read_group_material" && tool.resolveFile);
-                if (!reader?.resolveFile) throw new InputError("本群没有这个已共享的材料读取入口");
+                const reader = materials.find((tool) => ["read_group_material", "read_material"].includes(tool.name) && tool.resolveFile);
+                if (!reader?.resolveFile) throw new InputError("当前任务没有这个已共享的材料读取入口");
                 source = await reader.resolveFile(id, activeSignal);
               }
             } else if (reference.startsWith("workspace:")) {
@@ -1152,18 +1155,11 @@ export class PrototypeAgents {
       if (!tool) throw new InputError("应用不具备这个能力");
       const result = await tool.execute(randomUUID(), args, activeSignal);
       if (capability === "files.write") {
-        if (typeof args.content !== "string") throw new InputError("产物内容无效");
-        const artifact = await saveTaskArtifact({ storage: this.storage, id: task.agentId, taskId: task.id,
-          path: args.file, data: Buffer.from(args.content, "utf8"), signal: activeSignal });
-        let registered = false;
-        try {
-          await check();
-          const saved = await this.applications.store.appendArtifact(task.agentId, task.id, artifact);
-          registered = saved.artifacts.some((item) => item.snapshotId === artifact.snapshotId);
-          if (!registered) throw new InputError("任务已结束，产物未登记为本次结果");
-        } finally {
-          if (!registered) await removeTaskArtifact({ storage: this.storage, id: task.agentId, taskId: task.id, artifact });
-        }
+        if (typeof args.file !== "string" || typeof args.content !== "string") throw new InputError("产物内容无效");
+        const bytes = Buffer.from(args.content, "utf8");
+        await registerTaskArtifact({ storage: this.storage, store: this.applications.store, id: task.agentId, taskId: task.id,
+          path: args.file, data: bytes, signal: activeSignal, check });
+        await onFileWritten?.(args.file, bytes);
       }
       const text = result.content?.find((content) => content.type === "text")?.text;
       const images = result.content?.filter((content) => content.type === "image");
@@ -1408,7 +1404,7 @@ export class PrototypeAgents {
     }
   }
 
-  async prompt(input: unknown = {}, onProgress: Progress = () => {}, { signal, activityScope, taskAllowNetwork }: PromptOptions = {}) {
+  async prompt(input: unknown = {}, onProgress: Progress = () => {}, { signal, activityScope, taskAllowNetwork, gateway }: PromptOptions = {}) {
     const { agentId: rawAgentId, sessionId: rawSessionId, message = "", history, attachments: suppliedAttachments, applicationContext } = objectFields(input);
     const runtimeEpoch = this.runtimeEpoch;
     const checkExternalCancellation = () => { if (signal?.aborted) throw modelError("cancelled"); };
@@ -1416,7 +1412,8 @@ export class PrototypeAgents {
     const agentId = validId(rawAgentId), sessionId = validId(rawSessionId, "对话");
     if (activityScope !== undefined && (!activityScope || typeof activityScope !== "object" || Array.isArray(activityScope)
       || Object.keys(activityScope).length !== 2 || activityScope.kind !== "main")) throw new InputError("工作任务来源无效");
-    const activitySource: Parameters<ActivityStore["start"]>[0]["scope"] = activityScope === undefined ? { kind: "private", sessionId }
+    const activitySource: Parameters<ActivityStore["start"]>[0]["scope"] = gateway ? { kind: "gateway", conversationId: gateway.conversationId }
+      : activityScope === undefined ? { kind: "private", sessionId }
       : { kind: "main", conversationId: validId(activityScope.conversationId, "主对话") };
     if (taskAllowNetwork !== undefined && (activitySource.kind !== "main" || typeof taskAllowNetwork !== "boolean"))
       throw new InputError("可信任务联网策略只接受主 Agent 传递的布尔值");
@@ -1425,6 +1422,7 @@ export class PrototypeAgents {
     if (!textWithinLimit(message, REQUIREMENT_MESSAGE_MAX_CHARACTERS) || (!message.trim() && !attachments.length))
       throw new InputError("请提供任务文字或附件，文字不超过 12000 字");
     await this.ready; checkExternalCancellation();
+    if (gateway && this.closing) throw modelError("cancelled");
     await this.closing; checkExternalCancellation(); this.prune();
     const architecture = await this.getActiveArchitecture(agentId);
     checkExternalCancellation();
@@ -1484,51 +1482,62 @@ export class PrototypeAgents {
       if (this.agents.get(agentId)?.revision !== agent.revision) throw new InputError("Agent 定义已更新，请重新发送任务");
       await this.activities.update(agentId, activity.id, { status: "running" });
       onProgress({ type: "status", phase: "thinking" });
-      const materialDescriptors = await this.materials.resolve(agentId, attachments);
+      const materials = gateway?.materials ?? this.materials;
+      const materialDescriptors = await materials.resolve(agentId, attachments);
       checkCancellation();
       for (const entry of restored) if (entry.attachments?.length) {
-        await this.materials.resolve(agentId, entry.attachments); checkCancellation();
+        await materials.resolve(agentId, entry.attachments); checkCancellation();
       }
       checkCancellation();
       const fresh = !item.session;
       if (fresh) {
-        const root = await this.workspace(agentId);
+        const root = gateway?.root ?? await this.workspace(agentId);
         checkCancellation();
-        const guardWrite = async (file: unknown) => {
-          if (typeof file !== "string") return;
-          const parts = file.split("/").filter((part) => part && part !== ".");
-          if (parts[0]?.toLowerCase() !== "inputs" || !/^[a-f0-9-]{36}$/i.test(parts[1] ?? "")) return;
-          try { await this.materials.get(agentId, parts[1]!.toLowerCase()); }
-          catch (error) { if (errorField(error, "reason") === "material_missing") return; throw error; }
-          throw new InputError("上传的输入材料不能覆盖，请将修改另存为任务产物");
-        };
+        const guardWrite = (file: unknown) => protectMaterialCopy(file, id => materials.get(agentId, id));
         const customTools = createWorkspaceTools(root, { guardWrite }).filter((tool) => agent.toolIds?.includes(tool.name));
-        for (const tool of this.materials.tools(agentId)) customTools.push({ ...tool,
+        const materialTools: MaterialTool[] = materials.tools(agentId);
+        if (gateway) {
+          const reader = materialTools.find(tool => tool.name === "read_material")!;
+          reader.resolveFile = id => materials.raw(agentId, id);
+        }
+        for (const tool of materialTools) customTools.push({ ...tool,
           execute: async (callId, params, toolSignal, ...args) => {
             const activeSignal = toolSignal ? AbortSignal.any([toolSignal, item.controller.signal]) : item.controller.signal;
             const result = await tool.execute(callId, params, activeSignal);
             if (result.content?.some((content) => content.type === "image")) item.hasImages = true;
             return result;
           } });
-        for (const tool of createWebTools({ web: this.web, agentId, scope: `private:${sessionId}`, connectionSnapshot })) customTools.push({ ...tool,
+        for (const tool of createWebTools({ web: this.web, agentId, scope: gateway?.scope ?? `private:${sessionId}`, connectionSnapshot })) customTools.push({ ...tool,
           execute: async (callId, params, toolSignal, ...args) => {
             if (!item.allowNetwork) throw new InputError("本轮要求不联网，未发出网络请求");
             return tool.execute(callId, { ...objectFields(params), refresh: objectFields(params).refresh === true || item.refreshWeb },
               toolSignal ? AbortSignal.any([item.controller.signal, toolSignal]) : item.controller.signal, ...args);
           } });
         if (["node-action", "managed-service"].includes(agent.execution?.kind ?? "")) customTools.push(...await this.applications.tools(agent, {
+          ...(gateway ? { scope: gateway.scope, workspaceRoot: root, materialTools, onFileWritten: gateway.publish } : {}),
           allowNetwork: () => item.allowNetwork, getApplicationContext: () => item.applicationContext ?? null }));
         else if (agent.execution) customTools.push(...await this.developedTools(agent, root));
+        if (gateway && agent.execution) customTools.push({ name: "publish_task_file", label: "交付本轮文件", description: "将程序生成的会话工作目录文件登记为本次任务产物，供调用方下载。",
+          parameters: schema({ file: { type: "string", description: "本会话工作目录中的相对文件名" } }, ["file"]), executionMode: "sequential",
+          execute: async (_id, params) => ({ content: [{ type: "text", text: JSON.stringify(await gateway.publish(objectFields(params).file)) }], details: {} }) });
         checkCancellation();
         const dataDir = await this.storage.directory(agent.id);
         checkCancellation();
         const executionTool = customTools.find((tool) => ["run_application_action", "run_developed_workflow"].includes(tool.name));
         item.session = await this.sessionFactory({ config: runtimeConfig, cwd: root, dataDir,
-          beforeModelRequest: () => this.connections.resolveKind(item.connectionSnapshot, "model"),
-          systemPrompt: `${RUNTIME_BOUNDARY}\n${WEB_RUNTIME_PROMPT}${executionTool ? `\n本 Agent 拥有 ${executionTool.name}，涉及已交付操作时先调用工具，并以真实任务结果回答。` : ""}\n\nAgent 工作指令：\n${agent.instructions}`, customTools: customTools.map((tool) => ({ ...tool,
+          beforeModelRequest: async () => { if (gateway) await gateway.check(); return this.connections.resolveKind(item.connectionSnapshot, "model"); },
+          systemPrompt: `${RUNTIME_BOUNDARY}\n${WEB_RUNTIME_PROMPT}${executionTool ? `\n本 Agent 拥有 ${executionTool.name}，涉及已交付操作时先调用工具，并以真实任务结果回答。` : ""}${gateway && agent.execution ? "\n程序生成的文件若尚未登记为本轮产物，请使用 publish_task_file 交付。" : ""}\n\nAgent 工作指令：\n${agent.instructions}`, customTools: customTools.map((tool) => ({ ...tool,
             execute: async (...args: Parameters<NeumaTool["execute"]>) => {
+              if (gateway) {
+                await gateway.check();
+                args[2] = args[2] ? AbortSignal.any([taskSignal, args[2]]) : taskSignal;
+              }
               const result = await tool.execute(...args);
-              item.runtimeEvidence.push({ tool: tool.name, arguments: args[1], result });
+              if (gateway && tool.name === "write_workspace_file") {
+                const { file, content } = objectFields(args[1]);
+                if (typeof content === "string") await gateway.publish(file, Buffer.from(content, "utf8"));
+              }
+              if (!gateway) item.runtimeEvidence.push({ tool: tool.name, arguments: args[1], result });
               return result;
             } })) });
       }
@@ -1539,7 +1548,7 @@ export class PrototypeAgents {
       const images: PromptImages = [];
       for (const attachment of materialDescriptors.filter((value) => value.kind === "image")) {
         onProgress({ type: "status", phase: "tool", label: "正在准备图片材料…" });
-        const image = await this.materials.image(agentId, attachment.id, { signal: taskSignal });
+        const image = await materials.image(agentId, attachment.id, { signal: taskSignal });
         checkCancellation(); images.push({ type: "image", data: image.data, mimeType: image.mimeType });
         if (Number.isSafeInteger(image.pageCount)) attachment.pageCount = image.pageCount;
         if (image.warnings?.length) attachment.warnings = image.warnings;
@@ -1548,6 +1557,7 @@ export class PrototypeAgents {
       const request = `${context}当前显示名称（仅用于称呼）：${JSON.stringify(profileOf(agent).name)}\n本轮生效的 Agent 记忆（替代旧版本）：${JSON.stringify(safeText(agent.memory ?? ""))}\n${application.prompt}\n${materialContext}\n用户本轮任务：${message.trim() || "用户已提供附件，请结合当前任务处理；任务目标不明确时询问用户。"}`;
       item.hasImages = images.length > 0;
       checkCancellation();
+      if (gateway) await gateway.check();
       await item.session!.prompt(request, images.length ? { images } : undefined);
       checkCancellation();
       requireSuccess(item.session!, item);
@@ -1557,7 +1567,7 @@ export class PrototypeAgents {
       checkCancellation();
       await this.activities.update(agentId, activity.id, { status: "complete", turns: Math.max(1, item.turns), summary: reply });
       checkCancellation();
-      await this.verifyWorkingConversation({ agent, activityId: activity.id, sessionId, message, reply,
+      if (!gateway) await this.verifyWorkingConversation({ agent, activityId: activity.id, sessionId, message, reply,
         toolEvidence: [{ kind: "host-input-context", attachments: materialDescriptors.map(({ id, name, kind, mimeType, pageCount }) => ({ id, name, kind, mimeType, ...(pageCount === undefined ? {} : { pageCount }) })),
           imageCount: images.length }, ...item.runtimeEvidence], config: runtimeConfig, signal: taskSignal }).catch(async () => {
         taskSignal.throwIfAborted();
@@ -1580,8 +1590,8 @@ export class PrototypeAgents {
     } finally {
       const lifecycle = new ExecutionLifecycle();
       lifecycle.own("turn", () => { item.busy = false; item.usedAt = Date.now(); item.finish();
-        if (failed && this.sessions.get(sessionId) === item) this.sessions.delete(sessionId); });
-      if (failed) lifecycle.own("failed-session", () => item.session?.dispose());
+        if ((failed || gateway) && this.sessions.get(sessionId) === item) this.sessions.delete(sessionId); });
+      if (failed || gateway) lifecycle.own("finished-session", () => item.session?.dispose());
       lifecycle.own("subscription", () => unsubscribe());
       lifecycle.own("slot", () => releaseSlot());
       lifecycle.own("late-cancel", async () => { if (signal?.aborted) await abortSession(); });

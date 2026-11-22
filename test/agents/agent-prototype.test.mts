@@ -14,6 +14,8 @@ import { listeningAddress } from "../helpers/m7-test-boundaries.mjs";
 import type { TestFailure } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -76,6 +78,108 @@ async function fixture(t: test.TestContext, sessionFactory: SessionFactory) {
   t.after(async () => { await agents.close(); await rm(root, { recursive: true, force: true }); });
   return { agents, root, options };
 }
+
+async function publishConversation(agents: PrototypeAgents) {
+  const version = await agents.gateway.conversationVersion("weekly");
+  assert.ok(version);
+  const grant = await agents.gateway.configure("weekly", { actionIds: [], deliveryVersion: version, conversationVersion: version });
+  assert.equal(grant.verification.status, "passed");
+  const headers = { authorization: `Bearer ${grant.token}`, "content-type": "application/json" };
+  const submit = (body: UnknownRecord) => fetch(`${grant.apiUrl}/turns`, { method: "POST", headers,
+    body: JSON.stringify({ deliveryVersion: version, ...body }) });
+  const task = (id: string) => fetch(`${grant.apiUrl}/tasks/${id}?deliveryVersion=${encodeURIComponent(version)}`, { headers });
+  const finished = async (id: string) => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const response = await task(id); assert.equal(response.status, 200);
+      const record = await response.json();
+      if (!["queued", "running"].includes(record.status)) return record;
+      await delay(20);
+    }
+    throw new Error("智能体委派任务未在测试期限内结束");
+  };
+  return { grant, headers, version, submit, task, finished };
+}
+
+test("本机 MCP 委派给纯对话 Agent，REST 取回独立产物，重启后可带原会话追问", async (t) => {
+  const records: FactoryRecords = [], messages: string[] = [];
+  let materialNames: string[] = [];
+  const { agents, options } = await fixture(t, factory(records, async record => {
+    if (record.builder || record.reviewer) return;
+    const prompt = record.prompts.at(-1)!; messages.push(prompt);
+    if (!prompt.endsWith("请整理上传的进展")) return;
+    const tools = fixtureTools(record.options.customTools);
+    const catalog = JSON.parse(toolText(await tools.list_materials!.execute("catalog", {})));
+    materialNames = catalog.attachments.map((file: { name: string }) => file.name);
+    const attachment = catalog.attachments[0];
+    const file = JSON.parse(toolText(await tools.read_workspace_file!.execute("read", { file: `inputs/${attachment.id}/${attachment.name}` })));
+    await tools.write_workspace_file!.execute("write", { file: "summary.md", content: file.text });
+  }));
+  await agents.build(input());
+  await agents.uploadAttachment("weekly", { name: "私人资料.md", source: Buffer.from("个人笔记") });
+  const { grant, headers, version, submit, finished } = await publishConversation(agents);
+  const client = new Client({ name: "neuma-delegation-test", version: "1" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(grant.mcpUrl!), { requestInit: { headers } }));
+  try {
+    const catalog = await client.listTools();
+    assert.ok(catalog.tools.some(tool => tool.name === "ask_agent"));
+    const args = { deliveryVersion: version, mutationId: "first-turn", message: "请整理上传的进展",
+      files: [{ name: "本周.md", data: Buffer.from("完成合同初稿").toString("base64") }] };
+    const call = await client.callTool({ name: "ask_agent", arguments: args });
+    assert.ok(!call.isError, toolText(call));
+    const { taskId, conversationId } = JSON.parse(toolText(call));
+    const result = await finished(taskId);
+    assert.equal(result.status, "completed"); assert.equal(result.result.reply, "这是周报。");
+    assert.deepEqual(materialNames, ["本周.md"]);
+    assert.deepEqual(result.artifacts.map((file: { name: string }) => file.name), ["summary.md"]);
+    const page = await client.callTool({ name: "read_artifact", arguments: { taskId, artifactIndex: 0, deliveryVersion: version } });
+    assert.equal(Buffer.from(JSON.parse(toolText(page)).data, "base64").toString(), "完成合同初稿");
+    assert.deepEqual((await agents.files("weekly")).files, []);
+    const retry = await submit(args); assert.equal(retry.status, 202); assert.equal((await retry.json()).taskId, taskId);
+    assert.equal(messages.length, 1);
+    await client.close(); await agents.close();
+    const restored = new PrototypeAgents(options);
+    try {
+      await restored.gateway.ready;
+      const next = await submit({ mutationId: "second-turn", conversationId, message: "再缩短一点" });
+      assert.equal(next.status, 202);
+      assert.equal((await finished((await next.json()).taskId)).status, "completed");
+      assert.match(messages.at(-1)!, /请整理上传的进展/); assert.match(messages.at(-1)!, /这是周报。/);
+      const replacement = await publishConversation(restored);
+      assert.equal((await fetch(`${grant.apiUrl}/actions`, { headers })).status, 401);
+      assert.equal((await replacement.task(taskId)).status, 404);
+      assert.equal((await replacement.submit({ mutationId: "new-grant-turn", conversationId, message: "继续" })).status, 404);
+    } finally { await restored.close(); }
+  } finally { await client.close(); }
+});
+
+test("外部任务运行中可幂等重试，阻止交错续聊；取消及撤销会停止实际模型调用", { timeout: 15000 }, async (t) => {
+  const records: FactoryRecords = [];
+  let started!: () => void, reachedModel = new Promise<void>(resolve => { started = resolve; });
+  const { agents } = await fixture(t, factory(records, async record => {
+    if (record.builder || record.reviewer) return;
+    started(); await new Promise<void>(resolve => { record.release = resolve; });
+  }));
+  await agents.build(input());
+  const api = await publishConversation(agents);
+  const args = { mutationId: "pending-turn", message: "等待回复" };
+  const first = await api.submit(args); assert.equal(first.status, 202);
+  const { taskId, conversationId } = await first.json(); await reachedModel;
+  const running = await (await api.task(taskId)).json();
+  assert.equal(running.status, "running"); assert.equal(running.progress.phase, "tool");
+  assert.doesNotMatch(JSON.stringify(running.progress), /private-/);
+  assert.equal((await (await api.submit(args)).json()).taskId, taskId);
+  assert.equal((await api.submit({ ...args, mutationId: "overlapping-turn", conversationId })).status, 409);
+  assert.equal((await api.submit({ ...args, message: "不同任务" })).status, 409);
+  const stopped = await fetch(`${api.grant.apiUrl}/tasks/${taskId}/cancel`, { method: "POST", headers: api.headers, body: JSON.stringify({ deliveryVersion: api.version }) });
+  assert.equal((await stopped.json()).status, "cancelled"); assert.ok(records.at(-1)!.aborted);
+  reachedModel = new Promise(resolve => { started = resolve; });
+  const next = await api.submit({ ...args, mutationId: "another-pending", conversationId });
+  assert.equal(next.status, 202);
+  const nextId = (await next.json()).taskId; await reachedModel;
+  await agents.gateway.revoke("weekly");
+  assert.ok(records.at(-1)!.aborted);
+  assert.equal((await agents.applications.store.get("weekly", nextId)).status, "interrupted");
+});
 
 test("已确认的大需求按相同总量完整交接构建，超量不能覆盖保存记录", async (t) => {
   const { agents, options } = await fixture(t, async () => assert.fail("此测试不调用模型"));

@@ -1,5 +1,6 @@
 import type { AgentStorage } from "../agents/agent-storage.mjs";
 import type { TaskArtifact } from "../contracts/application.mjs";
+import type { ApplicationTaskStore } from "./task-store.mjs";
 interface ArtifactInput { storage: Pick<AgentStorage, "path">; id: string; taskId: string }
 import { constants } from "node:fs";
 import { open, rm } from "node:fs/promises";
@@ -38,6 +39,23 @@ export async function saveTaskArtifact({ storage, id, taskId, path, data, signal
 export async function removeTaskArtifact({ storage, id, taskId, artifact }: Omit<ArtifactInput, "storage"> & { storage: Pick<AgentStorage, "removeFile">; artifact: TaskArtifact | null | undefined }) {
   if (!snapshotId(artifact?.snapshotId)) return;
   await storage.removeFile(id, snapshotPath(taskId, artifact.snapshotId));
+}
+
+export async function registerTaskArtifact(input: Parameters<typeof saveTaskArtifact>[0] & {
+  storage: Pick<AgentStorage, "path" | "removeFile">; store: Pick<ApplicationTaskStore, "appendArtifact">; check: () => unknown;
+}) {
+  const { storage, store, id, taskId, check } = input;
+  const artifact = await saveTaskArtifact(input);
+  let registered = false;
+  try {
+    await check();
+    const saved = await store.appendArtifact(id, taskId, artifact);
+    registered = saved.artifacts.some(item => item.snapshotId === artifact.snapshotId);
+    if (!registered) throw new InputError("任务已结束，产物未登记为本次结果");
+    return { name: artifact.name, size: artifact.size, sha256: artifact.sha256 };
+  } finally {
+    if (!registered) await removeTaskArtifact({ storage, id, taskId, artifact });
+  }
 }
 
 export async function readTaskArtifactSnapshot({ storage, id, taskId, artifact, offset = 0, limit = TASK_ARTIFACT_PAGE_BYTES, signal }: ArtifactInput & { artifact: TaskArtifact; offset?: number | undefined; limit?: number | undefined; signal?: AbortSignal | undefined }) {

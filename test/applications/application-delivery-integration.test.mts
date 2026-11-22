@@ -1,4 +1,4 @@
-import {callFixture,recordArray} from "../helpers/m7-test-boundaries.mjs";
+import {callFixture,fixtureTools,recordArray} from "../helpers/m7-test-boundaries.mjs";
 import {fixturePort} from "../helpers/http-model.mjs";
 import type {WebCapabilityPort} from "../../src/runtime/web-capabilities.mjs";
 import {readDevelopmentRunRecord} from "../../src/development/development-record.mjs";
@@ -6,7 +6,8 @@ import { objectFields } from "../../src/runtime/type-boundary.mjs";
 import { toolText } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
@@ -83,6 +84,43 @@ async function fixture(t: test.TestContext, { businessArchive = false, inputReje
 
 // Models and web providers are controlled substitutes. Pi sessions, the five-stage
 // controller, OS isolation, task/state persistence, HTTP routes and files are real.
+test("已交付应用可从自然语言网关调用动作，调用方取得该轮写入的 CSV 快照", { timeout: 30000 }, async (t) => {
+  const f = await fixture(t); if (!f) return;
+  const { conversationVersion, deliveryVersion } = await f.api(`${route}/services`);
+  assert.ok(conversationVersion); assert.notEqual(conversationVersion, deliveryVersion);
+  const grant = await f.api(`${route}/gateway`, { method: "POST", body: { conversationVersion, deliveryVersion, actionIds: ["analyze"] } });
+  assert.equal(grant.verification.status, "passed");
+  f.agents.sessionFactory = options => {
+    let reply = "";
+    return { async prompt() {
+      const run = fixtureTools(options.customTools).run_application_action!;
+      const output = JSON.parse(toolText(await run.execute("gateway-export-csv", { actionId: "exportCsv",
+        input: { items: [{ title: "本周进展", url: "https://example.com/", content: "已交付", truncated: false }] } })));
+      reply = output.status === "completed" ? output.result.message : "导出失败";
+      await writeFile(join(options.cwd, "link-results.csv"), "后来改写的工作副本");
+    }, getLastAssistantText: () => reply, async abort() {}, dispose() {} };
+  };
+  const headers = { authorization: `Bearer ${grant.token}`, "content-type": "application/json" };
+  const response = await fetch(`${grant.apiUrl}/turns`, { method: "POST", headers,
+    body: JSON.stringify({ message: "请导出本周 CSV", deliveryVersion, mutationId: "deliver-csv-round" }) });
+  assert.equal(response.status, 202);
+  const { taskId } = await response.json(), query = `?deliveryVersion=${encodeURIComponent(deliveryVersion)}`;
+  const endpoint = `${grant.apiUrl}/tasks/${taskId}`;
+  let result;
+  for (let i = 0; i < 200; i++) {
+    result = await (await fetch(endpoint + query, { headers })).json();
+    if (!["queued", "running"].includes(result.status)) break;
+    await delay(20);
+  }
+  assert.equal(result.status, "completed"); assert.equal(result.result.reply, "CSV 已保存到产物");
+  assert.deepEqual(result.artifacts.map((file: { name: string }) => file.name), ["link-results.csv"]);
+  const artifact = await (await fetch(endpoint + "/artifacts/0" + query, { headers })).json();
+  assert.match(Buffer.from(artifact.data, "base64").toString(), /本周进展.*已交付/s);
+  const list = await (await fetch(grant.apiUrl + "/tasks" + query, { headers })).json();
+  assert.deepEqual(list.tasks.map((task: { taskId: string }) => task.taskId), [taskId]);
+  assert.deepEqual((await f.api(`${route}/tasks`)).tasks, []);
+});
+
 test("input rejection evidence remains serializable through real SDK, packaging and activation without running the rejected action", { timeout: 30000 }, async (t) => {
   const f = await fixture(t, { inputRejection: true }); if (!f) return;
   const record = readDevelopmentRunRecord(await f.agents.development.store.get(id));

@@ -108,7 +108,7 @@ export class ApplicationTaskStore {
     });
   }
   view(task: ApplicationTask) { const { events, mutationId, requestHash, ...value } = task; return structuredClone({ ...value, taskId: task.id, ...(task.execution ? { executionOutcome: executionOutcome(task.execution) } : {}) }); }
-  async create(id: string, input: ApplicationTaskInput) {
+  async create(id: string, input: ApplicationTaskInput, beforeCreate?: (tasks: readonly ApplicationTask[]) => void) {
     await this.ready;
     return this.serial(id, async () => {
       const record = await this.record(id);
@@ -120,6 +120,8 @@ export class ApplicationTaskStore {
         if (taskRequestHash(existing) !== requestHash) throw applicationConflict("这个幂等标识已用于其他任务，请使用新的标识");
         return { task: this.view(existing), created: false };
       }
+      // Admission sees the same serialized record as the insert and never rejects an identical retry.
+      beforeCreate?.(record.tasks);
       const task: ApplicationTask = { ...(validateApplicationTaskEnvelope(input) as ApplicationTaskInput), id: randomUUID(), agentId: id, status: "queued", sequence: 0,
         requestHash, createdAt: now(), updatedAt: now(), progress: null, result: null, artifacts: [], events: [] };
       this.event(task, "queued"); record.tasks.push(task); await this.save(id, record);

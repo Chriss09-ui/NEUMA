@@ -1,6 +1,6 @@
 import type { AgentStoragePort } from "./storage-port.mjs";
 import { objectFields, isRecord, isInteger } from "./type-boundary.mjs";
-export type ActivityScope = { groupId: string; taskId: string } | { kind: "private"; sessionId: string } | { kind: "main"; conversationId: string };
+export type ActivityScope = { groupId: string; taskId: string } | { kind: "private"; sessionId: string } | { kind: "main" | "gateway"; conversationId: string };
 export interface ActivityRecord { id: string; agentId: string; sessionId: string; revision: number; scope: ActivityScope; status: string; createdAt: string; startedAt: string | null; updatedAt: string; endedAt: string | null; summary: string; turns: number }
 import { randomUUID } from "node:crypto";
 import { InputError } from "../requirements/core.mjs";
@@ -18,7 +18,7 @@ function scopeOf(value: unknown): ActivityScope {
   const keys = Object.keys(value);
   if (keys.length === 2 && identifier(value.groupId) && identifier(value.taskId)) return { groupId: value.groupId, taskId: value.taskId };
   if (keys.length === 2 && value.kind === "private" && identifier(value.sessionId)) return { kind: "private", sessionId: value.sessionId };
-  if (keys.length === 2 && value.kind === "main" && identifier(value.conversationId)) return { kind: "main", conversationId: value.conversationId };
+  if (keys.length === 2 && (value.kind === "main" || value.kind === "gateway") && identifier(value.conversationId)) return { kind: value.kind, conversationId: value.conversationId };
   throw new InputError("活动范围无效");
 }
 

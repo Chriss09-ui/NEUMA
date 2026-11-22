@@ -7,7 +7,8 @@ export interface GatewayTask {id:string;agentId:string;actionId:string;deliveryV
 import type { UnknownRecord } from "../contracts/json.mjs";
 import type { JsonSchemaType, CallToolResult } from "@modelcontextprotocol/server";
 import { objectFields, errorField, isRecord, isInteger, isArray } from "../runtime/type-boundary.mjs";
-interface GatewayBase { schemaVersion: 1; agentId: string; actionIds: string[]; updatedAt?: string }
+import { GatewayTurnError, GatewayTurns, ownsTurn } from "./gateway-turns.mjs";
+interface GatewayBase { schemaVersion: 1; agentId: string; actionIds: string[]; conversationVersion?: string; updatedAt?: string }
 export interface GatewayGrant extends GatewayBase { enabled: true; port: number; tokenHash: string; grantId: string; deliveryVersion: string }
 interface GatewayDisabled extends GatewayBase { enabled: false; port?: number | undefined; tokenHash?: string; grantId?: string; deliveryVersion?: string }
 export type GatewayRecord = GatewayGrant | GatewayDisabled;
@@ -37,7 +38,7 @@ const ARTIFACT_PAGE_BYTES = TASK_ARTIFACT_PAGE_BYTES;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const gatewayFailure = Symbol("gatewayFailure");
 const fail = (reason: string, message: string, statusCode = 400) => Object.assign(new Error(message), { reason, statusCode, [gatewayFailure]: true });
-function taggedFailure(error: unknown): error is ReturnType<typeof fail> { return Boolean(error && typeof error === "object" && gatewayFailure in error && error[gatewayFailure]); }
+function taggedFailure(error: unknown): error is ReturnType<typeof fail> | GatewayTurnError { return error instanceof GatewayTurnError || Boolean(error && typeof error === "object" && gatewayFailure in error && error[gatewayFailure]); }
 function publicFailure(error: unknown) {
   const input = publicInputContractFailure(error);
   if (input) return { statusCode: 400, payload: input };
@@ -46,7 +47,12 @@ function publicFailure(error: unknown) {
       payload: { error: "接口调用未完成，请检查操作与运行状态", reason: "gateway_failed" } };
 }
 const taskView = (task: UnknownRecord) => ({ taskId: task.id ?? task.taskId, deliveryVersion: task.deliveryVersion, actionId: task.actionId,
+  ...(objectFields(task.source).kind === "gateway_turn" ? { conversationId: objectFields(task.source).conversationId } : {}),
   status: task.status, progress: task.progress, result: task.result, error: task.error, artifacts: task.artifacts ?? [], createdAt: task.createdAt, updatedAt: task.updatedAt });
+function sharedTask(task: GatewayTask, grant: GatewayGrant) {
+  return ownsTurn(task, grant) || (task.agentId === grant.agentId && task.deliveryVersion === grant.deliveryVersion
+    && task.source?.scope === "private" && task.source.gatewayGrant === grant.grantId && grant.actionIds.includes(task.actionId));
+}
 function json(response: ServerResponse, status: number, value: unknown) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
   response.end(JSON.stringify(value));
@@ -65,7 +71,9 @@ function exact(value: unknown, fields: string[]): asserts value is UnknownRecord
 export class ServiceGateway {
   declare agents: GatewayAgents; declare storage: GatewayAgents["storage"]; servers: Map<string, Server>; errors: Map<string, { reason: unknown; message: unknown }>; queues: Map<string, Promise<unknown>>; transports: Set<NodeStreamableHTTPServerTransport>; grantRevisions: Map<string, number>; closing: boolean; permanent: boolean; suspended: boolean; ready: Promise<void>; closePromise?: Promise<void> | null;
 
-  constructor({ agents, storage = agents.storage }: { agents: GatewayAgents; storage?: GatewayAgents["storage"] }) {
+  private readonly turns: GatewayTurns | undefined;
+  constructor({ agents, storage = agents.storage, turns }: { agents: GatewayAgents; storage?: GatewayAgents["storage"]; turns?: GatewayTurns }) {
+    this.turns = turns;
     Object.assign(this, { agents, storage }); this.servers = new Map(); this.errors = new Map(); this.queues = new Map(); this.transports = new Set(); this.grantRevisions = new Map(); this.closing = false; this.permanent = false; this.suspended = false;
     this.ready = this.restore(); this.ready.catch(() => {});
   }
@@ -73,7 +81,9 @@ export class ServiceGateway {
     agentId(id); const input = await this.storage.readJson(id, FILE, { maxBytes: 128 * 1024 });
     const value = input ? objectFields(input) : null;
     if (!value) return { schemaVersion: 1, agentId: id, enabled: false, actionIds: [] };
-    if (value.schemaVersion !== 1 || value.agentId !== id || !isArray(value.actionIds) || value.actionIds.some((id) => typeof id !== "string") || typeof value.enabled !== "boolean" || value.enabled && (!isInteger(value.port) || value.port < 1 || value.port > 65535
+    if (value.schemaVersion !== 1 || value.agentId !== id || !isArray(value.actionIds) || value.actionIds.some((id) => typeof id !== "string")
+      || value.conversationVersion !== undefined && (typeof value.conversationVersion !== "string" || !value.conversationVersion)
+      || typeof value.enabled !== "boolean" || value.enabled && (!isInteger(value.port) || value.port < 1 || value.port > 65535
       || !/^[a-f0-9]{64}$/.test(String(value.tokenHash ?? "")) || typeof value.grantId !== "string" || typeof value.deliveryVersion !== "string")) throw fail("invalid_gateway_record", "接口配置无法读取，请保留文件后重试");
     return value as typeof value & GatewayRecord;
   }
@@ -105,28 +115,46 @@ export class ServiceGateway {
     const address = record.port ? `http://127.0.0.1:${record.port}` : null;
     return { enabled: record.enabled, status: this.suspended && record.enabled ? "suspended" : this.errors.has(record.agentId) ? "failed" : record.enabled ? "running" : "disabled",
       port: record.port ?? null, deliveryVersion: record.deliveryVersion ?? null, actionIds: record.actionIds,
+      ...(record.conversationVersion ? { conversationVersion: record.conversationVersion } : {}),
       apiUrl: address ? `${address}/v1/agents/${record.agentId}` : null, mcpUrl: address ? `${address}/mcp/${record.agentId}` : null,
       bridge: address ? { command: process.execPath, args: [fileURLToPath(new URL("./mcp-bridge.mjs", import.meta.url)), `${address}/mcp/${record.agentId}`], env: { NEUMA_MCP_TOKEN: "填入本机接口令牌" } } : null,
       ...(this.errors.get(record.agentId) ?? {}) };
   }
   async config(id: string) { await this.ready; return this.view(await this.record(id)); }
+  async conversationVersion(id: string) { return (await this.turns?.runtime(id))?.version; }
+  private async descriptor(id: string, conversationVersion?: string): Promise<GatewayDescriptor> {
+    if (!conversationVersion) return this.agents.applications.descriptor(id);
+    const runtime = await this.turns?.runtime(id);
+    if (!runtime || runtime.version !== conversationVersion) throw fail("delivery_changed", "对话绑定的智能体版本已变化，请刷新接口", 409);
+    if (["node-action", "managed-service"].includes(runtime.agent.execution?.kind ?? "")) {
+      const application = await this.agents.applications.descriptor(id);
+      if (application.agent !== runtime.agent) throw fail("delivery_changed", "智能体版本已变化，请刷新接口", 409);
+      return application;
+    }
+    return { agent: runtime.agent, deliveryVersion: runtime.version, manifest: { actions: [] } };
+  }
   async configure(id: string, input: unknown) {
     agentId(id); await this.ready; if (this.suspended) await this.resume();
     return this.serial(id, async () => {
-      exact(input, ["actionIds", "deliveryVersion"]);
-      const descriptor: GatewayDescriptor = await this.agents.applications.descriptor(id);
+      exact(input, ["actionIds", "deliveryVersion", "conversationVersion"]);
+      const conversationVersion = input.conversationVersion;
+      if (conversationVersion !== undefined && (typeof conversationVersion !== "string" || !conversationVersion))
+        throw fail("invalid_request", "请选择当前可用的智能体对话版本");
+      const descriptor = await this.descriptor(id, conversationVersion);
       if (input.deliveryVersion !== descriptor.deliveryVersion) throw fail("delivery_changed", "交付版本已变化，请刷新后选择需要发布的操作", 409);
-      if (!Array.isArray(input.actionIds) || !input.actionIds.length || input.actionIds.length > 80 || new Set(input.actionIds).size !== input.actionIds.length
+      if (!Array.isArray(input.actionIds) || !input.actionIds.length && !conversationVersion || input.actionIds.length > 80 || new Set(input.actionIds).size !== input.actionIds.length
         || input.actionIds.some((actionId) => !descriptor.manifest.actions.some((action) => action.id === actionId))) throw fail("invalid_gateway_actions", "请选择已交付并允许外部调用的操作");
       const previous = await this.record(id), token = randomBytes(32).toString("base64url"), grantId = randomUUID();
       const port = await this.listen(id, previous.port ?? 0);
-      const record: GatewayRecord = { schemaVersion: 1, agentId: id, enabled: true, port, deliveryVersion: descriptor.deliveryVersion, actionIds: [...input.actionIds], tokenHash: hash(token), grantId, updatedAt: new Date().toISOString() };
+      const record: GatewayRecord = { schemaVersion: 1, agentId: id, enabled: true, port, deliveryVersion: descriptor.deliveryVersion, actionIds: [...input.actionIds],
+        ...(conversationVersion ? { conversationVersion } : {}), tokenHash: hash(token), grantId, updatedAt: new Date().toISOString() };
       try { await this.storage.writeJson(id, FILE, record); }
       catch { if (!previous.enabled) await this.stop(id); throw fail("gateway_persistence_failed", "接口授权未能保存，请重试"); }
       this.grantRevisions.set(id, (this.grantRevisions.get(id) ?? 0) + 1);
       let invalidationFailed = false;
       if (previous.enabled) {
-        try { await this.agents.invalidateGatewayAcceptance?.({ agentId: id, deliveryVersion: previous.deliveryVersion, grantId: previous.grantId }); }
+        await this.turns?.interrupt(id);
+        try { if (previous.actionIds.length) await this.agents.invalidateGatewayAcceptance?.({ agentId: id, deliveryVersion: previous.deliveryVersion, grantId: previous.grantId }); }
         catch { invalidationFailed = true; }
       }
       const verification = invalidationFailed ? await this.verificationFailed(id, record) : await this.verify(id, record, token);
@@ -141,7 +169,8 @@ export class ServiceGateway {
       await this.storage.writeJson(id, FILE, next);
       this.grantRevisions.set(id, (this.grantRevisions.get(id) ?? 0) + 1);
       await this.stop(id); this.errors.delete(id);
-      await this.agents.invalidateGatewayAcceptance?.({ agentId: id, deliveryVersion: record.deliveryVersion, grantId: record.grantId });
+      await this.turns?.interrupt(id);
+      if (record.actionIds.length) await this.agents.invalidateGatewayAcceptance?.({ agentId: id, deliveryVersion: record.deliveryVersion, grantId: record.grantId });
       return this.view(next);
     });
   }
@@ -160,15 +189,16 @@ export class ServiceGateway {
     try {
       current = await this.record(id);
       if (!current.enabled || current.grantId !== grant.grantId) throw fail("gateway_unauthorized", "接口授权已改变或已撤销", 401);
-      descriptor = await this.agents.applications.descriptor(id);
+      descriptor = await this.descriptor(id, grant.conversationVersion);
     } finally {
       if (revision !== (this.grantRevisions.get(id) ?? 0)) throw fail("gateway_unauthorized", "接口授权已改变或已撤销", 401);
     }
     // Async record and snapshot reads cannot authorize a request across a local grant or active-delivery change.
     const active = this.agents.agents instanceof Map ? this.agents.agents.get(id) : null;
     if (current.deliveryVersion !== grant.deliveryVersion || descriptor.deliveryVersion !== grant.deliveryVersion
+      || grant.conversationVersion && !this.turns?.matchesVersion(id, grant.conversationVersion)
       || this.agents.agents instanceof Map && (!active || active !== descriptor.agent
-        || `${active.developmentRef?.id}:${active.execution?.codeHash}` !== descriptor.deliveryVersion
+        || grant.deliveryVersion !== grant.conversationVersion && `${active.developmentRef?.id}:${active.execution?.codeHash}` !== descriptor.deliveryVersion
         || this.agents.removing?.has(id) || this.agents.builds?.has(id)))
       throw fail("delivery_changed", "接口绑定的交付版本已变化，请刷新授权", 409);
     return descriptor;
@@ -186,16 +216,39 @@ export class ServiceGateway {
   async task(id: string, grant: GatewayGrant, taskId: unknown) {
     await this.currentGrant(id, grant); const checkedTaskId = agentId(taskId);
     const task = await this.agents.applications.store.get(id, checkedTaskId);
-    if (task.agentId !== id || task.source?.gatewayGrant !== grant.grantId || task.source?.scope !== "private"
-      || task.deliveryVersion !== grant.deliveryVersion || !grant.actionIds.includes(task.actionId)) throw fail("task_not_shared", "当前接口无权读取这个任务", 404);
+    if (!sharedTask(task, grant)) throw fail("task_not_shared", "当前接口无权读取这个任务", 404);
     await this.currentGrant(id, grant);
-    return task;
+    return this.withProgress(task);
+  }
+  private withProgress(task: GatewayTask): GatewayTask {
+    const progress = task.status === "running" ? this.turns?.progress(task.id) : undefined;
+    return progress ? { ...task, progress } : task;
   }
   async cancel(id: string, grant: GatewayGrant, input: unknown) {
     exact(input, ["taskId", "deliveryVersion"]);
     if (input.deliveryVersion !== grant.deliveryVersion) throw fail("delivery_changed", "请求的交付版本已变化", 409);
-    await this.task(id, grant, input.taskId); const result = await this.agents.applications.cancel(id, agentId(input.taskId));
-    await this.currentGrant(id, grant); return taskView(result.task);
+    const task = await this.task(id, grant, input.taskId);
+    const cancelled = ownsTurn(task, grant) && this.turns ? await this.turns.cancel(id, task.id) : (await this.agents.applications.cancel(id, task.id)).task;
+    await this.currentGrant(id, grant); return taskView(cancelled);
+  }
+  private async submitTurn(id: string, grant: GatewayGrant, input: unknown) {
+    const turns = this.turns;
+    if (!grant.conversationVersion || !turns) throw fail("conversation_not_shared", "此接口尚未授权智能体对话", 403);
+    exact(input, ["message", "files", "conversationId", "mutationId", "deliveryVersion"]);
+    if (input.deliveryVersion !== grant.deliveryVersion) throw fail("delivery_changed", "请求需要当前交付版本", 409);
+    const check = async () => {
+      if (this.closing) throw fail("gateway_closed", "接口服务正在关闭");
+      await this.currentGrant(id, grant);
+    };
+    return this.serial(id, async () => {
+      const result = await turns.submit(grant, input, check).catch((error: unknown) => {
+        if (error instanceof InputError && errorField(error, "reason") === "application_conflict")
+          throw fail("mutation_conflict", "这个请求编号已用于其他输入，请使用新编号", 409);
+        throw error;
+      });
+      await check();
+      return result;
+    });
   }
   async readArtifact(id: string, grant: GatewayGrant, input: unknown) {
     exact(input, ["taskId", "artifactIndex", "deliveryVersion", "offset", "limit"]);
@@ -231,17 +284,17 @@ export class ServiceGateway {
     try {
       const response = await fetch(`${view.apiUrl}/actions`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) });
       const catalog = objectFields(await response.json()), actions = isArray(catalog.actions) ? catalog.actions.map((action) => objectFields(action).id).sort() : undefined;
-      if (response.status !== 200 || catalog.deliveryVersion !== grant.deliveryVersion || JSON.stringify(actions) !== JSON.stringify(expectedActions))
+      if (response.status !== 200 || catalog.deliveryVersion !== grant.deliveryVersion || catalog.conversationVersion !== grant.conversationVersion || JSON.stringify(actions) !== JSON.stringify(expectedActions))
         throw fail("gateway_verification_failed", "HTTP 操作发现未通过核验");
       client = new Client({ name: "NEUMA-local-gateway-check", version: "1" });
       await client.connect(new StreamableHTTPClientTransport(new URL(view.mcpUrl!), { requestInit: { headers: { authorization: `Bearer ${token}` } } }), { signal: AbortSignal.timeout(5000) });
       const tools = (await client.listTools({}, { signal: AbortSignal.timeout(5000) })).tools.map((tool) => tool.name).sort();
-      const expectedTools = [...expectedActions.map((action) => `run_${action}`), "get_task", "cancel_task", "read_artifact"].sort();
+      const expectedTools = [...expectedActions.map((action) => `run_${action}`), ...(grant.conversationVersion ? ["ask_agent"] : []), "get_task", "cancel_task", "read_artifact"].sort();
       if (JSON.stringify(tools) !== JSON.stringify(expectedTools)) throw fail("gateway_verification_failed", "MCP 工具发现未通过核验");
       await this.currentGrant(id, grant);
       const evidence = { grantId: grant.grantId, actionIds: [...grant.actionIds], api: { actions, status: 200 }, mcp: { tools },
         checkedAt, mode: "actual", status: "passed" };
-      await this.agents.verifyGatewayAcceptance?.({ agentId: id, deliveryVersion: grant.deliveryVersion, evidence });
+      if (grant.actionIds.length) await this.agents.verifyGatewayAcceptance?.({ agentId: id, deliveryVersion: grant.deliveryVersion, evidence });
       return { status: "passed", checkedAt, mode: "actual", scope: "authorized_http_mcp_catalogs" };
     } catch {
       return this.verificationFailed(id, grant, checkedAt);
@@ -250,7 +303,7 @@ export class ServiceGateway {
   async verificationFailed(id:string,grant:GatewayGrant,checkedAt=new Date().toISOString()):Promise<GatewayVerification> {
     const evidence = { grantId: grant.grantId, actionIds: [...grant.actionIds], checkedAt,
       mode: "actual", status: "failed", reason: "gateway_verification_failed" };
-    try { await this.agents.verifyGatewayAcceptance?.({ agentId: id, deliveryVersion: grant.deliveryVersion, evidence }); }
+    try { if (grant.actionIds.length) await this.agents.verifyGatewayAcceptance?.({ agentId: id, deliveryVersion: grant.deliveryVersion, evidence }); }
     catch { return { status: "failed", checkedAt, mode: "actual", reason: "gateway_verification_failed", evidenceSaved: false }; }
     return { status: "failed", checkedAt, mode: "actual", reason: "gateway_verification_failed" };
   }
@@ -259,14 +312,16 @@ export class ServiceGateway {
     const base = `/v1/agents/${id}`;
     if (url.pathname === `/mcp/${id}`) return this.mcp(id, record, descriptor, request, response);
     if (url.pathname === `${base}/actions` && request.method === "GET") {
-      return json(response, 200, { deliveryVersion: record.deliveryVersion, actions: descriptor.manifest.actions.filter((action) => record.actionIds.includes(action.id)).map(({ id, title, inputSchema, outputSchema }) => ({ id, title, inputSchema, outputSchema })) });
+      return json(response, 200, { deliveryVersion: record.deliveryVersion, ...(record.conversationVersion ? { conversationVersion: record.conversationVersion } : {}),
+        actions: descriptor.manifest.actions.filter((action) => record.actionIds.includes(action.id)).map(({ id, title, inputSchema, outputSchema }) => ({ id, title, inputSchema, outputSchema })) });
     }
+    if (url.pathname === `${base}/turns` && request.method === "POST") return json(response, 202, await this.submitTurn(id, record, await body(request)));
     if (url.pathname === `${base}/tasks` && request.method === "POST") return json(response, 202, await this.submit(id, record, await body(request)));
     if (url.pathname === `${base}/tasks` && request.method === "GET") {
       if (url.searchParams.get("deliveryVersion") !== record.deliveryVersion) throw fail("delivery_changed", "读取任务需要当前交付版本", 409);
-      const tasks = (await this.agents.applications.store.list(id, { scope: "private" })).filter((task) => task.source.gatewayGrant === record.grantId && record.actionIds.includes(task.actionId) && task.deliveryVersion === record.deliveryVersion);
+      const tasks = (await this.agents.applications.store.list(id, record.conversationVersion ? undefined : { scope: "private" })).filter(task => sharedTask(task, record));
       await this.currentGrant(id, record);
-      return json(response, 200, { deliveryVersion: record.deliveryVersion, tasks: tasks.map(taskView) });
+      return json(response, 200, { deliveryVersion: record.deliveryVersion, tasks: tasks.map(task => taskView(this.withProgress(task))) });
     }
     const artifact = url.pathname.match(new RegExp(`^${base}/tasks/([\\w-]{1,80})/artifacts/(0|[1-9]\\d*)$`));
     if (artifact && request.method === "GET") {
@@ -303,6 +358,17 @@ export class ServiceGateway {
       inputSchema: fromJsonSchema<UnknownRecord>({ type: "object", properties: { input: action.inputSchema as JsonSchemaType, mutationId: { type: "string", pattern: "^[A-Za-z0-9_-]{8,100}$" }, deliveryVersion: version }, required: ["input", "mutationId", "deliveryVersion"], additionalProperties: false }),
       outputSchema,
     }, guarded(async (input) => result(await this.submit(id, grant, { ...input, actionId: action.id }))));
+    if (grant.conversationVersion) {
+      const agent = objectFields(descriptor.agent), profile = objectFields(agent.profile);
+      const name = String(profile.name || agent.name || id);
+      server.registerTool("ask_agent", { title: `委派给${name}`, description: `让${name}处理自然语言任务。${profile.description || ""} 返回 taskId 和 conversationId。用 get_task 读取回复和产物；追问时传回 conversationId。`,
+        inputSchema: fromJsonSchema<UnknownRecord>({ type: "object", properties: {
+          message: { type: "string", minLength: 1, maxLength: 12000 }, conversationId: { type: "string", pattern: "^[a-f0-9]{32}$" },
+          files: { type: "array", maxItems: 10, items: { type: "object", properties: { name: { type: "string" }, data: { type: "string", description: "完整的 base64 文件内容" } }, required: ["name", "data"], additionalProperties: false } },
+          mutationId: { type: "string", pattern: "^[A-Za-z0-9_-]{8,100}$", description: "同一轮重试沿用原值，新任务或追问使用新值" }, deliveryVersion: version,
+        }, required: ["message", "mutationId", "deliveryVersion"], additionalProperties: false }), outputSchema,
+      }, guarded(async input => result(await this.submitTurn(id, grant, input))));
+    }
     server.registerTool("get_task", { description: "读取本次授权创建的任务状态和结果。", inputSchema: taskInput, outputSchema }, guarded(async ({ taskId, deliveryVersion }) => {
       if (deliveryVersion !== grant.deliveryVersion) throw fail("delivery_changed", "任务版本已变化");
       return result(taskView(await this.task(id, grant, taskId)));
@@ -334,8 +400,11 @@ export class ServiceGateway {
     this.closing = true; this.suspended = true;
     this.closePromise = (async () => {
       await this.ready.catch(() => {}); await Promise.allSettled([...this.queues.values()]);
-      await Promise.allSettled([...this.transports].map((transport) => transport.close()));
-      await Promise.all([...this.servers.keys()].map((id) => this.stop(id)));
+      try { await this.turns?.interrupt(); }
+      finally {
+        await Promise.allSettled([...this.transports].map((transport) => transport.close()));
+        await Promise.all([...this.servers.keys()].map((id) => this.stop(id)));
+      }
     })().finally(() => { this.closePromise = null; });
     return this.closePromise;
   }

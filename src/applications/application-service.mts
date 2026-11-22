@@ -26,7 +26,8 @@ export interface ApplicationAgents extends Pick<PrototypeAgents,"ready"|"storage
   services:Pick<PrototypeAgents["services"],"run">;
 }
 export type ApplicationResourcesPort=Pick<ApplicationResources,"open"|"close"|"closeAll">&{assertInstance(agentId:string,instanceId:string,version:string):unknown;closeAgent(id:string):unknown};
-interface SubmitOptions { source?: TaskSource; scope?: string; signal?: AbortSignal | undefined; heldLease?: boolean;
+type OnFileWritten = (file: string, bytes: Buffer) => Promise<unknown>;
+interface SubmitOptions { source?: TaskSource; scope?: string; signal?: AbortSignal | undefined; heldLease?: boolean; onFileWritten?: OnFileWritten | undefined;
   workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; allowNetwork?: boolean; validatedApplicationContext?: unknown }
 interface TaskSubmissionResult { taskId: string; task: TaskView }
 interface Submission { epoch: number; task: TaskView | null; done: Promise<TaskSubmissionResult> | null }
@@ -34,7 +35,7 @@ interface StateWrite { agentId: string; epoch: number; done: Promise<unknown> | 
 interface RunningTask {
   controller: AbortController; task: TaskView; descriptor: ApplicationDescriptor; action: ApplicationAction;
   connectionSnapshot: Awaited<ReturnType<PrototypeAgents["connections"]["snapshot"]>>;
-  workspaceRoot: string | undefined; materialTools: MaterialTool[] | undefined; heldLease: boolean;
+  workspaceRoot: string | undefined; materialTools: MaterialTool[] | undefined; heldLease: boolean; onFileWritten?: OnFileWritten | undefined;
   done?: Promise<void> | undefined; signal?: AbortSignal | undefined; terminalStatus?: string;
   onCapability?: NonNullable<ActionRunOptions["onCapability"]>; onProgress?: (progress: unknown) => Promise<void>;
   execution?: ExecutionDispatch;
@@ -157,7 +158,7 @@ export class ApplicationService {
     return submission.done;
   }
   async submitTask(id: string, body: Record<string, unknown>, { source = { kind: "application", scope: "private" }, signal, heldLease = false, workspaceRoot, materialTools, allowNetwork = true,
-    validatedApplicationContext }: SubmitOptions = {}, submission: Submission): Promise<TaskSubmissionResult> {
+    validatedApplicationContext, onFileWritten }: SubmitOptions = {}, submission: Submission): Promise<TaskSubmissionResult> {
     const descriptor = await this.descriptor(id);
     this.assertOpen(submission.epoch);
     if (body.deliveryVersion !== undefined && body.deliveryVersion !== descriptor.deliveryVersion) throw new InputError("应用交付版本已变化，请重新打开页面");
@@ -186,7 +187,7 @@ export class ApplicationService {
     this.assertOpen(submission.epoch);
     if (created) {
       const controller = new AbortController();
-      const item: RunningTask = { controller, task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease };
+      const item: RunningTask = { controller, task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease, onFileWritten };
       const abort = () => controller.abort();
       if (heldLease) { signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort(); }
       this.running.set(task.id, item);
@@ -306,7 +307,7 @@ export class ApplicationService {
     const settled = () => this.submitting.delete(submission); submission.done.then(settled, settled);
     return submission.done;
   }
-  async resumeTask(id: string, taskId: string, body: Record<string, unknown>, { scope = "private", workspaceRoot, materialTools, heldLease = false, signal, allowNetwork = true }: SubmitOptions = {}, submission: Submission): Promise<TaskSubmissionResult> {
+  async resumeTask(id: string, taskId: string, body: Record<string, unknown>, { scope = "private", workspaceRoot, materialTools, heldLease = false, signal, allowNetwork = true, onFileWritten }: SubmitOptions = {}, submission: Submission): Promise<TaskSubmissionResult> {
     const task = await this.store.get(id, taskId);
     if (task.source.scope !== scope) throw new InputError("任务范围不匹配");
     const descriptor = await this.descriptor(id);
@@ -331,7 +332,7 @@ export class ApplicationService {
       allowNetwork: task.allowNetwork !== false && allowNetwork });
     submission.task = resumed.task; this.assertOpen(submission.epoch);
     if (resumed.created) {
-      const item: RunningTask = { task: resumed.task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease,
+      const item: RunningTask = { task: resumed.task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease, onFileWritten,
         controller: new AbortController(), resume: { input: body.input, resolution: body.resolution } };
       const abort = () => item.controller.abort();
       if (heldLease) { signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort(); }
@@ -395,7 +396,7 @@ export class ApplicationService {
     })().finally(() => { this.closing = null; });
     return this.closing;
   }
-  async tools(agent: { id: string }, { scope = "private", workspaceRoot, materialTools, allowNetwork = () => true, getApplicationContext = () => null }: { scope?: string; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; allowNetwork?: () => boolean; getApplicationContext?: () => ApplicationContext | null } = {}): Promise<NeumaTool[]> {
+  async tools(agent: { id: string }, { scope = "private", workspaceRoot, materialTools, allowNetwork = () => true, getApplicationContext = () => null, onFileWritten }: { scope?: string; workspaceRoot?: string | undefined; materialTools?: MaterialTool[] | undefined; allowNetwork?: () => boolean; getApplicationContext?: () => ApplicationContext | null; onFileWritten?: OnFileWritten } = {}): Promise<NeumaTool[]> {
     const { manifest, deliveryVersion } = await this.descriptor(agent.id);
     if (!manifest.actions.length) return [];
     return [{ name: "run_application_action", label: "执行应用操作", description: `执行已交付应用动作，与页面共用持久任务及状态。以真实任务结果回答。仅按以下动作输入契约传参：${JSON.stringify(applicationActionCatalog(manifest))}`,
@@ -406,7 +407,7 @@ export class ApplicationService {
       executionMode: "sequential" as const, execute: async (callId: string, params: unknown, signal?: AbortSignal) => {
         const submitted = await this.submit(agent.id, { ...objectFields(params), deliveryVersion,
           mutationId: /^[\w-]{8,100}$/.test(callId) ? callId : randomUUID() },
-          { source: { kind: scope === "private" ? "conversation" : "group", scope }, heldLease: true, workspaceRoot, materialTools, signal,
+          { source: { kind: scope.startsWith("gateway:") ? "gateway_action" : scope === "private" ? "conversation" : "group", scope }, heldLease: true, workspaceRoot, materialTools, signal, onFileWritten,
             allowNetwork: allowNetwork(), validatedApplicationContext: getApplicationContext() });
         const task = await this.wait(agent.id, submitted.taskId);
         return { content: [{ type: "text" as const, text: JSON.stringify({ taskId: task.id, status: task.status, result: task.result, error: task.error,
@@ -417,7 +418,7 @@ export class ApplicationService {
         input: {}, resolution: { type: "object", additionalProperties: true } }, required: ["taskId", "expectedVersion"], additionalProperties: false },
       executionMode: "sequential" as const, execute: async (callId: string, params: unknown, signal?: AbortSignal) => {
         const result = await this.resume(agent.id, objectFields(params).taskId as string, { ...objectFields(params), mutationId: /^[\w-]{8,100}$/.test(callId) ? callId : randomUUID() },
-          { scope, workspaceRoot, materialTools, heldLease: true, signal, allowNetwork: allowNetwork() });
+          { scope, workspaceRoot, materialTools, heldLease: true, signal, allowNetwork: allowNetwork(), onFileWritten });
         const task = await this.wait(agent.id, result.taskId);
         return { content: [{ type: "text" as const, text: JSON.stringify({ taskId: task.id, status: task.status, result: task.result,
           waiting: task.waiting, version: task.sequence, error: task.error }) }], details: {} };

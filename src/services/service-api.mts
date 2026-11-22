@@ -28,7 +28,8 @@ export async function serviceSummary(agents: ServiceAgents, id: string) {
   if (!isArray(entries)) throw new InputError("服务交付历史格式无效");
   const history = entries.map((value) => { const { deliveryVersion: version, language, host } = objectFields(value);
     return { deliveryVersion: version, active: version === deliveryVersion, language, host }; });
-  return { environment: managed.environments, deliveryVersion, actions: descriptor?.manifest.actions ?? [],
+  const conversationVersion = await agents.gateway?.conversationVersion?.(id);
+  return { environment: managed.environments, deliveryVersion, ...(conversationVersion ? { conversationVersion } : {}), actions: descriptor?.manifest.actions ?? [],
     service: descriptor?.manifest.runtime === "managed-service" ? { ...descriptor.manifest.service,
       operations: descriptor.manifest.actions, status: managed.services.some((worker) => worker.deliveryVersion === deliveryVersion) ? "ready" : "stopped" } : null,
     workers: managed.services.filter((worker) => worker.deliveryVersion === deliveryVersion), history,
