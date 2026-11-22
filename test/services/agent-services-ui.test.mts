@@ -89,6 +89,20 @@ test("接口默认关闭，仅发送选择的动作；一次性令牌离开后�
   ui.view.hide(); assert.equal(token!.value, ""); await ui.view.show("agent"); assert.equal(token!.value, ""); ui.view.hide();
 });
 
+test("纯对话智能体可单独授权，刷新保留用户选择", async () => {
+  const calls: unknown[][] = [];
+  const ui = setup({ configureGateway: async (...args) => { calls.push(args); return {}; } });
+  ui.snapshot({ conversationVersion: "runtime-v1", actions: [], gateway: { enabled: false } });
+  await ui.view.show("weekly");
+  const choice = all(ui.container).find(item => item.type === "checkbox")!;
+  assert.equal(choice.checked, false);
+  choice.checked = true; choice.dispatch("change"); await ui.view.reload();
+  assert.equal(choice.checked, true);
+  await control(ui.container, "开启或更新接口").click();
+  assert.deepEqual(calls, [["weekly", [], "runtime-v1", "runtime-v1"]]);
+  ui.view.hide();
+});
+
 test("切换智能体后迟到状态不能替换当前面板，迟到令牌不再显示", async () => {
   let release: (value: ServicesResult | PromiseLike<ServicesResult>) => void, tokenRelease: (value: { token?: string | undefined; } | PromiseLike<{ token?: string | undefined; }>) => void;
   const ui = setup({ services: async (id: string) => id === "old" ? new Promise((resolve) => { release = resolve; }) : data(),

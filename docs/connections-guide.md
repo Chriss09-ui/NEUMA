@@ -1,6 +1,6 @@
 # NEUMA 连接配置与验证
 
-本文为当前连接与本机接口说明，核对日期：2026-10-25；源码基线：`e4f1974`。适用于 Apple 芯片 Mac；本次核对未使用真实业务账户，具体服务是否可用仍以该服务的授权和实际调用结果为准。
+本文适用于 Apple 芯片 Mac。业务连接部分的核对基线为 2026-10-25 的 `e4f1974`。本机对话委派部分对应当前工作区源码。具体业务服务的可用性以该服务的授权和实际调用结果为准。
 
 连接是智能体访问外部服务的入口。数据库、知识库和业务系统均通过已设计的 HTTP API 或 MCP 连接使用；不会自动安装数据库驱动，也不会因发现某个工具就授权执行它。
 
@@ -42,14 +42,44 @@ JSON 结果超过 128 KiB 时保存为私有结果引用，可按分页读取；
 - HTTP、MCP、OAuth、凭据仓库与设计契约位于 `src/connections/`。
 - [连接协议测试](../test/services/connections-protocols.test.mts)通过显式的 `credentialKeySource` 提供固定测试密钥，不访问真实钥匙串；OAuth 与 MCP 使用本机模拟服务。它们覆盖只读 POST、授权、凭据、发现与配置版本等协议行为，不证明正式业务账户的权限或数据检索质量。
 
-## 把已交付动作提供给本机其他应用
+## 从 Codex 调用智能体
 
-“运行与接口”中可以选择允许外部调用的动作，并显式启用接口。每个智能体使用独立回环端口，默认不开启；接口令牌只显示一次，磁盘仅保存摘要。重新发布会更换授权，旧令牌立即失效。
+在已就绪智能体的“运行与接口”中，勾选“允许与智能体对话”，点击“开启或更新接口”。调用方可以给这个智能体派任务，它会使用自己的工作指令、记忆、模型和可用业务工具。若只需某个已交付动作，可以单独勾选该动作。每个智能体使用独立本机端口，接口默认关闭。令牌只在发布时显示一次，NEUMA 只保存其摘要。
 
-REST 入口提供动作列表、任务提交、任务列表、任务状态、取消及已登记产物的分页读取。提交和读取都绑定交付版本；提交必须使用稳定的 `mutationId`，相同请求编号不会重复执行。接口只能查看这次授权创建的任务，不能读取普通聊天或其他授权的任务。
+在这台 Mac 的 zsh 终端执行下面的命令，在相应提示处粘贴设置页的 **MCP 地址** 和 **访问令牌**。令牌输入时不回显。为多个智能体接入时，分别给每个服务器和令牌变量取名。
 
-MCP 与 REST 使用同一动作和任务控制器。MCP 中每个公开动作使用 `run_<动作编号>` 工具，并提供 `get_task`、`cancel_task` 和 `read_artifact`。长任务先返回任务编号，再读取进度和结果；产物只读取该授权任务登记的不可变快照，按返回的 `nextOffset` 继续读取 base64 字节并核对完整 `sha256` 与 `size`，不接受任意文件路径。接口与读取边界见 [service-gateway.mts](../src/services/service-gateway.mts) 和 [网关测试](../test/services/service-gateway.test.mts)。
+```zsh
+read -r 'NEUMA_MCP_URL?MCP 地址：'
+read -rs 'NEUMA_AGENT_TOKEN?接口令牌：'
+export NEUMA_AGENT_TOKEN
+codex mcp add neuma_agent --url "$NEUMA_MCP_URL" --bearer-token-env-var NEUMA_AGENT_TOKEN
+codex
+```
 
-支持 HTTP MCP 的客户端直接使用设置页地址。只接受 stdio 的客户端可使用设置页返回的 NEUMA 本地桥接配置，将接口令牌填入客户端私有环境变量 `NEUMA_MCP_TOKEN`；令牌不放入启动参数。桥接只连接 NEUMA 的本机回环地址，使用官方 MCP SDK，不执行第三方服务命令。
+在 Codex 中可以说“请用 neuma_agent 整理这些记录，等它完成后把周报给我”。Codex 调用 `ask_agent` 拿到 `taskId` 和 `conversationId`，用 `get_task` 查询到终态，成功回复在 `result.reply` 中。追问时传回同一个 `conversationId` 并使用新的 `mutationId`。新终端需要重新提供令牌。使用桌面端时，在 MCP 服务器设置中选 Streamable HTTP，使用同一地址，并确保运行 Codex 的进程能读取令牌环境变量。[OpenAI MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp)
 
-重启时恢复原端口。端口被其他程序占用时明确显示失败，不静默换地址。服务随 NEUMA 后端关闭，关闭网页不会关闭接口；升级交付版本后需要重新选择并发布动作，旧客户端不能静默执行新版动作。
+如果本机 API 可访问，但 Codex 在初始化 MCP 时提示连接失败，请检查启动 Codex 的进程所用的代理。将 `127.0.0.1` 和 `localhost` 加入该代理的绕过列表。通过终端环境变量配置代理时，在现有的 `NO_PROXY` 和 `no_proxy` 列表中追加这两个地址。若已发现工具而调用时提示需要批准，请在 Codex 的交互会话里确认本次委派。
+
+2026-11-22 使用本机 Codex CLI 0.171.0-alpha.13 实测了 Streamable HTTP 接入。CLI 发现 `ask_agent`，向临时看板助手提交任务，再通过 `get_task` 取得全年数据的回复。两端模型使用本机测试替身，看板动作、MCP 通信、任务执行和结果读取使用实际实现。
+
+### 从程序使用 REST
+
+从界面复制 **API 地址** 作为基础地址。所有请求都带 `Authorization: Bearer <接口令牌>`，提交使用 `Content-Type: application/json`。先 `GET /actions` 获取当前 `deliveryVersion` 和动作列表，响应含 `conversationVersion` 时可发起对话。向基础地址下的 `/turns` 发送 POST 请求，例如：
+
+```json
+{
+  "message": "把这些记录整理成周报：完成客户访谈，周五交付初稿。",
+  "mutationId": "weekly-report-round-01",
+  "deliveryVersion": "<从 GET /actions 取得的完整值>"
+}
+```
+
+接受后返回 HTTP 202。以 `GET /tasks/<taskId>?deliveryVersion=<URL 编码后的版本>` 查询进度，以 `POST /tasks/<taskId>/cancel` 和含 `deliveryVersion` 的 JSON 停止任务。重试同一份请求时沿用原编号，换输入或开始下一轮使用新编号。同一会话的上一轮仍在运行时提交新轮次会收到 409。
+
+REST 和 MCP 均可通过可选字段 `files: [{"name":"材料.md","data":"<base64>"}]` 附上小文件，每轮最多十个。任务文字为 1 至 12000 字，含 base64 和协议元数据的完整请求最多 256 KiB。文件名、格式按 NEUMA 材料规则校验。对话材料保存在该授权的会话目录，追问可以继续使用。发起新会话时省略 `conversationId`。
+
+已授权的应用动作仍可通过 `POST /tasks` 或 MCP 工具 `run_<动作编号>` 提交。两类任务都支持 `get_task`、`cancel_task` 和 `read_artifact`。按任务返回的产物索引读取不可变快照，使用 `nextOffset` 续读并核对完整的 `sha256` 与 `size`。API 也支持 `GET /tasks/<taskId>/artifacts/<索引>?deliveryVersion=<URL 编码后的版本>`。[网关实现](../src/services/service-gateway.mts) · [对话任务](../src/services/gateway-turns.mts)
+
+支持 HTTP MCP 的客户端直接使用设置页的 MCP 地址。只接受 stdio 的客户端可使用工作台管理接口 `GET /api/agents/<智能体编号>/gateway` 返回的 `bridge.command` 和 `bridge.args` 启动 NEUMA 本地桥接，并通过子进程环境变量 `NEUMA_MCP_TOKEN` 提供令牌。桥接使用官方 MCP SDK 连接该智能体的本机回环地址。
+
+接口随 NEUMA 后端运行，关闭网页后任务可以继续。后端重启时恢复原端口，已完成的任务和会话可以继续查询和追问，未完成的轮次记为中断。原端口被占用时界面会显示失败。重新发布会更换令牌并中断旧授权下运行中的对话，新授权只能查询自身任务。更新智能体版本后，请在设置中重新发布所需权限。

@@ -49,7 +49,7 @@ export function createApplicationApi(request: BrowserRequest = fetch): Applicati
     serviceLogs: (id, deliveryVersion) => json(id, `/services/logs?deliveryVersion=${part(deliveryVersion!)}`),
     rollbackService: (id, deliveryVersion) => json(id, "/services/rollback", { deliveryVersion }),
     gateway: (id) => json(id, "/gateway"),
-    configureGateway: (id, actionIds, deliveryVersion) => json(id, "/gateway", { actionIds, deliveryVersion }),
+    configureGateway: (id, actionIds, deliveryVersion, conversationVersion) => json(id, "/gateway", { actionIds, deliveryVersion, conversationVersion }),
     revokeGateway: (id) => json(id, "/gateway", {}, "DELETE"),
     materials: (id) => json(id, "/attachments"),
     connections: (id) => json(id, "/connections"),

@@ -2,7 +2,7 @@ import type { FormElement, FormDocument } from "./form-dom.js";
 import type { ApplicationApi, ServicesResult, WorkflowTask } from "./ui-api-types.js";
 import type { ValueSchema } from "./ui-types.js";
 interface ServiceTaskRow<E> { form: E; note: E; fields: E; submit: E; task?: WorkflowTask | undefined; choice?: E | undefined; read?: (() => unknown) | undefined; schemaKey?: string | undefined }
-interface ServiceItem<E> { id: string; root: E; operations: Map<string, E>; tasks: Map<string, ServiceTaskRow<E>>; busy: boolean; loading: boolean; generation: number; selectionDirty: boolean; feedback?: E; environments?: Map<string, { status: E; prepare: E }>; data?: ServicesResult | undefined; serviceStatus?: E; runButtons?: E[]; history?: E; rollback?: E; log?: E; gatewayStatus?: E; actionList?: E; gatewaySave?: E; gatewayRevoke?: E; addresses?: E; tokenBox?: E; token?: E; taskSection?: E; historyKey?: string | undefined }
+interface ServiceItem<E> { id: string; root: E; operations: Map<string, E>; tasks: Map<string, ServiceTaskRow<E>>; busy: boolean; loading: boolean; generation: number; selectionDirty: boolean; feedback?: E; environments?: Map<string, { status: E; prepare: E }>; data?: ServicesResult | undefined; serviceStatus?: E; runButtons?: E[]; history?: E; rollback?: E; log?: E; gatewayStatus?: E; actionList?: E; conversation?: E; gatewaySave?: E; gatewayRevoke?: E; addresses?: E; tokenBox?: E; token?: E; taskSection?: E; historyKey?: string | undefined }
 type Interval = number | { unref?: (() => unknown) | undefined };
 type Schedule = (callback: () => void, delay: number) => Interval;
 type Unschedule = (timer: Interval | undefined) => unknown;
@@ -89,8 +89,12 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
     item.gatewayStatus! = node("p", "service-status muted-note"); item.actionList! = node("fieldset", "service-action-list"); item.actionList!.append(node("legend", "sr-only", "允许调用的功能"));
     item.gatewaySave! = button("开启或更新接口", () => operate(item, async () => {
       const actionIds = [...item.operations].filter(([, field]) => (field as E).checked).map(([actionId]) => actionId);
-      if (!actionIds.length) throw new Error("请先选择至少一项允许调用的功能。");
-      const result = await api.configureGateway(id, actionIds, item.data!.deliveryVersion); item.token!.value = current === id ? result.token || "" : ""; item.tokenBox!.hidden = !item.token!.value;
+      const conversationVersion = item.conversation?.checked ? item.data?.conversationVersion : undefined;
+      if (!actionIds.length && !conversationVersion) throw new Error("请先选择至少一项允许调用的功能。");
+      const result = conversationVersion
+        ? await api.configureGateway(id, actionIds, item.data!.deliveryVersion || conversationVersion, conversationVersion)
+        : await api.configureGateway(id, actionIds, item.data!.deliveryVersion);
+      item.token!.value = current === id ? result.token || "" : ""; item.tokenBox!.hidden = !item.token!.value;
       item.selectionDirty = false;
     }));
     item.gatewayRevoke! = button("停用接口", () => operate(item, async () => { await api.revokeGateway(id); item.token!.value = ""; item.tokenBox!.hidden = true; }));
@@ -123,7 +127,9 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
       item.history!.value = history.some((entry) => entry.deliveryVersion === selected) ? selected : item.data!.deliveryVersion || ""; item.historyKey = historyKey;
     }
     item.history!.disabled = item.busy || !history.length; item.rollback!.disabled = item.busy || !history.length;
-    const outdatedGateway = gateway.enabled && gateway.deliveryVersion && gateway.deliveryVersion !== item.data!.deliveryVersion;
+    const conversationVersion = item.data.conversationVersion;
+    const outdatedGateway = gateway.enabled && (gateway.deliveryVersion !== (item.data.deliveryVersion || conversationVersion)
+      || gateway.conversationVersion && gateway.conversationVersion !== conversationVersion);
     item.gatewayStatus!.textContent = outdatedGateway ? "接口仍绑定旧版本，请选择当前功能后更新接口。"
       : gateway.status === "failed" ? gateway.message || "接口启动失败，请检查运行环境后重试。"
         : gateway.status === "suspended" ? "接口暂时暂停。" : gateway.enabled ? "接口已开启，仅本机可访问。" : "接口未开启。";
@@ -138,7 +144,17 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
       const field = item.operations.get(action.id)!; if (!item.selectionDirty) (field as E).checked = (gateway.actionIds || []).includes(action.id); field.disabled = item.busy;
     }
     for (const [actionId, field] of item.operations) if (!actions.some((action) => action.id === actionId)) { field.parentElement?.remove(); item.operations.delete(actionId); }
-    item.gatewaySave!.disabled = item.busy || !actions.length; item.gatewayRevoke!.disabled = item.busy || !gateway.enabled;
+    if (conversationVersion && !item.conversation) {
+      const label = node("label", "connection-field", "允许与智能体对话"), field = node("input");
+      field.type = "checkbox"; field.addEventListener("change", () => { item.selectionDirty = true; });
+      label.append(field, node("span", "muted-note small", "调用方可用自然语言派任务。智能体可使用自己的模型和全部已交付动作，材料和文件保存在独立会话中。"));
+      item.actionList!.append(label); item.conversation = field;
+    }
+    if (item.conversation) {
+      if (!conversationVersion) { item.conversation.parentElement?.remove(); delete item.conversation; }
+      else { if (!item.selectionDirty) (item.conversation as E).checked = Boolean(gateway.conversationVersion); item.conversation.disabled = item.busy; }
+    }
+    item.gatewaySave!.disabled = item.busy || !actions.length && !conversationVersion; item.gatewayRevoke!.disabled = item.busy || !gateway.enabled;
     item.taskSection!.hidden = !workflowTasks.some((task) => ["waiting_input", "interrupted", "needs_review"].includes(task.status));
     for (const task of workflowTasks.filter((task) => ["waiting_input", "interrupted", "needs_review"].includes(task.status))) {
       let row = item.tasks.get(task.id);

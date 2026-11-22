@@ -14,8 +14,8 @@ export interface ServiceAction { id: string; title?: string | undefined; name?: 
 export interface ServiceValueSchema extends Omit<ValueSchema, "properties" | "items"> { title?: string; properties?: Record<string, ServiceValueSchema>; items?: ServiceValueSchema }
 export interface WorkflowTask { id: string; status: string; version: number; waiting: { attemptId?: string | undefined; stepId?: string | undefined; index?: number | undefined; prompt?: string | undefined; inputSchema?: ServiceValueSchema | undefined; outputSchema?: ServiceValueSchema | undefined } }
 export interface ServiceEnvironment { available?: boolean | undefined; version?: string | undefined }
-export interface ServiceGateway { enabled?: boolean | undefined; status?: string | undefined; deliveryVersion?: string | undefined; message?: string | undefined; actionIds?: string[] | undefined; apiUrl?: string | undefined; mcpUrl?: string | undefined }
-export interface ServicesResult { deliveryVersion?: string | undefined; environment?: { docker?: ServiceEnvironment | undefined; managed?: { available?: boolean | undefined; javascript?: ServiceEnvironment | undefined; python?: ServiceEnvironment | undefined } | undefined } | undefined; service?: { language: string; host: string; status?: string | undefined; operations?: ServiceAction[] | undefined; actions?: ServiceAction[] | undefined } | null | undefined; workers?: { status: string }[] | undefined; history?: { deliveryVersion: string; active: boolean }[] | undefined; gateway?: ServiceGateway | undefined; workflowTasks?: WorkflowTask[] | undefined; actions?: ServiceAction[] | undefined }
+export interface ServiceGateway { enabled?: boolean | undefined; status?: string | undefined; deliveryVersion?: string | undefined; conversationVersion?: string; message?: string | undefined; actionIds?: string[] | undefined; apiUrl?: string | undefined; mcpUrl?: string | undefined }
+export interface ServicesResult { deliveryVersion?: string | undefined; conversationVersion?: string; environment?: { docker?: ServiceEnvironment | undefined; managed?: { available?: boolean | undefined; javascript?: ServiceEnvironment | undefined; python?: ServiceEnvironment | undefined } | undefined } | undefined; service?: { language: string; host: string; status?: string | undefined; operations?: ServiceAction[] | undefined; actions?: ServiceAction[] | undefined } | null | undefined; workers?: { status: string }[] | undefined; history?: { deliveryVersion: string; active: boolean }[] | undefined; gateway?: ServiceGateway | undefined; workflowTasks?: WorkflowTask[] | undefined; actions?: ServiceAction[] | undefined }
 export interface ApplicationApi {
  application(id: string): Promise<ApplicationView>;
  open(id: string): Promise<ApplicationInstance>;
@@ -39,7 +39,7 @@ export interface ApplicationApi {
  serviceLogs(id: string, deliveryVersion?: string): Promise<{ text?: string | undefined }>;
  rollbackService(id: string, deliveryVersion: string): Promise<unknown>;
  gateway(id: string): Promise<ServiceGateway>;
- configureGateway(id: string, actionIds: string[], deliveryVersion?: string): Promise<{ token?: string | undefined }>;
+ configureGateway(id: string, actionIds: string[], deliveryVersion?: string, conversationVersion?: string): Promise<{ token?: string | undefined }>;
  revokeGateway(id: string): Promise<unknown>;
  materials(id: string): Promise<{ attachments?: Material[] | undefined; materials?: Material[] | undefined }>;
  connections(id: string): Promise<ConnectionsResult>;
