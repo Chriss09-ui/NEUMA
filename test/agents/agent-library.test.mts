@@ -22,6 +22,15 @@ const snapshot = (content = "已整理") => ({ schemaVersion: 2, messages: [
   { role: "assistant", content, status: "complete", revision: "v1" },
 ] });
 
+test("两次编辑基于同一版本时，旧草稿不能覆盖先保存的修改", async t => {
+  const { library } = await fixture(t);
+  const base = input(), first = input("周报助手", "生成简报"), stale = input("周报助手", "汇总会议");
+  await library.saveRequirement("weekly", base);
+  await library.saveRequirement("weekly", first, { expectedDraft: base.draft });
+  await assert.rejects(library.saveRequirement("weekly", stale, { expectedDraft: base.draft }), { reason: "requirement_version_conflict" });
+  assert.deepEqual((await library.list()).requirements[0]!.draft, first.draft);
+});
+
 test("需求共用UTF8总量预算，超过旧60000字的合法任务要求完整保存并读回", async (t) => {
   const { dataDir, library } = await fixture(t);
   const value = input();

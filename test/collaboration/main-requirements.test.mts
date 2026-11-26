@@ -77,6 +77,48 @@ test("显式迭代保留当前会话未确认的修改，不用已保存版本�
   assert.equal(edited.version, local.version); assert.equal(edited.confirmed, false); assert.deepEqual(record, before);
 });
 
+test("正式迭代只确认相对已保存版本的增删改，确认后仍完整交付同一助手", async () => {
+  const base = validDraft("这个旧目标已经确认");
+  base.constraints = [{ text: "保留原文证据", source: "user" }, { text: "分两栏", source: "user" }];
+  const saved = { id: "existing", name: base.name.value, draft: base };
+  const api = { ...agents, getRequirements: async () => ({ requirements: [saved] }) };
+  const edit = await prepareRequirement({ record: {}, conversationId: "one", mutationId: "open", agentId: saved.id, mode: "edit" }, api);
+  const changed = structuredClone(base);
+  changed.deliverable.value += "，附上行动清单";
+  changed.constraints.pop(); changed.constraints.push({ text: "保留负责人", source: "user" });
+  const result = await advanceRequirement(edit, "附上行动清单，保留负责人，取消分栏", {
+    preflight: sufficientPreflight, generateDraft: async () => ({ draft: changed, proposedGap: "none", question: "" }),
+  }, { agents: api });
+  assert.deepEqual(result.context.changes, ["补充输出：附上行动清单", "新增工作约束：保留负责人", "移除工作约束：分两栏"]);
+  assert.doesNotMatch(result.reply, /这个旧目标|保留原文证据|核心使用场景|这份需求可以确认吗/);
+  assert.match(result.reply, /确认本次修改/);
+  assert.equal(result.action, undefined);
+  const approved = await advanceRequirement(result.requirement, "确认修改", {
+    generateDraft: async () => assert.fail("确认当前差异不重写需求"),
+  }, { agents: api });
+  assert.equal(approved.action?.agentId, "existing"); assert.equal(approved.requirement.draft.goal.value, base.goal.value);
+  assert.deepEqual(approved.requirement.draft.constraints, changed.constraints);
+});
+
+test("另一会话在确认前保存了需求，会先展示最新差异，再接受确认", async () => {
+  const base = validDraft("整理会议"), newer = structuredClone(base);
+  newer.constraints.push({ text: "保留发言人", source: "user" });
+  const api = { ...agents, getRequirements: async () => ({ requirements: [{ id: "existing", name: base.name.value, draft: base }] }) };
+  const opened = await prepareRequirement({ record: {}, conversationId: "chat", mutationId: "open", agentId: "existing", mode: "edit" }, api);
+  const candidate = structuredClone(base); candidate.deliverable.value += "，附术语表";
+  const proposal = await advanceRequirement(opened, "附术语表", { ...providers, generateDraft: async () => ({ draft: candidate, proposedGap: "none", question: "" }) }, { agents: api });
+  const latest = { id: "existing", name: newer.name.value, draft: newer };
+  const conflict = await advanceRequirement(proposal.requirement, "确认修改", providers, { agents: { getRequirements: async () => ({ requirements: [latest] }),
+    saveRequirements: async (_id, _input, options) => {
+      assert.deepEqual(options?.expectedDraft, base); throw Object.assign(new InputError("其他窗口更新了需求"), { reason: "requirement_version_conflict" });
+    } } });
+  assert.equal(conflict.action, undefined); assert.equal(conflict.requirement.confirmed, false);
+  assert.match(conflict.reply, /移除工作约束：保留发言人/); assert.match(conflict.reply, /补充输出：附术语表/);
+  const approved = await advanceRequirement(conflict.requirement, "确认修改", providers, { agents: { ...api,
+    saveRequirements: async (id, input, options) => { assert.deepEqual(options?.expectedDraft, newer); return agents.saveRequirements(id, input); } } });
+  assert.equal(approved.action?.agentId, latest.id);
+});
+
 test("取消、模型错误和无效输入不改变旧草稿，不保存 Agent", async () => {
   const draft = await prepareRequirement({ record: {}, conversationId: "one", mutationId: "new", mode: "new" }, agents), snapshot = structuredClone(draft);
   const controller = new AbortController(); let saved = 0;

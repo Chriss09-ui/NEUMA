@@ -28,11 +28,11 @@ interface MainTurn {
   accepted?: Promise<MainRecord>;
 }
 import { createHash, randomUUID } from "node:crypto";
-import { InputError, ProviderError } from "../requirements/core.mjs";
+import { InputError, ProviderError, isRequirementApproval, normalizeDraft } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { MAIN_PROMPT } from "./main-prompts.mjs";
-import { classifyRequirementInput, iterationPreference } from "./requirement-routing.mjs";
+import { classifyRequirementInput, iterationPreference, pendingIterationPreference } from "./requirement-routing.mjs";
 import { MainStore, mainId, mainConversationFailure } from "./main-store.mjs";
 import { MainMaterials } from "./main-materials.mjs";
 import { makeProviders } from "../requirements/providers.mjs";
@@ -62,6 +62,10 @@ function requirementEvidence(record: MainRecord) {
   const recent = record.messages.slice(-24);
   const memoryReplies = new Set(recent.filter(message => message.sources.some(source => source.type === "agent_memory")).map(message => message.id));
   const memoryMessages = new Set(record.requests.filter(request => memoryReplies.has(request.assistantId)).flatMap(request => [request.userId, request.assistantId]));
+  for (const message of recent) for (const source of message.sources) {
+    if (source.type === "agent_memory" && Array.isArray(source.supersededIds))
+      for (const id of source.supersededIds) if (typeof id === "string") memoryMessages.add(id);
+  }
   return recent.filter(message => !memoryMessages.has(message.id) && (message.role === "user" || message.status === "complete"))
     .map(({ id, role, content }) => ({ id, role, content }));
 }
@@ -130,7 +134,22 @@ export class MainAgent {
 
   async listConversations() { return { conversations: await this.store.list() }; }
   async createConversation(input: Record<string, unknown> = {}) { return { conversation: await this.store.create(input) }; }
-  async getConversation(conversationId: string) { return { conversation: await this.store.get(conversationId) }; }
+  private async recoverablePreference(record: MainRecord) {
+    const pending = this.agents.applyIterationPreference && pendingIterationPreference(record);
+    if (pending && (await this.agents.getActiveArchitecture?.(record.requirement!.agentId))?.delivery === "ready") return pending;
+  }
+  private async conversationView(conversation: MainRecord) {
+    const r = conversation.requirement;
+    if (r && !r.confirmed && r.savedRequirement?.id === r.agentId && conversation.context?.type === "requirements" && conversation.context.agentId === r.agentId) {
+      const pending = await this.recoverablePreference(conversation);
+      const displayed = pending ? { ...r, draft: normalizeDraft(r.savedRequirement.draft) } : r;
+      conversation.context = { ...requirementContext(displayed)!, ...(pending ? { pendingPreference: { text: pending.text, messageId: pending.messageId } } : {}) };
+    }
+    return conversation;
+  }
+  async getConversation(conversationId: string) {
+    return { conversation: await this.conversationView(await this.store.get(conversationId)) };
+  }
 
   async removeConversation(conversationId: string, input: Record<string, unknown> = {}) {
     mainId(conversationId);
@@ -166,7 +185,8 @@ export class MainAgent {
       const previous = record.requirementActivations?.find((item) => item.mutationId === mutationId);
       if (previous) {
         if (previous.agentId !== key) throw new InputError("这个请求标识已用于其他需求入口");
-        return { conversation: record, context: record.context ?? null };
+        const conversation = await this.conversationView(record);
+        return { conversation, context: conversation.context ?? null };
       }
       const requirement = await prepareRequirement({ record, conversationId, mutationId, agentId, mode: agentId ? "edit" : "new" }, this.agents);
       const context = requirementContext(requirement);
@@ -177,7 +197,8 @@ export class MainAgent {
         rememberRequirement(next, requirement); next.requirementActivations ??= [];
         next.requirementActivations.push({ mutationId, agentId: key, context });
       });
-      return { conversation, context };
+      await this.conversationView(conversation);
+      return { conversation, context: conversation.context ?? null };
     } finally { this.activating.delete(conversationId); }
   }
 
@@ -379,12 +400,13 @@ export class MainAgent {
     ctx.onProgress({ type: "context", context: structuredClone(context) });
   }
 
-  private async saveIterationPreference(ctx: MainTurn, requirement: MainRequirement, preference: string) {
+  private async saveIterationPreference(ctx: MainTurn, requirement: MainRequirement, preference: string, supersededIds?: string[]) {
     const saved = await this.agents.applyIterationPreference?.(requirement.agentId, preference, { signal: ctx.controller.signal });
     if (saved) {
       const name = requirement.savedRequirement!.name;
-      ctx.sources.push({ type: "agent_memory", operation: "updated", agentId: requirement.agentId, name, sourceLink: link("agent", requirement.agentId) });
-      ctx.forcedReply = `已为「${name}」保存偏好「${preference}」，从下次任务起生效。`;
+      ctx.sources.push({ type: "agent_memory", operation: "updated", agentId: requirement.agentId, name, sourceLink: link("agent", requirement.agentId),
+        ...(supersededIds ? { supersededIds } : {}) });
+      ctx.forcedReply = `已为「${name}」保存偏好：${preference.replace(/[。！!]$/u, "")}。下次任务起生效。`;
     }
     this.guard(ctx);
   }
@@ -451,7 +473,9 @@ export class MainAgent {
     await this.ready; if (this.closed) throw new InputError("主 Agent 已关闭");
     if (this.removals.has(conversationId) || this.activating.has(conversationId))
       throw mainConversationFailure("conversation_conflict", "这份主对话正在更新，请等待完成后重试");
-    const record = await this.store.get(conversationId), fingerprint = attachmentIds.length ? hash(JSON.stringify({ message, attachmentIds })) : hash(message);
+    const expectedReplyId = input.expectedReplyId === undefined ? undefined : mainId(input.expectedReplyId, "待处理的回复");
+    const record = await this.store.get(conversationId), fingerprint = attachmentIds.length || expectedReplyId
+      ? hash(JSON.stringify({ message, attachmentIds, expectedReplyId })) : hash(message);
     this.store.assertAvailable(conversationId);
     if (this.removals.has(conversationId) || this.activating.has(conversationId))
       throw mainConversationFailure("conversation_conflict", "这份主对话正在更新，请等待完成后重试");
@@ -470,6 +494,8 @@ export class MainAgent {
       return { reply: assistant.content, conversation: record, context: record.context ?? null, actions: assistant.actions, sources: assistant.sources };
     }
     if (this.active.has(conversationId)) throw new InputError("当前主 Agent 对话正在处理，请等待完成或停止");
+    if (expectedReplyId && pendingIterationPreference(record)?.messageId !== expectedReplyId)
+      throw mainConversationFailure("conversation_conflict", "待保存的偏好已变化，请重新查看当前对话。");
     const ctx: MainTurn = { conversationId, message, mutationId, fingerprint, attachmentIds, attachments: [],
       visibleAttachmentIds: new Set(record.messages.flatMap((item) => item.role === "user" ? (item.attachments ?? []).map((ref) => ref.id) : [])),
       onProgress, controller: new AbortController(), reply: "", sources: [], actions: [], operations: new Map() };
@@ -506,7 +532,25 @@ export class MainAgent {
       const requirement = record.context?.type === "requirements" && record.context.agentId === record.requirement?.agentId ? record.requirement : null;
       const preference = requirement && !ctx.attachmentIds.length && this.agents.applyIterationPreference
         ? iterationPreference(ctx.message, requirement) : undefined;
-      if (requirement && preference?.direct) await this.saveIterationPreference(ctx, requirement, preference.text);
+      const onlyPreference = ctx.message.trim() === "只保存这项偏好";
+      const approval = isRequirementApproval(ctx.message);
+      const pending = requirement && !ctx.attachmentIds.length && (preference?.direct || onlyPreference || approval)
+        ? await this.recoverablePreference(record) : undefined;
+      if (onlyPreference && !pending) throw new InputError("待保存的偏好已变化，请重新查看当前对话。");
+      const savePending = pending && (pending.text === preference?.text || onlyPreference || approval);
+      if (requirement && savePending) {
+        const baseline = await prepareRequirement({ record: {}, conversationId: ctx.conversationId, mutationId: ctx.mutationId,
+          mode: "edit", agentId: requirement.agentId }, this.agents);
+        this.guard(ctx);
+        await this.saveIterationPreference(ctx, requirement, pending.text, pending.supersededIds);
+        if (!ctx.forcedReply) throw new InputError("这个助手尚未就绪，偏好暂未保存。");
+        ctx.pendingRequirement = { ...baseline, version: requirement.version + 1, createdAt: requirement.createdAt };
+        ctx.context = requirementContext(ctx.pendingRequirement); ctx.contextChanged = true;
+        ctx.onProgress({ type: "context", context: structuredClone(ctx.context) });
+      } else if (requirement && preference?.direct) await this.saveIterationPreference(ctx, requirement, preference.text);
+      if (!ctx.forcedReply && approval && !ctx.attachmentIds.length && requirement?.status === "ready"
+        && requirementContext(requirement)?.changes?.length === 0 && (await this.agents.getActiveArchitecture?.(requirement.agentId))?.delivery === "ready")
+        ctx.forcedReply = "这位助手的正式需求已经保存。你可以直接告诉我想改哪一项。";
       const allowMemory = preference?.direct === false;
       if (requirement && (!requirement.confirmed || allowMemory) && ctx.forcedReply === undefined) {
         if (isMainConfirmation(ctx.message)) await this.requirements(ctx, { mode: "continue" });

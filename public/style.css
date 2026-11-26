@@ -123,7 +123,6 @@
 .main-activity-item:hover { color: var(--accent); }
 .main-activity-task { display: grid; gap: 8px; padding: 16px 0; border-bottom: 1px solid var(--border); }
 .main-activity-task strong { font-size: 12px; font-weight: 500; line-height: 1.7; overflow-wrap: anywhere; }
-.main-progress { margin-top: 8px; font-size: 10.5px; }
 .main-composer-context { flex-shrink: 0; min-height: 30px; padding: 4px 8px; color: var(--text); font-size: 12px; white-space: nowrap; }
 .sidebar-groups { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 
@@ -369,10 +368,11 @@ a { color: inherit; }
 
 .sidebar-settings { flex-shrink: 0; }
 .sidebar-agents { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-.sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; min-height: 32px; padding: 0 8px; }
+.sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; min-height: 32px; padding: 0 3px; }
 .sidebar-section-heading h2 { flex: 1; min-width: 0; color: var(--text-2); font-size: 12px; font-weight: 600; white-space: nowrap; }
-.sidebar-section-link { display: flex; align-items: center; min-height: 28px; border-radius: 4px; color: inherit; text-decoration: none; }
-.sidebar-section-link:hover, .sidebar-section-link[aria-current="page"] { color: var(--text); }
+.sidebar-section-link { display: flex; align-items: center; min-height: 28px; padding: 0 5px; border-radius: 6px; color: inherit; text-decoration: none; }
+.sidebar-section-link[aria-current="page"] { color: var(--text); }
+.sidebar-section-link:is(:hover, :focus-visible) { color: var(--text); background: var(--brand-soft); box-shadow: 0 1px 3px #00000026; }
 .sidebar-agent-list { display: flex; flex-direction: column; flex: 0 1 auto; gap: 2px; min-height: 44px; max-height: 332px; overflow-y: auto; overflow-x: hidden; overscroll-behavior-y: contain; scrollbar-width: thin; }
 #sidebar-group-list { max-height: 188px; }
 .sidebar-agent-list:empty { display: none; }

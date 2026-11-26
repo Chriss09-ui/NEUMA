@@ -25,6 +25,7 @@ const GAP_ORDER = ["goal", "scenario", "source", "task", "deliverable", "boundar
 const GAP_SET = new Set([...GAP_ORDER, "none"]);
 const LEGACY_CONFIRMATION_QUESTION = "这是你想要的吗？如果没有需要修改的地方，我们就可以进入下一步创建。";
 export const CONFIRMATION_QUESTION = "这份需求可以确认吗？请回复“确认”，或直接说需要修改的地方。";
+export const CHANGE_CONFIRMATION_QUESTION = "确认本次修改吗？可以回复“确认修改”，或继续调整。";
 const CONFIRMATION_CLARIFICATION_QUESTION = "你说的“没有”，是没有需要修改、可以确认吗？请回复“确认”；如果这份需求不对，请说要改哪里。";
 const CONFIRMATION_OPTIONS_QUESTION = "请回复“确认”，或直接说要修改哪一部分。";
 const REVISION_QUESTION = "我们先找出偏差：1）目标理解错了；2）处理方式不合适；3）结果的形式或深度不合适；4）我还说不清。你只需选一个，我再接着问。";
@@ -57,12 +58,12 @@ function shortReply(value: string) {
 }
 
 function isConfirmationPrompt(question: string) {
-  return [LEGACY_CONFIRMATION_QUESTION, CONFIRMATION_QUESTION,
+  return [LEGACY_CONFIRMATION_QUESTION, CONFIRMATION_QUESTION, CHANGE_CONFIRMATION_QUESTION,
     CONFIRMATION_CLARIFICATION_QUESTION, CONFIRMATION_OPTIONS_QUESTION].includes(question);
 }
 
-function isApproval(value: string) {
-  return new Set(["确认", "确认需求", "是", "是的", "是的就是这样", "对",
+export function isRequirementApproval(value: string) {
+  return new Set(["确认", "确认需求", "确认修改", "确认本次修改", "是", "是的", "是的就是这样", "对",
     "对的就是这样", "可以", "可以确认",
     "没问题", "没有修改", "没有需要修改", "不需要修改", "就这样",
     "就这样吧", "先这样吧"]).has(shortReply(value));
@@ -227,6 +228,11 @@ function requireModelDraft(input: unknown): RequirementDraft {
 
 function hasGroundedFact(item: RequirementField) {
   return Boolean(item.value) && ["user", "inferred"].includes(item.source);
+}
+
+export function resolvedRoutingCondition(draft: RequirementDraft) {
+  return !draft.routingCondition.value && hasGroundedFact(draft.scenario) && hasGroundedFact(draft.task)
+    ? field(`当用户在${draft.scenario.value}需要${draft.task.value}时`, "inferred") : draft.routingCondition;
 }
 
 function addGap(gaps: string[], gap: string) {
@@ -475,7 +481,7 @@ export async function processTurn(request: TurnRequest, { generateDraft, judgeJe
     return finish(result);
   }
   if (awaitingConfirmation && decideNext(previousDraft).status === "ready") {
-    if (isApproval(message)) {
+    if (isRequirementApproval(message)) {
       return finish(confirmationOnly(previousDraft, true, null, "explicit_approval"));
     }
   }
@@ -498,10 +504,7 @@ export async function processTurn(request: TurnRequest, { generateDraft, judgeJe
   signal?.throwIfAborted();
   const modelMs = Date.now() - modelStartedAt;
   const draft = requireModelDraft(modelResult?.draft);
-  if (!draft.routingCondition.value && hasGroundedFact(draft.scenario)
-      && hasGroundedFact(draft.task)) {
-    draft.routingCondition = field(`当用户在${draft.scenario.value}需要${draft.task.value}时`, "inferred");
-  }
+  draft.routingCondition = resolvedRoutingCondition(draft);
 
   const skipOptionalBoundary = declinesExtraBoundary(message, lastQuestion);
   const answeredPoint = matchedAnswerPoint(modelResult?.answeredPoint);

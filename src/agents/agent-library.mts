@@ -9,7 +9,7 @@ import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "./agent-storage.mjs";
 import { textWithinLimit } from "../runtime/text-length.mjs";
 import { assertRequirementDraftSize, REQUIREMENT_MESSAGE_MAX_CHARACTERS, REQUIREMENT_NAME_MAX_CHARACTERS, REQUIREMENT_RECORD_MAX_BYTES } from "../requirements/requirement-limits.mjs";
-interface RequirementMetadata { confirmationReceipt?: unknown; consultation?: unknown }
+interface RequirementMetadata { confirmationReceipt?: unknown; consultation?: unknown; expectedDraft?: unknown }
 
 export const CONVERSATION_BYTES = 8 * 1024 * 1024;
 export const CONVERSATION_SCHEMA_VERSION = 4;
@@ -169,6 +169,9 @@ export class AgentLibrary {
         if (!isDeepStrictEqual(previous.draft, value.draft) || previous.name !== value.name) throw new InputError("这次确认已用于其他需求内容，请刷新后重试");
         return { requirement: requirement(id, previous) };
       }
+      if (previous && metadata.expectedDraft !== undefined && !isDeepStrictEqual(previous.draft, metadata.expectedDraft)
+        && !isDeepStrictEqual(previous.draft, value.draft))
+        throw Object.assign(new InputError("其他对话已更新这位助手的需求，请查看最新差异。"), { reason: "requirement_version_conflict" });
       if (input.importOnly && previous) {
         const browserIsNewer = previous._legacyFallback === "definition" || (previous._legacyFallback === "architecture"
           && Date.parse(value.updatedAt as string) > Date.parse(previous.updatedAt as string));

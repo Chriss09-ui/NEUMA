@@ -40,17 +40,29 @@ export function createMainContext({ api, current, submit, edit, build }: { api: 
       ["inputSource", "每次输入"], ["task", "核心任务与处理方式"], ["deliverable", "输出结果"], ["successCriteria", "完成标准", "暂无额外标准"]] as const;
     const valueOf = (key: RequirementFieldKey) => typeof draft[key] === "string" ? draft[key] : draft[key]?.value;
     const hasDraft = fields.some(([key]) => valueOf(key)) || valueOf("routingCondition") || draft.constraints?.length || draft.unresolved?.length;
-    byId("main-context-title").textContent = "需求说明";
+    const changes = context!.changes, pending = context!.pendingPreference;
+    byId("main-context-title").textContent = changes ? "修改助手" : "需求说明";
     const status = byId("main-context-requirement-status"); status.className = `status ${context!.status}`;
-    status.textContent = context!.confirmed ? "需求已确认" : context!.status === "ready" ? "待你确认" : hasDraft ? "待补充" : "等待描述";
-    target.append(node("p", "muted-note", "边聊边整理，你随时可以修改。"));
-    const steps = node("ol", "brief-steps"); steps.setAttribute("aria-label", "创建进度");
-    const currentStep = context!.confirmed ? 2 : context!.status === "ready" ? 1 : 0;
-    for (const [index, label] of ["描述想法", "确认需求", "生成并使用"].entries()) {
-      const step = node("li"); step.append(node("span", "", String(index + 1)), node("span", "brief-step-label", label));
-      if (index === currentStep) step.setAttribute("aria-current", "step"); steps.append(step);
+    status.textContent = pending ? "待保存偏好" : context!.confirmed ? "需求已确认"
+      : changes && context!.status === "ready" ? (changes.length ? "待确认修改" : "等待修改")
+        : context!.status === "ready" ? "待你确认" : hasDraft ? "待补充" : "等待描述";
+    if (changes) {
+      if (pending) target.append(node("p", "muted-note", pending.text));
+      else if (changes.length) {
+        target.append(node("h3", "field-label", "本次修改"));
+        const list = node("ul", "task-spec-list"); for (const change of changes) list.append(node("li", "", change));
+        target.append(list);
+      } else target.append(node("p", "muted-note", "原需求已保存。告诉 NEUMA 想改哪一项即可。"));
+    } else {
+      target.append(node("p", "muted-note", "边聊边整理，你随时可以修改。"));
+      const steps = node("ol", "brief-steps"); steps.setAttribute("aria-label", "创建进度");
+      const currentStep = context!.confirmed ? 2 : context!.status === "ready" ? 1 : 0;
+      for (const [index, label] of ["描述想法", "确认需求", "生成并使用"].entries()) {
+        const step = node("li"); step.append(node("span", "", String(index + 1)), node("span", "brief-step-label", label));
+        if (index === currentStep) step.setAttribute("aria-current", "step"); steps.append(step);
+      }
+      target.append(steps);
     }
-    target.append(steps);
     const content = node("div", "draft-content");
     if (!hasDraft) {
       const empty = node("div", "brief-empty"), illustration = node("div", "brief-illustration");
@@ -77,10 +89,11 @@ export function createMainContext({ api, current, submit, edit, build }: { api: 
       appendField("能力依赖", draft.capabilityDependencies?.join("；"), "", "暂无已知依赖");
       appendField("未解决事项", draft.unresolved?.join("；"), "", "暂无");
     }
-    target.append(content);
-    if (hasDraft && !context!.confirmed && context!.lastQuestion) { const question = node("div", "main-context-question"); question.append(node("h3", "", "当前待确认"), node("p", "", context!.lastQuestion)); target.append(question); }
+    if (changes) disclosure("查看完整需求").append(content); else target.append(content);
+    if (!pending && hasDraft && !context!.confirmed && context!.lastQuestion) { const question = node("div", "main-context-question"); question.append(node("h3", "", "当前待确认"), node("p", "", context!.lastQuestion)); target.append(question); }
     const actions = node("div", "panel-actions");
-    if (!context!.confirmed && context!.status === "ready") actions.append(button("确认需求并开始制作", () => submit("确认需求"), "primary"));
+    if (!pending && !context!.confirmed && context!.status === "ready" && (!changes || changes.length))
+      actions.append(button(changes ? "确认本次修改" : "确认需求并开始制作", () => submit(changes ? "确认修改" : "确认需求"), "primary"));
     const handoff = context!.buildState?.handoff || context!.buildState?.updateStatus?.handoff;
     if (handoff) actions.append(button("继续澄清需求", () => submit("继续澄清这个智能体的需求"), "primary"));
     else if (context!.confirmed && context!.agentId) actions.append(button("制作智能体", () => build(context!.agentId, context!.requirement), "primary"));
@@ -89,13 +102,13 @@ export function createMainContext({ api, current, submit, edit, build }: { api: 
     if (buildStatus && buildStatus !== "ready") target.append(node("p", "main-context-status",
       buildLabels[buildStatus] || "制作尚未完成，请打开智能体查看。"));
     else if (!buildStatus && context!.confirmed) target.append(node("p", "muted-note small", "需求确认后仍需架构评估与运行检查，进度会依据实际状态更新。"));
-    const disclosure = (label: string) => {
+    function disclosure(label: string) {
       const details = node("details", "panel-disclosure"), summary = node("summary", "", label), mark = node("span", "", "＋");
       const key = `${identity()}:${label}`; details.open = disclosureState.get(key) === true;
       details.addEventListener("toggle", () => disclosureState.set(key, details.open));
       mark.setAttribute("aria-hidden", "true"); summary.append(mark);
       const body = node("div", "disclosure-content"); details.append(summary, body); target.append(details); return body;
-    };
+    }
     const taskItems = (draft.taskSpec?.items || []).filter((item) => item.applicability === "applies" && item.content);
     if (taskItems.length) {
       const requirements = disclosure(`具体任务要求（${taskItems.length}项）`), list = node("ul", "task-spec-list");
@@ -115,8 +128,10 @@ export function createMainContext({ api, current, submit, edit, build }: { api: 
       link.click(); setTimeout(() => URL.revokeObjectURL(url), 30_000);
     }, "secondary"); exportButton.disabled = !hasDraft; toolActions.append(exportButton);
     tools.append(toolActions, node("p", "muted-note small", "需求与对话自动保存，重新打开这份对话可继续。"));
-    disclosure("关于这份需求").append(node("p", "muted-note", "确认后，智能体会拥有左侧的独立入口。后续可以回到 NEUMA 继续迭代。"));
-    target.append(node("p", "panel-footnote", "确认后生成可对话的助手\n先试用，再逐步完善"));
+    if (!changes) {
+      disclosure("关于这份需求").append(node("p", "muted-note", "确认后，智能体会拥有左侧的独立入口。后续可以回到 NEUMA 继续迭代。"));
+      target.append(node("p", "panel-footnote", "确认后生成可对话的助手\n先试用，再逐步完善"));
+    }
   }
   function group() {
     const target = byId("main-context-content"); byId("main-context-title").textContent = groupView?.group?.name || "群任务";

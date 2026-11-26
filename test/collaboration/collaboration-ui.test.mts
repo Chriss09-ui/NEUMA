@@ -126,9 +126,10 @@ function setup(source: string, request: (path: string, options?: RequestInit) =>
     } }] : []; }
   }
   const get = (id: string) => {
-    if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(id === "group-message" ? "textarea" : id === "group-share-agent" ? "select"
+    if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(id === "group-message" || id === "main-message" ? "textarea" : id === "group-share-agent" ? "select"
       : ["group-editor", "group-files-dialog", "group-share-dialog", "main-material-dialog"].includes(id) ? "dialog" : "div"), {
-      id, ...(["main-history-menu", "group-history-menu"].includes(id) ? { hidden: true } : {}),
+      id, ...(id === "main-message" ? { placeholder: "给 NEUMA 发消息…" } : {}),
+      ...(["main-history-menu", "group-history-menu"].includes(id) ? { hidden: true } : {}),
       ...(["main-history-delete", "group-history-delete"].includes(id) ? { textContent: "删除对话" } : {}),
       ...(id === "group-panel" ? { hidden: true } : {}),
     }));
@@ -2393,8 +2394,11 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
   await ui.route({ page: "chat" }); await new Promise(resolve => setTimeout(resolve, 800)); ui.get("main-message").value = "整理材料";
-  assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
+  const input = ui.get("main-message");
+  assert.equal(input.placeholder, "给 NEUMA 发消息…"); assert.equal(ui.text("main-progress"), "");
+  assert.equal(ui.get("main-send").hidden, false); assert.equal(ui.get("main-cancel").hidden, true);
   await ui.submit("main-chat-form"); await new Promise(resolve => setTimeout(resolve, 800));
+  assert.equal(ui.get("main-send").hidden, true); assert.equal(ui.get("main-cancel").hidden, false);
   assert.equal(ui.get("sidebar-main-new-chat").disabled, true); assert.equal(ui.get("sidebar-main-new-chat").hidden, false);
   assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, true);
   await mainHistoryMore(ui, conversation.id)!.click();
@@ -2402,13 +2406,16 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   let reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   assert.equal(reply!.children.find(isBubble)!.textContent, "正在处理…");
   assert.equal(reply!.children.some((item) => item.className === "collaboration-message-heading"), false);
+  assert.equal(input.value, ""); assert.equal(input.disabled, false);
+  input.value = "下一条草稿"; await input.dispatchEvent({ type: "input" });
   streamController!.enqueue!(new TextEncoder().encode([
     { type: "status", label: "正在整理材料…" }, { type: "text-start" },
     { type: "text-delta", delta: "已整理" }, { type: "text-delta", delta: "第一份材料" },
   ].map(value => JSON.stringify(value)).join("\n") + "\n"));
   await new Promise(resolve => setTimeout(resolve, 800)); reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   const body = reply!.children.find(isBubble);
-  assert.equal(ui.text("main-progress"), "正在处理，进度已保存…"); assert.equal(ui.get("main-progress").hidden, false);
+  assert.equal(input.placeholder, "正在处理，进度已保存…");
+  assert.equal(ui.text("main-progress"), input.placeholder); assert.equal(input.value, "下一条草稿");
   assert.equal(body!.textContent, "已整理第一份材料"); assert.equal(body!.classes.has("streaming"), true);
   assert.equal(textOf(reply!), "已整理第一份材料");
   streamController!.enqueue!(new TextEncoder().encode(JSON.stringify({ type: "done", result: { reply: "已整理第一份材料",
@@ -2419,7 +2426,9 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   assert.equal(completed!.children.find(isBubble)!.classes.has("streaming"), false);
   assert.equal(ui.get("sidebar-main-new-chat").disabled, false); assert.equal(ui.get("sidebar-main-new-chat").hidden, false);
   assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
-  assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
+  assert.equal(input.placeholder, "给 NEUMA 发消息…"); assert.equal(input.value, "下一条草稿");
+  assert.equal(ui.get("main-send").hidden, false); assert.equal(ui.get("main-cancel").hidden, true);
+  assert.equal(ui.text("main-progress"), "");
 });
 
 test("主历史异常纯气泡保留部分正文和真实失败、停止及中断状态", async () => {
@@ -2990,7 +2999,8 @@ test("服务器已取消或明确失败后主动重发使用新请求，取消�
     await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "继续这个任务";
     await ui.submit("main-chat-form"); await settle();
     assert.equal(ui.get("main-message").value, "继续这个任务");
-    assert.equal(ui.text("main-progress"), ""); assert.equal(ui.get("main-progress").hidden, true);
+    assert.equal(ui.get("main-message").placeholder, "给 NEUMA 发消息…"); assert.equal(ui.text("main-progress"), "");
+    assert.equal(ui.get("main-send").hidden, false); assert.equal(ui.get("main-cancel").hidden, true);
     assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
     if (reason === "cancelled") {
       assert.match(ui.text("main-error"), /本轮已停止/); assert.equal(ui.get("main-error").classes.has("error"), false);
@@ -3039,6 +3049,40 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   // Re-reading a saved conversation must never replay its build action, even without a visible recovery control.
   await ui.get("main-refresh").click(); await settle(); assert.equal(events.filter((event) => event.build).length, 1);
   assert.equal(requests.includes("/api/requirements/turn"), false);
+});
+
+test("旧对话的偏好可就地保存，正式编辑只展示改动和对应确认操作", async () => {
+  const draft = { goal: { value: "已确认的论文解读目标" } };
+  const formal = { type: "requirements", agentId: "paper", draft, status: "ready", confirmed: false, changes: ["补充输出：附一份术语表"] };
+  const pending = { text: "称呼用户为「chriss」。", messageId: "old-reply" };
+  const old = { id: "old-reply", role: "assistant", content: "这是旧版返回的完整需求。", status: "complete" };
+  let conversation: FixtureConversation = { id: "main-one", title: "论文助手", messages: [old], context: { ...formal, pendingPreference: pending } };
+  const writes: WireBody[] = [];
+  const ui = setup(mainSource, async (path: string, options: RequestInit = {}) => {
+    if (path.endsWith("/operations")) {
+      writes.push(JSON.parse(String(options.body)));
+      conversation = { ...conversation, context: { ...formal, changes: [] }, messages: [...conversation.messages, { role: "assistant", content: "偏好已保存", status: "complete" }] };
+      return Response.json({ conversation, context: conversation.context, reply: "偏好已保存", actions: [] });
+    }
+    return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+  });
+  await ui.route({ page: "chat" }); await settle();
+  const messages = ui.get("main-messages"), panel = ui.get("main-context-content");
+  assert.equal(Boolean(messages.querySelector("details")?.open), false);
+  assert.match(ui.text("main-messages"), /只需更新助手偏好.*chriss/s);
+  assert.ok(!panel.querySelectorAll("button").some(item => item.textContent.includes("确认")));
+  ui.get("main-message").value = "留着稍后发的消息";
+  await messages.querySelectorAll("button").find(item => item.textContent === "只保存这项偏好")!.click(); await settle();
+  assert.equal(writes[0]?.message, "只保存这项偏好"); assert.equal(writes[0]?.expectedReplyId, old.id);
+  assert.equal(ui.get("main-message").value, "留着稍后发的消息");
+  assert.equal(messages.querySelectorAll("button").some(item => item.textContent === "只保存这项偏好"), false);
+  conversation = { ...conversation, context: formal };
+  await ui.get("main-refresh").click(); await settle();
+  assert.match(ui.text("main-context-content"), /补充输出：附一份术语表/);
+  const full = panel.querySelectorAll("details").find(item => item.querySelector("summary")?.textContent === "查看完整需求")!;
+  assert.equal(full.open, false); assert.ok(full.querySelectorAll("div").some(item => item.textContent === draft.goal.value));
+  await panel.querySelectorAll("button").find(item => item.textContent === "确认本次修改")!.click(); await settle();
+  assert.equal(writes[1]?.message, "确认修改");
 });
 
 test("需求快捷确认成功、失败或停止都保留原输入及发送期间的草稿编辑", async (t) => {
@@ -3333,7 +3377,7 @@ test("桌面主聊天统一需求输入，旧创建表单仅作为隐藏档案�
   assert.match(html, /class="main-context-slot"[^>]*>\s*<aside id="main-context-panel"/);
   const mainPage = html.slice(html.indexOf('<section id="page-chat"'), html.indexOf('<dialog id="main-material-dialog"'));
   assert.doesNotMatch(mainPage, /class="page-header"|与你持续对话，一起把想法变成可完成的工作。/);
-  assert.match(mainPage, /<p id="main-progress"[^>]*\bhidden><\/p>/);
+  assert.match(mainPage, /<p id="main-progress" class="sr-only" role="status"><\/p>/);
   assert.doesNotMatch(html, /id="(?:main-new-chat|agent-new-chat|group-new-task)"/);
   const mainForm = mainPage.slice(mainPage.indexOf('<form id="main-chat-form"'), mainPage.indexOf('</form>'));
   assert.ok(mainForm.includes(element!("main-context-open")![0]));

@@ -7,19 +7,21 @@ export interface MainRequirementAgents {
   get?(agentId: string): Promise<{ name: string; draft?: unknown } | null>;
   getRequirementConsultation?(agentId: string): Promise<Consultation | null>;
   getRequirementHandoff?(agentId: string): Promise<RequirementHandoff | null>;
-  saveRequirements?(agentId: string, input: unknown, options?: { confirmation?: unknown; requestId?: unknown; consultation?: unknown }): Promise<{ requirement?: MainSavedRequirement | null; [key: string]: unknown }>;
+  saveRequirements?(agentId: string, input: unknown, options?: { confirmation?: unknown; requestId?: unknown; consultation?: unknown; expectedDraft?: unknown }): Promise<{ requirement?: MainSavedRequirement | null; [key: string]: unknown }>;
 }
 type TurnOptions = NonNullable<Parameters<typeof processTurn>[2]>;
 type AdvanceOptions = Pick<TurnOptions, "signal" | "onProgress" | "requestId" | "platform" | "research"> & { agents?: MainRequirementAgents; evidenceMessages?: Parameters<typeof processTurn>[0]["evidenceMessages"] };
 import { createHash } from "node:crypto";
-import { CONFIRMATION_QUESTION, InputError, decideNext, emptyDraft, normalizeDraft, processTurn } from "../requirements/core.mjs";
+import { CHANGE_CONFIRMATION_QUESTION, CONFIRMATION_QUESTION, InputError, decideNext, emptyDraft, normalizeDraft, processTurn } from "../requirements/core.mjs";
+import { requirementChanges } from "./main-requirement-changes.mjs";
 import { claimRequirementHandoff, newConsultation } from "../requirements/consultation.mjs";
 import { substantiveRequirementHash } from "../requirements/task-spec.mjs";
 import { textLength } from "../runtime/text-length.mjs";
+import { errorField } from "../runtime/type-boundary.mjs";
 import { REQUIREMENT_HISTORY_MAX_MESSAGES, REQUIREMENT_HISTORY_MAX_CHARACTERS } from "../requirements/requirement-limits.mjs";
 
 const stableId = (conversationId: string, mutationId: string) => `agent_${createHash("sha256").update(`${conversationId}:${mutationId}`).digest("hex").slice(0, 32)}`;
-export const isMainConfirmation = (message: unknown) => typeof message === "string" && /^(?:确认需求|确认)[\s。！!，,]*$/.test(message.trim());
+export const isMainConfirmation = (message: unknown) => typeof message === "string" && /^确认(?:需求|(?:本次)?修改)?[\s。！!，,]*$/.test(message.trim());
 const recentMessages = (messages: string[]) => {
   const selected = []; let size = 0;
   for (const message of [...messages].reverse()) {
@@ -33,8 +35,13 @@ const recentMessages = (messages: string[]) => {
 export function requirementContext(requirement: MainRequirement | null | undefined) {
   if (!requirement) return null;
   const { agentId, mode, draft, status, confirmed, lastQuestion, summary, question, confirmationQuestion, savedRequirement, version } = requirement;
+  const changes = !confirmed && savedRequirement?.id === agentId ? requirementChanges(savedRequirement.draft, draft) : undefined;
+  const confirmChange = changes && status === "ready" ? (changes.length ? CHANGE_CONFIRMATION_QUESTION : null) : undefined;
+  const changeSummary = changes?.length ? ["本次修改", ...changes.map(line => `• ${line}`)].join("\n") : "当前没有正式需求变更。";
   return { type: "requirements", agentId, mode, draft: structuredClone(draft), name: savedRequirement?.name ?? draft.name?.value ?? "",
-    status, confirmed, lastQuestion, summary, question, confirmationQuestion, version, needsBuild: status === "needs_build",
+    status, confirmed, summary: changes ? changeSummary : summary, question, version, needsBuild: status === "needs_build",
+    lastQuestion: confirmChange === undefined ? lastQuestion : confirmChange,
+    confirmationQuestion: confirmChange === undefined ? confirmationQuestion : confirmChange, ...(changes ? { changes } : {}),
     ...(requirement.consultation ? { consultation: { revision: requirement.consultation.revision,
       issues: structuredClone(requirement.consultation.issues),
       lastAssessment: structuredClone(requirement.consultation.assessments.at(-1) ?? null) } } : {}),
@@ -54,10 +61,10 @@ export async function prepareRequirement({ record, conversationId, mutationId, a
   if (!["new", "continue", "edit"].includes(mode)) throw new InputError("请选择新建、继续或修改需求");
   if (mode === "new" && agentId) throw new InputError("新建需求不能覆盖已有 Agent");
   const existing = agentId ? (record.requirements ?? []).find((value) => value.agentId === agentId) : record.requirement;
-  const refresh = mode === "edit" && existing?.confirmed;
+  const refresh = mode !== "new" && existing?.confirmed && (mode === "edit" || existing.savedRequirement?.id === existing.agentId);
   if (mode !== "new" && existing && !refresh) {
     const restored = structuredClone(existing);
-    if (mode === "edit") restored.mode = "edit";
+    if (mode === "edit" || restored.savedRequirement?.id === restored.agentId) restored.mode = "edit";
     restored.consultation ??= newConsultation();
     const handoff = await agents.getRequirementHandoff?.(restored.agentId);
     return handoff && restored.consultation.handoff?.id !== handoff.id
@@ -100,20 +107,32 @@ export async function advanceRequirement(requirement: MainRequirement, message: 
     confirmed: result.confirmed, lastQuestion: result.question ?? result.confirmationQuestion ?? "", question: result.question,
     confirmationQuestion: result.confirmationQuestion, summary: result.summary, userMessages, consultation: result.consultation, version: requirement.version + 1,
     updatedAt: new Date().toISOString() };
-  let action, source;
+  let action, source, versionNotice;
   if (result.confirmed) {
-    const saved = await agents!.saveRequirements!(next.agentId, { name: next.draft.name.value || "我的 Agent", draft: next.draft },
-      { confirmation: result.confirmation, requestId: result.confirmation!.requestId, consultation: result.consultation });
-    if (!saved?.requirement || saved.requirement.id !== next.agentId) throw new InputError("需求未能保存到对应 Agent，请重试；不会创建重复 Agent");
-    next.savedRequirement = structuredClone(saved.requirement);
-    action = { type: "build_agent", agentId: next.agentId, label: "开始制作智能体", requirement: next.savedRequirement };
+    try {
+      const saved = await agents!.saveRequirements!(next.agentId, { name: next.draft.name.value || "我的 Agent", draft: next.draft },
+        { confirmation: result.confirmation, requestId: result.confirmation!.requestId, consultation: result.consultation, expectedDraft: requirement.savedRequirement?.draft });
+      if (!saved?.requirement || saved.requirement.id !== next.agentId) throw new InputError("需求未能保存到对应 Agent，请重试；不会创建重复 Agent");
+      next.savedRequirement = structuredClone(saved.requirement);
+    } catch (error) {
+      if (errorField(error, "reason") !== "requirement_version_conflict") throw error;
+      const latest = (await agents!.getRequirements!()).requirements.find(item => item.id === next.agentId);
+      if (!latest) throw error;
+      next.confirmed = false; next.status = "ready"; next.savedRequirement = latest; next.consultation = requirement.consultation;
+      versionNotice = "其他对话已更新这位助手的需求。下面是这份草稿和最新版本的差异。";
+    }
+  }
+  if (next.confirmed) {
+    action = { type: "build_agent", agentId: next.agentId, label: "开始制作智能体", requirement: next.savedRequirement! };
     source = { type: requirement.savedRequirement ? "agent_updated" : "agent_created", agentId: next.agentId,
       name: next.savedRequirement!.name, sourceLink: `#agent/${encodeURIComponent(next.agentId)}`, status: "needs_build" };
     try { signal?.throwIfAborted(); }
     catch (error) { if (error && typeof error === "object") Object.assign(error, { mainRequirementSource: source }); throw error; }
   }
-  const reply = result.confirmed
+  const context = requirementContext(next)!;
+  next.summary = context.summary; next.lastQuestion = context.lastQuestion; next.confirmationQuestion = context.confirmationQuestion;
+  const reply = next.confirmed
     ? "需求已确认并保存。正在打开左侧的这个智能体，开始架构评估与制作。"
-    : [result.summary, result.question ?? result.confirmationQuestion].filter(Boolean).join("\n\n");
-  return { requirement: next, context: requirementContext(next), reply, action, source };
+    : [versionNotice, next.summary, next.question ?? next.confirmationQuestion].filter(Boolean).join("\n\n");
+  return { requirement: next, context, reply, action, source };
 }

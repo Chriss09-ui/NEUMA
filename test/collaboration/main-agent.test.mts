@@ -602,6 +602,86 @@ test("已选助手的长期偏好在迭代对话里生效，重试复用结果�
   assert.ok(!evidence.some(message => message.content.includes("默认用中文") || message.content.includes("默认分三点")));
 });
 
+test("在原创建对话向已交付的助手改称呼，直接写记忆，已有正式编辑可继续", async t => {
+  const f = await fixture(t);
+  await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "open" });
+  await f.main.prompt(f.input("做一个周报助手", "describe"));
+  const published = await f.main.prompt(f.input("确认需求", "publish"));
+  const target = published.conversation.requirement!.agentId;
+  assert.equal(published.conversation.requirement!.mode, "create");
+  const writes: string[] = [];
+  f.main.agents.applyIterationPreference = async (id, text) => { assert.equal(id, target); writes.push(text); return { memory: text }; };
+  const direct = await f.main.prompt(f.input("我想让agent称呼我为chriss", "direct_address"));
+  assert.deepEqual(direct.actions, []); assert.equal(direct.sources[0]?.type, "agent_memory");
+  assert.deepEqual(direct.conversation.requirement, published.conversation.requirement);
+  assert.doesNotMatch(direct.reply, /确认|输入与规模/);
+  await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "edit", agentId: target });
+  f.providers.generateDraft = async () => {
+    const draft = structuredClone(f.requirements.get(target)!.draft); draft.deliverable.value += "，附上行动清单";
+    return { draft, proposedGap: "none", question: "" };
+  };
+  const formal = await f.main.prompt(f.input("每次交付附上行动清单", "formal"));
+  const later = await f.main.prompt(f.input("以后叫我 Chris", "while_editing"));
+  assert.deepEqual(later.conversation.requirement, formal.conversation.requirement);
+  assert.deepEqual((await f.main.getConversation(f.conversation.id)).conversation.context?.changes, ["补充输出：附上行动清单"]);
+  assert.deepEqual(writes, ["称呼用户为「chriss」。", "称呼用户为「Chris」。"]);
+  assert.equal(f.calls.filter(row => row.type === "requirements").length, 1);
+});
+
+test("旧版误收的连续称呼请求可按回复单独保存，旧草稿与后续正式需求隔离", async t => {
+  const f = await fixture(t, async record => {
+    await record.tools.open_agent_requirements!.execute("continue", { mode: "continue" });
+  });
+  await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "initial" });
+  await f.main.prompt(f.input("做一个周报助手", "describe"));
+  const published = await f.main.prompt(f.input("确认需求", "publish"));
+  const target = published.conversation.requirement!.agentId;
+  assert.equal(published.conversation.requirement!.mode, "create");
+  const writes: string[] = [];
+  // Simulate older releases which only knew how to turn this request into a formal draft.
+  f.providers.generateDraft = async () => {
+    const draft = structuredClone(f.requirements.get(target)!.draft); draft.task.value += "，称呼用户为 chriss";
+    return { draft, proposedGap: "none", question: "" };
+  };
+  await f.main.prompt(f.input("我想让他叫我chriss", "old_turn"));
+  const old = await f.main.prompt(f.input("我想让agent称呼我为chriss", "old_repeat"));
+  f.main.agents.applyIterationPreference = async (id, text) => { assert.equal(id, target); writes.push(text); return { memory: text }; };
+  f.main.agents.getActiveArchitecture = async () => null;
+  assert.equal((await f.main.getConversation(f.conversation.id)).conversation.context?.pendingPreference, undefined);
+  f.main.agents.getActiveArchitecture = async id => id === target ? { delivery: "ready" } : null;
+  const view = (await f.main.getConversation(f.conversation.id)).conversation;
+  const lastId = view.messages.at(-1)!.id;
+  assert.deepEqual(view.context?.pendingPreference, { text: "称呼用户为「chriss」。", messageId: lastId });
+  assert.deepEqual(view.context?.draft, published.conversation.requirement!.draft);
+  assert.deepEqual(writes, []);
+  await assert.rejects(f.main.prompt({ ...f.input("只保存这项偏好", "stale"), expectedReplyId: "wrong_reply" }), /已变化/);
+  const saveMemory = f.main.agents.applyIterationPreference;
+  f.main.agents.applyIterationPreference = async () => { throw new InputError("记忆暂时无法保存"); };
+  await assert.rejects(f.main.prompt({ ...f.input("只保存这项偏好", "offline"), expectedReplyId: lastId }), /暂时无法保存/);
+  assert.deepEqual((await f.main.getConversation(f.conversation.id)).conversation.context?.pendingPreference, view.context?.pendingPreference);
+  f.main.agents.applyIterationPreference = saveMemory;
+  const repair = { ...f.input("只保存这项偏好", "save_memory"), expectedReplyId: lastId };
+  const recovered = await f.main.prompt(repair);
+  assert.deepEqual(await f.main.prompt(repair), recovered);
+  assert.deepEqual(writes, ["称呼用户为「chriss」。"]);
+  assert.deepEqual(recovered.actions, []);
+  assert.deepEqual(recovered.context?.changes, []);
+  assert.deepEqual(recovered.conversation.requirement!.draft, published.conversation.requirement!.draft);
+  assert.deepEqual(recovered.conversation.messages.slice(0, old.conversation.messages.length), old.conversation.messages);
+  const unchanged = await f.main.prompt(f.input("确认", "no_further_edits"));
+  assert.deepEqual(unchanged.actions, []); assert.equal(unchanged.conversation.requirement?.confirmed, false);
+
+  f.providers.generateDraft = async () => {
+    const draft = structuredClone(f.requirements.get(target)!.draft); draft.deliverable.value += "，附上行动清单";
+    return { draft, proposedGap: "none", question: "" };
+  };
+  const formal = await f.main.prompt(f.input("每次交付附上行动清单", "formal"));
+  const evidence = formal.conversation.requirement!.consultation!.evidenceMessages;
+  assert.ok(evidence.some(m => m.content === "每次交付附上行动清单"));
+  assert.ok(!evidence.some(m => m.content.includes("chriss") || m.content.includes("只保存这项偏好")));
+  assert.equal(f.calls.filter(row => row.type === "requirements").length, 1);
+});
+
 test("迭代偏好只接受本轮单一长期偏好，正式修改、问句、材料、新建与其他目标保留原流程", async t => {
   const routed: string[] = [], writes: string[] = [];
   const f = await fixture(t, undefined, { requirementRouter: async ({ message }) => { routed.push(message); return "continue"; } });
@@ -611,6 +691,9 @@ test("迭代偏好只接受本轮单一长期偏好，正式修改、问句、�
     f.input("这次用中文回答", "one_off"), f.input("不要记住以后默认用中文", "negated"),
     f.input("以后默认用中文吗？", "question"), f.input("以后摘要默认分三点，并自动发给老师", "mixed_action"),
     f.input("帮另一个助手记住：以后默认用中文", "another_target"), f.input("以后每份报告必须分三点", "contract"),
+    f.input("这次叫我 Chriss", "temporary_address"), f.input("以后叫我 Chriss 吗？", "address_question"),
+    f.input("把这个助手改名为 Chriss", "rename_agent"), f.input("想让 agent 称呼我为 Chriss，再发邮件", "address_and_action"),
+    f.input("以后叫我起床", "wake_me"),
     { ...f.input("以后默认用中文", "attachment"), attachmentIds: ["document"] },
     f.input("以后默认用英文", "unpublished"),
   ];

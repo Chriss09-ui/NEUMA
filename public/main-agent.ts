@@ -11,6 +11,7 @@ import { createMainContext } from "./main-context.js";
 import { button, messageRow, node, notice } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = <K extends keyof PageElements>(id: K) => pageElement(document, id);
+const messageInput = byId("main-message"), idlePlaceholder = messageInput.placeholder;
 let selected: MainConversation | null = null, records: MainConversation[] = [], operation: MainObservation | null = null, loading = false, loaded = false, sequence = 0;
 let retryRequest: { id: string; fingerprint: string; body: MutationRequest } | null = null, page = "chat", listing: Promise<void> | null = null, activationSequence = 0, activationRetry: { key: string; body: MutationRequest } | null = null;
 let needsConversationReload = false, needsHistoryReload = false;
@@ -68,6 +69,12 @@ function showRecovery(message: string | undefined, error = true, target: "main-e
   notice(byId(target), message, error); controls();
 }
 function busy() { return Boolean(loading || operation || removing || materials.busy()); }
+function setComposerProgress(text: string) {
+  const status = byId("main-progress");
+  if (status.textContent === text) return;
+  status.textContent = text;
+  messageInput.placeholder = text || idlePlaceholder;
+}
 function closeHistoryMenu(restoreFocus = false) {
   if (!historyMenu) return;
   const { trigger, row } = historyMenu; historyMenu = null;
@@ -99,10 +106,11 @@ function controls() {
   byId("main-recovery").hidden = byId("main-refresh").hidden;
   byId("main-history-delete").disabled = busy();
   for (const item of byId("main-history-list").querySelectorAll("button")) item.disabled = busy();
+  byId("main-send").hidden = Boolean(operation);
   byId("main-cancel").hidden = !operation;
   byId("main-message").disabled = Boolean(loading || removing);
   materials.setDisabled(busy());
-  if (!operation) notice(byId("main-progress"), "");
+  if (!operation) setComposerProgress("");
 }
 function render() {
   const target = byId("main-messages"), wasBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
@@ -118,7 +126,18 @@ function render() {
     const groups = node("a", "secondary collaboration-action-link", "查看群组"); groups.href = "#groups";
     actions.append(groups); welcome.append(actions); target.append(welcome);
   }
-  for (const message of selected?.messages || []) target.append(messageRow(message, { bubble: true, attachmentUrl: (id) => api.mainMaterialUrl(selected!.id, id) }));
+  const pending = selected?.context?.pendingPreference;
+  for (const message of selected?.messages || []) {
+    const options = { bubble: true, attachmentUrl: (id: string) => api.mainMaterialUrl(selected!.id, id) };
+    const row = messageRow(message, options);
+    if (pending && pending.messageId === message.id && message.role === "assistant") {
+      const suggestion = messageRow({ ...message, content: `这次只需更新助手偏好：${pending.text}` }, options);
+      const save = button("只保存这项偏好", () => void send({ message: "只保存这项偏好", expectedReplyId: pending.messageId }), "secondary");
+      save.disabled = busy(); const actions = node("div", "panel-actions"); actions.append(save);
+      const original = node("details", "panel-disclosure"); original.append(node("summary", "", "查看原回复"), row);
+      suggestion.append(actions, original); target.append(suggestion);
+    } else target.append(row);
+  }
   if (operation?.reply) target.append(messageRow(operation.reply, { bubble: true }));
   if (wasBottom) target.scrollTop = target.scrollHeight;
   closeHistoryMenu(true);
@@ -256,12 +275,12 @@ async function followMain(reference: OperationReference, running: MainObservatio
   running.reference = reference;
   return observeOperation(cursor => api.mainOperation(reference.ownerId, reference.operationId, cursor, { signal: running.controller.signal }), reference, {
     signal: running.controller.signal,
-    disconnected: () => { if (operation === running) notice(byId("main-progress"), "连接中断，正在重新连接；后台任务继续执行。", false); },
+    disconnected: () => { if (operation === running) setComposerProgress("连接中断，正在重新连接；后台任务继续执行。"); },
     update(snapshot) {
       if (operation !== running || selected?.id !== reference.ownerId) return true;
       selected = snapshot.conversation; running.reply = undefined;
       applyContext(snapshot.context, { syncRequirement: true }); render();
-      notice(byId("main-progress"), snapshot.status === "running" ? "正在处理，进度已保存…" : "");
+      setComposerProgress(snapshot.status === "running" ? "正在处理，进度已保存…" : "");
       return snapshot.status !== "running";
     },
   });
@@ -276,24 +295,26 @@ function restoreObservation() {
   const reference: OperationReference = { version: 1, domain: "main", ownerId: selected.id, operationId: request.mutationId, generation: request.assistantId };
   const running: MainObservation = { id: selected.id, controller: new AbortController(), reference };
   operation = running; controls();
+  setComposerProgress("正在处理，进度已保存…");
   void followMain(reference, running).catch(caught => {
     if (operation === running && !running.controller.signal.aborted) showRecovery(`${errorInfo(caught).message} 后台任务继续保留，可重新加载查看。`);
   }).finally(() => { if (operation === running) { operation = null; render(); void list(); } });
 }
-async function send({ message: shortcutMessage }: { message?: string | undefined } = {}) {
+async function send({ message: shortcutMessage, expectedReplyId }: { message?: string | undefined; expectedReplyId?: string } = {}) {
   const shortcut = shortcutMessage !== undefined;
-  const attachmentIds = materials.refs(), supplied = (shortcut ? shortcutMessage! : byId("main-message").value).trim();
+  const attachmentIds = expectedReplyId ? [] : materials.refs(), supplied = (shortcut ? shortcutMessage! : byId("main-message").value).trim();
   const message = supplied || (attachmentIds.length ? "请处理这些材料，任务目标不明确时先向我提问。" : "");
   if (!message || message.length > 4000 || busy()) return;
   if (!selected) { await create(); if (!selected) return; }
   const id = selected.id;
   const previousContext = structuredClone(selected.context ?? null), previousPanel = contextPanel.capture();
-  const input = { message, ...(attachmentIds.length ? { attachmentIds } : {}) }, fingerprint = JSON.stringify(input);
+  const input = { message, ...(attachmentIds.length ? { attachmentIds } : {}), ...(expectedReplyId ? { expectedReplyId } : {}) }, fingerprint = JSON.stringify(input);
   const request = retryRequest?.id === id && retryRequest.fingerprint === fingerprint
     ? retryRequest.body : { ...input, mutationId: crypto.randomUUID() };
   retryRequest = { id, fingerprint, body: request };
   const running: MainObservation & { reply: GroupMessageView } = { id, controller: new AbortController(), reply: { role: "assistant", content: "", status: "running" } };
   operation = running;
+  setComposerProgress("正在处理…");
   selected.messages ||= [];
   const previous = selected.messages.length;
   const user: GroupMessageView = { role: "user", content: message, ...(attachmentIds.length ? { attachments: materials.attachments() } : {}) };
@@ -306,7 +327,7 @@ async function send({ message: shortcutMessage }: { message?: string | undefined
       if (event.type === "operation") { running.reference = event.operation as OperationReference; if (running.cancelRequested) void api.stopMainOperation(running.reference).catch(caught => showRecovery(`停止尚未确认：${errorInfo(caught).message}`)); return; }
       if (event.type === "text-start") running.reply.content = "";
       if (event.type === "text-delta") running.reply.content += event.delta || "";
-      if (event.type === "status") notice(byId("main-progress"), event.label || "正在联系智能体、整理工作…");
+      if (event.type === "status") setComposerProgress(event.label ?? "正在联系智能体、整理工作…");
       if (event.type === "context") applyContext(event.context as MainPanelContext | null | undefined, { reveal: true });
       render();
     } });
@@ -320,7 +341,7 @@ async function send({ message: shortcutMessage }: { message?: string | undefined
       || (source.type === "group" && ["created", "updated", "archived"].includes(source.operation!))))) {
       document.dispatchEvent(new CustomEvent("neuma:groups-changed"));
     }
-    retryRequest = null; materials.consume();
+    retryRequest = null; if (!expectedReplyId) materials.consume();
   } catch (caught) { if (operation !== running) return; const error = errorInfo(caught);
     const stopped = running.controller.signal.aborted || error.reason === "cancelled";
     if (stopped || error.reason) retryRequest = null;
@@ -401,7 +422,7 @@ document.addEventListener("keydown", (event) => {
 byId("main-cancel").addEventListener("click", async () => {
   const current = operation; if (!current) return;
   byId("main-cancel").disabled = true;
-  try { if (current.reference) await api.stopMainOperation(current.reference); else { current.cancelRequested = true; notice(byId("main-progress"), "请求正在保存，接受后将停止。"); } }
+  try { if (current.reference) await api.stopMainOperation(current.reference); else { current.cancelRequested = true; setComposerProgress("请求正在保存，接受后将停止。"); } }
   catch (caught) { const error = errorInfo(caught); showRecovery(`停止尚未确认：${error.message}`); }
   finally { byId("main-cancel").disabled = false; }
 });

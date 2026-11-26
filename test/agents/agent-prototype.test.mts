@@ -21,6 +21,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
+import { MainAgent } from "../../src/main/main-agent.mjs";
 import { InputError, ProviderError, processTurn } from "../../src/requirements/core.mjs";
 import { CAPABILITIES, designHash } from "../../src/architecture/architecture-contract.mjs";
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
@@ -550,6 +551,30 @@ test("迭代偏好原子追加到已发布助手，重复提交与过期设置�
   const current = await restored.get("weekly");
   assert.equal(current?.revision, built.agent!.revision);
   assert.deepEqual(current?.architectureRef, built.agent!.architectureRef);
+});
+
+test("在 NEUMA 迭代中指定用户称呼，重启后的助手在新对话读到称呼", async t => {
+  const records: FactoryRecords = [], { agents, options } = await fixture(t, factory(records));
+  const { agent } = await agents.build(input());
+  assert.ok(agent);
+  const main = new MainAgent({ config: options.config, dataDir: options.dataDir, agents, collaboration: {},
+    sessionFactory: async () => { throw new Error("明确称呼无需调用主模型或需求路由模型"); } });
+  t.after(() => main.close());
+  const { conversation } = await main.createConversation({ mutationId: "nickname-chat" });
+  await main.activateRequirements({ conversationId: conversation.id, agentId: agent.id, mutationId: "select-weekly" });
+  for (const [mutationId, message] of [["set-name", "想让agent称呼我为Chriss"], ["repeat-name", "以后叫我 Chriss"]]) {
+    const result = await main.prompt({ conversationId: conversation.id, mutationId, message });
+    assert.deepEqual(result.actions, []);
+    assert.match(result.reply, /Chriss/);
+  }
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.deepEqual(await restored.getMemory(agent.id), { memory: "称呼用户为「Chriss」。" });
+  const current = await restored.get(agent.id);
+  assert.equal(current?.name, agent.name); assert.equal(current?.revision, agent.revision);
+  await restored.prompt(turn(agent.id, "nickname-new-session", "你好"));
+  const request = records.flatMap(record => record.prompts).find(prompt => prompt.endsWith("用户本轮任务：你好"));
+  assert.ok(request);
+  assert.match(request, /本轮生效的 Agent 记忆（替代旧版本）："称呼用户为「Chriss」。"/);
 });
 
 test("展示资料独立于已确认需求，持久化后恢复侧栏且下一轮采用新称呼", async (t) => {
