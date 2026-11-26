@@ -202,7 +202,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
         name = "submit_architecture_review_slice";
         const published = objectFields(body.tools!.find(tool => tool.function.name === "submit_architecture_review_slice")!.function).parameters;
         assert.deepEqual(Object.keys(objectFields(objectFields(published).properties)).sort(), ["summary", "issues", assignment.field].sort());
-        args = { summary: "原生模拟模型独立核对本组原文", issues: [], factClaims: reviewSliceJson ? [] : " [\n ] ",
+        args = { summary: "原生模拟模型独立核对本组原文", factClaims: reviewSliceJson ? [] : " [\n ] ",
+          issues: assignment.field === "priorFindingDecisions" ? reviewed.issues.filter(issue => issue.id !== undefined && ids.includes(issue.id)) : [],
           checks: assignment.field === "checks" ? reviewed.checks.filter(row => ids.includes(row.id)) : [],
           acceptanceScopeChecks: assignment.field === "acceptanceScopeChecks" ? reviewed.acceptanceScopeChecks!.filter(row => "acceptanceId" in row && ids.includes(row.acceptanceId)) : [],
           priorFindingDecisions: assignment.field === "priorFindingDecisions" ? reviewed.priorFindingDecisions!.filter(row => "findingId" in row && ids.includes(row.findingId)) : [] };

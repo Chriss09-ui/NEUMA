@@ -378,12 +378,13 @@ test("分组规划的应用字段错误保留原反馈，结构修好后内容�
   const invalid = await callFixture(options!.rawInputValidators!.submit_development_plan_part!, undefined,
     [{ args: { plan: 42 }, toolCallId: "malformed" }]);
   assert.equal(invalid.valid, false); assert.equal(handle.reference.formatRecovery!.episodes[0]!.failures.length, 1);
-  const mixed = fixture().plan; mixed.schemaVersion = 3; Reflect.set(mixed.application!, "service", {});
+  const { operations: _operations, ...serviceWithoutOperations } = plan.application!.service!;
+  const incompletePlan = { ...plan, application: { ...plan.application!, service: serviceWithoutOperations } };
   handle.accepting = true;
-  await assert.rejects(fixtureTools(options!.customTools).submit_development_plan_part!.execute("mixed", { plan: mixed }), error => {
+  await assert.rejects(fixtureTools(options!.customTools).submit_development_plan_part!.execute("missing-operations", { plan: incompletePlan }), error => {
     assert.ok(error instanceof InputError);
-    assert.match(error.message, /plan\.application\.service \[additionalProperties\]/);
-    assert.doesNotMatch(error.message, /service\.(?:schemaVersion|language|operations)/);
+    assert.match(error.message, /plan\.application\.service\.operations \[required\]/);
+    assert.doesNotMatch(error.message, /plan\.application\.service \[additionalProperties\]/);
     return true;
   });
   assert.equal(handle.reference.formatRecovery!.episodes[0]!.failures.length, 2);
@@ -395,8 +396,9 @@ test("分组规划的应用字段错误保留原反馈，结构修好后内容�
   assert.deepEqual(handle.reference, reference, "重开同一责任会话沿用已发生的计数");
   handle.accepting = true;
   const submit = fixtureTools(options!.customTools).submit_development_plan_part!;
-  delete mixed.application!.service;
-  await assert.rejects(submit.execute("wrong-execution", { plan: mixed }), /execution_mismatch/);
+  const wrongAssignment = structuredClone(plan);
+  wrongAssignment.cases[0]!.taskId = plan.tasks[1]!.id;
+  await assert.rejects(submit.execute("wrong-assignment", { plan: wrongAssignment }), /task_acceptance_mismatch/);
   assert.equal(policy.content.plan!.count, 1); assert.ok(handle.reference.formatRecovery!.episodes[0]!.closed);
   await submit.execute("corrected", { plan });
   assert.equal(handle.submitted, true); assert.equal(policy.content.plan!.count, 1);
