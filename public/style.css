@@ -571,7 +571,18 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .reply-activity.settled .thinking-label { animation: none; font-size: 12px; }
 .reply-error { color: var(--danger); font-size: 12px; line-height: 1.7; }
 .message-recovery { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 11px; }
-.bubble.streaming::after { content: ""; display: inline-block; width: 5px; height: 14px; border-radius: 2px; margin-left: 4px; vertical-align: -2px; background: var(--accent); animation: thinking-breathe 1s ease-in-out infinite; }
+.streaming-cursor { display: none; }
+@property --reply-cursor-opacity { syntax: "<number>"; inherits: true; initial-value: 1; }
+.bubble.streaming { animation: reply-cursor-breathe 1s ease-in-out infinite; }
+.bubble.streaming .streaming-cursor,
+.bubble.streaming .rich-text-math:has(> .streaming-cursor) .katex-html::after {
+  content: ""; display: inline-block; width: 5px; height: 14px; border-radius: 2px; vertical-align: -2px;
+  /* Paint beyond the text edge without using any of the line's available width. */
+  position: relative; inset-inline-start: 4px; margin-inline-end: -5px;
+  pointer-events: none; background: var(--accent); opacity: var(--reply-cursor-opacity, 1);
+}
+.bubble.streaming .rich-text-math > .streaming-cursor { display: none; }
+@keyframes reply-cursor-breathe { 50% { --reply-cursor-opacity: .45; } }
 @keyframes thinking-turn { to { transform: rotate(360deg); } }
 @keyframes thinking-breathe { 50% { opacity: .45; } }
 

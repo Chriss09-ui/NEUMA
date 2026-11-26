@@ -83,13 +83,18 @@ export function renderRichText<N>(container: RichTextElement<N>, content: unknow
     if (text !== undefined) node.textContent = text;
     return node;
   };
-  const literal = (parent: N & RichTextParent<N>, value: string | undefined) => parent.append(document.createTextNode(value ?? ""));
+  let cursorParent: RichTextParent<N> | undefined;
+  const literal = (parent: N & RichTextParent<N>, value: string | undefined) => {
+    parent.append(document.createTextNode(value ?? ""));
+    if (value?.trim()) cursorParent = parent;
+  };
   const math = (parent: N & RichTextParent<N>, formula: string, original: string, display = false, block = false) => {
     const node = element(block ? "div" : "span"); node.className = "rich-text-math";
     try {
       renderFormula(formula, node, { displayMode: display, output: "htmlAndMathml", trust: false, throwOnError: true,
         strict: "error", maxExpand: 1000, maxSize: 20, macros: {} });
       parent.append(node);
+      cursorParent = display ? node : parent;
     } catch { literal(parent, original); }
   };
   const inline = (parent: N & RichTextParent<N>, tokens: RenderToken[] = [], context = false) => {
@@ -103,7 +108,10 @@ export function renderRichText<N>(container: RichTextElement<N>, content: unknow
         case "codespan": {
           const value = decode(token.text);
           if (simpleFormula(value, context)) math(parent, value, value);
-          else parent.append(element("code", value));
+          else {
+            parent.append(element("code", value));
+            cursorParent = parent;
+          }
           break;
         }
         case "link": {
@@ -138,7 +146,7 @@ export function renderRichText<N>(container: RichTextElement<N>, content: unknow
         case "code": {
           const node = element("pre"), code = element("code", token.text);
           if (/^[\w+-]+$/.test(token.lang || "")) code.className = `language-${token.lang}`;
-          node.append(code); parent.append(node); break;
+          node.append(code); parent.append(node); cursorParent = code; break;
         }
         case "blockquote": {
           const node = element("blockquote"); blocks(node, token.tokens); parent.append(node); break;
@@ -150,6 +158,7 @@ export function renderRichText<N>(container: RichTextElement<N>, content: unknow
             const li = element("li");
             if (item.task) {
               const check = element("span", item.checked ? "☑ " : "☐ "); check.setAttribute("aria-label", item.checked ? "已完成" : "未完成"); li.append(check);
+              cursorParent = check;
             }
             blocks(li, item.tokens, !token.loose); node.append(li);
           }
@@ -179,7 +188,13 @@ export function renderRichText<N>(container: RichTextElement<N>, content: unknow
     }
   };
   try { blocks(fragment, markdown.lexer(source) as RenderToken[]); }
-  catch { fragment.replaceChildren(document.createTextNode(source)); }
+  catch { fragment.replaceChildren(document.createTextNode(source)); cursorParent = fragment; }
+  if (cursorParent) {
+    const cursor = element("span");
+    cursor.className = "streaming-cursor";
+    cursor.setAttribute("aria-hidden", "true");
+    cursorParent.append(cursor);
+  }
   container.classList.add("rich-text");
   container.replaceChildren(fragment);
   sources.set(container, source);

@@ -54,7 +54,7 @@ async function runBrowser(browser: string, url: string, root: string, { windowSi
   const args = ["--headless", ...(windowSize ? [`--window-size=${windowSize.width},${windowSize.height}`] : []),
     "--disable-gpu", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
-    "--host-resolver-rules=MAP * ~NOTFOUND", `--user-data-dir=${join(root, "profile")}`,
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", `--user-data-dir=${join(root, "profile")}`,
     "--timeout=5000", "--dump-dom", url];
   const encoded = await new Promise<string>((resolve, reject) => {
     const grouped = process.platform !== "win32";
