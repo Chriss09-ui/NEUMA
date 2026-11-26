@@ -207,20 +207,20 @@ test("资料、记忆和产物 API 使用独立 Agent 身份，只交付 JSON �
     getProfiles: async () => ({ profiles: [{ id: agent.id, ...profile }] }),
     setProfile: async (id, value) => { seen.push(["profile", id, value]); return { profile: value }; },
     getMemory: async (id) => { seen.push(["memory", id]); return { memory: "优先简短中文" }; },
-    setMemory: async (id, memory) => { seen.push(["save-memory", id, memory]); return { memory }; },
+    setMemory: async (id, memory, expectedMemory) => { seen.push(["save-memory", id, memory, expectedMemory]); return { memory }; },
     files: async (id) => { seen.push(["files", id]); return { files, truncated: false }; },
     file: async (id, path) => { seen.push(["file", id, path]); return { path, content: "<script>window.parent.example()</script>", truncated: false }; },
   });
   assert.deepEqual(JSON.parse(String((await invoke(handler, "GET", "/api/agent-profiles")).text)), { profiles: [{ id: agent.id, ...profile }] });
   assert.deepEqual(JSON.parse(String((await invoke(handler, "POST", `/api/agents/${agent.id}/profile`, profile)).text)), { profile });
   assert.deepEqual(JSON.parse(String((await invoke(handler, "GET", `/api/agents/${agent.id}/memory`)).text)), { memory: "优先简短中文" });
-  assert.deepEqual(JSON.parse(String((await invoke(handler, "POST", `/api/agents/${agent.id}/memory`, { memory: "保存后的偏好" })).text)), { memory: "保存后的偏好" });
+  assert.deepEqual(JSON.parse(String((await invoke(handler, "POST", `/api/agents/${agent.id}/memory`, { memory: "保存后的偏好", expectedMemory: "优先简短中文" })).text)), { memory: "保存后的偏好" });
   assert.deepEqual(JSON.parse(String((await invoke(handler, "GET", `/api/agents/${agent.id}/files`)).text)), { files, truncated: false });
   const file = await invoke(handler, "GET", `/api/agents/${agent.id}/file?path=pages%2Fresult.html`);
   assert.match(checkedText(file.headers["content-type"]), /^application\/json/);
   assert.deepEqual(JSON.parse(String(file.text)), { path: "pages/result.html", content: "<script>window.parent.example()</script>", truncated: false });
   assert.equal((await invoke(handler, "GET", `/api/agents/${agent.id}/files/pages/result.html`)).status, 404);
-  assert.deepEqual(seen, [["profile", agent.id, profile], ["memory", agent.id], ["save-memory", agent.id, "保存后的偏好"], ["files", agent.id], ["file", agent.id, "pages/result.html"]]);
+  assert.deepEqual(seen, [["profile", agent.id, profile], ["memory", agent.id], ["save-memory", agent.id, "保存后的偏好", "优先简短中文"], ["files", agent.id], ["file", agent.id, "pages/result.html"]]);
 });
 
 test("辅助接口输入错误沿用安全错误响应，缺少产物路径不产生执行路由", async () => {

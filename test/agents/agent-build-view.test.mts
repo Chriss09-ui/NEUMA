@@ -19,6 +19,24 @@ const development = (overrides: Partial<DevelopmentView> = {}): DevelopmentView 
   architectureRef: { version: 1, candidateHash: "candidate-1" }, delivery: "needs_development", tasks: [], ...overrides });
 const currentStage = (presentation: ReturnType<typeof agentMakingState>) => presentation.stages.find((stage: { status: string; }) => stage.status === "current")?.id;
 
+test("局部工作指令更新按实时和持久进度展示，回正式设计后切回蓝图流程", () => {
+  const ongoing = architecture({ status: "designing", delivery: "blocked", design: null,
+    instructionRevisionCalls: { scope: 1, success: 1, missing: 0, review: 0 } });
+  const live = agentMakingState(agent, { status: "building", operation: { phase: "instruction_scope" } });
+  assert.equal(currentStage(live), "instruction_scope");
+  assert.deepEqual(live.stages.map(stage => stage.title), ["需求确认", "影响范围", "样例验证", "运行交付"]);
+  const reconnected = agentMakingState(agent, { status: "building", architecture: ongoing });
+  assert.equal(currentStage(reconnected), "instruction_validation");
+  assert.deepEqual(reconnected.stages.map(stage => stage.status), ["complete", "complete", "current", "pending"]);
+  const fallback = agentMakingState(agent, { status: "building",
+    architecture: { ...ongoing, instructionRevisionFallback: "样例未保留原交付要求" } });
+  assert.equal(currentStage(fallback), "designing");
+  assert.equal(fallback.stages.find(stage => stage.id === "evaluating")?.status, "pending");
+  const published = agentMakingState(agent, { status: "ready", architecture: architecture({
+    design: { ...validDesign([]), profile: "light" }, delivery: "ready", instructionRevision: { candidateHash: "candidate-1" } }) });
+  assert.deepEqual(published.stages.map(stage => stage.status), ["complete", "complete", "complete", "complete"]);
+});
+
 test("显式重开停在架构起点并提供可用的手动开始按钮", () => {
   const pending = architecture({ status: "pending", delivery: "blocked", candidateHash: undefined, design: null, review: null });
   const state = agentBuildState(agent, { architecture: pending });

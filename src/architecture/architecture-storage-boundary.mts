@@ -3,7 +3,7 @@ import type { ToolSchema } from "../contracts/tools.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 import { checkedStoredDraft } from "../requirements/consultation-storage.mjs";
 import { InputError } from "../requirements/core.mjs";
-import { LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, reviewSubmissionSchema } from "./architecture-contract.mjs";
+import { instructionRevisionMatches, LEGACY_DESIGN_SCHEMA, DESIGN_V2_SCHEMA, DESIGN_V3_SCHEMA, reviewSubmissionSchema } from "./architecture-contract.mjs";
 import { architectureToolValidation } from "./architecture-tool-diagnostics.mjs";
 import { objectFields, isRecord, isArray, isInteger } from "../runtime/type-boundary.mjs";
 const strings = (value: unknown): value is string[] => isArray(value) && value.every(entry => typeof entry === "string");
@@ -82,7 +82,10 @@ export function checkedStoredArchitectureRecord(input: unknown): StoredArchitect
   }
   if (value.reviewFindingTransitions !== undefined && !isArray(value.reviewFindingTransitions)) invalid();
   if (value.restartSource !== undefined) { const source = objectFields(value.restartSource); if (![source.version, source.preparedVersion].every(isInteger) || [source.recordHash, source.authorization, source.createdAt].some(entry => typeof entry !== "string")) invalid(); }
-  return input as StoredArchitectureRecord;
+  const record = input as StoredArchitectureRecord;
+  if ((record.instructionRevision !== undefined || record.instructionRevisionCalls && record.status === "passed" && !record.review)
+    && !instructionRevisionMatches(record)) invalid();
+  return record;
 }
 
 /** A shape bridge for an already passed record; downstream source hashes and delivery gates still apply. */

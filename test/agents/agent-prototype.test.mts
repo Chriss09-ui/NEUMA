@@ -532,6 +532,26 @@ test("独立记忆持久化，编辑与清空在已有会话下一轮生效", as
   assert.equal(records.length, 3); assert.match(runtime!.prompts[2]!, /Agent 记忆（替代旧版本）：""/);
 });
 
+test("迭代偏好原子追加到已发布助手，重复提交与过期设置页均不丢失记忆", async t => {
+  const { agents, options } = await fixture(t, factory([]));
+  const signal = new AbortController().signal;
+  const apply = (preference: string) => agents.applyIterationPreference("weekly", preference, { signal });
+  assert.equal(await apply("默认用中文"), null);
+  const built = await agents.build(input());
+  await agents.setMemory("weekly", "原有研究背景");
+  await Promise.all([apply("默认用中文"), apply("摘要分三点")]);
+  await apply("摘要分三点");
+  const expected = "原有研究背景\n默认用中文\n摘要分三点";
+  assert.deepEqual(await agents.getMemory("weekly"), { memory: expected });
+  await assert.rejects(agents.setMemory("weekly", "草稿", "原有研究背景"), /记忆已在其他地方更新/);
+  await assert.rejects(apply("字".repeat(12000)), /超过 12000/);
+  const restored = new PrototypeAgents(options); t.after(() => restored.close());
+  assert.deepEqual(await restored.getMemory("weekly"), { memory: expected });
+  const current = await restored.get("weekly");
+  assert.equal(current?.revision, built.agent!.revision);
+  assert.deepEqual(current?.architectureRef, built.agent!.architectureRef);
+});
+
 test("展示资料独立于已确认需求，持久化后恢复侧栏且下一轮采用新称呼", async (t) => {
   const records: FactoryRecords = [], { agents, options } = await fixture(t, factory(records));
   await agents.build(input());

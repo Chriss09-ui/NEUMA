@@ -571,8 +571,10 @@ function renderArchitecture(agent: AgentRequirement, brief: HTMLElement) {
     .filter((text) => typeof text === "string").join("；");
   const issues = (Array.isArray(record.issues) ? record.issues : []).map((issue) => [issue?.description, issue?.remedy]
     .filter((text) => typeof text === "string" && text.trim()).join(" ")).filter(Boolean).join("；");
+  const revision = record.instructionRevision;
+  const sampleConclusion = record.status === "passed" && revision && revision.candidateHash === record.candidateHash ? revision.reason : undefined;
   for (const [label, value] of [["方案类型", profiles[record.design?.profile!]], ["方案说明", record.summary],
-    ["选择理由", record.design?.rationale], ["检查结论", record.review?.summary],
+    ["选择理由", record.design?.rationale], ["检查结论", record.review?.summary], ["样例验证结论", sampleConclusion],
     ["待处理问题", issues], ["待接入能力", capabilities]]) {
     if (typeof value !== "string" || !value.trim()) continue;
     const row = element("div", "draft-field", "");

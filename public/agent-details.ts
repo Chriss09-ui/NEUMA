@@ -4,7 +4,7 @@ type DetailsTab = "memory" | "profile" | "connections" | "services";
 type ArtifactPreview = Awaited<ReturnType<ReturnType<typeof createApplicationApi>["artifactPreview"]>>;
 interface DownloadState { downloading?: boolean | undefined; downloadNote?: string | undefined }
 interface TaskArtifact extends DownloadState { taskId: string; index: number; path: string; note: string; preview: ArtifactPreview | null }
-interface DetailsState { files: FileView[]; filesLoaded: boolean; filesLoading: boolean; file: ArtifactPreview | null; filePath: string; filesSequence: number; fileSequence: number; memory: string; memoryLoaded: boolean; memorySequence: number; memorySaving: boolean; memoryDirty: boolean; profile: AgentProfile | null; profileDirty: boolean; profileSaving: boolean; filesNote?: string | undefined; fileNote?: string | undefined; memoryNote?: string | undefined; memoryError?: boolean | undefined; profileNote?: string | undefined; profileError?: boolean | undefined; taskArtifact?: TaskArtifact | null | undefined; workspaceDownload?: DownloadState | null | undefined }
+interface DetailsState { files: FileView[]; filesLoaded: boolean; filesLoading: boolean; file: ArtifactPreview | null; filePath: string; filesSequence: number; fileSequence: number; memory: string; savedMemory: string; memoryLoaded: boolean; memorySequence: number; memorySaving: boolean; memoryDirty: boolean; profile: AgentProfile | null; profileDirty: boolean; profileSaving: boolean; filesNote?: string | undefined; fileNote?: string | undefined; memoryNote?: string | undefined; memoryError?: boolean | undefined; profileNote?: string | undefined; profileError?: boolean | undefined; taskArtifact?: TaskArtifact | null | undefined; workspaceDownload?: DownloadState | null | undefined }
 import { pageElement, type PageElements } from "./page-elements.js";
 import { errorInfo } from "./ui-types.js";
 import { createAgentRuntime } from "./agent-runtime.js";
@@ -28,7 +28,7 @@ const showingFile = (id: string | null | undefined) => currentId() === id && fil
 
 function state(id: string | null) {
   if (!states.has(id!)) states.set(id, { files: [], filesLoaded: false, filesLoading: false, file: null, filePath: "", filesSequence: 0, fileSequence: 0,
-    memory: "", memoryLoaded: false, memorySequence: 0, memorySaving: false, memoryDirty: false,
+    memory: "", savedMemory: "", memoryLoaded: false, memorySequence: 0, memorySaving: false, memoryDirty: false,
     profile: null, profileDirty: false, profileSaving: false });
   return states.get(id)!;
 }
@@ -353,14 +353,15 @@ function renderMemory() {
 
 async function loadMemory(id: string | null) {
   const item = state(id);
-  if (item.memoryLoaded) return;
+  if (item.memoryDirty || item.memorySaving) return;
+  item.memoryLoaded = false;
   const sequence = ++item.memorySequence;
   item.memoryNote = "正在读取记忆…"; item.memoryError = false;
   if (showing(id, "memory")) renderMemory();
   try {
     const result = await api.getMemory(id!);
     if (sequence !== item.memorySequence || item.memoryDirty) return;
-    item.memory = result.memory; item.memoryLoaded = true;
+    item.memory = result.memory; item.savedMemory = result.memory; item.memoryLoaded = true;
     item.memoryNote = "保存后从下次任务生效；清空并保存即可移除记忆。";
   } catch (caught) { const error = errorInfo(caught);
     if (sequence !== item.memorySequence) return;
@@ -376,7 +377,8 @@ byId("agent-memory-form").addEventListener("submit", async (event) => {
   const submitted = item.memory; item.memorySaving = true; item.memoryNote = "正在保存…"; item.memoryError = false;
   renderMemory();
   try {
-    const result = await api.saveMemory(id!, submitted);
+    const result = await api.saveMemory(id!, submitted, { expectedMemory: item.savedMemory });
+    item.savedMemory = result.memory;
     if (item.memory === submitted) { item.memory = result.memory; item.memoryDirty = false; }
     item.memoryNote = item.memoryDirty ? "已保存上一份内容；当前修改尚未保存。" : "已保存，下次任务会使用这份记忆。";
   } catch (caught) { const error = errorInfo(caught); item.memoryNote = error.message || "保存失败，请重试。"; item.memoryError = true; }

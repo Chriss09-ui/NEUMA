@@ -32,7 +32,7 @@ import { InputError, ProviderError } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
 import { MAIN_PROMPT } from "./main-prompts.mjs";
-import { classifyRequirementInput } from "./requirement-routing.mjs";
+import { classifyRequirementInput, iterationPreference } from "./requirement-routing.mjs";
 import { MainStore, mainId, mainConversationFailure } from "./main-store.mjs";
 import { MainMaterials } from "./main-materials.mjs";
 import { makeProviders } from "../requirements/providers.mjs";
@@ -58,6 +58,13 @@ const sourceSummary = ({ type, agentId, groupId, taskId, sessionId, conversation
   type, agentId, groupId, taskId, sessionId, conversationId, sourceLink, status, operation, name,
   ...(typeof reply === "string" ? { reply: reply.slice(0, 1200) } : {}), ...(typeof message === "string" ? { message: message.slice(0, 600) } : {}),
 });
+function requirementEvidence(record: MainRecord) {
+  const recent = record.messages.slice(-24);
+  const memoryReplies = new Set(recent.filter(message => message.sources.some(source => source.type === "agent_memory")).map(message => message.id));
+  const memoryMessages = new Set(record.requests.filter(request => memoryReplies.has(request.assistantId)).flatMap(request => [request.userId, request.assistantId]));
+  return recent.filter(message => !memoryMessages.has(message.id) && (message.role === "user" || message.status === "complete"))
+    .map(({ id, role, content }) => ({ id, role, content }));
+}
 const intents = {
   create: /(?:创建|新建|建立|组建|拉|建).{0,12}(?:群|组)|(?:create|start).{0,20}(?:group|team)/i,
   update: /(?:修改|调整|更新|改名|重命名|加入|拉入|拉进|移出|踢出|加进|添加|更换|变更|恢复|重新启用).{0,25}(?:群|组|成员)|(?:群|组).{0,25}(?:改为|改成|换成|加上|加入|移除|改名|修改|恢复)|(?:update|rename|add|remove|restore).{0,20}(?:group|member)/i,
@@ -372,6 +379,16 @@ export class MainAgent {
     ctx.onProgress({ type: "context", context: structuredClone(context) });
   }
 
+  private async saveIterationPreference(ctx: MainTurn, requirement: MainRequirement, preference: string) {
+    const saved = await this.agents.applyIterationPreference?.(requirement.agentId, preference, { signal: ctx.controller.signal });
+    if (saved) {
+      const name = requirement.savedRequirement!.name;
+      ctx.sources.push({ type: "agent_memory", operation: "updated", agentId: requirement.agentId, name, sourceLink: link("agent", requirement.agentId) });
+      ctx.forcedReply = `已为「${name}」保存偏好「${preference}」，从下次任务起生效。`;
+    }
+    this.guard(ctx);
+  }
+
   async requirements(ctx: MainTurn, { agentId, mode }: { agentId?: string | undefined; mode?: string | undefined } = {}, { mutationId, signal = ctx.controller.signal }: { mutationId?: string | undefined; signal?: AbortSignal | undefined } = {}) {
     if (ctx.requirementRoute === "outside") throw new InputError("本轮已离开需求创建，旧草稿已保留，请处理当前要求");
     if (agentId) mainId(agentId, "Agent");
@@ -389,8 +406,7 @@ export class MainAgent {
     let result;
     try { result = await advanceRequirement(current, ctx.message, await this.getRequirementProviders(), {
       signal, onProgress: ctx.onProgress, agents: this.agents, requestId: ctx.mutationId,
-      evidenceMessages: [...record.messages.slice(-24).filter((item) => item.role === "user" || item.status === "complete")
-        .map(({ id, role, content }) => ({ id, role, content })), ...measurements],
+      evidenceMessages: [...requirementEvidence(record), ...measurements],
       research: async ({ query, url }, { signal: researchSignal }: { signal?: AbortSignal | undefined } = {}) => {
         this.guard(ctx, researchSignal);
         const options = { agentId: "main", scope: `requirements:${ctx.conversationId}:${ctx.mutationId}`,
@@ -487,29 +503,30 @@ export class MainAgent {
       if (background) signal?.removeEventListener("abort", abort);
       onAccepted?.(accepted);
       if (!background && signal?.aborted) abort(); this.guard(ctx);
-      if (record.context?.type === "requirements" && record.context!.agentId === record.requirement?.agentId
-        && record.requirement?.status === "ready" && !record.requirement!.confirmed && isMainConfirmation(ctx.message)) {
-        await this.requirements(ctx, { mode: "continue" }); this.guard(ctx); ctx.reply = ctx.forcedReply!;
+      const requirement = record.context?.type === "requirements" && record.context.agentId === record.requirement?.agentId ? record.requirement : null;
+      const preference = requirement && !ctx.attachmentIds.length && this.agents.applyIterationPreference
+        ? iterationPreference(ctx.message, requirement) : undefined;
+      if (requirement && preference?.direct) await this.saveIterationPreference(ctx, requirement, preference.text);
+      const allowMemory = preference?.direct === false;
+      if (requirement && (!requirement.confirmed || allowMemory) && ctx.forcedReply === undefined) {
+        if (isMainConfirmation(ctx.message)) await this.requirements(ctx, { mode: "continue" });
+        else {
+          const route = await this.requirementRouter({ config: this.config, cwd: this.store.root, dataDir: this.store.root,
+            sessionFactory: this.sessionFactory, message: ctx.message, requirement, allowMemory,
+            signal: ctx.controller.signal, onProgress: ctx.onProgress });
+          this.guard(ctx);
+          ctx.requirementRoute = typeof route === "string" ? route : "continue";
+          if (allowMemory && typeof route === "object" && route.route === "memory" && route.quote === ctx.message.trim())
+            await this.saveIterationPreference(ctx, requirement, preference.text);
+          if (!["continue", "new", "outside"].includes(ctx.requirementRoute)) throw failed("requirement_routing_failed", "本轮消息去向尚未核实，当前需求已保留，请重试");
+          if (ctx.forcedReply === undefined && ctx.requirementRoute !== "outside") await this.requirements(ctx, { mode: ctx.requirementRoute === "new" ? "new" : "continue" });
+        }
+      }
+      if (ctx.forcedReply !== undefined) {
+        this.guard(ctx); ctx.reply = ctx.forcedReply;
         ctx.onProgress({ type: "text-start" }); ctx.onProgress({ type: "text-delta", delta: ctx.reply });
         const conversation = await this.flush(ctx, "complete"); this.guard(ctx);
         return { reply: ctx.reply, conversation, context: conversation.context, actions: ctx.actions, sources: ctx.sources };
-      }
-      if (record.context?.type === "requirements" && record.context!.agentId === record.requirement?.agentId && !record.requirement!.confirmed) {
-        if (isMainConfirmation(ctx.message)) await this.requirements(ctx, { mode: "continue" });
-        else {
-          ctx.requirementRoute = await this.requirementRouter({ config: this.config, cwd: this.store.root, dataDir: this.store.root,
-            sessionFactory: this.sessionFactory, message: ctx.message, requirement: record.requirement!,
-            signal: ctx.controller.signal, onProgress: ctx.onProgress });
-          this.guard(ctx);
-          if (!["continue", "new", "outside"].includes(ctx.requirementRoute)) throw failed("requirement_routing_failed", "本轮消息去向尚未核实，当前需求已保留，请重试");
-          if (ctx.requirementRoute !== "outside") await this.requirements(ctx, { mode: ctx.requirementRoute === "new" ? "new" : "continue" });
-        }
-        if (ctx.forcedReply !== undefined) {
-          this.guard(ctx); ctx.reply = ctx.forcedReply!;
-          ctx.onProgress({ type: "text-start" }); ctx.onProgress({ type: "text-delta", delta: ctx.reply });
-          const conversation = await this.flush(ctx, "complete"); this.guard(ctx);
-          return { reply: ctx.reply, conversation, context: conversation.context, actions: ctx.actions, sources: ctx.sources };
-        }
       }
       if (!this.config.llmConfigured) throw failed("not_configured", "请先在设置中连接模型");
       ctx.onProgress({ type: "status", phase: "thinking", label: "正在了解你的要求…" });

@@ -1,3 +1,4 @@
+import { boundedRevisionText as bounded, presentation, matchesFormat } from "./architecture-instruction-format.mjs";
 import type { ArchitectureDesign, ArchitectureEvidenceContext, ArchitectureReview, ArchitectureContext, ArchitectureRecord, ArchitectureDecision, ArchitectureIssue, Capability, EvidenceItem, RequirementItem } from "../contracts/architecture.mjs";
 import type { RequirementDraft } from "../contracts/requirements.mjs";
 import type { ToolSchema } from "../contracts/tools.mjs";
@@ -543,4 +544,26 @@ export function designHash(value: unknown) {
     return result;
   }
   return createHash("sha256").update(canonical(value)).digest("hex");
+}
+
+export function instructionRevisionMatches(input: unknown) {
+  const record = objectFields(input), design = objectFields(record.design);
+  const { hash, ...body } = objectFields(record.instructionRevision);
+  const format = presentation(objectFields(body.format));
+  const calls = objectFields(record.instructionRevisionCalls);
+  if (!["scope", "success", "missing", "review"].every(stage => isInteger(calls[stage]) && calls[stage] > 0)
+    || body.callCountsHash !== designHash(calls)) return false;
+  if (typeof hash !== "string" || body.version !== 1 || !Number.isSafeInteger(body.sourceVersion)
+    || typeof body.platformHash !== "string" || !/^[a-f0-9]{64}$/.test(body.platformHash)
+    || typeof record.version !== "number" || body.sourceVersion !== record.version - 1
+    || typeof body.sourceCandidateHash !== "string" || !/^[a-f0-9]{64}$/.test(body.sourceCandidateHash)
+    || !format || design.schemaVersion !== 3 || requiresDevelopment(design) || !Array.isArray(design.connections) || design.connections.length
+    || !bounded(body.reason, 1200) || !Array.isArray(body.changedIds) || !body.changedIds.length || !body.changedIds.every(id => typeof id === "string")
+    || !Array.isArray(body.samples) || body.samples.length !== 2) return false;
+  const [success, missing] = body.samples.map(objectFields);
+  if (!success || !missing || success.input === missing.input || ![success, missing].every(sample => bounded(sample.input, 2400)
+    && bounded(sample.output, 12000) && bounded(sample.quote, 1200) && sample.output.includes(sample.quote))
+    || typeof success.output !== "string" || !matchesFormat(success.output, format)) return false;
+  return record.candidateHash === designHash(design) && body.candidateHash === record.candidateHash && body.sourceFingerprint === record.sourceFingerprint
+    && body.platformHash === record.platformHash && hash === designHash(body);
 }

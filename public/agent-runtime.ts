@@ -258,7 +258,7 @@ export function createAgentRuntime(request: BrowserRequest = fetch): AgentRuntim
     listProfiles: (options) => json("/api/agent-profiles", undefined, options),
     saveProfile: (id, profile, options) => json(`/api/agents/${encodeURIComponent(id)}/profile`, profile, options),
     getMemory: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, undefined, options),
-    saveMemory: (id, memory, options) => json(`/api/agents/${encodeURIComponent(id)}/memory`, { memory }, options),
+    saveMemory: (id, memory, { expectedMemory, ...options } = {}) => json(`/api/agents/${encodeURIComponent(id)}/memory`, { memory, expectedMemory }, options),
     listFiles: (id, options) => json(`/api/agents/${encodeURIComponent(id)}/files`, undefined, options),
     readFile: (id, path, options) => json(`/api/agents/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`, undefined, options),
     fileDownloadUrl: (id, path) => `/api/agents/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}&download=1`,

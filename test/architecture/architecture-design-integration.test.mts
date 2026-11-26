@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { ArchitectureDesigner } from "../../src/architecture/architecture.mjs";
 import { designSubmissionCounts, readDesignSubmissionPolicy } from "../../src/architecture/architecture-design-rejections.mjs";
 import { PrototypeAgents } from "../../src/agents/agent-prototype.mjs";
-import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { createPlatformSnapshot, validatePlatformMetadata } from "../../src/architecture/platform-contract.mjs";
 import { networkAllowed } from "../../src/runtime/web-capabilities.mjs";
 import { authorizeConfirmedRequirement, evaluateConsultation, issueConfirmation, newConsultation } from "../../src/requirements/consultation.mjs";
 import { sufficientPreflight } from "../helpers/consultation.mjs";
@@ -56,11 +56,11 @@ const stageNames = { blueprint: "submit_architecture_blueprint", module: "submit
 async function fixture(t: test.TestContext, { failModule = false, rejectReview = false, researchBeforeBlueprint = false, rejectModuleCalls = 0, formatModuleCalls = 0, rejectIntegrationCalls = 0,
   failRevisionCalls = 0, failRevisedReview = 0, failRepairCalls = 0, programBlocker = false, useFindingSelectors = false,
   consultBeforeBlueprint = false, failConsultation = false, omitBlueprintRequirement = false, stallModule = false,
-  acceptanceCount = 0, failReviewSlice = false, malformedReviewSlice = false, autoCorrectSlice = false, mixedFormatSlice = false,
+  acceptanceCount = 0, conversationAcceptance = false, failReviewSlice = false, malformedReviewSlice = false, autoCorrectSlice = false, mixedFormatSlice = false,
   readReviewPages = false, rejectSlice = false, reviewSliceJson = false, legacyModuleContext = false, compactHandoffs = false, malformedCoverage = false,
   interruptIntegration = false, encodedIntegrationValue = false, mixedScopeReferences = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "neuma-design-native-")), requests: { kind: string; body: FixtureChatRequest }[] = [], errors: ((unknown))[] = [], sessions: ({ "session": (NeumaPiSession); "options": (PiSessionOptions); })[] = [], researchCalls: ((unknown))[] = [];
-  const state = { failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, formatModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
+  const state = { sampleDropsEvidence: false, invalidSample: false, failModule, rejectReview, researchBeforeBlueprint, rejectModuleCalls, formatModuleCalls, rejectIntegrationCalls, failRevisionCalls, failRevisedReview,
     programBlocker, researchIssued: false, consultationIssued: false, reviewRejected: false, malformedSliceSubmitted: false, malformedSliceInterrupted: false, formatSliceCalls: 0,
     blueprintDraft: null as Record<string, unknown> | null, blueprintAllocation: null as Record<string, unknown> | null, blueprintPatched: false,
     blueprintRawRejected: false, blueprintRawFeedback: "",
@@ -75,7 +75,24 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
   const model = createServer(async (request, response) => {
     try {
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
-      const body = fixtureChatRequest(Buffer.concat(chunks).toString()), names = body.tools!.map((tool) => tool.function.name), payloads = users(body);
+      const body = fixtureChatRequest(Buffer.concat(chunks).toString()), names = (body.tools ?? []).map(tool => tool.function.name), payloads = users(body);
+      const localInput = payloads.find(row => Array.isArray(row.changes) && typeof row.previousInstructions === "string");
+      const sample = text(body.messages.findLast(row => row.role === "user")?.content);
+      if (!names.length && (localInput || sample.includes("虚构青禾周报"))) {
+        const kind = localInput ? localInput.success ? "sample_review" : "sample_scope" : "sample_execution";
+        requests.push({ kind, body });
+        const content = localInput ? localInput.success
+          ? objectFields(localInput.missing).output === "未提供的工作已全部完成。" ? { passed: false }
+            : { passed: true, reason: "结果保留试读及其来源，缺材料向用户索要。", successQuote: "完成试读", missingQuote: "请提供记录" }
+          : { route: "local", points: 0, language: "unchanged", layout: JSON.stringify(localInput.changes).includes("编号列表") ? "ordered" : "table", successInput: "虚构青禾周报：周二完成试读，周三安排复核。请汇总。",
+              missingInput: "虚构青禾周报：这周没有提供任何工作记录。请汇总。" }
+          : sample.includes("没有提供") ? state.sampleDropsEvidence ? "未提供的工作已全部完成。" : "请提供记录，再整理周报。" : state.invalidSample
+            ? "完成试读，安排复核。" : "| 时间 | 进展 |\n| --- | --- |\n| 周二 | 完成试读 |\n| 周三 | 安排复核 |";
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end("data: " + JSON.stringify({ id: "local-instruction", choices: [{ index: 0,
+          delta: { role: "assistant", content: typeof content === "string" ? content : JSON.stringify(content) }, finish_reason: "stop" }] }) + "\n\ndata: [DONE]\n\n");
+        return;
+      }
       const stage = (Object.keys(stageNames) as (keyof typeof stageNames)[]).find(key => names.includes(stageNames[key]));
       const kind = stage ?? (names.includes("submit_architecture_review_slice") ? "review_slice" : names.includes("submit_blueprint_analysis") ? "consultation" : names.includes("submit_repair_patch") ? "repair" : names.includes("submit_architecture_review_revision") ? "review_revision"
         : names.includes("submit_requirement_fidelity") ? "fidelity" : "reviewer");
@@ -141,6 +158,8 @@ async function fixture(t: test.TestContext, { failModule = false, rejectReview =
             selectionBasis: { capacity: "已确认记录集合", process: "逐项核对", quality: "保留原文事实", requirementIds: payload.requirements!.map((item) => item.id), assumptions: [] } });
           if (stage === "blueprint" && state.programBlocker) candidate.unknowns = [{ question: "固定尚未核实的业务效果",
             blocking: true, resolution: "保留独立程序阻断，用于检验评审恢复不能绕过未完成核实" }];
+          if (stage === "blueprint" && conversationAcceptance) candidate.acceptance = candidate.acceptance.map(row => ({ ...row,
+            verification: { stage: "runtime", owner: "conversation", adapterId: "conversation" } }));
           if (stage === "blueprint" && acceptanceCount) candidate.acceptance = Array.from({ length: acceptanceCount }, (_, i) => ({
             ...candidate.acceptance[i % candidate.acceptance.length]!, id: `case_${i}` }));
           if (stage === "module" && state.reviewRejected) candidate.components[0]!.purpose = "完整逐条归纳已确认工作记录并标记缺失项";
@@ -400,6 +419,79 @@ async function normalBuild(t: test.TestContext, f: Awaited<ReturnType<typeof fix
   t.after(() => agents.close());
   return agents;
 }
+
+async function confirmReportChange(f: Awaited<ReturnType<typeof fixture>>, agents: PrototypeAgents, addCapability = false, format = "周报请使用 Markdown 表格") {
+  const draft = structuredClone(f.definition.draft);
+  draft.deliverable.value += "，" + format;
+  draft.taskSpec!.items.push({ id: "report_format", dimension: "delivery", applicability: "applies", critical: true, content: format,
+    source: { kind: "user", evidence: [{ messageId: "revision", quote: format }] } });
+  if (addCapability) draft.capabilityDependencies.push("需要新增文件生成能力");
+  const source = newConsultation();
+  source.evidenceMessages.push({ id: "confirmed", role: "user", content: "完整核对全部工作记录" },
+    { id: "revision", role: "user", content: format });
+  const platform = createPlatformSnapshot({ allowNetwork: networkAllowed(draft) });
+  const consultation = await evaluateConsultation({ draft, consultation: source, platform, preflight: sufficientPreflight });
+  const next = { ...f.definition, draft };
+  const confirmation = issueConfirmation(draft, consultation, { platform });
+  await agents.saveRequirements(next.id, next, { consultation, confirmation });
+  return next;
+}
+
+test("正式修改周报表格在原入口发布新指令，两份独立样例核对业务并持久保留原架构绑定", { timeout: 30000 }, async t => {
+  const f = await fixture(t, { conversationAcceptance: true }), agents = await normalBuild(t, f);
+  const first = await agents.build(f.definition);
+  const base = first.architecture!;
+  const start = f.requests.length, next = await confirmReportChange(f, agents);
+  const result = await agents.build(next), updated = result.architecture!;
+  assert.equal(updated.status, "passed", updated.summary);
+  assert.equal(updated.delivery, "ready");
+  assert.equal(updated.version, base.version + 1);
+  assert.equal(result.agent!.id, first.agent!.id);
+  assert.match(result.agent!.instructions, /Markdown 表格/);
+  assert.deepEqual(updated.design!.components, base.design!.components);
+  assert.deepEqual(updated.design!.acceptance.slice(0, -1), base.design!.acceptance);
+  assert.deepEqual(f.requests.slice(start).map(row => row.kind), ["sample_scope", "sample_execution", "sample_execution", "sample_review"]);
+  assert.deepEqual(updated.instructionRevisionCalls, { scope: 1, success: 1, missing: 1, review: 1 });
+  assert.throws(() => validatePlatformMetadata({ ...updated, instructionRevisionCalls: { scope: 1, success: 1, missing: 1, review: 0 } }), /局部指令验证/);
+  assert.equal(updated.review, null);
+  await f.reload();
+  const saved = await f.designer.get(next.id);
+  assert.equal(objectFields(saved!.instructionRevision).sourceCandidateHash, base.candidateHash);
+  assert.equal(objectFields(saved!.instructionRevision).candidateHash, updated.candidateHash);
+  assert.ok((await agents.getActiveRuntime(next.id)) !== null);
+
+  const revisionStart = f.requests.length;
+  const incompatible = await confirmReportChange(f, agents, false, "周报改用编号列表");
+  const revised = await agents.build(incompatible);
+  assert.equal(revised.architecture!.instructionRevision, undefined);
+  assert.deepEqual(f.requests.slice(revisionStart, revisionStart + 2).map(row => row.kind), ["sample_scope", "blueprint"]);
+  assert.ok(revised.architecture!.review?.verdict === "pass");
+});
+
+test("样例未达到新格式就回蓝图，新增能力从正式设计开始", { timeout: 30000 }, async t => {
+  for (const scenario of ["新增能力", "原验收需要运行代码", "样例不符合格式", "格式符合但缺材料时编造事实"]) await t.test(scenario, async t => {
+    const addCapability = scenario === "新增能力";
+    const requiresCode = scenario === "原验收需要运行代码";
+    const f = await fixture(t, { conversationAcceptance: !requiresCode }), agents = await normalBuild(t, f);
+    await agents.build(f.definition);
+    const start = f.requests.length;
+    f.state.invalidSample = scenario === "样例不符合格式";
+    f.state.sampleDropsEvidence = scenario === "格式符合但缺材料时编造事实";
+    const next = await confirmReportChange(f, agents, addCapability), result = await agents.build(next);
+    const requests = f.requests.slice(start).map(row => row.kind), record = result.architecture!;
+    assert.equal(record.status, "passed", record.summary);
+    assert.equal(record.instructionRevision, undefined);
+    assert.ok(record.review?.verdict === "pass" && requests.includes("blueprint"));
+    if (addCapability || requiresCode) assert.equal(requests.includes("sample_scope"), false);
+    else {
+      const expected = f.state.sampleDropsEvidence
+        ? ["sample_scope", "sample_execution", "sample_execution", "sample_review", "blueprint"] : ["sample_scope", "sample_execution", "blueprint"];
+      assert.deepEqual(requests.slice(0, expected.length), expected);
+      assert.match(String(record.instructionRevisionFallback), /样例/);
+      assert.match(String(objectFields(objectFields(record.instructionRevisionSamples).success).output), /完成试读/);
+    }
+  });
+});
 
 test("真实Pi把扁平蓝图、模块正文和编码用例装配为正式候选，整合按目标类型还原并持久保存", { timeout: 30000 }, async t => {
   const f = await fixture(t, { compactHandoffs: true, encodedIntegrationValue: true });

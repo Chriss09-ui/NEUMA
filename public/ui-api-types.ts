@@ -72,7 +72,7 @@ export interface AgentRuntime {
  listProfiles(options?: RequestOptions): Promise<{ profiles: (AgentProfile & { id: string })[] }>;
  saveProfile(id: string, profile: unknown, options?: RequestOptions): Promise<{ profile: AgentProfile; version: number }>;
  getMemory(id: string, options?: RequestOptions): Promise<{ memory: string; version?: number | undefined; updatedAt?: string | undefined }>;
- saveMemory(id: string, memory: unknown, options?: RequestOptions): Promise<{ memory: string; version?: number | undefined; updatedAt?: string | undefined }>;
+ saveMemory(id: string, memory: unknown, options?: RequestOptions & { expectedMemory?: string }): Promise<{ memory: string; version?: number | undefined; updatedAt?: string | undefined }>;
  listFiles(id: string, options?: RequestOptions): Promise<{ files: FileView[]; truncated?: boolean | undefined }>;
  readFile(id: string, path: string, options?: RequestOptions): Promise<FileView & { content: string; truncated?: boolean | undefined; integrity:{bytes:number;sha256:string;redacted?:boolean} }>;
  fileDownloadUrl(id: string, path: string): string;

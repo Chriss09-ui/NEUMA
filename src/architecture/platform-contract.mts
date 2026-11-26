@@ -2,7 +2,7 @@ import { objectFields } from "../runtime/type-boundary.mjs";
 import type { Capability } from "../contracts/architecture.mjs";
 export type PlatformSnapshot = ReturnType<typeof createPlatformSnapshot>;
 import { InputError } from "../requirements/core.mjs";
-import { CAPABILITIES, CAPABILITY_CATALOG_VERSION, CURRENT_ARCHITECTURE_VERSION, PUBLIC_CAPABILITIES, PUBLIC_TOOL_IDS,
+import { instructionRevisionMatches, CAPABILITIES, CAPABILITY_CATALOG_VERSION, CURRENT_ARCHITECTURE_VERSION, PUBLIC_CAPABILITIES, PUBLIC_TOOL_IDS,
   capabilitySnapshotCompatible, designHash, validateReview } from "./architecture-contract.mjs";
 import { APPLICATION_PROTOCOL_VERSION } from "../applications/application-contract.mjs";
 import { PUBLIC_CAPABILITY_VERSION, PUBLIC_WEB_CAPABILITIES } from "../runtime/web-capabilities.mjs";
@@ -265,7 +265,9 @@ export function validatePlatformMetadata(record: unknown) {
     if (!record.design || designHash(record.design) !== record.candidateHash) fail("候选内容与摘要不匹配");
   } else if (record.reviewContext !== undefined && record.reviewContext !== null) fail("缺少评估候选摘要");
   if (record.review !== undefined && record.review !== null) validateReview(record.review, { candidateHash: record.candidateHash as string, schemaVersion: objectFields(record.design).schemaVersion as number });
-  if (record.status === "passed" && (!record.review || objectFields(record.review).verdict !== "pass"
+  if (record.instructionRevision !== undefined && (record.review !== null || !instructionRevisionMatches(record)))
+    fail("局部指令验证与候选、样例或平台绑定不符");
+  if (record.status === "passed" && (objectFields(record.review).verdict !== "pass" && !record.instructionRevision
     || !Array.isArray(record.issues) || record.issues.some((issue) => objectFields(issue).blocking)))
     fail("通过记录必须有通过评估且无阻断问题");
   for (const raw of record.attempts as unknown[] ?? []) {

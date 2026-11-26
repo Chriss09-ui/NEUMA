@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MainAgent } from "../../src/main/main-agent.mjs";
+import { classifyRequirementInput } from "../../src/main/requirement-routing.mjs";
 import { InputError, ProviderError } from "../../src/requirements/core.mjs";
 import { validDraft } from "../helpers/architecture.mjs";
 import { sufficientPreflight } from "../helpers/consultation.mjs";
@@ -574,6 +575,93 @@ test("旧主对话重新迭代读取其他会话确认的新需求，快捷确�
   const result = await f.main.prompt(f.input("确认需求", "confirm_latest"));
   assert.deepEqual(f.requirements.get("worker")!.draft, { ...updated.draft, taskSpec: { version: 1, items: [] } }); assert.equal(result.context!.agentId, "worker");
   assert.equal(f.records.length, 0); assert.equal(result.actions[0]!.type, "build_agent");
+});
+
+test("已选助手的长期偏好在迭代对话里生效，重试复用结果，后续正式需求不会引用记忆回合", async t => {
+  const f = await fixture(t);
+  const writes: string[] = [];
+  f.main.agents.applyIterationPreference = async (id, preference) => {
+    assert.equal(id, "worker"); writes.push(preference);
+    return { memory: writes.join("\n") };
+  };
+  const selected = await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "select_worker" });
+  const request = f.input("以后默认用中文", "language_preference");
+  const first = await f.main.prompt(request);
+  assert.deepEqual(await f.main.prompt(request), first);
+  const second = await f.main.prompt(f.input("帮这个助手记住：以后摘要默认分三点。", "format_preference"));
+  assert.deepEqual(writes, ["以后默认用中文", "以后摘要默认分三点"]);
+  assert.deepEqual(second.conversation.requirement, selected.conversation.requirement);
+  assert.deepEqual(second.context, selected.context);
+  assert.deepEqual(second.actions, []);
+  assert.equal(second.sources[0]?.agentId, "worker"); assert.equal(second.sources[0]?.type, "agent_memory");
+  assert.match(second.reply, /已.*保存.*摘要默认分三点/);
+  assert.equal(f.records.length, 0);
+  const formal = await f.main.prompt(f.input("每份报告必须附原始记录", "formal_update"));
+  const evidence = formal.conversation.requirement?.consultation?.evidenceMessages ?? [];
+  assert.ok(evidence.some(message => message.content === "每份报告必须附原始记录"));
+  assert.ok(!evidence.some(message => message.content.includes("默认用中文") || message.content.includes("默认分三点")));
+});
+
+test("迭代偏好只接受本轮单一长期偏好，正式修改、问句、材料、新建与其他目标保留原流程", async t => {
+  const routed: string[] = [], writes: string[] = [];
+  const f = await fixture(t, undefined, { requirementRouter: async ({ message }) => { routed.push(message); return "continue"; } });
+  f.main.agents.applyIterationPreference = async (_, preference) => { writes.push(preference); return null; };
+  await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "select_worker" });
+  const inputs = [
+    f.input("这次用中文回答", "one_off"), f.input("不要记住以后默认用中文", "negated"),
+    f.input("以后默认用中文吗？", "question"), f.input("以后摘要默认分三点，并自动发给老师", "mixed_action"),
+    f.input("帮另一个助手记住：以后默认用中文", "another_target"), f.input("以后每份报告必须分三点", "contract"),
+    { ...f.input("以后默认用中文", "attachment"), attachmentIds: ["document"] },
+    f.input("以后默认用英文", "unpublished"),
+  ];
+  for (const input of inputs) await f.main.prompt(input);
+  await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "new_agent" });
+  await f.main.prompt(f.input("以后默认用中文", "create_language"));
+  assert.deepEqual(routed, [...inputs.map(input => input.message), "以后默认用中文"]);
+  assert.deepEqual(writes, ["以后默认用英文"]);
+});
+
+test("迭代偏好写入失败时保留草稿和实际失败状态", async t => {
+  const f = await fixture(t);
+  f.main.agents.applyIterationPreference = async () => { throw new InputError("记忆不能保存"); };
+  const selected = await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "select_worker" });
+  await assert.rejects(f.main.prompt(f.input("以后默认用中文")), /记忆不能保存/);
+  const { conversation } = await f.main.getConversation(f.conversation.id);
+  assert.deepEqual(conversation.requirement, selected.conversation.requirement);
+  assert.equal(conversation.messages.at(-1)?.status, "failed");
+  assert.deepEqual(conversation.messages.at(-1)?.sources, []);
+  assert.deepEqual(conversation.messages.at(-1)?.actions, []);
+});
+
+test("只读寻址接受有完整本轮依据的表达偏好，不能用摘句或混合请求改写记忆", async t => {
+  const writes: string[] = [];
+  const words = ["我希望你今后回复时先给我结论，再列出依据", "以后请使用繁体字回答我"];
+  const mixed = "以后请使用繁体字回复并自动发送邮件";
+  const incomplete = "今后请把回答写得更有条理";
+  const routed: string[] = [];
+  const f = await fixture(t, undefined, { requirementRouter: classifyRequirementInput, sessionFactory: async options => ({
+    messages: [], async prompt(payload) {
+      const message = fixtureString(objectFields(JSON.parse(payload)).currentUserMessage);
+      routed.push(message);
+      await fixtureTool(options, "submit_requirement_route").execute("decide", {
+        route: "memory", quote: message === incomplete ? "回答写得更有条理" : message,
+      });
+    }, abort() {}, dispose() {},
+  }) });
+  f.main.agents.applyIterationPreference = async (_id, preference) => { writes.push(preference); return { memory: writes.join("\n") }; };
+  const selected = await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "select_worker" });
+  for (const [i, message] of words.entries()) {
+    const result = await f.main.prompt(f.input(message, `memory_${i}`));
+    assert.match(result.reply, /保存偏好/);
+    assert.deepEqual(result.conversation.requirement, selected.conversation.requirement);
+  }
+  assert.deepEqual(writes, ["今后回复时先给我结论，再列出依据", words[1]]);
+  for (const [i, message] of [incomplete, mixed].entries()) {
+    const result = await f.main.prompt(f.input(message, `formal_${i}`));
+    assert.ok(!result.sources.some(source => source.type === "agent_memory"));
+  }
+  assert.equal(writes.length, 2);
+  assert.deepEqual(routed, [...words, incomplete, mixed]);
 });
 
 test("未完成需求中的简短确认不能由模型切换到另一个已保存 Agent", async (t) => {

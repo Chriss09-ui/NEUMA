@@ -1360,7 +1360,7 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .agent-making-eyebrow { display: block; color: var(--accent-hover); font-family: var(--font-brand); font-size: 11px; font-weight: 600; letter-spacing: .08em; }
 .agent-making-title { margin: 10px 0 12px; font-size: 28px; font-weight: 550; letter-spacing: -.02em; }
 .agent-making-name { color: var(--text-2); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
-.agent-making-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 0; margin: 0 0 32px; list-style: none; }
+.agent-making-steps { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); padding: 0; margin: 0 0 32px; list-style: none; }
 .agent-making-step { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; color: var(--muted); }
 .agent-making-step:not(:last-child)::after { content: ""; position: absolute; left: 44px; right: 12px; top: 16px; height: 1px; background: var(--border-strong); }
 .agent-making-marker { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface); font-family: var(--font-brand); font-size: 12px; }

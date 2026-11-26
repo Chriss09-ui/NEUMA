@@ -43,6 +43,7 @@ export function rememberArchitectureThought(segments: ThoughtSegment[] = [], eve
 
 const makingStages = [["requirements", "需求确认"], ["designing", "架构设计"], ["evaluating", "独立评估"],
   ["development", "按需研发"], ["delivery", "运行交付"]] as const;
+const instructionStages = [["requirements", "需求确认"], ["instruction_scope", "影响范围"], ["instruction_validation", "样例验证"], ["delivery", "运行交付"]] as const;
 
 export function agentMakingState(agent: MakingAgent, state: MakingState) {
   const architecture = state.architecture?.agentId === agent.id && agentSourceKey(state.architecture) === agentSourceKey(agent)
@@ -59,18 +60,29 @@ export function agentMakingState(agent: MakingAgent, state: MakingState) {
   if (architecture?.status === "passed") phase = hasDevelopment ? "development" : "delivery";
   if (development.record?.phase === "packaging" || operation?.phase === "packaging") phase = "delivery";
   if (architecture?.diagnostic?.phase === "evaluating") phase = "evaluating";
+  const calls = architecture?.instructionRevisionCalls;
+  const receipt = architecture?.instructionRevision;
+  const verified = receipt && receipt.candidateHash === architecture?.candidateHash && architecture.status === "passed";
+  let localPhase = operation?.phase;
+  if (!localPhase && calls?.scope && !architecture?.instructionRevisionFallback)
+    localPhase = calls.success || calls.missing || calls.review ? "instruction_validation" : "instruction_scope";
+  const usingInstructionStages = verified || localPhase === "instruction_scope" || localPhase === "instruction_validation";
+  if (verified) phase = "delivery";
+  else if (localPhase === "instruction_scope" || localPhase === "instruction_validation") phase = localPhase;
+  const steps = usingInstructionStages ? instructionStages : makingStages;
   const stopped = architecture?.status === "cancelled" || development.record?.status === "cancelled" || state.status === "cancelled";
   const failed = ["failed", "error", "infeasible", "needs_changes", "needs_evidence", "blocked"].includes(state.status)
     || ["failed", "blocked", "interrupted"].includes(development.record?.status!);
-  const headline = stopping ? "正在终止生成" : reading ? "正在读取制作进度" : active ? "正在制作你的 Agent"
+  const activeHeadline = usingInstructionStages ? "正在更新工作指令" : "正在制作你的 Agent";
+  const headline = stopping ? "正在终止生成" : reading ? "正在读取制作进度" : active ? activeHeadline
     : stopped ? "生成已终止" : failed ? "制作暂未完成" : development.canResume ? "等待继续制作"
       : state.status === "needs_connection" ? "等待连接所需能力" : "准备制作你的 Agent";
   const summary = stopping ? "正在停止当前操作并保存进度，请稍候。"
     : reading ? "正在核实这个智能体已保存的状态。"
       : (!active && state.buildError) || (!active && recovery?.message) || state.error || (active ? operation?.label || state.label : development.visible ? development.summary : state.label)
         || "需求已经确认，可以开始设计与检查。";
-  const index = makingStages.findIndex(([id]) => id === phase);
-  const stages = makingStages.map(([id, title], position) => {
+  const index = steps.findIndex(([id]) => id === phase);
+  const stages = steps.map(([id, title], position) => {
     let status = "pending", label = "待开始";
     if (id === "requirements") { status = "complete"; label = "已确认"; }
     else if (!reading && position < index) { status = "complete"; label = "已完成"; }

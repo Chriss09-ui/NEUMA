@@ -1,3 +1,4 @@
+import { checkInstructionRevisionSource, tryInstructionRevision } from "./architecture-instruction-revision.mjs";
 import { ExecutionLifecycle } from "../runtime/execution-lifecycle.mjs";
 import { runRepairAgent } from "../runtime/repair-agent.mjs";
 import { runArchitectureReviewDispatch, revalidateArchitectureReviewDispatch, shouldDistributeArchitectureReview, architectureReviewDispatchRecovery } from "./architecture-review-dispatch.mjs";
@@ -270,6 +271,8 @@ export class ArchitectureDesigner {
         records.set(record.agentId + ":" + record.version, record);
       }
     }
+    for (const record of records.values()) if (record.instructionRevision)
+      checkInstructionRevisionSource(record, records.get(record.agentId + ":" + (record.version - 1)));
     this.records = records;
   }
 
@@ -419,6 +422,7 @@ export class ArchitectureDesigner {
   save(record: StoredArchitectureRecord) {
     agentId(record.agentId);
     validatePlatformMetadata(record);
+    if (record.instructionRevision) checkInstructionRevisionSource(record, this.records.get(record.agentId + ":" + (record.version - 1)));
     if (record.designProgressCheckpoint)
       record.designProgressEvidenceHash = designEvidenceHash(record);
     const snapshot = structuredClone({ ...record, updatedAt: new Date().toISOString() });
@@ -1577,7 +1581,7 @@ export class ArchitectureDesigner {
     return structuredClone(record);
   }
 
-  async design(definition: Definition, { signal, onProgress = () => {}, consultation, developmentFailure, historicalPlanningReference, architectureRepair }: ArchitectureDesignOptions = {}) {
+  async design(definition: Definition, { signal, onProgress = () => {}, consultation, developmentFailure, historicalPlanningReference, architectureRepair, publishedArchitecture, runInstructionSample }: ArchitectureDesignOptions = {}) {
     definition = structuredClone(definition);
     await this.ready; signal?.throwIfAborted();
     const requirements = requirementItems(definition.draft);
@@ -1946,6 +1950,40 @@ export class ArchitectureDesigner {
           ...(record.feedbackLedger ? { revisionFeedback: architectureFeedbackContext(feedbackLedger(record.feedbackLedger)) } : {}),
           ...(record.confirmedRequirementContext ? { confirmedRequirementContext: record.confirmedRequirementContext } : {}),
           ...(record.deferredVerifications ? { deferredVerifications: record.deferredVerifications } : {}), ...platformContext });
+        if (attempt === 0 && previous && publishedArchitecture && runInstructionSample && !revisionSeed && !recovery.request
+          && !architectureRepair && !developmentFailure && !restartSource && !designProgressSource
+          && !feedbackLedger(record.feedbackLedger)?.findings.some(finding => !finding.closure)) {
+          const calls = { scope: 0, success: 0, missing: 0, review: 0 };
+          const local = await tryInstructionRevision(previous, record, context(), publishedArchitecture, runInstructionSample, {
+            config: this.config, cwd: this.cwd, dataDir: this.dataDir, sessionFactory: this.sessionFactory, signal,
+            saveSample: async (stage, input, output) => {
+              const sample = textWithinLimit(output, 12000) ? { input, output } : { input, outputHash: designHash(output), exceedsLimit: true };
+              record.instructionRevisionSamples = { ...objectFields(record.instructionRevisionSamples), [stage]: sample };
+              await this.save(record);
+            },
+            charge: stage => async () => {
+              signal?.throwIfAborted();
+              calls[stage]++;
+              record.instructionRevisionCalls = { ...calls };
+              await this.save(record);
+              onProgress({ type: "status", phase: stage === "scope" ? "instruction_scope" : "instruction_validation", label: stage === "scope" ? "正在核对本次修改的影响范围…"
+                : stage === "review" ? "正在核对样例和原有交付要求…" : "正在用独立样例验证修改后的工作指令…" });
+            },
+          });
+          signal?.throwIfAborted();
+          if (local?.status === "passed") {
+            delete record.instructionRevisionSamples;
+            Object.assign(record, { design: local.design, contractVersion: local.design.schemaVersion, candidateHash: local.receipt.candidateHash, instructionRevision: local.receipt,
+              reviewContext: { candidateHash: local.receipt.candidateHash, platformHash: record.platformHash },
+              status: "passed", delivery: "blocked", buildable: true, summary: "局部指令修改已通过样例验证，正在更新执行定义" });
+            await this.save(record); signal?.throwIfAborted(); return structuredClone(record);
+          }
+          if (local?.status === "fallback") {
+            record.instructionRevisionFallback = local.reason;
+            onProgress({ type: "status", phase: "designing", label: local.reason + "，继续正式设计…" });
+            await this.save(record);
+          }
+        }
         const remainingModules = Math.max(0, ARCHITECTURE_MODULE_LIMIT - delegates);
         const availableDelegate = remainingModules ? { ...delegateTool,
           description: `${delegateTool.description} 当前本次构建剩余${remainingModules}项；修订不重置额度，优先复用已有结果。`,
@@ -2357,7 +2395,8 @@ export class ArchitectureDesigner {
     const current = await this.get(record.agentId);
     if (current?.version !== record.version || current.candidateHash !== record.candidateHash
       || current.status !== "passed" || current.buildable !== true) throw new InputError("架构版本已改变，请重新检查后生成");
-    current.delivery = "ready"; current.summary = "方案检查通过，执行定义已生成，可以开始任务。";
+    current.delivery = "ready";
+    current.summary = current.instructionRevision ? "输出格式修改已通过样例验证，新指令已生效。" : "方案检查通过，执行定义已生成，可以开始任务。";
     await this.save(current); return current;
   }
 }

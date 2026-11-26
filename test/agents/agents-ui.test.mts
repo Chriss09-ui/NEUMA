@@ -1170,6 +1170,18 @@ test("现有说明区域展示可展开的方案依据、检查结论和待接�
   assert.doesNotMatch(text(details), /internal_read_tool|available_tool|不可展示的提示词|内部能力/);
 });
 
+test("方案说明只展示当前候选已通过的样例验证结论", async () => {
+  for (const candidateHash of ["current", "previous"]) {
+    const record = architecture({ candidateHash: "current", review: null,
+      instructionRevision: { candidateHash, reason: "回答符合三点摘要要求", samples: [{ input: "样例原文" }] } });
+    const ui = await setup({ inspect: () => Response.json({ agent: null, architecture: record }) });
+    const brief = treeText(ui.get("agent-brief"));
+    assert.equal(brief.includes("样例验证结论"), candidateHash === "current");
+    assert.equal(brief.includes("回答符合三点摘要要求"), candidateHash === "current");
+    assert.doesNotMatch(brief, /样例原文/);
+  }
+});
+
 test("逐段显示回复且复用气泡，完成前阻止重复任务并保留下一条输入和阅读位置", async () => {
   const partial = stream(), ui = await setup({ turn: () => partial.response });
   const pending = ui.submit("当前任务"); await settle();

@@ -5,7 +5,7 @@ interface FixtureAgent {id:string;name:string;draft:{goal:{value:string}};profil
 interface FixtureRuntime {agentId:string;agent:FixtureAgent;definition:({revision:number;[key:string]:unknown})|null;status:string;ready:boolean;busy:boolean;error:string;[key:string]:unknown}
 interface FixtureDetail {id?:string;agentId?:string|null;page?:string;active?:boolean;profile?:AgentProfile;[key:string]:unknown}
 interface FixtureEvent {type?:string;detail?:FixtureDetail;target?:unknown;propertyName?:string;defaultPrevented?:boolean;preventDefault?:()=>void}
-interface DetailsOptions {files?:(id:string)=>unknown;file?:(id:string,path:string)=>unknown;memory?:(id:string)=>unknown;saveMemory?:(id:string,value:string)=>unknown;saveProfile?:(id:string,profile:AgentProfile)=>unknown;artifactPreview?:(id:string,taskId:string,index:number)=>unknown;downloadArtifact?:(id:string,taskId:string,index:number)=>unknown;downloadFile?:(id:string,path:string)=>unknown;initial?:string;stored?:Map<string,string>;initialRuntime?:Record<string,Partial<FixtureRuntime>>;reduceMotion?:boolean;panelMotion?:boolean}
+interface DetailsOptions {files?:(id:string)=>unknown;file?:(id:string,path:string)=>unknown;memory?:(id:string)=>unknown;saveMemory?:(id:string,value:string,options?:{expectedMemory?:string})=>unknown;saveProfile?:(id:string,profile:AgentProfile)=>unknown;artifactPreview?:(id:string,taskId:string,index:number)=>unknown;downloadArtifact?:(id:string,taskId:string,index:number)=>unknown;downloadFile?:(id:string,path:string)=>unknown;initial?:string;stored?:Map<string,string>;initialRuntime?:Record<string,Partial<FixtureRuntime>>;reduceMotion?:boolean;panelMotion?:boolean}
 import { fixtureDeferred } from "../helpers/m7-test-boundaries.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -162,7 +162,7 @@ declare src:string; disabled = false; open = false; attributes = new Map<string,
       readFile: (id: unknown, path: unknown) => call("readFile", [id, path], file, { path, content: `${id}的文件内容`, truncated: false }),
       downloadFile: (id:string, path:string) => call("downloadFile", [id, path], downloadFile, new Blob(["完整工作目录原文件"])),
       getMemory: (id: unknown) => call("getMemory", [id], memory, { memory: `${id}的记忆` }),
-      saveMemory: (id:string, value:string) => call("saveMemory", [id, value], saveMemory, { memory: value }),
+      saveMemory: (id:string, value:string, options?:{expectedMemory?:string}) => call("saveMemory", [id, value, options], saveMemory, { memory: value }),
       saveProfile: (id:string, value:AgentProfile) => call("saveProfile", [id, value], saveProfile, { profile: value }),
     }),
   });
@@ -676,6 +676,34 @@ test("记忆保存中编辑和后台响应不丢草稿，保存失败后仍能�
   assert.equal(ui.get("agent-memory-input").value, "提交后的新草稿");
   await ui.submit("agent-memory-form");
   assert.equal(ui.item()!.memoryDirty, false);
+});
+
+test("重新打开记忆读取迭代后的偏好，旧草稿提交时保留用户输入和服务端新内容", async () => {
+  let stored = "优先列出行动项";
+  const ui = await setup({
+    memory: () => ({ memory: stored }),
+    saveMemory: (_id, value, options) => {
+      if (options?.expectedMemory !== undefined && options.expectedMemory !== stored) throw Error("记忆已更新");
+      stored = value;
+      return { memory: stored };
+    },
+  });
+  await ui.openMemory();
+  assert.equal(ui.get("agent-memory-input").value, "优先列出行动项");
+  await ui.click("agent-details-close");
+  stored += "\n以后默认用中文回答";
+  await ui.openMemory();
+  assert.equal(ui.get("agent-memory-input").value, stored);
+
+  await ui.input("agent-memory-input", "我的未保存修改");
+  await ui.click("agent-details-close");
+  stored += "\n摘要分三点";
+  await ui.openMemory();
+  assert.equal(ui.get("agent-memory-input").value, "我的未保存修改");
+  await ui.submit("agent-memory-form");
+  assert.equal(ui.get("agent-memory-feedback").textContent, "记忆已更新");
+  assert.equal(ui.get("agent-memory-input").value, "我的未保存修改");
+  assert.equal(stored, "优先列出行动项\n以后默认用中文回答\n摘要分三点");
 });
 
 test("文件与列表迟到响应不覆盖新选择或其他 Agent 的预览", async () => {
