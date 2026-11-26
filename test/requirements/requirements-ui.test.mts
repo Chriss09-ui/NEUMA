@@ -6,7 +6,7 @@ interface RequirementBody {name:string;draft:LegacyRequirement["draft"];updatedA
 interface LegacyConversation {schemaVersion:number;messages:Message[]}
 interface HistoryRecord {id:string;agentId:string;schemaVersion?:number;messages?:Message[];title?:string;createdAt?:string;updatedAt?:string;saveVersion?:number;mutationId?:string;deletedAt?:string}
 interface HarnessOptions {stored?:Map<string,string>;requirements?:LegacyRequirement[];conversations?:Map<string,LegacyConversation>;historyConversations?:Map<string,HistoryRecord>;storageRequest?:(path:string,body:RequirementBody,options:RequestInit)=>Response|Promise<Response>|null|undefined}
-interface FixtureEvent {type:string;detail?:{id?:string;profile?:AgentProfile;profiles?:(AgentProfile&{id:string})[];action?:string};preventDefault?:()=>void}
+interface FixtureEvent {type:string;detail?:{id?:string;profile?:AgentProfile;profiles?:(AgentProfile&{id:string})[];action?:string;items?:LegacyRequirement[]};preventDefault?:()=>void}
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -133,7 +133,16 @@ declare src:string;
 
 type RequirementUi = ReturnType<typeof setup>;
 type RequirementElement = ReturnType<RequirementUi["get"]>;
-function managementAvatar(ui:RequirementUi) { return ui.get("agents-list").children[0]!.children[0]!.children[0]!; }
+function descendants(node:RequirementElement):RequirementElement[] { return [node, ...node.children.flatMap(descendants)]; }
+function managementAvatar(ui:RequirementUi) {
+  const avatar = descendants(ui.get("agents-list")).find((node) => node.dataset.avatarKind);
+  assert.ok(avatar);
+  return avatar;
+}
+function managementTitles(ui:RequirementUi) {
+  return ui.get("agents-list").children.filter((node) => node.tagName === "ARTICLE")
+    .map((card) => descendants(card).find((node) => /^H[1-6]$/.test(node.tagName))?.textContent);
+}
 function deliveryAvatar(ui:RequirementUi) { return ui.get("messages").children.at(-1)!.children[0]!; }
 
 function assertStarAvatar(target:RequirementElement, icon:string|undefined, {shape,color}:{shape?:string;color?:string} = {}) {
@@ -145,7 +154,6 @@ function assertStarAvatar(target:RequirementElement, icon:string|undefined, {sha
   assert.equal(root!.dataset.avatarMotion, "true");
   if (shape) assert.equal(root!.dataset.shape, shape);
   if (color) assert.equal(root!.dataset.color, color);
-  const descendants = (node:RequirementElement):RequirementElement[] => [node, ...node.children.flatMap(descendants)];
   const world = descendants(root!).find((node) => node.className === "star-avatar-world");
   assert.ok(world);
   assert.equal(world.children.length, 2);
@@ -294,9 +302,9 @@ test("修改展示信息同步管理卡、交付卡与迭代名称，原始需�
   const profile = { name: "我的会议伙伴", description: "", icon: "📝" };
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "test-agent", profile } });
   const card = ui.get("agents-list").children[0];
-  assert.equal(card!.children[1]!.textContent, "我的会议伙伴");
-  assert.equal(card!.children[2]!.textContent, "");
-  assert.equal(card!.children[0]!.children[0]!.textContent, "📝");
+  assert.deepEqual(managementTitles(ui), ["我的会议伙伴"]);
+  assert.equal(descendants(card!).some((node) => node.tagName === "P" && node.textContent.includes("整理会议")), false);
+  assert.equal(managementAvatar(ui).textContent, "📝");
   assert.equal(managementAvatar(ui)!.dataset.avatarKind, "text");
   assert.equal(deliveryAvatar(ui)!.dataset.avatarKind, "text");
   assert.equal(deliveryAvatar(ui)!.textContent, "📝");
@@ -306,7 +314,7 @@ test("修改展示信息同步管理卡、交付卡与迭代名称，原始需�
   assert.equal(ui.agents()[0]!.name, "会议助手");
   assert.equal(ui.agents()[0]!.draft.name!.value, "会议助手");
   await ui.document.dispatchEvent({ type: "neuma:agent-profiles-loaded", detail: { profiles: [{ id: "test-agent", name: "迟到旧名字", description: "旧简介", icon: "旧" }] } });
-  assert.equal(ui.get("agents-list").children[0]!.children[1]!.textContent, "我的会议伙伴");
+  assert.deepEqual(managementTitles(ui), ["我的会议伙伴"]);
   await ui.submit("迭代需求");
   assert.equal(ui.agents()[0]!.id, "test-agent");
   assert.equal(ui.agents()[0]!.name, "新的需求名称");
@@ -364,12 +372,45 @@ test("没有浏览器入口也能从 Agent 文件夹恢复列表，主需求会�
   assert.equal(ui.agents().length, 1);
   assert.equal(ui.agents()[0]!.id, "saved-one");
   assert.equal(ui.agents()[0]!.persisted, true);
-  assert.equal(ui.get("agents-list").children[0]!.children[1]!.textContent, "我的助手");
+  assert.deepEqual(managementTitles(ui), ["我的助手"]);
   assert.equal(ui.session().messages.length, 0);
   assert.equal(ui.session().draft, null);
   assert.equal(ui.persistenceRequests.some((request) => request.body), false);
   assert.equal(ui.stored.has("neuma.requirements.session.optin.v1"), false);
   assert.equal(JSON.parse(String(ui.stored.get("neuma.requirements.saved-list.v1")))[0].id, "saved-one");
+});
+
+test("管理页按展示名称和简介搜索，清除后恢复列表，侧栏仍可访问所有助手", async () => {
+  const ui = setup(async () => Response.json(result()), { requirements: [
+    { id: "paper", name: "旧名称", draft: { goal: { value: "原始目标" } },
+      profile: { name: "Paper 助手", description: "整理论文" } },
+    { id: "weekly", name: "周报助手", draft: { goal: { value: "整理进度" } },
+      profile: { name: "周报助手", description: "输出 Markdown 周报" } },
+  ] });
+  let sidebarIds:string[] = [];
+  ui.document.addEventListener("neuma:agents-changed", (event) => {
+    sidebarIds = Array.from(event.detail!.items!, (agent) => agent.id).sort();
+  });
+  await ui.ready();
+  const input = ui.get("agents-search");
+  async function search(value:string) {
+    input.value = value;
+    await input.dispatchEvent({ type: "input" });
+  }
+  await search("  pAPER ");
+  assert.deepEqual(managementTitles(ui), ["Paper 助手"]);
+  await search("MARKDOWN");
+  assert.deepEqual(managementTitles(ui), ["周报助手"]);
+  await search("没有这个名字");
+  assert.deepEqual(managementTitles(ui), []);
+  const feedback = descendants(ui.get("agents-list"));
+  assert.ok(feedback.some((node) => node.textContent === "没有找到匹配的智能体"));
+  assert.deepEqual(sidebarIds, ["paper", "weekly"]);
+  const clear = descendants(ui.get("agents-list")).find((node) => node.tagName === "BUTTON" && node.textContent === "清除搜索");
+  assert.ok(clear);
+  await clear.click();
+  assert.equal(input.value, "");
+  assert.deepEqual(managementTitles(ui).sort(), ["Paper 助手", "周报助手"]);
 });
 
 test("首次接入迁移全部旧需求及手动保存对话，服务器现存版本优先", async () => {
@@ -463,7 +504,9 @@ test("待同步需求的删除状态读取失败时保留新版备份并提示�
   assert.equal(ui.agents()[0]!.pendingSync, true);
   assert.deepEqual(JSON.parse(String(stored.get("neuma.requirements.saved-list.v1"))), [pending]);
   assert.equal(ui.persistenceRequests.some((request) => request.body), false);
-  assert.match(ui.get("agents-error").textContent, /浏览器备份保留.*删除状态读取失败/);
+  assert.equal(ui.get("agents-notice").hidden, false);
+  assert.ok(ui.get("agents-notice-title").textContent);
+  assert.match(ui.get("agents-notice-body").textContent, /删除状态读取失败/);
 });
 
 test("只删除legacy-saved聊天后启动仍保留该Agent尚未同步的需求", async () => {
@@ -553,7 +596,9 @@ test("删除等待旧保存时阻止排队的新需求再保存或构建", async
   await ui.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "edit", id: "one" } });
   const current = ui.submit("确认新需求"); await settle();
   const card = ui.get("agents-list").children[0];
-  const removal = card!.children.find((node: { className: string; }) => node.className === "agent-actions")!.children.find((node: { textContent: string; }) => node.textContent === "删除")!.click();
+  const deleteButton = descendants(card!).find((node) => node.tagName === "BUTTON" && node.textContent === "删除");
+  assert.ok(deleteButton);
+  const removal = deleteButton.click();
   await settle();
   release!(); await Promise.all([previous, current, removal]);
   assert.equal(writes, 1);
@@ -583,7 +628,9 @@ test("服务器已有旧需求时，失败保存的新需求刷新后仍可恢�
   assert.equal(restored.agents()[0]!.persisted, true);
   assert.equal(JSON.parse(String(restored.stored.get("neuma.requirements.saved-list.v1")))[0].name, "新需求 B");
   assert.equal(restored.persistenceRequests.some((request) => request.body), false);
-  assert.match(restored.get("agents-error").textContent, /未同步.*再次点击保存/);
+  const notice = restored.get("agents-notice-body").textContent;
+  assert.match(notice, /新需求 B/);
+  assert.match(notice, /保存/);
   await restored.document.dispatchEvent({ type: "neuma:agent-action", detail: { action: "save", id: "one" } });
   assert.equal(restored.serverRequirements!.get("one")!.name, "新需求 B");
   assert.equal(restored.agents()[0]!.dirty, false);
@@ -642,7 +689,7 @@ test("旧pending迁移失败保留完整旧备份，服务器删除冲突时只�
   });
   await failed.ready();
   assert.deepEqual(JSON.parse(String(stored.get("neuma.agent.conversation.v2.one"))), pending);
-  assert.match(failed.get("agents-error").textContent, /浏览器备份保留.*磁盘暂时无法写入/);
+  assert.match(failed.get("agents-notice-body").textContent, /磁盘暂时无法写入/);
   const deleted = setup(async () => Response.json(result()), { stored, requirements: [requirement],
     storageRequest: (path, body) => path.includes("/conversations/") && body
       ? Response.json({ error: "该对话已删除", reason: "conversation_deleted" }, { status: 409 }) : null,

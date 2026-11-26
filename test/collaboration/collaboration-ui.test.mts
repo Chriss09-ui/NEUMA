@@ -495,8 +495,55 @@ test("侧栏群组列表不显示空列表提示，群组入口和群组页引�
     assert.equal(ui.get("sidebar-groups-feedback").hidden, true);
     assert.equal(ui.text("sidebar-groups-feedback"), "");
     assert.equal(ui.get("sidebar-group-list").children.length, groups.filter((item) => !item.archived).length);
-    if (!groups.some((item) => !item.archived)) assert.match(ui.text("groups-list"), /创建第一个群组/);
+    if (!groups.length) assert.match(ui.text("groups-list"), /创建第一个群组/);
+    else if (groups.every((item) => item.archived)) {
+      const show = ui.get("groups-list").querySelectorAll("button").find((item) => item.textContent === "显示已归档群组");
+      assert.ok(show);
+      await show.click();
+      assert.equal(ui.get("groups-show-archived").checked, true);
+      assert.equal(ui.get("groups-list").querySelectorAll("a").find((link) => link.textContent === "查看群聊")?.href, "#group/one");
+      assert.equal(ui.get("sidebar-group-list").children.length, 0);
+    }
   }
+});
+
+test("群组管理搜索完整用途，收起或展开只影响卡片说明，归档筛选与侧栏独立", async () => {
+  const purpose = "共同完成课程设计。" + "整理老师要求并记录证据。".repeat(8) + "最终交付 Markdown/CSV。";
+  const active = { ...group("design", "Design 小组"), purpose };
+  const archived = { ...group("past", "往期小组"), archived: true };
+  const ui = setup(groupsSource, async () => Response.json({ groups: [active, archived] }));
+  await settle();
+  const library = ui.get("groups-list"), search = ui.get("groups-search"), archive = ui.get("groups-show-archived");
+  const searchFor = async (value: string) => {
+    search.value = value;
+    await search.dispatchEvent({ type: "input" });
+  };
+  const listedLinks = () => library.querySelectorAll("a");
+  await searchFor(" markdown/csv ");
+  assert.equal(listedLinks().find((link) => link.textContent === "进入群聊")?.href, "#group/design");
+  assert.ok(!ui.text("groups-list").includes("最终交付"));
+  const toggle = library.querySelectorAll("button").find((item) => item.textContent === "展开说明");
+  assert.ok(toggle);
+  await toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.ok(ui.text("groups-list").includes(purpose));
+  await toggle.click();
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.ok(!ui.text("groups-list").includes("最终交付"));
+
+  await searchFor("design 小组");
+  assert.ok(listedLinks().some((link) => link.textContent === active.name));
+  await searchFor(archived.name);
+  const clear = library.querySelectorAll("button").find((item) => item.textContent === "清除搜索");
+  assert.ok(clear);
+  await clear.click();
+  assert.equal(search.value, "");
+  archive.checked = true;
+  await archive.dispatchEvent({ type: "change" });
+  assert.ok(listedLinks().some((link) => link.textContent === active.name));
+  assert.ok(listedLinks().some((link) => link.textContent === archived.name));
+  assert.ok(sidebarGroup(ui, active.id));
+  assert.equal(sidebarGroup(ui, archived.id), undefined);
 });
 
 test("群头像在侧栏、列表和群标题使用同一静态组合，资料更新不增加读取请求", async () => {
@@ -506,7 +553,7 @@ test("群头像在侧栏、列表和群标题使用同一静态组合，资料�
   await settle(); await ui.document.dispatchEvent({ type: "neuma:agents-changed", detail: { items: state.members } });
   await ui.route({ page: "group", groupId: "one" }); await settle();
   const avatars = () => [sidebarGroup(ui)!.querySelector(".sidebar-group-avatar"),
-    ui.get("sidebar-group-rail").children[0]!.children[0], ui.get("groups-list").children[0]!.children[0]!.children[0],
+    ui.get("sidebar-group-rail").children[0]!.children[0], ui.get("groups-list").querySelector(".group-library-avatar"),
     ui.get("group-avatar"), ui.get("group-details-avatar")];
   for (const avatar of avatars()) {
     assert.equal(avatar!.dataset.memberCount, "2");
@@ -517,6 +564,7 @@ test("群头像在侧栏、列表和群标题使用同一静态组合，资料�
   await ui.document.dispatchEvent({ type: "neuma:agent-profile-changed", detail: { id: "writer", profile: { icon: "star:1:7" } } });
   for (const avatar of avatars()) assert.equal(avatar!.children[0]!.dataset.avatarIcon, "star:1:7");
   assert.equal(requests.length, before);
+  for (const member of state.members!) assert.ok(ui.text("groups-list").includes(member.name));
   assert.equal(sidebarGroup(ui)!.querySelector(".sidebar-group-link")!.href, "#group/one");
   assert.equal(textOf(sidebarGroup(ui)!.querySelector(".sidebar-group-link")!), "研究小组");
 });

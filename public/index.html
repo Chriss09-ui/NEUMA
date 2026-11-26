@@ -117,7 +117,20 @@
         <dialog id="main-material-dialog" class="collaboration-dialog" aria-labelledby="main-material-title"><header class="collaboration-dialog-heading"><h2 id="main-material-title">这份对话的材料</h2><button id="main-material-close" class="ghost-button" type="button" aria-label="关闭主助理材料">关闭</button></header><p id="main-material-feedback" class="muted-note" role="status"></p><div id="main-material-list" class="collaboration-file-list"></div></dialog>
 
         <section id="page-groups" class="page page-groups" data-page="groups" aria-labelledby="groups-title" hidden>
-          <header class="page-header"><div><h1 id="groups-title">我的群组</h1><p class="page-subtitle">把不同能力的智能体放在一起，让它们共同完成工作。</p></div><div class="header-actions"><label class="groups-archive-filter"><input id="groups-show-archived" type="checkbox"> 显示归档</label><button id="groups-create" class="primary" type="button">＋ 创建群组</button></div></header><div id="groups-error" class="error" role="alert" hidden></div><div id="groups-list" class="groups-library" aria-live="polite"></div>
+          <header class="page-header library-page-header">
+            <div class="identity-heading"><h1 id="groups-title">我的群组</h1><span id="groups-count" class="count">—</span></div>
+            <div class="library-header-controls">
+              <label class="library-search">
+                <span class="sr-only">搜索群名或用途</span>
+                <input id="groups-search" type="search" placeholder="搜索群名或用途" aria-controls="groups-list">
+              </label>
+              <label class="groups-archive-filter"><input id="groups-show-archived" type="checkbox" aria-controls="groups-list">显示归档</label>
+              <button id="groups-create" class="primary" type="button">＋ 创建群组</button>
+            </div>
+          </header>
+          <div id="groups-error" class="error" role="alert" hidden></div>
+          <p id="groups-search-status" class="sr-only" role="status"></p>
+          <div id="groups-list" class="groups-library"><p class="muted-note">正在读取群组…</p></div>
         </section>
 
         <section id="page-group" class="page page-group group-chat-page" data-page="group" aria-labelledby="group-title" hidden>
@@ -543,17 +556,24 @@
 
         <!-- 智能体管理从左侧“我的智能体”进入 -->
         <section id="page-agents" class="page" data-page="agents" aria-labelledby="agents-title" hidden>
-          <header class="page-header">
-            <div>
-              <div class="identity-heading"><h1 id="agents-title">我的智能体</h1><span id="agent-count" class="count">0</span></div>
-              <p class="page-subtitle">进入独立对话、保存需求，或交给 NEUMA 继续迭代。</p>
+          <header class="page-header library-page-header">
+            <div class="identity-heading"><h1 id="agents-title">我的智能体</h1><span id="agent-count" class="count">0</span></div>
+            <div class="library-header-controls">
+              <label class="library-search">
+                <span class="sr-only">搜索智能体名称或简介</span>
+                <input id="agents-search" type="search" placeholder="搜索名称或简介" aria-controls="agents-list">
+              </label>
+              <button id="agents-create" class="primary" type="button">＋ 创建智能体</button>
             </div>
-            <button id="agents-create" class="primary" type="button">＋ 创建智能体</button>
           </header>
-          <p class="agents-preview-note muted-note">确认需求后生成助手，在独立对话中试用；已有需求也可进入后生成。</p>
           <div id="manage-agents">
             <div id="agents-error" class="error" role="alert" hidden></div>
-            <div id="agents-list" class="agent-grid" aria-live="polite"></div>
+            <details id="agents-notice" class="agents-notice" hidden>
+              <summary><span id="agents-notice-title"></span></summary>
+              <p id="agents-notice-body"></p>
+            </details>
+            <p id="agents-search-status" class="sr-only" role="status"></p>
+            <div id="agents-list" class="agent-grid"></div>
           </div>
         </section>
 

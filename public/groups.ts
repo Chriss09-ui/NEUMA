@@ -23,12 +23,14 @@ let route: UiRoute = { page: "chat", groupId: null, agentId: null }, groups: Gro
 let loading = false, sending = false, selectedTask = "", newTask = false, pollTimer: number | null = null, polling = false;
 let editing: Group | null = null, editorTrigger: HTMLElement | null = null, editorSaving = false, editorSequence = 0, editorRetry: { fingerprint: string; body: unknown } | null = null, retry: { id: string; fingerprint: string; body: GroupSend } | null = null;
 let listSequence = 0;
+let libraryState: "loading" | "ready" | "error" = "loading";
+const expandedPurposes = new Set<string>();
 let settingsGroupId: string | null = null, settingsSequence = 0, settingsTimer: number | null = null, removeSettingsListener: (() => void) | null = null;
 const drafts = new Map<string, ReturnType<ReturnType<typeof createGroupMentionComposer>["snapshot"]>>();
 const archivingGroups = new Set<string>();
 const newTaskDrafts = new Map<string, boolean>();
 const selectedConversations = new Map<string, string>();
-const avatarMembers = new Map<string, { id: string; profile: { icon: string } }>();
+const knownMembers = new Map<string, { id: string; name: string; profile: { name: string; icon: string } }>();
 const sidebarGroups = new Map<string, GroupSidebar>(), taskHistories = new Map<string, TaskHistory>(), taskHistorySequences = new Map<string, number>();
 const collapsedGroups = new Map<string, { link: HTMLAnchorElement; mark: HTMLElement }>();
 const historyActionErrors = new Map<string, string>(), removingHistories = new Map<string, string>(), removalRetries = new Map<string, { mutationId: string }>();
@@ -41,25 +43,28 @@ const navigate = (detail: Partial<UiRoute>) => document.dispatchEvent(new Custom
 const mentionComposer = createGroupMentionComposer({ input: byId("group-message"), popup: byId("group-mention-popup"),
   selected: byId("group-selected-mentions"), document, window });
 
-function rememberAvatars(members: DisplayAgent[] = []) {
+function rememberMembers(members: DisplayAgent[] = []) {
   let changed = false;
   for (const member of members) {
-    if (typeof member?.id !== "string" || (!member.profile && avatarMembers.has(member.id))) continue;
-    const icon = typeof member.profile?.icon === "string" ? member.profile.icon : "";
-    if (avatarMembers.get(member.id)?.profile.icon === icon) continue;
-    avatarMembers.set(member.id, { id: member.id, profile: { icon } }); changed = true;
+    if (typeof member?.id !== "string") continue;
+    const previous = knownMembers.get(member.id);
+    const name = member.name?.trim() || previous?.name || "";
+    const displayName = member.profile?.name?.trim() ?? previous?.profile.name ?? "";
+    const icon = member.profile?.icon ?? previous?.profile.icon ?? "";
+    if (previous?.name === name && previous.profile.name === displayName && previous.profile.icon === icon) continue;
+    knownMembers.set(member.id, { id: member.id, name, profile: { name: displayName, icon } }); changed = true;
   }
   return changed;
 }
 function groupAvatar(group: Group, className: string) {
-  const avatar = node("span", className); renderGroupAvatar(avatar, group, [...avatarMembers.values()]); return avatar;
+  const avatar = node("span", className); renderGroupAvatar(avatar, group, [...knownMembers.values()]); return avatar;
 }
 function renderGroupIdentity() {
   if (data?.group?.id !== route.groupId) return;
-  for (const id of ["group-avatar", "group-details-avatar"] as const) renderGroupAvatar(byId(id), data.group, [...avatarMembers.values()]);
+  for (const id of ["group-avatar", "group-details-avatar"] as const) renderGroupAvatar(byId(id), data.group, [...knownMembers.values()]);
 }
-function syncAvatars(members: DisplayAgent[]) {
-  if (!rememberAvatars(members)) return;
+function syncMembers(members: DisplayAgent[]) {
+  if (!rememberMembers(members)) return;
   renderLibrary(); renderGroupIdentity();
 }
 
@@ -275,7 +280,7 @@ async function loadTaskHistory(id: string) {
     const result = withoutRemovedHistory(await api.group(id));
     if (taskHistorySequences.get(id) !== sequence || !groups.some((group) => group.id === id && !group.archived)) return;
     if (result.group?.id !== id || !Array.isArray(result.tasks)) throw new Error("群历史尚未确认，请重试。");
-    rememberTaskHistory(result); rememberAvatars(result.members); renderLibrary();
+    rememberTaskHistory(result); rememberMembers(result.members); renderLibrary();
   } catch (caught) { const error = errorInfo(caught);
     if (taskHistorySequences.get(id) !== sequence || !sidebarGroups.has(id)) return;
     taskHistories.set(id, { loading: false, error: `${error.message} 收起后展开可重试。` }); renderSidebarGroups();
@@ -313,7 +318,7 @@ function renderCollapsedGroups(visible: Group[]) {
     view.link.title = group.name; view.link.setAttribute("aria-label", `打开${group.name}的群聊`);
     if (route.page === "group" && route.groupId === group.id) view.link.setAttribute("aria-current", "page");
     else view.link.removeAttribute("aria-current");
-    renderGroupAvatar(view.mark, group, [...avatarMembers.values()]);
+    renderGroupAvatar(view.mark, group, [...knownMembers.values()]);
   }
   if (shown.some((group, index) => rail.children[index] !== collapsedGroups.get(group.id)!.link)) {
     const focused = rail.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
@@ -341,7 +346,7 @@ function renderSidebarGroups() {
         onOpen: () => openSidebarGroup(group.id), onNew: () => openSidebarGroup(group.id, undefined, true), storage: localStorage });
       entry.root.dataset.groupId = group.id; sidebarGroups.set(group.id, entry);
     }
-    renderGroupAvatar(entry.icon as HTMLElement, group, [...avatarMembers.values()]);
+    renderGroupAvatar(entry.icon as HTMLElement, group, [...knownMembers.values()]);
     const current = route.page === "group" && route.groupId === group.id, history = taskHistories.get(group.id);
     if (historyMenu?.groupId === group.id) closeHistoryMenu(true);
     entry.update({ title: group.name, active: current,
@@ -377,27 +382,104 @@ function renderSidebarGroups() {
   }
   renderCollapsedGroups(visible);
 }
+function groupLibraryCard(group: Group) {
+  const card = node("article", "group-library-card");
+  const title = node("a", "group-library-title", group.name);
+  title.href = `#group/${encodeURIComponent(group.id)}`;
+  const heading = node("div", "group-library-heading"), identity = node("div", "group-library-identity");
+  const name = node("h2");
+  name.id = `group-library-title-${group.id}`;
+  name.append(title);
+  card.setAttribute("aria-labelledby", name.id);
+  identity.append(name);
+  const updated = new Date(group.updatedAt);
+  if (Number.isFinite(updated.getTime())) {
+    const date = node("time", "group-library-date", `更新于 ${updated.toLocaleDateString("zh-CN")}`);
+    date.dateTime = updated.toISOString();
+    identity.append(date);
+  }
+  heading.append(groupAvatar(group, "group-library-avatar"), identity);
+  if (group.archived) heading.append(node("span", "group-library-archived", "已归档"));
+  card.append(heading);
+
+  const purpose = group.purpose?.trim() || "";
+  if (purpose) {
+    const description = node("p", "group-library-purpose", purpose);
+    card.append(description);
+    const characters = Array.from(purpose);
+    if (characters.length > 72 || purpose.split("\n").length > 2) {
+      const start = characters.slice(0, 72).join("");
+      const preview = start.match(/^[^。！？\n]+[。！？\n]/u)?.[0]?.trimEnd() || `${start.trimEnd()}…`;
+      description.id = `group-library-purpose-${group.id}`;
+      const toggle = button("", () => {
+        if (expandedPurposes.has(group.id)) expandedPurposes.delete(group.id);
+        else expandedPurposes.add(group.id);
+        updatePurpose();
+      }, "group-purpose-toggle");
+      toggle.setAttribute("aria-controls", description.id);
+      function updatePurpose() {
+        const expanded = expandedPurposes.has(group.id);
+        description.textContent = expanded ? purpose : preview;
+        toggle.textContent = expanded ? "收起说明" : "展开说明";
+        toggle.setAttribute("aria-expanded", String(expanded));
+      }
+      updatePurpose();
+      card.append(toggle);
+    }
+  }
+
+  const footer = node("div", "group-library-footer"), members = node("div", "group-library-members");
+  const ids = group.memberIds || [];
+  members.append(node("span", "group-library-count", `${ids.length} 位成员`));
+  const names = ids.map((id) => knownMembers.get(id)).map((member) => member?.profile.name || member?.name).filter(Boolean);
+  if (names.length) members.append(node("span", "group-library-names", names.slice(0, 3).join("、") + (names.length > 3 ? " 等" : "")));
+  const open = node("a", "group-library-open", group.archived ? "查看群聊" : "进入群聊");
+  open.href = title.href;
+  footer.append(members, open);
+  card.append(footer);
+  return card;
+}
+
+function renderGroupCards() {
+  const target = byId("groups-list"), search = byId("groups-search"), archive = byId("groups-show-archived");
+  const status = byId("groups-search-status");
+  target.replaceChildren();
+  if (libraryState !== "ready") {
+    if (libraryState === "loading") target.append(node("p", "muted-note", "正在读取群组…"));
+    return;
+  }
+  const scope = groups.filter((group) => archive.checked || !group.archived);
+  const query = search.value.trim().toLocaleLowerCase();
+  const matches = query ? scope.filter((group) => [group.name, group.purpose || ""].some((value) => value.toLocaleLowerCase().includes(query))) : scope;
+  byId("groups-count").textContent = String(scope.length);
+  status.textContent = query ? `找到 ${matches.length} 个群组` : "";
+  if (matches.length) {
+    for (const group of matches) target.append(groupLibraryCard(group));
+    return;
+  }
+  const empty = node("div", "collaboration-empty groups-empty");
+  if (!groups.length) {
+    empty.append(node("h2", "", "还没有群组"), node("p", "muted-note", "选择智能体，为它们设定一个共同目标。"),
+      button("创建第一个群组", () => void editor(null, byId("groups-create")), "primary"));
+  } else if (!scope.length) {
+    empty.append(node("h2", "", "群组均已归档"), button("显示已归档群组", () => {
+      archive.checked = true; renderGroupCards(); archive.focus();
+    }, "secondary"));
+  } else {
+    empty.append(node("h2", "", "没有找到匹配的群组"), button("清除搜索", () => {
+      search.value = ""; renderGroupCards(); search.focus();
+    }, "secondary"));
+  }
+  target.append(empty);
+}
+
 function renderLibrary() {
-  const target = byId("groups-list"); target.replaceChildren();
-  const visible = groups.filter((group) => byId("groups-show-archived").checked || !group.archived);
-  if (!visible.length) {
-    const empty = node("div", "collaboration-empty groups-empty"); empty.append(node("span", "collaboration-empty-mark", "◎"),
-      node("h2", "", "把能力组合成一支团队"), node("p", "muted-note", "创建群组、选择智能体，为它们交代一个共同目标。"),
-      button("创建第一个群组", () => void editor(null, byId("groups-create")), "primary")); target.append(empty);
-  }
-  for (const group of visible) {
-    const card = node("article", "group-library-card"), title = node("a", "group-library-title", group.name);
-    title.href = `#group/${encodeURIComponent(group.id)}`;
-    const heading = node("div", "group-library-heading"); heading.append(groupAvatar(group, "group-library-avatar"), title,
-      node("span", "identity-badge", group.archived ? "已归档" : "协作群"));
-    card.append(heading, node("p", "muted-note", group.purpose || "共同推进工作"),
-      node("p", "group-library-meta", `${group.memberIds?.length || 0} 位成员 · ${group.updatedAt ? new Date(group.updatedAt).toLocaleDateString("zh-CN") : "刚刚创建"}`)); target.append(card);
-  }
+  renderGroupCards();
   renderSidebarGroups();
-  notice(byId("sidebar-groups-feedback"), "");
 }
 async function list() {
   const sequence = ++listSequence;
+  if (libraryState === "error") { libraryState = "loading"; renderGroupCards(); notice(byId("groups-error"), ""); }
   try {
     const result = await api.groups(); if (!Array.isArray(result.groups)) throw new Error("群列表尚未确认。");
     if (sequence !== listSequence) return;
@@ -407,10 +489,12 @@ async function list() {
         taskHistories.delete(group.id); taskHistorySequence(group.id);
       }
     }
-    groups = result.groups; renderLibrary(); notice(byId("groups-error"), "");
+    groups = result.groups; libraryState = "ready";
+    renderLibrary(); notice(byId("groups-error"), ""); notice(byId("sidebar-groups-feedback"), "");
     for (const [id, entry] of sidebarGroups) if (entry.expanded) void loadTaskHistory(id);
   } catch (caught) { const error = errorInfo(caught);
     if (sequence !== listSequence) return;
+    if (libraryState !== "ready") { libraryState = "error"; renderGroupCards(); }
     notice(byId("groups-error"), `${error.message} 重新进入群组页面可重试。`, true);
     notice(byId("sidebar-groups-feedback"), "群组暂时无法读取。");
   }
@@ -462,7 +546,7 @@ async function load(id: string | null = route.groupId, { quiet = false } = {}) {
       }
       pendingSidebarTask = null;
     }
-    if (rememberAvatars(result.members)) renderLibrary();
+    if (rememberMembers(result.members)) renderLibrary();
     notice(byId("group-error"), ""); render();
   } catch (caught) { const error = errorInfo(caught);
     if (taskHistorySequences.get(id) === historySequence && sidebarGroups.has(id)) {
@@ -624,14 +708,15 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || event.defaultPrevented || !settingsGroupId || document.querySelector("dialog[open]")) return;
   event.preventDefault(); closeSettings();
 });
-byId("groups-show-archived").addEventListener("change", renderLibrary);
+byId("groups-show-archived").addEventListener("change", renderGroupCards);
+byId("groups-search").addEventListener("input", renderGroupCards);
 byId("groups-create").addEventListener("click", () => void editor(null, byId("groups-create")));
 document.addEventListener("neuma:groups-changed", () => void list());
-document.addEventListener("neuma:agents-changed", (event) => syncAvatars(event.detail?.items || []));
+document.addEventListener("neuma:agents-changed", (event) => syncMembers(event.detail?.items || []));
 document.addEventListener("neuma:agent-profile-changed", (event) => {
-  if (event.detail?.profile) syncAvatars([{ id: event.detail.id, profile: event.detail.profile }]);
+  if (event.detail?.profile) syncMembers([{ id: event.detail.id, profile: event.detail.profile }]);
 });
-document.addEventListener("neuma:agent-profiles-loaded", (event) => syncAvatars((event.detail?.profiles || [])
+document.addEventListener("neuma:agent-profiles-loaded", (event) => syncMembers((event.detail?.profiles || [])
   .map((profile) => ({ id: profile.id, profile }))));
 byId("group-editor-form").addEventListener("submit", (event) => { event.preventDefault(); void saveEditor(); });
 byId("group-editor-close").addEventListener("click", closeEditor);

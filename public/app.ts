@@ -46,6 +46,8 @@ const deleteSavedEl = pageElement(document, "delete-saved");
 const storageNoteEl = pageElement(document, "storage-note");
 const agentsEl = pageElement(document, "agents-list");
 const agentCountEl = pageElement(document, "agent-count");
+const agentsSearch = pageElement(document, "agents-search");
+const migrationIssues: string[] = [];
 const resetEl = pageElement(document, "reset");
 const modifyEl = pageElement(document, "modify");
 
@@ -229,9 +231,21 @@ function formatTime(value: string | undefined) {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function renderAgents() {
+function renderAgentCards() {
+  const query = agentsSearch.value.trim().toLocaleLowerCase();
+  const matches = query ? agents.filter((agent) =>
+    [agentDisplayName(agent), agentDisplayDescription(agent)].some((value) => value.toLocaleLowerCase().includes(query))) : agents;
   agentsEl.replaceChildren();
-  agentCountEl.textContent = String(agents.length);
+  pageElement(document, "agents-search-status").textContent = query ? `找到 ${matches.length} 个智能体` : "";
+  if (agents.length && !matches.length) {
+    const empty = element("div", "empty-state");
+    empty.append(element("h2", "", "没有找到匹配的智能体"), button("secondary", "清除搜索", () => {
+      agentsSearch.value = "";
+      renderAgentCards();
+      agentsSearch.focus();
+    }));
+    agentsEl.append(empty);
+  }
   if (!agents.length) {
     const empty = element("div", "empty-state");
     empty.append(element("span", "empty-symbol", "✳"), element("h2", "", "给自己添一位工作助手"));
@@ -239,37 +253,70 @@ function renderAgents() {
     empty.append(button("primary", "创建第一个智能体", () => pageElement(document, "agents-create").click()));
     agentsEl.append(empty);
   }
-  for (const agent of agents) {
+  for (const agent of matches) {
     const name = agentDisplayName(agent);
     const card = element("article", `card agent-card${agent.id === activeAgentId ? " active" : ""}`);
     const top = element("div", "agent-card-top");
     const avatar = element("span", "agent-avatar");
     renderAgentAvatar(avatar, agent);
-    top.append(avatar,
-      element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "Agent"));
-    const state = agent.dirty && agent.persisted ? ["warn", "修改未保存"]
-      : agent.persisted ? ["ok", "已保存到 Agent 文件夹"] : agent.localBackup ? ["warn", "仅浏览器备份"] : ["", "仅当前页"];
-    top.append(element("span", `status ${state[0]}`, state[1]));
-    card.append(top, element("h3", "", name));
-    card.append(element("p", "", agentDisplayDescription(agent)));
+    avatar.setAttribute("aria-hidden", "true");
+    const identity = element("div", "agent-card-identity");
+    const title = element("h2", "", name);
+    title.id = `agent-card-title-${agent.id}`;
+    card.setAttribute("aria-labelledby", title.id);
+    identity.append(element("span", "agent-type", AGENT_TYPE_LABEL[agent.draft.agentType?.value] || "智能体"), title);
+    const more = element("button", "agent-card-more", "···");
+    more.type = "button";
+    more.disabled = busy;
+    more.title = "更多操作";
+    more.setAttribute("aria-label", `${name}的更多操作`);
+    const menu = element("div", "agent-card-menu");
+    menu.popover = "auto";
+    more.popoverTargetElement = menu;
+    const exportButton = button("ghost-button", "导出", () => downloadJson(`${name}.json`,
+      { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt, exportedAt: new Date().toISOString() }));
+    const deleteButton = button("ghost-button danger", "删除", () => removeAgent(agent.id), `删除 ${name} 的需求`);
+    for (const item of [exportButton, deleteButton]) {
+      item.popoverTargetElement = menu;
+      item.popoverTargetAction = "hide";
+      menu.append(item);
+    }
+    top.append(avatar, identity, more, menu);
+    card.append(top, element("p", "agent-description", agentDisplayDescription(agent)));
+    const meta = element("div", "agent-meta");
+    const saved = agent.persisted && !agent.dirty;
+    const status = saved ? "需求已保存" : agent.persisted ? "修改未保存" : agent.localBackup ? "仅浏览器备份" : "仅当前页";
+    meta.append(element("span", `agent-save-state${saved ? "" : " attention"}`, status));
+    if (!saved) meta.append(button("inline-button", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
+      `保存 ${name} 的需求`));
     const time = formatTime(agent.updatedAt);
-    if (time) card.append(element("span", "agent-meta", `更新于 ${time}${agent.id === activeAgentId ? " · 正在对话中编辑" : ""}`));
+    if (agent.id === activeAgentId) meta.append(element("span", "agent-updated", "正在编辑需求"));
+    else if (time) meta.append(element("span", "agent-updated", `更新于 ${time}`));
+    card.append(meta);
     const actions = element("div", "agent-actions");
     actions.append(button("secondary", "进入对话", () => navigate({ page: "agent", agentId: agent.id }),
       `进入 ${name} 的对话`));
     actions.append(button("ghost-button", "让 NEUMA 迭代", () => openAgent(agent.id), `让 NEUMA 迭代 ${name}`));
-    if (agent.dirty || !agent.persisted) {
-      actions.append(button("secondary", agent.persisted ? "保存修改" : "保存", () => saveAgent(agent.id),
-        `保存 ${name} 的需求`));
-    }
-    actions.append(button("ghost-button", "导出", () => downloadJson(`${name}.json`,
-      { name: agent.name, draft: agent.draft, updatedAt: agent.updatedAt, exportedAt: new Date().toISOString() })));
-    actions.append(button("ghost-button danger", "删除", () => removeAgent(agent.id), `删除 ${name} 的需求`));
     card.append(actions);
     agentsEl.append(card);
   }
+}
+
+function renderAgents() {
+  agentCountEl.textContent = String(agents.length);
+  renderAgentCards();
+  const pending = agents.filter((agent) => agent.pendingSync).map(agentDisplayName);
+  const notice = pageElement(document, "agents-notice");
+  notice.hidden = !migrationIssues.length && !pending.length;
+  pageElement(document, "agents-notice-title").textContent = migrationIssues.length ? "旧记录同步需要处理" : "有需求尚未同步";
+  pageElement(document, "agents-notice-body").textContent = [
+    ...migrationIssues,
+    ...(pending.length ? [`请在${pending.join("、")}的卡片上点击「保存」或「保存修改」。`] : []),
+  ].join("\n");
   document.dispatchEvent(new CustomEvent("neuma:agents-changed", { detail: { items: agents, busy } }));
 }
+
+agentsSearch.addEventListener("input", renderAgentCards);
 
 function openAgent(id: string) {
   if (busy) return;
@@ -298,20 +345,25 @@ async function loadAgentLibrary() {
     const result = await agentApi.listRequirements();
     if (!Array.isArray(result.requirements)) throw new Error("智能体需求列表尚未确认");
     const durable = new Map(result.requirements.map((item) => normalizeAgentRequirement(item)).filter((item): item is NonNullable<typeof item> => Boolean(item)).map((item) => [item.id, item] as const));
-    const failures = [], pending = [];
+    const failures = new Map<string, Set<string>>();
+    function reportIssue(name: string, reason: string) {
+      const affected = failures.get(reason) ?? new Set<string>();
+      affected.add(name);
+      failures.set(reason, affected);
+    }
     for (const backup of browserRequirements) {
       if (removedAgentIds.has(backup.id)) continue;
+      const name = agentDisplayName(durable.get(backup.id) ?? backup);
       if (backup.pendingSync) {
         try {
           const state = await agentApi.listConversations(backup.id);
           if (state.deleted) {
             removedAgentIds.add(backup.id);
             const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id), historyRemoved = deleteAgentConversationBackups(browserStorage, backup.id);
-            if (!requirementRemoved || !conversationRemoved || !historyRemoved) failures.push("已删除条目的浏览器备份未能清理");
+            if (!requirementRemoved || !conversationRemoved || !historyRemoved) reportIssue(name, "已删除条目的浏览器备份未能清理");
             continue;
           }
-        } catch (caught) { const error = errorInfo(caught); failures.push(error.message || "未同步条目的删除状态尚未确认"); }
-        pending.push(backup.name);
+        } catch (caught) { const error = errorInfo(caught); reportIssue(name, error.message || "未同步条目的删除状态尚未确认"); }
         continue;
       }
       try {
@@ -322,7 +374,7 @@ async function loadAgentLibrary() {
           removedAgentIds.add(backup.id);
           const requirementRemoved = deleteRequirement(browserStorage, backup.id), conversationRemoved = deleteAgentPreview(browserStorage, backup.id), historyRemoved = deleteAgentConversationBackups(browserStorage, backup.id);
           if (!requirementRemoved || !conversationRemoved || !historyRemoved) {
-            failures.push("已删除条目的浏览器备份未能清理");
+            reportIssue(name, "已删除条目的浏览器备份未能清理");
           }
           continue;
         }
@@ -330,24 +382,25 @@ async function loadAgentLibrary() {
         if (!requirement || requirement.id !== backup.id) throw new Error("旧需求迁移尚未确认");
         durable.set(backup.id, requirement);
         saveRequirement(browserStorage, requirement);
-      } catch (caught) { const error = errorInfo(caught); failures.push(error.message || "旧记录未迁移"); }
+      } catch (caught) { const error = errorInfo(caught); reportIssue(name, error.message || "旧记录未迁移"); }
     }
-    for (const [id] of durable) {
+    for (const [id, requirement] of durable) {
       if (removedAgentIds.has(id)) continue;
       const legacy = loadSavedAgentConversation(browserStorage, id);
       if (!legacy) continue;
+      const name = agentDisplayName(requirement);
       const conversationId = legacy.pendingSync ? "legacy-browser-pending" : "legacy-saved";
       try {
         const current = await agentApi.getHistoryConversation(id, conversationId);
         if (current.deleted) {
-          if (!deleteAgentPreview(browserStorage, id)) failures.push("已删除对话的旧浏览器备份未能清理");
+          if (!deleteAgentPreview(browserStorage, id)) reportIssue(name, "已删除对话的旧浏览器备份未能清理");
           continue;
         }
         if (legacy.pendingSync && !current.conversation) {
           const disk = await agentApi.getHistoryConversation(id, "legacy-saved");
           if (disk.conversation && JSON.stringify(disk.conversation.messages) === JSON.stringify(legacy.messages)) {
-            if (!saveAgentConversationBackup(browserStorage, id, disk.conversation)) failures.push("旧对话已迁入文件夹，但浏览器备份未能保存");
-            if (!deleteAgentPreview(browserStorage, id)) failures.push("旧对话已迁入文件夹，但浏览器旧备份未能清理");
+            if (!saveAgentConversationBackup(browserStorage, id, disk.conversation)) reportIssue(name, "旧对话已迁入文件夹，但浏览器备份未能保存");
+            if (!deleteAgentPreview(browserStorage, id)) reportIssue(name, "旧对话已迁入文件夹，但浏览器旧备份未能清理");
             continue;
           }
         }
@@ -356,19 +409,19 @@ async function loadAgentLibrary() {
           mutationId: `import-${conversationId}`, importOnly: true,
         });
         if (saved.deleted) {
-          if (!deleteAgentPreview(browserStorage, id)) failures.push("已删除对话的旧浏览器备份未能清理");
+          if (!deleteAgentPreview(browserStorage, id)) reportIssue(name, "已删除对话的旧浏览器备份未能清理");
           continue;
         }
         if (saved.conversation?.schemaVersion !== 3 || saved.conversation.id !== conversationId
           || !Array.isArray(saved.conversation.messages)) throw new Error("旧对话迁移尚未确认");
         if (!saveAgentConversationBackup(browserStorage, id, saved.conversation)) {
-          failures.push("旧对话已迁入文件夹，但浏览器备份未能保存");
+          reportIssue(name, "旧对话已迁入文件夹，但浏览器备份未能保存");
         }
-        if (!deleteAgentPreview(browserStorage, id)) failures.push("旧对话已迁入文件夹，但浏览器旧备份未能清理");
+        if (!deleteAgentPreview(browserStorage, id)) reportIssue(name, "旧对话已迁入文件夹，但浏览器旧备份未能清理");
       } catch (caught) { const error = errorInfo(caught);
         if (error.reason === "conversation_deleted") {
-          if (!deleteAgentPreview(browserStorage, id)) failures.push("已删除对话的旧浏览器备份未能清理");
-        } else failures.push(error.message || "旧对话未迁移");
+          if (!deleteAgentPreview(browserStorage, id)) reportIssue(name, "已删除对话的旧浏览器备份未能清理");
+        } else reportIssue(name, error.message || "旧对话未迁移");
       }
     }
     const currentItems = new Map(agents.map((item) => [item.id, item]));
@@ -385,9 +438,8 @@ async function loadAgentLibrary() {
     }
     agents = [...currentItems.values()].filter((item) => !removedAgentIds.has(item.id))
       .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+    for (const [reason, names] of failures) migrationIssues.push(`${reason}\n涉及智能体 · ${[...names].join("、")}`);
     renderAgents();
-    if (failures.length) showAgentsError(`部分旧记录尚未迁移到 Agent 文件夹，浏览器备份保留：${failures[0]}`);
-    else if (pending.length) showAgentsError("浏览器保留上次未同步的需求，请打开对应 Agent，再次点击保存。服务器已有版本暂未更新。");
   } catch (caught) { const error = errorInfo(caught);
     showAgentsError(`Agent 文件夹暂时无法读取，浏览器备份保留：${error.message || "服务未响应"}`);
   }

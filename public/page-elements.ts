@@ -131,6 +131,11 @@ export interface PageElements {
   "agents-create": HTMLElementTagNameMap["button"];
   "agents-error": HTMLElementTagNameMap["div"];
   "agents-list": HTMLElementTagNameMap["div"];
+  "agents-notice": HTMLElementTagNameMap["details"];
+  "agents-notice-body": HTMLElementTagNameMap["p"];
+  "agents-notice-title": HTMLElementTagNameMap["span"];
+  "agents-search": HTMLElementTagNameMap["input"];
+  "agents-search-status": HTMLElementTagNameMap["p"];
   "agents-title": HTMLElementTagNameMap["h1"];
   "app-shell": HTMLElementTagNameMap["div"];
   "application-material-close": HTMLElementTagNameMap["button"];
@@ -231,9 +236,12 @@ export interface PageElements {
   "group-title": HTMLElementTagNameMap["span"];
   "group-upload": HTMLElementTagNameMap["button"];
   "group-workspace": HTMLElementTagNameMap["div"];
+  "groups-count": HTMLElementTagNameMap["span"];
   "groups-create": HTMLElementTagNameMap["button"];
   "groups-error": HTMLElementTagNameMap["div"];
   "groups-list": HTMLElementTagNameMap["div"];
+  "groups-search": HTMLElementTagNameMap["input"];
+  "groups-search-status": HTMLElementTagNameMap["p"];
   "groups-show-archived": HTMLElementTagNameMap["input"];
   "groups-title": HTMLElementTagNameMap["h1"];
   "iteration-agent-name": HTMLElementTagNameMap["strong"];
