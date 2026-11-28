@@ -35,6 +35,7 @@ declare autocomplete: string;
 }
 type ServiceElement = ReturnType<typeof dom>["container"];
 const all = (node: ServiceElement): ServiceElement[] => [node, ...node.children.flatMap(all)];
+const visible = (node: ServiceElement): ServiceElement[] => node.hidden ? [] : [node, ...node.children.flatMap(visible)];
 const text = (node: ServiceElement) => all(node).map((item) => item.textContent).join(" ");
 const control = (node: ServiceElement, label: string) => all(node).find((item) => item.tag === "button" && item.textContent === label)!;
 const data = (): ServicesResult => ({ environment: { managed: { available: true, javascript: { available: true }, python: { available: false } }, docker: { available: false } },
@@ -50,6 +51,17 @@ function setup(api: Partial<ApplicationApi> = {}) {
   return { ...ui, view, calls, snapshot: (value: ServicesResult) => { snapshot = value; } };
 }
 
+test("首次读取失败时仅显示错误和重试入口，重试后显示实际权限", async () => {
+  let available = false;
+  const ui = setup({ services: async () => { if (!available) throw new Error("暂时无法读取"); return data(); } });
+  await ui.view.show("agent");
+  assert.ok(visible(ui.container).some(item => item.textContent === "暂时无法读取"));
+  assert.ok(!visible(ui.container).some(item => item.type === "checkbox"));
+  available = true; await control(ui.container, "重新读取").click();
+  assert.ok(visible(ui.container).some(item => item.type === "checkbox"));
+  assert.ok(!visible(ui.container).includes(control(ui.container, "重新读取"))); ui.view.hide();
+});
+
 test("运行页面展示真实环境，普通功能不会要求先安装Docker", async () => {
   const ui = setup(); await ui.view.show("agent");
   assert.match(text(ui.container), /Python/); assert.match(text(ui.container), /Docker（可选）/);
@@ -58,35 +70,65 @@ test("运行页面展示真实环境，普通功能不会要求先安装Docker",
   await control(ui.container, "启动").click(); assert.deepEqual(ui.calls[1], ["start", "agent", "v1"]); ui.view.hide();
 });
 
-test("无交付版本时给出明确提示，出现版本后可选择并恢复", async () => {
-  const ui = setup(), empty = data(); empty.service = undefined; empty.history = []; empty.deliveryVersion = undefined;
+test("按实际交付显示启停、记录和版本恢复，保留所选历史版本", async () => {
+  const restored: string[] = [];
+  const ui = setup({ rollbackService: async (_id, version) => { restored.push(version); } });
+  const empty = data(); empty.service = undefined; empty.history = []; empty.deliveryVersion = undefined;
   ui.snapshot(empty); await ui.view.show("agent");
-  const select = all(ui.container).find((item) => item.tag === "select")!;
-  assert.equal(select.disabled, true); assert.match(text(select), /暂无交付版本/); assert.equal(select.children[0]!.value, "");
-  assert.equal(control(ui.container, "恢复所选版本").disabled, true);
-  assert.equal(control(ui.container, "启动").disabled, true);
+  const titles = () => visible(ui.container).map(item => item.textContent);
+  for (const title of ["启动", "恢复所选版本", "运行记录"]) assert.ok(!titles().includes(title), title);
+  assert.ok(titles().some(value => /暂无.*服务/.test(value)));
+  const archived = { ...empty, history: [{ deliveryVersion: "v0", active: false }] };
+  ui.snapshot(archived); await ui.view.reload();
+  const select = visible(ui.container).find(item => item.tag === "select")!;
+  assert.equal(select.value, "v0");
+  const versions = data(); versions.history!.push(...archived.history);
+  ui.snapshot(versions); await ui.view.reload();
+  assert.ok(titles().includes("运行记录")); assert.match(text(select), /当前 · v1/);
+  assert.equal(select.value, "v0");
+  await control(ui.container, "恢复所选版本").click(); assert.deepEqual(restored, ["v0"]);
   ui.snapshot(data()); await ui.view.reload();
-  assert.equal(select.disabled, false); assert.match(text(select), /当前 · v1/);
-  assert.equal(control(ui.container, "恢复所选版本").disabled, false);
+  assert.equal(select.value, "v1");
   assert.equal(control(ui.container, "启动").disabled, false); ui.view.hide();
 });
 
 test("后台状态更新保留未保存的动作选择和焦点", async () => {
   const ui = setup(); await ui.view.show("agent");
-  const checkbox = all(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.focus(); checkbox!.dispatch("change");
+  const checkbox = visible(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.focus(); checkbox!.dispatch("change");
   await ui.view.reload();
-  assert.equal(all(ui.container).find((item) => item.type === "checkbox"), checkbox); assert.equal(checkbox!.checked, true);
+  assert.equal(visible(ui.container).find((item) => item.type === "checkbox"), checkbox); assert.equal(checkbox!.checked, true);
   assert.equal(ui.document.activeElement, checkbox); ui.view.hide();
 });
 
-test("接口默认关闭，仅发送选择的动作；一次性令牌离开后清空", async () => {
-  const calls: unknown[][] = [], ui = setup({ configureGateway: async (...args: Parameters<ApplicationApi["configureGateway"]>) => { calls.push(args); return { token: "fixture-token" }; } });
+test("勾选权限才可开启接口，已开启时提供更新和停用，撤销后收起地址", async () => {
+  const calls: unknown[][] = [], snapshot = data();
+  const endpoints = { apiUrl: "http://127.0.0.1:8000/v1", mcpUrl: "http://127.0.0.1:8000/mcp" };
+  let failNextRead = false;
+  const ui = setup({
+    services: async () => {
+      if (failNextRead) { failNextRead = false; throw new Error("状态读取失败"); }
+      return structuredClone(snapshot);
+    },
+    configureGateway: async (...args) => {
+      calls.push(args); snapshot.gateway = { enabled: true, actionIds: args[1], deliveryVersion: "v1", ...endpoints };
+      failNextRead = true; return { token: "fixture-token" };
+    },
+    revokeGateway: async () => { snapshot.gateway = { enabled: false, actionIds: [], ...endpoints }; },
+  });
   await ui.view.show("agent");
-  await control(ui.container, "开启或更新接口").click(); assert.equal(calls.length, 0); assert.match(text(ui.container), /至少一项/);
-  const checkbox = all(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.dispatch("change");
-  await control(ui.container, "开启或更新接口").click(); assert.deepEqual(calls, [["agent", ["search"], "v1"]]);
-  const token = all(ui.container).find((item) => item.type === "password"); assert.equal(token!.value, "fixture-token");
-  ui.view.hide(); assert.equal(token!.value, ""); await ui.view.show("agent"); assert.equal(token!.value, ""); ui.view.hide();
+  const open = control(ui.container, "开启接口");
+  assert.equal(open.disabled, true); assert.ok(!visible(ui.container).includes(control(ui.container, "停用接口")));
+  const checkbox = visible(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.dispatch("change");
+  assert.equal(open.disabled, false); await open.click(); assert.deepEqual(calls, [["agent", ["search"], "v1"]]);
+  const token = visible(ui.container).find(item => item.type === "password");
+  assert.equal(token?.value, "fixture-token", "开启成功后，即使状态刷新失败也应能复制本次令牌");
+  await ui.view.reload();
+  assert.ok(visible(ui.container).includes(control(ui.container, "更新接口")));
+  assert.ok(visible(ui.container).some(item => item.textContent === endpoints.mcpUrl));
+  ui.view.hide(); assert.equal(token!.value, ""); await ui.view.show("agent"); assert.equal(token!.value, "");
+  await control(ui.container, "停用接口").click();
+  assert.ok(!visible(ui.container).some(item => item.textContent.includes(endpoints.apiUrl)));
+  assert.equal(control(ui.container, "开启接口").disabled, true); ui.view.hide();
 });
 
 test("纯对话智能体可单独授权，刷新保留用户选择", async () => {
@@ -94,11 +136,11 @@ test("纯对话智能体可单独授权，刷新保留用户选择", async () =>
   const ui = setup({ configureGateway: async (...args) => { calls.push(args); return {}; } });
   ui.snapshot({ conversationVersion: "runtime-v1", actions: [], gateway: { enabled: false } });
   await ui.view.show("weekly");
-  const choice = all(ui.container).find(item => item.type === "checkbox")!;
+  const choice = visible(ui.container).find(item => item.type === "checkbox")!;
   assert.equal(choice.checked, false);
   choice.checked = true; choice.dispatch("change"); await ui.view.reload();
   assert.equal(choice.checked, true);
-  await control(ui.container, "开启或更新接口").click();
+  await control(ui.container, "开启接口").click();
   assert.deepEqual(calls, [["weekly", [], "runtime-v1", "runtime-v1"]]);
   ui.view.hide();
 });
@@ -109,8 +151,8 @@ test("切换智能体后迟到状态不能替换当前面板，迟到令牌不�
     configureGateway: async () => new Promise((resolve) => { tokenRelease = resolve; }) });
   const old = ui.view.show("old"); await ui.view.show("new"); const root = ui.container.children[0]; release!(data()); await old;
   assert.equal(ui.container.children[0], root);
-  const checkbox = all(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.dispatch("change");
-  const pending = control(ui.container, "开启或更新接口").click(); ui.view.hide(); tokenRelease!({ token: "late-token" }); await pending;
+  const checkbox = visible(ui.container).find((item) => item.type === "checkbox"); checkbox!.checked = true; checkbox!.dispatch("change");
+  const pending = control(ui.container, "开启接口").click(); ui.view.hide(); tokenRelease!({ token: "late-token" }); await pending;
   await ui.view.show("new"); assert.equal(all(ui.container).find((item) => item.type === "password")!.value, ""); ui.view.hide();
 });
 
