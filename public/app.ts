@@ -328,8 +328,6 @@ function openAgent(id: string) {
     session.draft = structuredClone(agent.draft);
     session.status = "ready";
     session.confirmed = true;
-    session.messages.push({ role: "assistant",
-      content: `我们继续迭代“${agentDisplayName(agent)}”。右侧是当前确认的需求，你可以告诉我希望调整什么；确认修改后会更新同一个智能体入口。` });
     activeAgentId = id;
     pendingLegacy = null;
     inputEl.value = "";

@@ -79,6 +79,9 @@ function checked(input: unknown): MainRecord {
       throw new InputError("主对话需求协商记录无效");
   }
   if (value.requirement && !requirementIds.has(value.requirement.agentId)) throw new InputError("当前主对话需求不属于已保存草稿");
+  if (value.iterationAgentId !== undefined && (mainId(value.iterationAgentId, "智能体") !== value.requirement?.agentId
+    || requirementIds.size !== 1 || value.context?.type !== "requirements" || value.context.agentId !== value.iterationAgentId))
+    throw new InputError("迭代对话与智能体需求不匹配");
   const ids = new Set<string>();
   for (const message of value.messages) {
     mainId(message.id, "消息");
@@ -154,17 +157,28 @@ export class MainStore {
     this.persistence = task.catch(() => {}); return task;
   }
 
-  create({ mutationId, title = "新对话" }: { mutationId?: unknown; title?: unknown } = {}) {
+  create({ mutationId, title = "新对话" }: { mutationId?: unknown; title?: unknown } = {},
+    iteration?: { agentId: string; prepare(record: MainRecord): Promise<boolean> }) {
     if (mutationId !== undefined) mainId(mutationId, "请求");
     if (typeof title !== "string" || !title.trim() || !textWithinLimit(title, 200)) throw new InputError("对话标题不能超过 200 字");
     return this.queue(async () => {
-      const existing = typeof mutationId === "string" && [...this.records.values()].find((item) => item.creationMutationId === mutationId);
-      if (existing && existing.deletedAt) throw mainConversationFailure("conversation_deleted");
-      if (existing) return structuredClone(existing);
+      const records = [...this.records.values()];
+      const replay = typeof mutationId === "string" ? records.find(item => item.creationMutationId === mutationId) : undefined;
+      if (replay?.deletedAt) throw mainConversationFailure("conversation_deleted");
+      if (replay && replay.iterationAgentId !== iteration?.agentId) throw mainConversationFailure("conversation_conflict", "这个请求已用于另一份对话。");
+      const existing = replay ?? (iteration && records.find(item => !item.deletedAt && item.iterationAgentId === iteration.agentId));
+      if (existing && !iteration) return structuredClone(existing);
       const now = new Date().toISOString();
-      const record = checked({ schemaVersion: 1, id: `main_${randomUUID()}`, title: title.trim(), version: 1,
-        messages: [], requests: [], createdAt: now, updatedAt: now, ...(mutationId ? { creationMutationId: mutationId } : {}) });
-      await this.write(record); this.records.set(record.id, record); return structuredClone(record);
+      const record: MainRecord = existing ? structuredClone(existing) : { schemaVersion: 1, id: `main_${randomUUID()}`, title: title.trim(), version: 1,
+        messages: [], requests: [], createdAt: now, updatedAt: now, ...(typeof mutationId === "string" ? { creationMutationId: mutationId } : {}) };
+      if (iteration) {
+        record.iterationAgentId = iteration.agentId;
+        const changed = await iteration.prepare(record);
+        if (existing && !changed) return record;
+      }
+      if (existing) { record.version++; record.updatedAt = now; }
+      const saved = checked(record);
+      await this.write(saved); this.records.set(saved.id, saved); return structuredClone(saved);
     });
   }
 

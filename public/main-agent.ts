@@ -12,7 +12,8 @@ import { button, messageRow, node, notice } from "./group-view.js";
 
 const api = createCollaborationApi(), byId = <K extends keyof PageElements>(id: K) => pageElement(document, id);
 const messageInput = byId("main-message"), idlePlaceholder = messageInput.placeholder;
-let selected: MainConversation | null = null, records: MainConversation[] = [], operation: MainObservation | null = null, loading = false, loaded = false, sequence = 0;
+let selected: MainConversation | null = null, records: MainConversation[] = [], operation: MainObservation | null = null, loading: false | "history" | "change" = false, loaded = false, sequence = 0;
+let openingIteration: string | null = null;
 let retryRequest: { id: string; fingerprint: string; body: MutationRequest } | null = null, page = "chat", listing: Promise<void> | null = null, activationSequence = 0, activationRetry: { key: string; body: MutationRequest } | null = null;
 let needsConversationReload = false, needsHistoryReload = false;
 let removing: string | null = null, historyMenu: { id: string; trigger: HTMLButtonElement; row: HTMLElement } | null = null, historyRevision = 0;
@@ -68,7 +69,7 @@ function showRecovery(message: string | undefined, error = true, target: "main-e
   else needsConversationReload = true;
   notice(byId(target), message, error); controls();
 }
-function busy() { return Boolean(loading || operation || removing || materials.busy()); }
+function busy() { return Boolean(loading || openingIteration || operation || removing || materials.busy()); }
 function setComposerProgress(text: string) {
   const status = byId("main-progress");
   if (status.textContent === text) return;
@@ -108,23 +109,29 @@ function controls() {
   for (const item of byId("main-history-list").querySelectorAll("button")) item.disabled = busy();
   byId("main-send").hidden = Boolean(operation);
   byId("main-cancel").hidden = !operation;
-  byId("main-message").disabled = Boolean(loading || removing);
+  byId("main-message").disabled = Boolean(loading || openingIteration || removing);
   materials.setDisabled(busy());
   if (!operation) setComposerProgress("");
 }
 function render() {
   const target = byId("main-messages"), wasBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
+  byId("main-agent-title").textContent = selected?.iterationAgentId ? selected.title : "主对话";
   target.replaceChildren();
   if (!selected?.messages?.length) {
     const welcome = node("div", "collaboration-empty main-welcome");
     const mark = node("span", "brand-mark main-welcome-mark"); mark.setAttribute("aria-hidden", "true");
     const image = node("img"); image.src = "/assets/brand/neuma-mark.png"; image.alt = "";
     image.width = 52; image.height = 52; image.draggable = false; mark.append(image);
-    welcome.append(mark, node("h2", "", "今天，想先完成什么？"),
-      node("p", "muted-note", "说说你的想法，或把材料发过来。\n整理资料、写文案、分析问题，都可以从这里开始。"));
-    const actions = node("div", "main-welcome-actions");
-    const groups = node("a", "secondary collaboration-action-link", "查看群组"); groups.href = "#groups";
-    actions.append(groups); welcome.append(actions); target.append(welcome);
+    if (selected?.iterationAgentId) {
+      welcome.append(mark, node("h2", "", selected.title), node("p", "muted-note", "你希望这位助手怎么改？"));
+    } else {
+      welcome.append(mark, node("h2", "", "今天，想先完成什么？"),
+        node("p", "muted-note", "说说你的想法，或把材料发过来。\n整理资料、写文案、分析问题，都可以从这里开始。"));
+      const actions = node("div", "main-welcome-actions");
+      const groups = node("a", "secondary collaboration-action-link", "查看群组"); groups.href = "#groups";
+      actions.append(groups); welcome.append(actions);
+    }
+    target.append(welcome);
   }
   const pending = selected?.context?.pendingPreference;
   for (const message of selected?.messages || []) {
@@ -172,20 +179,22 @@ function render() {
   showMore.setAttribute("aria-expanded", String(historyShowAll));
   materials.render(); controls();
 }
+function displayConversation(conversation: MainConversation, input: string) {
+  selected = conversation; storage.write(conversation.id); retryRequest = null; materials.reset(); contextPanel.reset(conversation.context);
+  messageInput.value = input; needsConversationReload = false;
+  notice(byId("main-error"), ""); render();
+}
 async function select(id: string) {
   if (busy() || removedIds.has(id)) return;
   const unboundDraft = selected ? "" : byId("main-message").value;
   if (selected) drafts.set(selected.id, byId("main-message").value);
-  const current = ++sequence; loading = true; controls();
+  const current = ++sequence; loading = "history"; controls();
   try {
     const result = await api.conversation(id);
     if (current !== sequence) return;
     if (result.conversation?.id !== id) throw new Error("主助理对话身份尚未确认，请重试。");
-    selected = result.conversation; storage.write(id); retryRequest = null; materials.reset(); contextPanel.reset(selected.context);
-    byId("main-message").value = drafts.get(id) ?? unboundDraft;
-    needsConversationReload = false;
-    notice(byId("main-error"), ""); render();
-  } catch (caught) { const error = errorInfo(caught); showRecovery(error.message); }
+    displayConversation(result.conversation, drafts.get(id) ?? unboundDraft);
+  } catch (caught) { if (current === sequence) showRecovery(errorInfo(caught).message); }
   finally { if (current === sequence) { loading = false; render(); restoreObservation(); } }
 }
 async function readList() {
@@ -255,7 +264,7 @@ async function create({ preserveInput = true } = {}) {
   const originalFocus = document.activeElement;
   const input = byId("main-message").value;
   if (selected) drafts.set(selected.id, input);
-  loading = true; historyRevision++; controls();
+  loading = "change"; historyRevision++; controls();
   try {
     const result = await api.createConversation();
     if (!result.conversation?.id) throw new Error("新对话尚未保存，请重试。");
@@ -357,14 +366,50 @@ async function send({ message: shortcutMessage, expectedReplyId }: { message?: s
     if (page === "chat") byId("main-message").focus();
   }
 }
+async function openIteration(agentId: string) {
+  if (openingIteration === agentId) return;
+  const errorTarget = byId(page === "agent" ? "agent-error" : page === "agents" ? "agents-error" : "main-error");
+  if (removing || operation || materials.busy() || loading === "change")
+    return notice(errorTarget, "请等当前操作完成，再打开迭代对话。", true);
+  const token = ++activationSequence, key = `iteration:${agentId}`;
+  const body = activationRetry?.key === key ? activationRetry.body : { mutationId: crypto.randomUUID() };
+  activationRetry = { key, body }; openingIteration = agentId; notice(errorTarget, ""); controls();
+  try {
+    const { conversation } = await api.createConversation({ iterationAgentId: agentId, mutationId: body.mutationId });
+    if (activationSequence !== token) return;
+    if (!conversation?.id || removedIds.has(conversation.id) || conversation.iterationAgentId !== agentId
+      || conversation.context?.type !== "requirements" || conversation.context.agentId !== agentId)
+      throw new Error("返回的对话与这位助手不匹配，请重试。");
+    if (selected) drafts.set(selected.id, messageInput.value);
+    sequence++; historyRevision++; openingIteration = null; loading = "change";
+    try {
+      displayConversation(conversation, drafts.get(conversation.id) ?? "");
+      document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "chat" } }));
+      applyContext(conversation.context, { reveal: true, force: true });
+    } finally { loading = false; }
+    activationRetry = null; render(); restoreObservation();
+    if (page === "chat") messageInput.focus();
+    if (listing) await listing;
+    if (token === activationSequence) await list();
+  } catch (caught) {
+    if (token === activationSequence) {
+      const error = errorInfo(caught);
+      if (error.status === 400 || error.status === 409) activationRetry = null;
+      notice(errorTarget, `迭代对话未打开。${error.message}`, true);
+    }
+  } finally {
+    if (token === activationSequence) { openingIteration = null; controls(); }
+  }
+}
 async function activateRequirements(agentId?: string) {
-  document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "chat" } }));
+  if (agentId) return openIteration(agentId);
   if (!loaded) await list();
   if (busy()) return notice(byId("main-error"), "请等当前操作完成，再继续整理需求。", true);
-  if (!selected) { await create(); if (!selected) return; }
-  const id = selected.id, token = ++activationSequence, key = `${id}:${agentId || "new"}`;
-  const body = activationRetry?.key === key ? activationRetry.body : { ...(agentId ? { agentId } : {}), mutationId: crypto.randomUUID() };
-  activationRetry = { key, body }; loading = true; controls();
+  if (!selected || selected.iterationAgentId) { await create({ preserveInput: !selected }); if (!selected || selected.iterationAgentId) return; }
+  const id = selected.id, token = ++activationSequence, key = `${id}:new`;
+  const body = activationRetry?.key === key ? activationRetry.body : { mutationId: crypto.randomUUID() };
+  activationRetry = { key, body }; loading = "change"; controls();
+  document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "chat" } }));
   try {
     const result = await api.activateRequirements(id, body);
     if (token !== activationSequence || selected?.id !== id) return;
@@ -428,6 +473,7 @@ byId("main-cancel").addEventListener("click", async () => {
 });
 document.addEventListener("neuma:route", (event) => {
   closeHistoryMenu();
+  if (openingIteration) { openingIteration = null; activationSequence++; controls(); }
   page = event.detail.page;
   contextPanel.route(page);
   if (page !== "chat") detachObservation();

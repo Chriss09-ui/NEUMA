@@ -115,7 +115,7 @@ export interface CollaborationApi {
  agentFiles(id: string): Promise<ShareFilesResult>;
  activity(): Promise<{ [key: string]: unknown }>;
  conversations(): Promise<{ conversations: MainConversation[] }>;
- createConversation(): Promise<{ conversation: MainConversation; context?: MainPanelContext | undefined }>;
+ createConversation(iteration?: { iterationAgentId: string; mutationId: string }): Promise<{ conversation: MainConversation; context?: MainPanelContext | undefined }>;
  conversation(id: string): Promise<{ conversation: MainConversation; context?: MainPanelContext | undefined }>;
  removeConversation(id: string, body: unknown): Promise<{ removed: boolean; conversationId: string }>;
  activateRequirements(id: string, body: unknown): Promise<{ conversation: MainConversation; context?: MainPanelContext | undefined }>;
@@ -134,7 +134,7 @@ export interface GroupTaskView { id: string; conversationId?: string | undefined
 export interface GroupConversationView extends GroupTaskView { taskId: string; tasks: GroupTaskView[]; order: number }
 export interface MainPanelContext { type: string; agentId?: string | undefined; groupId?: string | undefined; taskId?: string | undefined; draft?: import("./ui-types.js").RequirementDraft | undefined; requirement?: AgentRequirement | undefined; confirmed?: boolean | undefined; status?: string | undefined; lastQuestion?: string | undefined; name?: string | undefined; buildStatus?: string | undefined; buildState?: { status: string; handoff?: import("./ui-types.js").RequirementHandoff | undefined; updateStatus?: import("./ui-types.js").BuildPresentation | null | undefined } | undefined;
   changes?: string[]; pendingPreference?: { text: string; messageId: string } }
-export interface MainConversation { id: string; title: string; version: number; messages?: GroupMessageView[] | undefined; context?: MainPanelContext | null | undefined; requests?: { mutationId: string; assistantId: string; status: string }[] }
+export interface MainConversation { id: string; title: string; version: number; iterationAgentId?: string | undefined; messages?: GroupMessageView[] | undefined; context?: MainPanelContext | null | undefined; requests?: { mutationId: string; assistantId: string; status: string }[] }
 export interface MainOperationSnapshot { reply: string; reason?: string | undefined; error: string | null; sources: MainUiSource[]; actions: MainUiAction[]; conversation: MainConversation; status: string; context: MainPanelContext | null }
 export interface MainUiAction { type: string; agentId?: string | undefined; requirement?: AgentRequirement | undefined }
 export interface MainUiSource { type: string; groupId?: string | undefined; operation?: string | undefined }

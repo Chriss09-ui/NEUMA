@@ -30,7 +30,7 @@ const record = object({ schemaVersion: oneOf(1), id: string, title: string, vers
     actions: array(object({ type: string })), createdAt: string, updatedAt: string,
     attachments: optional(array(object({ id: string, name: string }))), diagnostic: optional(diagnostic) })),
   requests: array(object({ mutationId: string, hash: string, userId: string, assistantId: string, status: string, diagnostic: optional(diagnostic) })),
-  creationMutationId: maybeString, deletedAt: maybeString, deletionMutationId: maybeString, deletionExpectedVersion: optional(number),
+  iterationAgentId: maybeString, creationMutationId: maybeString, deletedAt: maybeString, deletionMutationId: maybeString, deletionExpectedVersion: optional(number),
   requirements: optional(array(requirement)), requirement: optional(nullable(requirement)), context: optional(nullable(context)),
   requirementActivations: optional(array(object({ mutationId: string, agentId: nullable(string), context: nullable(context) }))) });
 export function checkedMainRecordShape(value: unknown): MainRecord {

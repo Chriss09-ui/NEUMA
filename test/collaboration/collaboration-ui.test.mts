@@ -3134,21 +3134,54 @@ test("需求快捷确认成功、失败或停止都保留原输入及发送期�
   }
 });
 
-test("需求激活未知结果保持主草稿和同一个幂等操作，迭代保持稳定智能体 ID", async () => {
+test("从助手页面点迭代只打开它的对话，失败重试和返回主历史保留各自草稿", async () => {
   const writes: WireBody[] = []; let fail = true;
-  const conversation = { id: "main-one", title: "长期工作", messages: [] };
-  const context = { type: "requirements", mode: "edit", agentId: "existing-agent", draft: { name: { value: "既有助手" } }, status: "needs_input", confirmed: false };
+  const conversation = { id: "main-one", title: "论文助手的原对话", messages: [{ role: "user", content: "只属于论文助手的旧消息" }] };
+  const context = { type: "requirements", mode: "edit", agentId: "existing-agent", name: "质性研究助手", changes: [], status: "ready", confirmed: false };
+  const iteration = { id: "main-qualitative", title: "迭代 · 质性研究助手", iterationAgentId: "existing-agent", messages: [], context };
   const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
-    if (path.endsWith("/requirements")) { writes.push(JSON.parse(String(options.body))); if (fail) { fail = false; throw new Error("响应丢失"); } return Response.json({ conversation: { ...conversation, context }, context }); }
-    return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
+    if (path === "/api/main/conversations" && options.method === "POST") {
+      writes.push(JSON.parse(String(options.body))); if (fail) { fail = false; throw new Error("响应丢失"); }
+      return Response.json({ conversation: iteration });
+    }
+    return Response.json(path === "/api/main/conversations" ? { conversations: [conversation, iteration] }
+      : { conversation: path.endsWith(iteration.id) ? iteration : conversation });
   });
+  ui.document.addEventListener("neuma:navigate", event => ui.route(event.detail!));
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "保留原主聊天输入";
+  await ui.route({ page: "agent", agentId: "existing-agent" });
   await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: { agentId: "existing-agent" } }); await settle();
-  assert.equal(ui.get("main-message").value, "保留原主聊天输入"); assert.match(ui.text("main-error"), /原对话与输入已保留/);
-  assert.equal(ui.get("main-refresh").hidden, false); assert.equal(ui.get("main-recovery").hidden, false);
+  assert.match(ui.text("agent-error"), /响应丢失/);
   await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: { agentId: "existing-agent" } }); await settle();
-  assert.deepEqual(writes[1], writes[0]); assert.equal(writes[0]!.agentId, "existing-agent"); assert.match(ui.text("main-context-content"), /既有助手/);
-  assert.equal(ui.get("main-refresh").hidden, true); assert.equal(ui.get("main-recovery").hidden, true);
+  assert.deepEqual(writes[1], writes[0]); assert.equal(writes[0]!.iterationAgentId, "existing-agent");
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), iteration.id);
+  assert.match(ui.text("main-messages"), /质性研究助手/); assert.doesNotMatch(ui.text("main-messages"), /论文助手/);
+  assert.equal(ui.get("main-message").value, ""); ui.get("main-message").value = "只属于质性的草稿";
+  await mainHistoryItems(ui).find(item => item.dataset.conversationId === conversation.id)!.click(); await settle();
+  assert.equal(ui.get("main-message").value, "保留原主聊天输入");
+  await ui.route({ page: "agents" });
+  await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: { agentId: "existing-agent" } }); await settle();
+  assert.equal(ui.get("main-message").value, "只属于质性的草稿");
+});
+
+test("连续打开两个助手时，先点的助手迟到也不能覆盖最后选择的迭代记录", async () => {
+  const records = ["A", "B"].map(id => ({ id: `main-${id}`, title: `迭代 · ${id}`, iterationAgentId: id,
+    messages: [{ role: "user", content: `属于 ${id} 的历史` }], context: { type: "requirements", agentId: id, status: "ready", changes: [] } }));
+  let finishFirst!: (response: Response) => void;
+  const ui = setup(mainSource, async (path, options: RequestInit = {}) => {
+    if (path === "/api/main/conversations" && options.method === "POST") {
+      const { iterationAgentId } = JSON.parse(String(options.body));
+      if (iterationAgentId === "A") return new Promise<Response>(resolve => { finishFirst = resolve; });
+      return Response.json({ conversation: records[1] });
+    }
+    return Response.json(path === "/api/main/conversations" ? { conversations: records } : { conversation: records.find(r => path.endsWith(r.id)) });
+  });
+  ui.document.addEventListener("neuma:navigate", event => ui.route(event.detail!));
+  await ui.route({ page: "agents" }); await settle();
+  for (const agentId of ["A", "B"]) await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: { agentId } });
+  await settle(); finishFirst(Response.json({ conversation: records[0] })); await settle();
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "main-B");
+  assert.match(ui.text("main-messages"), /属于 B 的历史/); assert.doesNotMatch(ui.text("main-messages"), /属于 A 的历史/);
 });
 
 test("主聊天群任务上下文显示实际分工与结果，关闭只停止查看，重开恢复轮询", async () => {

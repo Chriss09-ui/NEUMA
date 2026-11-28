@@ -28,6 +28,7 @@ interface MainTurn {
   accepted?: Promise<MainRecord>;
 }
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { InputError, ProviderError, isRequirementApproval, normalizeDraft } from "../requirements/core.mjs";
 import { createExecutionSession as createPiSession, classifyModelFailure } from "../runtime/execution-runtime.mjs";
 import { modelOutputBudget } from "../runtime/model-limits.mjs";
@@ -133,7 +134,30 @@ export class MainAgent {
   }
 
   async listConversations() { return { conversations: await this.store.list() }; }
-  async createConversation(input: Record<string, unknown> = {}) { return { conversation: await this.store.create(input) }; }
+  async createConversation(input: Record<string, unknown> = {}) {
+    if (input.iterationAgentId === undefined) return { conversation: await this.store.create(input) };
+    const agentId = mainId(input.iterationAgentId, "智能体"), mutationId = mainId(input.mutationId, "请求");
+    const conversation = await this.store.create({ mutationId }, { agentId, prepare: async record => {
+      if (this.closed || this.removals.has(record.id)) throw mainConversationFailure("conversation_conflict", "暂时无法打开这份迭代对话，请重试。");
+      if (this.active.has(record.id)) return false;
+      const prior = record.requirement;
+      const clean = prior?.savedRequirement && !prior.confirmed && !prior.userMessages.length
+        && isDeepStrictEqual(prior.draft, normalizeDraft(prior.savedRequirement.draft));
+      const requirement = await prepareRequirement({ record: clean ? {} : record, conversationId: record.id, mutationId, agentId, mode: "edit" }, this.agents);
+      if (this.active.has(record.id)) return false;
+      if (clean) {
+        requirement.createdAt = prior.createdAt; requirement.updatedAt = prior.updatedAt; requirement.version = prior.version;
+      }
+      const saved = requirement.savedRequirement!, displayName = objectFields(saved.profile).name;
+      const title = `迭代 · ${typeof displayName === "string" && displayName.trim() ? displayName.trim() : saved.name}`;
+      const unchanged = isDeepStrictEqual(prior, requirement);
+      if (record.title === title && unchanged) return false;
+      if (clean && !unchanged) { requirement.updatedAt = new Date().toISOString(); requirement.version++; }
+      record.title = title; rememberRequirement(record, requirement);
+      return true;
+    } });
+    return { conversation: await this.conversationView(conversation) };
+  }
   private async recoverablePreference(record: MainRecord) {
     const pending = this.agents.applyIterationPreference && pendingIterationPreference(record);
     if (pending && (await this.agents.getActiveArchitecture?.(record.requirement!.agentId))?.delivery === "ready") return pending;
@@ -182,6 +206,8 @@ export class MainAgent {
     this.activating.add(conversationId);
     try {
       const record = await this.store.get(conversationId), key = agentId ?? null;
+      if (record.iterationAgentId && record.iterationAgentId !== agentId)
+        throw new InputError("这份迭代对话只属于当前助手，请从目标助手的入口打开对话。");
       const previous = record.requirementActivations?.find((item) => item.mutationId === mutationId);
       if (previous) {
         if (previous.agentId !== key) throw new InputError("这个请求标识已用于其他需求入口");
@@ -415,6 +441,8 @@ export class MainAgent {
     if (ctx.requirementRoute === "outside") throw new InputError("本轮已离开需求创建，旧草稿已保留，请处理当前要求");
     if (agentId) mainId(agentId, "Agent");
     const record = await this.store.get(ctx.conversationId);
+    if (record.iterationAgentId && (mode === "new" || agentId && agentId !== record.iterationAgentId))
+      throw new InputError("这份迭代对话只属于当前助手，请从目标助手的入口打开对话。");
     if (isMainConfirmation(ctx.message) && (record.context?.type !== "requirements"
       || record.context!.agentId !== record.requirement?.agentId)) throw new InputError("请先继续或选择要确认的 Agent 需求；群任务中的确认不会确认旧草稿");
     if (isMainConfirmation(ctx.message) && (record.requirement!.status !== "ready" || record.requirement!.confirmed
@@ -552,7 +580,7 @@ export class MainAgent {
         && requirementContext(requirement)?.changes?.length === 0 && (await this.agents.getActiveArchitecture?.(requirement.agentId))?.delivery === "ready")
         ctx.forcedReply = "这位助手的正式需求已经保存。你可以直接告诉我想改哪一项。";
       const allowMemory = preference?.direct === false;
-      if (requirement && (!requirement.confirmed || allowMemory) && ctx.forcedReply === undefined) {
+      if (requirement && (record.iterationAgentId || !requirement.confirmed || allowMemory) && ctx.forcedReply === undefined) {
         if (isMainConfirmation(ctx.message)) await this.requirements(ctx, { mode: "continue" });
         else {
           const route = await this.requirementRouter({ config: this.config, cwd: this.store.root, dataDir: this.store.root,
@@ -563,6 +591,8 @@ export class MainAgent {
           if (allowMemory && typeof route === "object" && route.route === "memory" && route.quote === ctx.message.trim())
             await this.saveIterationPreference(ctx, requirement, preference.text);
           if (!["continue", "new", "outside"].includes(ctx.requirementRoute)) throw failed("requirement_routing_failed", "本轮消息去向尚未核实，当前需求已保留，请重试");
+          if (record.iterationAgentId && ctx.requirementRoute !== "continue")
+            ctx.forcedReply = `这里正在迭代「${requirement.savedRequirement!.name}」。要处理其他事情，可以在侧栏开启 NEUMA 新对话。`;
           if (ctx.forcedReply === undefined && ctx.requirementRoute !== "outside") await this.requirements(ctx, { mode: ctx.requirementRoute === "new" ? "new" : "continue" });
         }
       }

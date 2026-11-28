@@ -39,7 +39,7 @@ npm start
 
 打开 [http://127.0.0.1:3000](http://127.0.0.1:3000)。主 Agent 是统一的长期对话与全局管理入口，历史自动保存。左侧“历史对话”可折叠，主聊天不设顶部标题和创建按钮栏，右侧不预先展示工作概览。直接描述想创建的智能体或群组，NEUMA 根据对话识别意图；智能体需求展开右侧需求说明，澄清和确认继续使用原来的输入框；创建群组所需的目标或成员不清楚时先询问。“管理项目”保留独立入口，“设置”管理模型连接。
 
-点击左侧“我的智能体”或“我的群组”分区标题，进入对应管理页。在“我的智能体”页可按名称或简介搜索。卡片上的“进入对话”打开助手，“让 NEUMA 迭代”打开原需求。右上角“更多操作”可导出或删除。有待保存的需求时，保存入口在卡片的状态旁。展开列表上方的同步提示可查看旧记录的具体问题。
+点击左侧“我的智能体”或“我的群组”分区标题，进入对应管理页。在“我的智能体”页可按名称或简介搜索。卡片上的“进入对话”打开助手私聊。“让 NEUMA 迭代”和助手详情的同名入口打开这位助手的独立迭代对话，第一次打开时消息为空。再次打开会接着它的迭代记录，原创建对话仍可从 NEUMA 历史打开。右上角“更多操作”可导出或删除。有待保存的需求时，保存入口在卡片的状态旁。展开列表上方的同步提示可查看旧记录的具体问题。
 
 点击 NEUMA、具体智能体或群组条目的名称、头像或空白区域，可折叠／展开该条目的历史；新对话统一从条目右侧的“方框加笔”图标开启，鼠标悬浮或键盘聚焦时显示。点击可开启对应条目的新对话（群组为新话题），不会提交消息或启动任务。应用中的智能体会同时打开助手对话区域。使用 Tab 键可依次聚焦左侧导航中的链接与按钮；获得焦点的入口显示完整蓝色轮廓，滚动区边缘不会裁掉轮廓。
 
@@ -272,7 +272,7 @@ Pi 复用 `NEUMA_LLM_CHAT_URL`、`NEUMA_LLM_MODEL`、`NEUMA_LLM_API_KEY`；接�
 npm test
 ```
 
-接口：`GET /api/health` 返回连接配置状态。主入口使用 `POST /api/main/conversations/:id/operations` 提交 `{mutationId,message,attachmentIds?}`；接受回执包含 `operation` 与快照。`GET /api/main/conversations/:id/operations/:operationId?after=<cursor>` 续看，`POST` 同路径 `/cancel` 携带 `{generation}` 精确停止。相同请求编号不能更换内容；重复查看不执行任务。兼容 `POST /api/main/conversations/:id/messages` 仍在同一会话中路由普通对话、需求和群任务，保留原流式等待与断开取消语义；`POST /api/main/conversations/:id/requirements` 接收 `{mutationId, agentId?}`，激活新建或指定 Agent 的迭代草稿。主回复流中的 `context` 事件告知界面展示需求或群任务，完成响应携带持久化会话及当前上下文。独立的 `POST /api/requirements/turn` 继续保留，接收 `{ "message": "...", "draft": null, "lastQuestion": "", "userMessages": [] }`，返回更新草稿、`needs_input` 或 `ready`、至多一个追问、摘要、Jev 参与状态及诊断摘要。失败响应只返回安全的错误类别、HTTP 状态和重试次数，不返回密钥或接口原始响应。
+接口：`GET /api/health` 返回连接配置状态。`POST /api/main/conversations` 带 `{mutationId, iterationAgentId}` 可打开指定助手的迭代对话。主入口使用 `POST /api/main/conversations/:id/operations` 提交 `{mutationId,message,attachmentIds?}`；接受回执包含 `operation` 与快照。`GET /api/main/conversations/:id/operations/:operationId?after=<cursor>` 续看，`POST` 同路径 `/cancel` 携带 `{generation}` 精确停止。相同请求编号不能更换内容；重复查看不执行任务。兼容 `POST /api/main/conversations/:id/messages` 仍在同一会话中路由普通对话、需求和群任务，保留原流式等待与断开取消语义；`POST /api/main/conversations/:id/requirements` 接收 `{mutationId, agentId?}`，激活新建或指定 Agent 的迭代草稿。主回复流中的 `context` 事件告知界面展示需求或群任务，完成响应携带持久化会话及当前上下文。独立的 `POST /api/requirements/turn` 继续保留，接收 `{ "message": "...", "draft": null, "lastQuestion": "", "userMessages": [] }`，返回更新草稿、`needs_input` 或 `ready`、至多一个追问、摘要、Jev 参与状态及诊断摘要。失败响应只返回安全的错误类别、HTTP 状态和重试次数，不返回密钥或接口原始响应。
 
 制作与研发的后台入口：`POST /api/agents/:id/operations`，构建传 `{kind:"build",mutationId,name,draft,architectureRepair?}`，研发传 `{kind:"development",mutationId,resume}`。使用 `GET /api/agents/:id/operations/:operationId?after=<cursor>` 查看，`POST` 同路径 `/cancel` 传 `{generation}` 停止。智能体详情的 `operationReference` 可定位正在执行的任务。游标变化时按返回的完整快照替换显示，不重复拼接正文。旧 `/api/agents/build`、`/api/agents/:id/development/stream` 继续兼容。
 

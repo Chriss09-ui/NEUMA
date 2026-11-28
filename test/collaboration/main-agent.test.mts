@@ -543,6 +543,45 @@ test("创建 Agent 在同一主对话澄清并用真实追问覆盖模型改写�
   assert.equal(confirmed.conversation.messages.length, 4);
 });
 
+test("助手迭代首次为空，同名助手、创建历史各自独立，并发打开和重启后继续原记录", async t => {
+  const f = await fixture(t);
+  f.requirements.set("other", { ...structuredClone(f.requirements.get("worker")!), id: "other" });
+  await f.main.prompt(f.input("普通主对话的旧消息"));
+  await f.main.activateRequirements({ conversationId: f.conversation.id, agentId: "worker", mutationId: "old_entry" });
+  const original = (await f.main.getConversation(f.conversation.id)).conversation;
+  const open = (iterationAgentId: string, mutationId: string) => f.main.createConversation({ iterationAgentId, mutationId });
+  const [first, parallel] = await Promise.all([open("worker", "from_card"), open("worker", "from_settings")]);
+  assert.equal(first.conversation.context?.agentId, "worker");
+  assert.notEqual(first.conversation.id, original.id); assert.equal(parallel.conversation.id, first.conversation.id);
+  assert.deepEqual(first.conversation.messages, []);
+  f.main.agents.applyIterationPreference = async (_id, text) => ({ memory: text });
+  const saved = await f.main.prompt({ conversationId: first.conversation.id, mutationId: "nickname", message: "以后叫我 Chriss" });
+  assert.equal(saved.sources[0]?.agentId, "worker");
+  const other = (await open("other", "other_card")).conversation;
+  assert.notEqual(other.id, first.conversation.id); assert.deepEqual(other.messages, []);
+  assert.equal(other.context?.agentId, "other");
+  const published = f.requirements.get("worker")!;
+  published.profile = { name: "更新后的显示名" }; published.draft.goal.value = "其他对话确认的新目标";
+  const latest = (await open("worker", "latest_saved")).conversation;
+  assert.deepEqual(latest.messages, saved.conversation.messages); assert.equal(latest.requirement!.draft.goal.value, published.draft.goal.value);
+  assert.ok(latest.title.includes("更新后的显示名"));
+  const pending = await f.main.prompt({ conversationId: first.conversation.id, mutationId: "formal", message: "每次交付都需要附行动清单" });
+  published.draft.goal.value = "此后另一处的修改";
+  await assert.rejects(f.main.activateRequirements({ conversationId: first.conversation.id, agentId: "other", mutationId: "wrong_agent" }), InputError);
+  await assert.rejects(open("missing", "unknown_agent"), InputError);
+  const restored = new MainAgent({ config: f.config, dataDir: f.dataDir, agents: f.agents, collaboration: f.collaboration });
+  t.after(() => restored.close());
+  const resumed = (await restored.createConversation({ iterationAgentId: "worker", mutationId: "after_restart" })).conversation;
+  assert.equal(resumed.id, first.conversation.id); assert.deepEqual(resumed.messages, pending.conversation.messages);
+  assert.deepEqual(resumed.requirement, pending.conversation.requirement);
+  assert.deepEqual((await restored.getConversation(original.id)).conversation, original);
+  assert.equal((await restored.listConversations()).conversations.length, 3);
+  await restored.removeConversation(resumed.id, { confirm: true, expectedVersion: resumed.version, mutationId: "remove_iteration" });
+  await assert.rejects(restored.createConversation({ iterationAgentId: "worker", mutationId: "from_card" }), { reason: "conversation_deleted" });
+  const fresh = (await restored.createConversation({ iterationAgentId: "worker", mutationId: "after_delete" })).conversation;
+  assert.notEqual(fresh.id, resumed.id); assert.deepEqual(fresh.messages, []);
+});
+
 test("快捷需求激活不调用模型或增加消息，幂等保留最新草稿并隔离不同主会话", async (t) => {
   const f = await fixture(t);
   const first = await f.main.activateRequirements({ conversationId: f.conversation.id, mutationId: "activate_new" });
