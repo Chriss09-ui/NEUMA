@@ -149,6 +149,15 @@ async function fixture(t: test.TestContext, options: FixtureOptions = {}) {
   return { root, dataDir, sessions, architecture, controller, workspace, executor, config, controllers };
 }
 
+test("一次检查点写盘故障会保存失败终态并释放研发任务", async t => {
+  const { controller, architecture, sessions } = await fixture(t);
+  t.mock.method(controller.store, "save").mock.mockImplementationOnce(async () => { throw new Error("临时磁盘故障"); });
+  const result = await controller.run(architecture);
+  assert.equal(result.status, "failed"); assert.equal(result.diagnostic?.reason, "execution_failed");
+  assert.equal((await controller.store.getRun(result.id))?.status, "failed");
+  assert.equal(controller.active.has(architecture.agentId), false); assert.equal(sessions.length, 0);
+});
+
 const failReport = (report: VerifyReport, marker = "raw-failure") => ({ ...report, status: "failed", summary: "模拟业务断言不匹配",
   results: report.results.map((item, index) => index ? item : { ...item, status: "failed", actual: { error: marker },
     stdout: JSON.stringify({ error: marker }), stderr: `${marker}-stderr`, reason: "assertion_mismatch" }) });

@@ -100,6 +100,22 @@ test("large results are stored per agent and read with bounded pagination", asyn
   await store.remove("alpha", "data"); await assert.rejects(store.readResult("alpha", result.resultRef), { reason: "connection_revoked" });
 });
 
+test("数值表格从结果引用可分页读取，兼容旧的带缩进结果文件", async t => {
+  const data = { title: '空 格与"引号"', sections: [{ rows: Array(35_000).fill(Array(60).fill(0)) }] };
+  const content = JSON.stringify(data);
+  const { store } = await fixture(t, { fetchImpl: async () => new Response(content) });
+  const requirements = requirement([{ id: "read", method: "GET", path: "/read" }]); await save(store, requirements);
+  const result = await store.call(await store.snapshot("alpha"), { connectionId: "data", operationId: "read" }, { requirements });
+  assert.ok(result.resultRef);
+  const page = () => store.readResult("alpha", result.resultRef!, { offset: content.length - 100, length: 100 });
+  const current = await page(); assert.equal(current.content, content.slice(-100)); assert.equal(current.hasMore, false);
+  const path = `private/connection-results/${result.resultRef}.json`, old = await store.storage.readJson("alpha", path);
+  // Recreate the exact encoding shipped before compact result storage.
+  await store.storage.writeJson("alpha", path, old);
+  assert.deepEqual(await page(), current);
+  assert.equal((await store.readResult("alpha", result.resultRef, { length: 100 })).content, content.slice(0, 100));
+});
+
 test("official MCP transport discovers only and invokes reviewed tools, rejecting changed schemas", async (t) => {
   let calls = 0, changed = false;
   const server = createServer(async (request, response) => {

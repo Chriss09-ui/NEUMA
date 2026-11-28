@@ -7,6 +7,7 @@ import type { CollaborationService } from "../collaboration/groups.mjs";
 import type { PromptOptions } from "../agents/prototype-port.mjs";
 
 export interface MainAgentAgents extends MainRequirementAgents {
+  submitOperation?(kind: "build", input: Record<string, unknown>, options: { signal: AbortSignal }): unknown | Promise<unknown>;
   getActiveArchitecture?(agentId: string): Promise<{ delivery?: string | undefined } | null>;
   applyIterationPreference?(agentId: string, preference: string, options: { signal: AbortSignal }): Promise<{ memory: string } | null>;
   services?: { environment?(): Promise<unknown> } | undefined;

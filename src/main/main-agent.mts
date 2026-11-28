@@ -262,6 +262,32 @@ export class MainAgent {
     }
   }
 
+  private async completeReply(ctx: MainTurn, background?: boolean): Promise<MainPromptResult> {
+    const action = ctx.actions.find(item => item.type === "build_agent");
+    const saved = ctx.pendingRequirement?.savedRequirement;
+    if (background && action && saved && saved.id === action.agentId) {
+      // The accepted turn owns the handoff even when all observing pages disconnect.
+      this.guard(ctx);
+      const mutationId = "main_build_" + hash(JSON.stringify([ctx.conversationId, ctx.mutationId, saved.id]));
+      try {
+        if (!this.agents.submitOperation) throw new InputError("当前制作服务不可用");
+        await this.agents.submitOperation("build", { id: saved.id, name: saved.name, draft: saved.draft, mutationId },
+          { signal: ctx.controller.signal });
+        ctx.reply = "需求已确认并保存，制作任务已提交。可在智能体工作区查看进度。";
+      } catch (error) {
+        this.guard(ctx);
+        const detail = error instanceof InputError ? error.message : "请在智能体工作区核对任务状态。";
+        ctx.reply = `需求已确认并保存。制作请求未能确认：${detail}`;
+      }
+      action.type = "open_agent"; action.label = "查看制作进度";
+    }
+    if (ctx.forcedReply !== undefined) {
+      ctx.onProgress({ type: "text-start" }); ctx.onProgress({ type: "text-delta", delta: ctx.reply });
+    }
+    const conversation = await this.flush(ctx, "complete"); this.guard(ctx);
+    return { reply: ctx.reply, conversation, context: conversation.context ?? null, actions: ctx.actions, sources: ctx.sources };
+  }
+
   scheduleSave(ctx: MainTurn) {
     if (ctx.timer) return;
     ctx.timer = setTimeout(() => {
@@ -598,9 +624,7 @@ export class MainAgent {
       }
       if (ctx.forcedReply !== undefined) {
         this.guard(ctx); ctx.reply = ctx.forcedReply;
-        ctx.onProgress({ type: "text-start" }); ctx.onProgress({ type: "text-delta", delta: ctx.reply });
-        const conversation = await this.flush(ctx, "complete"); this.guard(ctx);
-        return { reply: ctx.reply, conversation, context: conversation.context, actions: ctx.actions, sources: ctx.sources };
+        return await this.completeReply(ctx, background);
       }
       if (!this.config.llmConfigured) throw failed("not_configured", "请先在设置中连接模型");
       ctx.onProgress({ type: "status", phase: "thinking", label: "正在了解你的要求…" });
@@ -637,10 +661,8 @@ export class MainAgent {
       const reply = ctx.forcedReply ?? ctx.session.getLastAssistantText?.();
       if (typeof reply !== "string" || !reply.trim()) throw failed("missing_content", "模型未返回回复文字，已有操作与结果保留");
       ctx.reply = reply;
-      if (ctx.forcedReply !== undefined) { ctx.onProgress({ type: "text-start" }); ctx.onProgress({ type: "text-delta", delta: reply }); }
       if (!ctx.contextChanged) { ctx.context = null; ctx.contextChanged = true; ctx.onProgress({ type: "context", context: null }); }
-      const conversation = await this.flush(ctx, "complete"); this.guard(ctx);
-      return { reply, conversation, context: conversation.context ?? null, actions: ctx.actions, sources: ctx.sources };
+      return await this.completeReply(ctx, background);
     } catch (error) {
       const safe = ctx.persistenceError ? failed("persistence_failed", "主 Agent 对话未能保存，已停止继续操作，已执行的操作与已有结果保留，请检查本机存储")
         : ctx.controller.signal.aborted ? failed("cancelled", "主 Agent 回复已停止，已执行的操作与已有结果保留")

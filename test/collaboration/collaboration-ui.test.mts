@@ -3001,7 +3001,7 @@ test("服务器已取消或明确失败后主动重发使用新请求，取消�
   }
 });
 
-test("需求在同一主会话激活与确认，成功的新回复桥接后台制作，恢复历史不重复构建", async () => {
+test("需求在同一主会话激活与确认，已交接制作只打开工作区，恢复历史不重复构建", async () => {
   const writes: ({ "path": (string); "body": (WireBody); })[] = [], events: FixtureDetailEvent[] = [], requests: ((string))[] = [];
   const draft = { name: { value: "研究助手" }, goal: { value: "读资料并给出结论" }, inputSource: { value: "文字材料" } };
   const requirement = { id: "research", name: "研究助手", draft, updatedAt: "2026-10-11T00:00:00Z" };
@@ -3014,7 +3014,7 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
       writes.push({ path, body: JSON.parse(String(options.body)) });
       const context = { ...ready, status: "needs_build", confirmed: true, requirement, needsBuild: true };
       conversation = { ...conversation, context, messages: [...conversation.messages, { role: "user", content: "确认需求" }, { role: "assistant", content: "需求已保存，开始制作", status: "complete" }] };
-      return Response.json({ reply: "需求已保存，开始制作", conversation, context, actions: [{ type: "build_agent", agentId: "research", requirement }] });
+      return Response.json({ reply: "需求已保存，开始制作", conversation, context, actions: [{ type: "open_agent", agentId: "research", requirement }] });
     }
     if (path === "/api/agents/research") return Response.json({ architecture: { agentId: "research", name: requirement.name, draft, status: "designing" } });
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
@@ -3031,13 +3031,31 @@ test("需求在同一主会话激活与确认，成功的新回复桥接后台�
   await ui.get("main-context-content").querySelectorAll("button").find((item) => item.textContent === "确认需求并开始制作")!.click(); await settle();
   assert.equal(writes[1]!.path, "/api/main/conversations/main-one/operations"); assert.equal(writes[1]!.body.message, "确认需求");
   assert.equal(ui.get("main-message").value, "我稍后要补充的主聊天草稿");
-  assert.equal(events.filter((event) => event.build).length, 1); assert.deepEqual(events.find!((event) => event.build)!.requirement, requirement);
+  assert.ok(events.some(event => objectFields(event.requirement).id === "research")); assert.ok(events.every(event => !event.build));
   assert.equal(navigations.at(-1)?.page, "agent");
   assert.equal(navigations.at(-1)?.agentId, "research");
   assert.match(ui.text("main-context-content"), /正在设计方案/);
   // Re-reading a saved conversation must never replay its build action, even without a visible recovery control.
-  await ui.get("main-refresh").click(); await settle(); assert.equal(events.filter((event) => event.build).length, 1);
+  await ui.get("main-refresh").click(); await settle(); assert.ok(events.every(event => !event.build));
   assert.equal(requests.includes("/api/requirements/turn"), false);
+});
+
+test("主对话按 Unicode 码点接收一万二千字，超限保留草稿并提示", async () => {
+  const { REQUIREMENT_MESSAGE_MAX_CHARACTERS } = await import("../../src/requirements/requirement-limits.mjs");
+  const sent: string[] = [], conversation: FixtureConversation = { id: "main-one", title: "长需求", messages: [] };
+  const ui = setup(mainSource, (path, options = {}) => {
+    if (path.endsWith("/operations")) {
+      const { message } = JSON.parse(String(options.body)); sent.push(message);
+      return Response.json({ conversation, reply: "已收到" });
+    }
+    return Response.json(path.endsWith("/conversations") ? { conversations: [conversation] } : { conversation });
+  });
+  await ui.route({ page: "chat" }); await settle();
+  const input = ui.get("main-message"), valid = "😀".repeat(REQUIREMENT_MESSAGE_MAX_CHARACTERS);
+  input.value = valid + "字"; await ui.submit("main-chat-form"); await settle();
+  assert.deepEqual(sent, []); assert.equal(input.value, valid + "字"); assert.match(ui.text("main-error"), /12000/);
+  input.value = valid; await ui.submit("main-chat-form"); await settle();
+  assert.deepEqual(sent, [valid]);
 });
 
 test("旧对话的偏好可就地保存，正式编辑只展示改动和对应确认操作", async () => {

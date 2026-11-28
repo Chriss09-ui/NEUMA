@@ -79,6 +79,28 @@ test("真实托管批次执行、等待输入、关闭重启后继续，不重�
   assert.deepEqual(f.calls, [2, 3]);
 });
 
+test("流程已提交结果而任务终态写入中断，重启继续补回结果", async t => {
+  const f = await fixture(t); if (!f.service) return;
+  const { taskId } = await f.service.submit("one", { actionId: "process", input: { values: [5] }, mutationId: "output-window", deliveryVersion: "v1" });
+  const waiting = await f.service.wait("one", taskId), store = f.service.store, update = store.update.bind(store);
+  const fault = t.mock.method(store, "update", async (...args: Parameters<typeof update>) => {
+    if (["completed", "failed"].includes(String(args[2].status))) throw new Error("任务终态写入中断");
+    return update(...args);
+  });
+  await f.service.resume("one", taskId, { input: "结果", expectedVersion: waiting.sequence, mutationId: "finish-output" });
+  await assert.rejects(f.service.wait("one", taskId), /任务终态写入中断/);
+  fault.mock.restore();
+  assert.equal((await f.service.workflows.get(waiting.workflowId!)).status, "completed");
+  await f.service.close(); await f.manager!.close();
+  const restarted = (await f.create())!.service;
+  const interrupted = await restarted.store.get("one", taskId);
+  assert.equal(interrupted.status, "interrupted");
+  await restarted.resume("one", taskId, { expectedVersion: interrupted.sequence, mutationId: "recover-output" });
+  const recovered = await restarted.wait("one", taskId);
+  assert.equal(recovered.status, "completed"); assert.deepEqual(recovered.result, { values: [10], suffix: "结果" });
+  assert.deepEqual(f.calls, [5]);
+});
+
 test("外部副作用结果不明时暂停，核实结果后继续且不重复调用", async (t) => {
   const f = await fixture(t, { sideEffect: true }); if (!f.service) return; f.fail(true);
   const { taskId } = await f.service.submit("one", { actionId: "process", input: { values: [4] }, mutationId: "effect-first", deliveryVersion: "v1" });
@@ -87,9 +109,13 @@ test("外部副作用结果不明时暂停，核实结果后继续且不重复�
   await assert.rejects(f.service.resume("one", taskId, { mutationId: "wrong-resume", expectedVersion: task.sequence }), /先核实/);
   await assert.rejects(f.service.resume("one", taskId, { mutationId: "wrong-result", expectedVersion: task.sequence,
     resolution: { attemptId: objectFields(task.waiting).attemptId, stepId: "batch", index: 0, outcome: "completed", output: "eight" } }));
-  await f.service.resume("one", taskId, { mutationId: "resolve-effect", expectedVersion: task.sequence,
-    resolution: { attemptId: objectFields(task.waiting).attemptId, stepId: "batch", index: 0, outcome: "completed", output: 8 } });
+  const resolution = { mutationId: "resolve-effect", expectedVersion: task.sequence,
+    resolution: { attemptId: objectFields(task.waiting).attemptId, stepId: "batch", index: 0, outcome: "completed", output: 8 } };
+  await f.service.resume("one", taskId, resolution);
   task = await f.service.wait("one", taskId); assert.equal(task.status, "waiting_input"); assert.deepEqual(f.calls, [4]);
+  const replay = await f.service.resume("one", taskId, resolution);
+  assert.equal(replay.task.sequence, task.sequence);
+  await assert.rejects(f.service.resume("one", taskId, { ...resolution, resolution: { ...resolution.resolution, output: 9 } }), /请求编号/);
   await f.service.resume("one", taskId, { mutationId: "resolve-final", expectedVersion: task.sequence, input: "checked" });
   task = await f.service.wait("one", taskId); assert.equal(task.status, "completed"); assert.deepEqual(objectFields(task.result).values, [8]); assert.deepEqual(f.calls, [4]);
 });

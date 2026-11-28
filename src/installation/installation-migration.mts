@@ -12,6 +12,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { InputError } from "../requirements/core.mjs";
 import { AgentStorage, agentId } from "../agents/agent-storage.mjs";
 import { AgentLibrary, validateConversationRecord } from "../agents/agent-library.mjs";
+import { DevelopmentArtifacts, type PlanningDraftSnapshot, type PlanningSnapshot } from "../development/development-artifacts.mjs";
+import { assertRequirementDraftSize, REQUIREMENT_NAME_MAX_CHARACTERS } from "../requirements/requirement-limits.mjs";
+import { textWithinLimit } from "../runtime/text-length.mjs";
 import { hashValue } from "../development/development-contract.mjs";
 import { inspectDevelopmentCode } from "../development/development-workspace.mjs";
 
@@ -137,7 +140,7 @@ async function writeJson(path: string, value: unknown, limit: number, signal?: A
   } finally { await rm(temporary, { force: true }); }
 }
 
-async function relocateRecord(record: Fields, id: string, { sourceDir, staging, dataDir, signal, checkedSnapshots }: Relocation) {
+async function relocateRecord(record: Fields, id: string, planning: DevelopmentArtifacts, { sourceDir, staging, dataDir, signal, checkedSnapshots }: Relocation) {
   const snapshot = async (input: unknown) => { const value = objectFields(input); return await relocateSnapshot(value, input); };
   const relocateSnapshot = async (value: Fields, input: unknown) => {
     if (input === null) return null;
@@ -156,6 +159,23 @@ async function relocateRecord(record: Fields, id: string, { sourceDir, staging, 
       throw new InputError("研发快照内容校验失败，迁移已停止");
     return { ...value, path: join(dataDir, "agents", id, "development", "snapshots", value.hash) };
   };
+  async function relocatePlanning(holder: Fields, key: string, draft: boolean) {
+    if (holder[key] === undefined) return;
+    const value = objectFields(holder[key]);
+    if (value.agentId !== id || !safeRunId(value.runId) || typeof value.hash !== "string" || !/^[a-f0-9]{64}$/.test(value.hash)
+      || typeof value.indexPath !== "string" || typeof value.path !== "string" || !Array.isArray(value.files))
+      throw new InputError("研发规划快照身份无效，迁移已停止");
+    const location = join("agents", id, "development", draft ? "planning-draft-snapshots" : "planning-snapshots", value.hash);
+    if (resolve(value.path) !== join(sourceDir, location)) throw new InputError("研发规划快照路径无效，迁移已停止");
+    const staged = { ...value, path: join(staging, location) };
+    if (draft) await planning.validateDraftSnapshot(staged as PlanningDraftSnapshot, id, { signal });
+    else await planning.validateSnapshot(staged as PlanningSnapshot, id);
+    holder[key] = { ...value, path: join(dataDir, location) };
+  }
+  await relocatePlanning(record, "planningArtifact", false);
+  for (const key of ["planningDraft", "planningDraftSource"]) {
+    if (record[key] !== undefined) await relocatePlanning(objectFields(record[key]), "snapshot", true);
+  }
   // Only controller references move; user examples and execution output remain unchanged.
   for (const key of ["snapshot", "verifiedSnapshot"]) if (record[key] !== undefined) record[key] = await snapshot(record[key]);
   const relocatePackage = async (input: unknown) => { const value = objectFields(input); if (value.snapshot !== undefined) value.snapshot = await snapshot(value.snapshot); };
@@ -168,7 +188,7 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
   const storage = new AgentStorage({ dataDir: staging, legacyDataDir: sourceDir });
   await storage.ready;
   const ids = await storage.agentIds(), runIds = new Set<string>(), checkedSnapshots: Relocation["checkedSnapshots"] = new Map();
-  const library = new AgentLibrary({ dataDir: staging, storage });
+  const library = new AgentLibrary({ dataDir: staging, storage }), planning = new DevelopmentArtifacts({ storage });
   await library.list();
   for (const id of ids) {
     abort(signal); agentId(id);
@@ -177,16 +197,17 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
     if (deleted && deleted.id !== id) throw new InputError("删除标记的 Agent 身份无效");
     if (definition && !deleted) {
       const value = objectFields(definition.agent);
-      if (definition.version !== 1 || value?.id !== id || typeof value.name !== "string" || !value.name.trim() || value.name.length > 120
-        || typeof objectFields(objectFields(value.draft).goal).value !== "string" || !(objectFields(objectFields(value.draft).goal).value as string).trim() || JSON.stringify(value.draft).length > 60000
-        || typeof value.instructions !== "string" || !value.instructions.trim() || value.instructions.length > 12000
+      if (definition.version !== 1 || value?.id !== id || typeof value.name !== "string" || !value.name.trim() || !textWithinLimit(value.name, REQUIREMENT_NAME_MAX_CHARACTERS)
+        || typeof objectFields(objectFields(value.draft).goal).value !== "string" || !(objectFields(objectFields(value.draft).goal).value as string).trim()
+        || typeof value.instructions !== "string" || !value.instructions.trim() || !textWithinLimit(value.instructions, 12_000)
         || !isInteger(value.revision) || value.revision < 1
-        || (value.memory !== undefined && (typeof value.memory !== "string" || value.memory.length > 12000 || value.memory.includes("\0"))))
+        || (value.memory !== undefined && (typeof value.memory !== "string" || !textWithinLimit(value.memory, 12_000) || value.memory.includes("\0"))))
         throw new InputError("Agent 定义格式或身份无效");
+      assertRequirementDraftSize(value.draft);
       if (value.profile !== undefined && (!value.profile || typeof objectFields(value.profile).name !== "string" || !(objectFields(value.profile).name as string).trim()
-        || (objectFields(value.profile).name as string).length > 120 || (objectFields(value.profile).name as string).includes("\0") || typeof objectFields(value.profile).description !== "string"
-        || (objectFields(value.profile).description as string).length > 240 || (objectFields(value.profile).description as string).includes("\0") || typeof objectFields(value.profile).icon !== "string"
-        || (objectFields(value.profile).icon as string).length > 16 || (objectFields(value.profile).icon as string).includes("\0"))) throw new InputError("Agent 展示资料格式无效");
+        || !textWithinLimit(objectFields(value.profile).name, 120) || (objectFields(value.profile).name as string).includes("\0") || typeof objectFields(value.profile).description !== "string"
+        || !textWithinLimit(objectFields(value.profile).description, 240) || (objectFields(value.profile).description as string).includes("\0") || typeof objectFields(value.profile).icon !== "string"
+        || !textWithinLimit(objectFields(value.profile).icon, 16) || (objectFields(value.profile).icon as string).includes("\0"))) throw new InputError("Agent 展示资料格式无效");
     }
     const architecture = await readJson(join(staging, "agents", id, "architecture.json"), limits.jsonBytes);
     if (architecture) {
@@ -215,7 +236,7 @@ async function validateAndRelocate({ sourceDir, staging, dataDir, limits, signal
         || typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))
         || typeof record.updatedAt !== "string" || !Number.isFinite(Date.parse(record.updatedAt))) throw new InputError("研发记录身份或格式无效");
       hashValue(record); runIds.add(record.id);
-      await relocateRecord(record, id, { sourceDir, staging, dataDir, signal, checkedSnapshots });
+      await relocateRecord(record, id, planning, { sourceDir, staging, dataDir, signal, checkedSnapshots });
       await writeJson(path, record, limits.jsonBytes, signal);
     }
   }

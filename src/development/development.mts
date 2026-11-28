@@ -1258,6 +1258,8 @@ export class DevelopmentController {
           ctx.record.planningDraftCapture = { status: "skipped", reason: "draft_unavailable_or_changed" };
         }
       }
+      // A failed checkpoint stops ordinary writes. The failure itself still needs a durable terminal record.
+      ctx.writes = ctx.writes.catch(() => {});
       await this.save(ctx);
       return clone(ctx.record);
     } finally {

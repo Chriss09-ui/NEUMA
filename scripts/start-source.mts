@@ -2,6 +2,7 @@ import type { RequestHandlerOptions } from "../src/server.mjs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { runSourceApplication } from "../src/installation/installation-runtime.mjs";
+import { openProjectPage } from "../src/projects/projects.mjs";
 import { createRequestHandler } from "../src/server.mjs";
 
 export function sourceApplicationOptions(root: string): { root: string; createHandler(options: RequestHandlerOptions): ReturnType<typeof createRequestHandler> };
@@ -13,5 +14,9 @@ export function sourceApplicationOptions(root: string, createHandler: (options: 
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   if (!process.argv[2]) throw new Error("源码开发启动必须显式提供仓库根目录");
-  await runSourceApplication(sourceApplicationOptions(process.argv[2]));
+  const application = await runSourceApplication(sourceApplicationOptions(process.argv[2]));
+  if (application && process.argv.slice(3).includes("--open")) {
+    try { await openProjectPage(application.url); }
+    catch { process.stderr.write(`浏览器未能自动打开，请访问 ${application.url}\n`); }
+  }
 }

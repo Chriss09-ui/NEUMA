@@ -543,6 +543,22 @@ test("创建 Agent 在同一主对话澄清并用真实追问覆盖模型改写�
   assert.equal(confirmed.conversation.messages.length, 4);
 });
 
+test("后台确认接受后切页断开仍提交制作一次，重读与重放只查看已有交接", async t => {
+  const f = await fixture(t, async ({ tools }) => { await tools.open_agent_requirements!.execute("create", { mode: "new" }); });
+  const first = await f.main.prompt(f.input("帮我创建一位智能体"));
+  const submitted: Record<string, unknown>[] = [];
+  f.main.agents.submitOperation = async (_kind, input) => { submitted.push(input); };
+  const page = new AbortController(), body = f.input("确认需求", "confirm_and_leave");
+  const finished = await f.main.prompt(body, () => {}, { background: true, signal: page.signal, onAccepted: () => page.abort() });
+  assert.equal(submitted.length, 1); assert.equal(submitted[0]!.id, first.context!.agentId);
+  assert.deepEqual(submitted[0]!.draft, finished.context!.draft);
+  assert.equal(finished.actions[0]?.type, "open_agent");
+  const viewed = await f.main.operation(f.conversation.id, "confirm_and_leave");
+  assert.equal(viewed.snapshot!.actions[0]?.type, "open_agent");
+  await f.main.prompt(body, () => {}, { background: true });
+  assert.equal(submitted.length, 1);
+});
+
 test("助手迭代首次为空，同名助手、创建历史各自独立，并发打开和重启后继续原记录", async t => {
   const f = await fixture(t);
   f.requirements.set("other", { ...structuredClone(f.requirements.get("worker")!), id: "other" });
@@ -577,7 +593,8 @@ test("助手迭代首次为空，同名助手、创建历史各自独立，并�
   assert.deepEqual((await restored.getConversation(original.id)).conversation, original);
   assert.equal((await restored.listConversations()).conversations.length, 3);
   await restored.removeConversation(resumed.id, { confirm: true, expectedVersion: resumed.version, mutationId: "remove_iteration" });
-  await assert.rejects(restored.createConversation({ iterationAgentId: "worker", mutationId: "from_card" }), { reason: "conversation_deleted" });
+  for (const mutationId of ["from_card", "from_settings", "after_restart"])
+    await assert.rejects(restored.createConversation({ iterationAgentId: "worker", mutationId }), { reason: "conversation_deleted" });
   const fresh = (await restored.createConversation({ iterationAgentId: "worker", mutationId: "after_delete" })).conversation;
   assert.notEqual(fresh.id, resumed.id); assert.deepEqual(fresh.messages, []);
 });

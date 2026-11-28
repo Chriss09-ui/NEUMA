@@ -379,7 +379,7 @@ export class PrototypeAgents {
     return record;
   }
   async getRequirements() { await this.ready; return this.library.list(); }
-  async saveRequirements(id: string, raw: unknown, { confirmation, consultation, expectedDraft }: { confirmation?: unknown; consultation?: unknown; requestId?: unknown; expectedDraft?: unknown } = {}) {
+  async saveRequirements(id: string, raw: unknown, { confirmation, consultation, expectedDraft, expectedRequirementHash }: { confirmation?: unknown; consultation?: unknown; requestId?: unknown; expectedDraft?: unknown; expectedRequirementHash?: string | null } = {}) {
     const value = objectFields(raw);
     await this.ready;
     let receipt;
@@ -392,7 +392,7 @@ export class PrototypeAgents {
         throw Object.assign(new InputError("请先在需求对话中完成当前版本的评估和确认"), { reason: "requirements_need_confirmation" });
       receipt = previous.confirmationReceipt;
     }
-    return this.library.saveRequirement(id, value, { confirmationReceipt: receipt, consultation, expectedDraft });
+    return this.library.saveRequirement(id, value, { confirmationReceipt: receipt, consultation, expectedDraft, expectedRequirementHash });
   }
   async getRequirementConsultation(id: string): Promise<Consultation | null> {
     validId(id); await this.library.pending.get(id);

@@ -236,6 +236,6 @@ export async function runBuildCommand() {
     process.stdout.write(preview ? "Apple 芯片 Mac 试用版源配置与编译产物检查通过。\n" : "发布检查通过。\n");
   }
   if (command === "test") await execute(process.execPath, [join(root, "scripts/run-tests.mjs"), ...args], { cwd: root });
-  if (command === "start") await execute(process.execPath, ["--env-file=" + join(SOURCE_ROOT, ".env"),
-    join(root, "scripts/start-source.mjs"), SOURCE_ROOT], { cwd: SOURCE_ROOT });
+  if (command === "start") await execute(process.execPath, ["--env-file-if-exists=" + join(SOURCE_ROOT, ".env"),
+    join(root, "scripts/start-source.mjs"), SOURCE_ROOT, ...args], { cwd: SOURCE_ROOT });
 }

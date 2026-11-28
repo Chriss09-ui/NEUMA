@@ -83,6 +83,16 @@ export class WorkflowController<Context = unknown> {
   async resume({ id, input, resolution: rawResolution, signal, context }: WorkflowResumeOptions<Context>) {
     if (this.running.has(id)) throw new ServiceError("workflow_busy");
     const record = await this.get(id), resolution = objectFields(rawResolution);
+    // The parent task can still be interrupted after the workflow committed its outputs.
+    if (record.status === "completed") {
+      const outputs = record.definition.outputs;
+      if (Object.keys(record.resultRefs).length !== outputs.length || outputs.some(id => {
+        const step = record.steps.find(entry => entry.id === id), ref = record.resultRefs[id];
+        return step?.status !== "completed" || !ref || !step.resultRef
+          || step.resultRef.sha256 !== ref.sha256 || step.resultRef.path !== ref.path;
+      })) throw new ServiceError("invalid_workflow_result_reference");
+      return record;
+    }
     if (!["pending", "waiting_input", "interrupted", "needs_review", "failed"].includes(record.status)) throw new ServiceError("workflow_cannot_resume");
     if (record.status === "waiting_input") {
       const step = record.definition.steps.find((item) => item.id === record.waiting!.stepId), state = record.steps.find((item) => item.id === step!.id)!;

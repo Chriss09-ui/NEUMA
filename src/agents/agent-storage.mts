@@ -4,6 +4,8 @@ import type { AgentStoragePort } from "../runtime/storage-port.mjs";
 import { objectFields, isArray, isInteger, errorField } from "../runtime/type-boundary.mjs";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
+import { constants as bufferLimits } from "node:buffer";
+import type { FileHandle } from "node:fs/promises";
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { InputError } from "../requirements/core.mjs";
@@ -51,24 +53,55 @@ async function checkAtomicReplacement(path: string, previous: Stats, attempt: nu
   if (attempt >= 2) throw new InputError("Agent 数据读取期间连续更新，请稍后重试");
 }
 
-async function readFile(path: string, maxBytes = Infinity): Promise<Buffer> {
+// Older connection results used indented JSON. Strip formatting while streaming so its
+// on-disk expansion cannot force an equally large allocation or change quoted string data.
+async function readCompactJson(handle: FileHandle, maxBytes: number, fileSize: number) {
+  const chunks: Buffer[] = [], buffer = Buffer.alloc(64 * 1024);
+  let total = 0, consumed = 0, quoted = false, escaped = false, whitespace = false, previous = 0;
+  const punctuation = (byte: number) => byte === 0x2c || byte === 0x3a || byte === 0x5b || byte === 0x5d || byte === 0x7b || byte === 0x7d;
+  for (;;) {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+    if (!bytesRead) return Buffer.concat(chunks, total);
+    consumed += bytesRead;
+    if (consumed > fileSize) throw new InputError("Agent 数据文件在读取期间发生变化");
+    const out = Buffer.allocUnsafe(bytesRead + 1);
+    let written = 0;
+    for (const byte of buffer.subarray(0, bytesRead)) {
+      if (!quoted && (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) { whitespace = true; continue; }
+      // Retain separators between tokens: malformed adjacent values must still fail JSON.parse.
+      if (whitespace && previous && !punctuation(previous) && !punctuation(byte)) out[written++] = 0x20;
+      whitespace = false; previous = byte; out[written++] = byte;
+      if (escaped) escaped = false;
+      else if (quoted && byte === 0x5c) escaped = true;
+      else if (byte === 0x22) quoted = !quoted;
+    }
+    total += written;
+    if (total > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+    if (written) chunks.push(Buffer.from(out.subarray(0, written)));
+  }
+}
+
+async function readFile(path: string, maxBytes = Infinity, compact = false): Promise<Buffer> {
+  // Indentation was ASCII in a single V8 string. Allow for the UTF-8 expansion of its bounded payload.
+  const physicalLimit = compact ? bufferLimits.MAX_STRING_LENGTH + 3 * maxBytes : maxBytes;
   for (let attempt = 0; attempt < 3; attempt++) {
     const info = await lstat(path);
     // A path stat can also finish against an inode unlinked by atomic rename.
     if (info.isFile() && !info.isSymbolicLink() && info.nlink === 0) {
-      await checkAtomicReplacement(path, info, attempt, maxBytes); continue;
+      await checkAtomicReplacement(path, info, attempt, physicalLimit); continue;
     }
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new InputError("Agent 数据只允许普通文件，不允许链接");
-    if (info.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
+    if (info.size > physicalLimit) throw new InputError("Agent 数据文件超过大小限制");
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const current = await handle.stat();
       // An atomic JSON replacement can unlink the already-open old inode. Reopen
       // only when the path now names a distinct, ordinary, singly-linked file.
       if (current.isFile() && current.nlink === 0) {
-        await checkAtomicReplacement(path, current, attempt, maxBytes); continue;
+        await checkAtomicReplacement(path, current, attempt, physicalLimit); continue;
       }
       if (!current.isFile() || current.nlink !== 1) throw new InputError("Agent 数据只允许普通文件");
+      if (compact && current.size > maxBytes && current.size <= physicalLimit) return await readCompactJson(handle, maxBytes, current.size);
       if (current.size > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
       const content = await handle.readFile();
       if (content.length > maxBytes) throw new InputError("Agent 数据文件超过大小限制");
@@ -78,9 +111,9 @@ async function readFile(path: string, maxBytes = Infinity): Promise<Buffer> {
   throw new InputError("Agent 数据读取期间连续更新，请稍后重试");
 }
 
-async function readJson(path: string, maxBytes?: number): Promise<UnknownRecord | null> {
+async function readJson(path: string, maxBytes?: number, compact = false): Promise<UnknownRecord | null> {
   try {
-    const value: unknown = JSON.parse((await readFile(path, maxBytes)).toString("utf8"));
+    const value: unknown = JSON.parse((await readFile(path, maxBytes, compact)).toString("utf8"));
     if (!value || typeof value !== "object") throw new InputError("Agent 数据文件格式无效");
     return value as UnknownRecord;
   }
@@ -91,12 +124,12 @@ async function readJson(path: string, maxBytes?: number): Promise<UnknownRecord 
   }
 }
 
-async function atomicJson(path: string, value: unknown, signal?: AbortSignal) {
+async function atomicJson(path: string, value: unknown, signal?: AbortSignal, compact = false) {
   try { await readFile(path); } catch (error) { if (errorField(error, "code") !== "ENOENT") throw error; }
   const temporary = join(dirname(path), `.pending-${randomUUID()}.json`);
   try {
     const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { await handle.writeFile(JSON.stringify(value, null, 2), "utf8"); }
+    try { await handle.writeFile(JSON.stringify(value, null, compact ? undefined : 2), "utf8"); }
     finally { await handle.close(); }
     signal?.throwIfAborted();
     await rename(temporary, path);
@@ -322,8 +355,8 @@ export class AgentStorage implements AgentStoragePort {
     return join(await this.directory(id, names.join("/"), { create }), name);
   }
 
-  async readJson(id: string, file: string, { maxBytes }: { maxBytes?: number } = {}) {
-    try { return await readJson(await this.path(id, file), maxBytes); }
+  async readJson(id: string, file: string, { maxBytes, compact }: { maxBytes?: number; compact?: boolean } = {}) {
+    try { return await readJson(await this.path(id, file), maxBytes, compact); }
     catch (error) { if (errorField(error, "code") === "ENOENT") return null; throw error; }
   }
 
@@ -342,8 +375,8 @@ export class AgentStorage implements AgentStoragePort {
     return files.sort();
   }
 
-  async writeJson(id: string, file: string, value: unknown, { signal }: { signal?: AbortSignal | undefined } = {}) {
-    await atomicJson(await this.path(id, file, true), value, signal);
+  async writeJson(id: string, file: string, value: unknown, { signal, compact }: { signal?: AbortSignal | undefined; compact?: boolean } = {}) {
+    await atomicJson(await this.path(id, file, true), value, signal, compact);
   }
 
   async removeFile(id: string, file: string) {

@@ -7,18 +7,18 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { GroupStorage, id } from "../collaboration/group-store.mjs";
 import { InputError, normalizeDraft, processTurn } from "./core.mjs";
-import { contentHash } from "./task-spec.mjs";
+import { contentHash, savedRequirementHash } from "./task-spec.mjs";
 import { issueConfirmation, newConsultation } from "./consultation.mjs";
 import { assertRequirementDraftSize, REQUIREMENT_CONVERSATION_MAX_BYTES } from "./requirement-limits.mjs";
 interface RequirementRecord extends UnknownRecord {
   schemaVersion: 1; id: string; version: number; draft: unknown; lastQuestion: unknown; consultation: unknown;
   requests: { id: string; inputHash: string; result: UnknownRecord }[];
-  boundAgentId?: string; confirmed?: boolean; confirmedRequestId?: string | null;
+  baseRequirementHash?: string | null; boundAgentId?: string; confirmed?: boolean; confirmedRequestId?: string | null;
 }
 interface RequirementAgentsPort {
   getRequirements?(): Promise<{ requirements: { id: string; draft: unknown }[] }>;
   getRequirementConsultation?(id: string): unknown | Promise<unknown>;
-  saveRequirements?(id: string, input: { name: unknown; draft: unknown }, metadata: { confirmation: unknown; requestId: unknown; consultation: unknown }): unknown | Promise<unknown>;
+  saveRequirements?(id: string, input: { name: unknown; draft: unknown }, metadata: { confirmation: unknown; requestId: unknown; consultation: unknown; expectedRequirementHash: string | null }): unknown | Promise<unknown>;
 }
 
 const conflict = () => Object.assign(new InputError("这份需求已在另一窗口更新，请重新打开后继续"), { reason: "requirement_conflict" });
@@ -50,6 +50,7 @@ export class RequirementSessions {
     id(sessionId, "需求会话");
     const value = await readStoredObject(this.storage, sessionId, "session.json", { maxBytes: REQUIREMENT_CONVERSATION_MAX_BYTES });
     if (value && (value.schemaVersion !== 1 || value.id !== sessionId || !isInteger(value.version)
+      || value.baseRequirementHash != null && (typeof value.baseRequirementHash !== "string" || !/^[a-f0-9]{64}$/.test(value.baseRequirementHash))
       || !isArray(value.requests) || !value.consultation || value.requests.some((raw) => {
         const request = objectFields(raw); return typeof request.id !== "string" || typeof request.inputHash !== "string" || !request.result || typeof request.result !== "object";
       }))) throw new InputError("需求协商记录损坏，请保留文件并检查");
@@ -83,11 +84,12 @@ export class RequirementSessions {
       }
       if (existing && input.requirementVersion !== existing.version || !existing && (input.requirementVersion as number) > 0) throw conflict();
       const record: RequirementRecord = existing ?? { schemaVersion: 1, id: sessionId, version: 0, draft: normalizeDraft(input.draft),
-        lastQuestion: "", consultation: newConsultation(), requests: [] };
+        lastQuestion: "", consultation: newConsultation(), requests: [], baseRequirementHash: null };
       if (!existing && input.agentId) {
         id(input.agentId, "智能体");
         const saved = (await this.agents?.getRequirements?.())?.requirements?.find((item) => item.id === input.agentId);
         if (!saved) throw new InputError("没有找到要编辑的智能体需求");
+        record.baseRequirementHash = savedRequirementHash(saved);
         record.draft = normalizeDraft(saved.draft); record.boundAgentId = input.agentId as string;
         record.consultation = await this.agents?.getRequirementConsultation?.(input.agentId as string) ?? newConsultation();
       }
@@ -121,8 +123,15 @@ export class RequirementSessions {
       const confirmation = issueConfirmation(normalizeDraft(record.draft), checkedConsultation(record.consultation), { requestId: record.confirmedRequestId ?? undefined });
       // Bind before saving, so a disconnected response cannot duplicate one confirmation under another Agent ID.
       if (!record.boundAgentId) { record.boundAgentId = agentId; checkRecordSize(record); await this.storage.writeJson(sessionId, "session.json", record); }
-      return agents.saveRequirements!(agentId, { name: value.name, draft: record.draft },
-        { confirmation, requestId: record.confirmedRequestId, consultation: record.consultation });
+      const result = await agents.saveRequirements!(agentId, { name: value.name, draft: record.draft },
+        { confirmation, requestId: record.confirmedRequestId, consultation: record.consultation, expectedRequirementHash: record.baseRequirementHash ?? null });
+      const saved = objectFields(objectFields(result).requirement);
+      if (saved.id === agentId) {
+        const hash = savedRequirementHash(saved);
+        if (record.baseRequirementHash !== hash)
+          await this.storage.writeJson(sessionId, "session.json", { ...record, baseRequirementHash: hash });
+      }
+      return result;
     });
   }
 

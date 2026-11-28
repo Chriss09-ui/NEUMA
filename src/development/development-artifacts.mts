@@ -959,11 +959,16 @@ export class DevelopmentArtifacts {
   }
 
   async draftSource(snapshot: PlanningDraftSnapshot, agentId: string, id: string, { signal }: PlanningOptions = {}) {
+    runId(id);
+    if (snapshot?.runId === id) throw new InputError("历史规划草稿只可恢复到新的空批次");
+    return this.validateDraftSnapshot(snapshot, agentId, { signal });
+  }
+
+  async validateDraftSnapshot(snapshot: PlanningDraftSnapshot, agentId: string, { signal }: PlanningOptions = {}) {
     if (!snapshot || snapshot.version !== 1 || snapshot.kind !== "untrusted-planning-draft" || snapshot.agentId !== agentId
       || !/^[a-f0-9]{64}$/.test(snapshot.hash) || typeof snapshot.path !== "string" || !Array.isArray(snapshot.files))
       throw new InputError("历史规划草稿标识无效");
-    runId(snapshot.runId); runId(id); planPath(snapshot.indexPath); abort(signal);
-    if (snapshot.runId === id) throw new InputError("历史规划草稿只可恢复到新的空批次");
+    runId(snapshot.runId); planPath(snapshot.indexPath); abort(signal);
     const parent = await this.storage.directory(agentId, "development/planning-draft-snapshots");
     const sourcePath = join(parent, snapshot.hash);
     if (relative(sourcePath, resolve(snapshot.path)) !== "") throw new InputError("历史规划草稿不属于当前 Agent");

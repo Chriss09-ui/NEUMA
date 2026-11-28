@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 class FixtureChild extends EventEmitter {declare pid:number;declare exitCode:number|null;declare signalCode:NodeJS.Signals|number|null;declare neumaClosed:boolean;declare kill:((signal?:NodeJS.Signals|number)=>boolean)|undefined;declare stdout:EventEmitter & {resume?:()=>unknown;write?:(chunk:string)=>unknown};declare stderr:{resume():unknown};declare stdin:import("node:stream").PassThrough;declare then?:undefined}
+import { validateProjectPlan } from "../../src/projects/project-inspection.mjs";
 import { ProjectManager, openProjectPage } from "../../src/projects/projects.mjs";
 
 async function fixture(t: test.TestContext) {
@@ -60,10 +61,21 @@ test("静态网页需要启用启动方式，预览拒绝隐藏文件和越界�
   assert.deepEqual(opened, [running!.url!]); assert.equal(running!.pageOpened!, true);
   assert.match(await (await fetch(running!.url!)).text(), /可用页面/);
   for (const path of [".env", "leak.js", "alias.js", "%2e%2e/outside.js"]) {
-    assert.equal((await fetch(`${running!.url!}${path}`)).status, 404);
+    assert.equal((await fetch(new URL(path, running!.url!))).status, 404);
   }
   await manager.stop(project.id);
   assert.equal((await manager.list())[0]!.status, "stopped");
+});
+
+test("子目录静态网页按入口 URL 打开，相对资源在同一目录解析", async t => {
+  const { app, manager, opened } = await fixture(t), entry = "报告 页/首页 #1.html";
+  await mkdir(join(app, "报告 页")); await writeFile(join(app, entry), '<link rel="stylesheet" href="style.css">');
+  await writeFile(join(app, "报告 页/style.css"), "body { color: green }");
+  manager.analyzeProject = project => validateProjectPlan(project, { status: "ready", summary: "预览报告", kind: "web", entry });
+  const project = await manager.add({ path: app }); await manager.start(project.id);
+  const home = await fetch(opened[0]!);
+  assert.equal(home.status, 200);
+  assert.equal(await (await fetch(new URL("style.css", home.url))).text(), "body { color: green }");
 });
 
 test("Node 项目真实启动、验证页面并停止，子进程不继承 NEUMA 的密钥", async (t) => {

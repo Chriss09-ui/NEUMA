@@ -9,7 +9,10 @@ import { migrateInstallation } from "../../src/installation/installation-migrati
 import { AgentStorage } from "../../src/agents/agent-storage.mjs";
 import { AgentLibrary } from "../../src/agents/agent-library.mjs";
 import { DevelopmentWorkspace, inspectDevelopmentCode } from "../../src/development/development-workspace.mjs";
-import { InputError } from "../../src/requirements/core.mjs";
+import { DevelopmentArtifacts, type PlanningSnapshot, type PlanningDraftSnapshot } from "../../src/development/development-artifacts.mjs";
+import { developmentPlan } from "../helpers/development.mjs";
+import { validDraft } from "../helpers/architecture.mjs";
+import { InputError, normalizeDraft } from "../../src/requirements/core.mjs";
 import type { PathLike } from "fs";
 import type { FileHandle } from "fs/promises";
 
@@ -79,6 +82,41 @@ test("installation migration preserves multi-conversation records and tombstones
   assert.deepEqual(await library.getConversationRecord("alpha", "legacy-saved"), { conversation: null, deleted: true });
   assert.deepEqual(await library.storage.readJson("alpha", "conversations/records/legacy-saved.json"), tombstone);
   assert.deepEqual(JSON.parse(await readFile(join(f.source, "agents/alpha/conversations/records/chat-one.json"), "utf8")), chatRecord());
+});
+
+test("迁移保留通过正式校验的大需求与 Unicode 展示名称", async t => {
+  const f = await fixture(t), value = definition(), draft = validDraft();
+  draft.taskSpec = { version: 1, items: Array.from({ length: 36 }, (_, i) => ({ id: "r_" + i,
+    dimension: "processing", applicability: "applies", critical: false, content: "甲".repeat(1900),
+    source: { kind: "user", evidence: [{ messageId: "user_original", quote: "原文" }] } })) };
+  const agent = { ...value, name: "报告😀", draft: normalizeDraft(draft) };
+  await json(join(f.source, "agents-layout.json"), { version: 1 });
+  await json(join(f.source, "agents/alpha/definition.json"), { version: 1, agent });
+  await f.migrate();
+  assert.deepEqual(JSON.parse(await readFile(join(f.dataDir, "agents/alpha/definition.json"), "utf8")).agent, agent);
+});
+
+test("迁移后的正式规划和历史草稿可从新数据根校验、续接", async t => {
+  const f = await fixture(t), artifacts = new DevelopmentArtifacts({ dataDir: f.source });
+  const { cases, ...index } = developmentPlan(), dir = await artifacts.directory("alpha", "run_alpha");
+  await artifacts.write(dir, "cases.json", JSON.stringify(cases));
+  await artifacts.write(dir, "index.json", JSON.stringify({ ...index, caseFiles: ["cases.json"] }));
+  const frozen = await artifacts.submit("alpha", "run_alpha", "index.json");
+  const draft = await artifacts.captureDraft("alpha", "run_alpha", "index.json");
+  assert.ok(draft);
+  const basic = { agentId: "alpha", version: 1, revision: 1, status: "interrupted", createdAt: date, updatedAt: date };
+  const ref = { bindingHash: "binding", snapshot: draft };
+  const file = (run: string) => `agents/alpha/development/records/${run}.json`;
+  await json(join(f.source, file("run_alpha")), { ...basic, id: "run_alpha", planningArtifact: frozen.snapshot, planningDraft: ref });
+  await json(join(f.source, file("run_next")), { ...basic, id: "run_next", planningDraftSource: ref });
+  await f.migrate();
+  const target = new DevelopmentArtifacts({ dataDir: f.dataDir });
+  const restored = JSON.parse(await readFile(join(f.dataDir, file("run_alpha")), "utf8")) as {
+    planningArtifact: PlanningSnapshot; planningDraft: { snapshot: PlanningDraftSnapshot } };
+  const later = JSON.parse(await readFile(join(f.dataDir, file("run_next")), "utf8")) as { planningDraftSource: { snapshot: PlanningDraftSnapshot } };
+  assert.deepEqual((await target.validateSnapshot(restored.planningArtifact, "alpha")).plan, frozen.plan);
+  assert.deepEqual(later.planningDraftSource.snapshot, restored.planningDraft.snapshot);
+  assert.equal((await target.restoreDraft(later.planningDraftSource.snapshot, "alpha", "run_next")).hash, draft.hash);
 });
 
 test("installation migration rejects invalid conversation identity, tombstones and byte budgets", async (t) => {

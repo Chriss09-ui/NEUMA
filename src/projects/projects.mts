@@ -121,10 +121,14 @@ async function awaitProjectAdd(item: ProjectPending, { signal, onProgress }: Pro
 }
 
 async function staticPreview(project: ProjectRecord) {
+  const entryPath = "/" + project.entry!.split(sep).map(encodeURIComponent).join("/");
   const server = createServer(async (request, response) => {
     try {
       if (request.method !== "GET" && request.method !== "HEAD") { response.writeHead(405); return response.end(); }
       const pathname = decodeURIComponent(new URL(request.url!, "http://127.0.0.1").pathname);
+      if (pathname === "/" && entryPath.lastIndexOf("/") > 0) {
+        response.writeHead(302, { location: entryPath }); return response.end();
+      }
       const parts = pathname.split("/");
       if (parts.some((part) => part.startsWith(".") || part === "node_modules") || pathname.includes("\0")) throw new Error();
       const target = await realpath(join(project.root, pathname === "/" ? project.entry! : pathname));
@@ -137,7 +141,7 @@ async function staticPreview(project: ProjectRecord) {
     } catch { if (!response.headersSent) response.writeHead(404); response.end(); }
   });
   await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
-  return { server, status: "running", url: `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}/` };
+  return { server, status: "running", url: `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}${entryPath}` };
 }
 
 export class ProjectManager {

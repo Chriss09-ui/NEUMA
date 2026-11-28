@@ -85,6 +85,10 @@ function stable(value: unknown): unknown {
 }
 
 export const contentHash = (value: unknown) => createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
+/** Identifies the saved requirement a session actually opened, independent of its display profile. */
+export function savedRequirementHash(value: { draft?: unknown; name?: unknown; updatedAt?: unknown }) {
+  return contentHash([value.name, value.draft, value.updatedAt]);
+}
 export const emptyTaskSpec = (): TaskSpecV1 => ({ version: 1, items: [] });
 
 export function taskSpecRequirementItems(draft: { taskSpec?: unknown } | null | undefined) {

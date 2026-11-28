@@ -284,7 +284,8 @@ async function send({ message: shortcutMessage, expectedReplyId }: { message?: s
   const shortcut = shortcutMessage !== undefined;
   const attachmentIds = expectedReplyId ? [] : materials.refs(), supplied = (shortcut ? shortcutMessage! : byId("main-message").value).trim();
   const message = supplied || (attachmentIds.length ? "请处理这些材料，任务目标不明确时先向我提问。" : "");
-  if (!message || message.length > 4000 || busy()) return;
+  if (!message || busy()) return;
+  if (Array.from(message).length > 12_000) return notice(byId("main-error"), "单条要求最多 12000 字，请拆分后发送。", true);
   if (!selected) { await create(); if (!selected) return; }
   const id = selected.id;
   const previousContext = structuredClone(selected.context ?? null), previousPanel = contextPanel.capture();
@@ -316,7 +317,11 @@ async function send({ message: shortcutMessage, expectedReplyId }: { message?: s
     selected = result.conversation;
     applyContext(result.context ?? selected.context, { reveal: true, syncRequirement: true });
     if (result.actions?.length && selected.messages?.length) selected.messages.at(-1)!.actions = result.actions;
-    for (const action of result.actions || []) if (action.type === "build_agent") buildRequirement(action.agentId, action.requirement || selected.context?.requirement);
+    for (const action of result.actions || []) {
+      if (action.type === "open_agent" && action.agentId === selected.context?.agentId)
+        document.dispatchEvent(new CustomEvent("neuma:navigate", { detail: { page: "agent", agentId: action.agentId } }));
+      else if (action.type === "build_agent") buildRequirement(action.agentId, action.requirement || selected.context?.requirement);
+    }
     if (result.sources?.some((source) => source.groupId && (source.type === "group_task"
       || (source.type === "group" && ["created", "updated", "archived"].includes(source.operation!))))) {
       document.dispatchEvent(new CustomEvent("neuma:groups-changed"));

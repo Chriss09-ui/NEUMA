@@ -150,7 +150,7 @@ export class ApplicationTaskStore {
       this.event(task, type, patch); await this.save(id, record); return this.view(task);
     });
   }
-  async resume(id: string, taskId: string, { expectedVersion, mutationId, input, resolution }: { expectedVersion: unknown; mutationId: unknown; input?: unknown; resolution?: unknown }, patch: Partial<ApplicationTask> = {}) {
+  async resume(id: string, taskId: string, { expectedVersion, mutationId, input, resolution }: { expectedVersion: unknown; mutationId: unknown; input?: unknown; resolution?: unknown }, prepare: () => Promise<Partial<ApplicationTask>>) {
     await this.ready;
     if (typeof mutationId !== "string" || !/^[\w-]{8,100}$/.test(mutationId)) throw new InputError("继续任务需要稳定的请求编号");
     const requestHash = createHash("sha256").update(JSON.stringify([input ?? null, resolution ?? null])).digest("hex");
@@ -164,6 +164,7 @@ export class ApplicationTaskStore {
       }
       if (expectedVersion !== task.sequence) throw applicationConflict("任务状态已变化，请刷新后继续");
       if (!["waiting_input", "interrupted", "needs_review", "failed"].includes(task.status)) throw applicationConflict("任务当前不能继续");
+      const patch = await prepare();
       Object.assign(task, json(patch), { status: "queued", error: null, finishedAt: null });
       task.resumeReceipts = [...(task.resumeReceipts ?? []), { mutationId, requestHash }].slice(-100);
       this.event(task, "resuming"); await this.save(id, record);

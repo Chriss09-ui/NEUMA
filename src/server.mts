@@ -121,7 +121,7 @@ function safeFailure(error: unknown, config: Partial<ProviderConfig>) {
       reason: error.reason, diagnostic: { stage: output ? "application" : "input", reason: error.reason, providerModel: config.model || null },
     } };
   }
-  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required", "requirement_conflict", "memory_conflict"].includes(error.reason ?? "") ? error.reason : null;
+  const conversationReason = error instanceof InputError && ["conversation_conflict", "conversation_deleted", "conversation_schema_upgrade_required", "requirement_conflict", "requirement_version_conflict", "memory_conflict"].includes(error.reason ?? "") ? error.reason : null;
   const conflict = error instanceof InputError && (error.code === "SKILL_CONFLICT" || conversationReason || ["collaboration_conflict", "main_conflict", "application_conflict", "connection_conflict"].includes(error.reason ?? ""));
   const status = conflict ? 409 : error instanceof InputError ? 400 : error instanceof ProviderError ? 502 : 500;
   const message = error instanceof InputError || error instanceof ProviderError ? error.message : "服务暂时无法处理，请重试";

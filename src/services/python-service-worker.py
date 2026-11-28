@@ -16,7 +16,6 @@ protocol_out = sys.stdout
 sys.stdout = sys.stderr
 active = None
 sequence = 0
-loaded = None
 
 def send(value):
     protocol_out.write(json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n")
@@ -46,6 +45,7 @@ ctx = SimpleNamespace(connection=group("connection", ["call", "readResult"]), st
 try:
     spec = importlib.util.spec_from_file_location("neuma_application", entrypoint)
     loaded = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = loaded
     spec.loader.exec_module(loaded)
 except Exception:
     sys.stderr.write("service_module_load_failed\n")
@@ -60,10 +60,6 @@ for line in sys.stdin:
         if message.get("type") != "run" or message.get("protocolVersion") != 1:
             raise RuntimeError("invalid_request")
         active = message["requestId"]
-        if loaded is None:
-            spec = importlib.util.spec_from_file_location("neuma_application", entrypoint)
-            loaded = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(loaded)
         action = getattr(loaded, "actions", {}).get(message["actionId"])
         if callable(action):
             result = action(message.get("input"), ctx)

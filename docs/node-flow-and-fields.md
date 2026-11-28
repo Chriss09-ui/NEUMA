@@ -76,6 +76,8 @@
 | `items[].source.reason` | string? | 推导理由（inferred 时） | `"由 20 MiB 上传上限推导"` |
 | `retired[]` | `{id,reason,evidence}` | 撤回记录 | `[{ id:"req-007", reason:"用户改口不需要 Word", evidence:[…] }]` |
 
+独立需求会话在保存时核对本次编辑的正式需求基线，过期保存返回 HTTP 409 和 `requirement_version_conflict`。主对话后台确认完成后，服务端向制作控制器提交绑定本次确认的请求，界面收到 `open_agent` 打开对应助手。同步兼容入口的 `build_agent` 仍由客户端处理。
+
 确认与评估输出：
 
 | 字段 | 类型 | 含义 | 示例 |

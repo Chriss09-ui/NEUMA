@@ -50,12 +50,17 @@ function checked(input: unknown): MainRecord {
     || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt))) throw new InputError("主 Agent 对话记录格式无效");
   mainId(value.id);
   if (value.creationMutationId !== undefined) mainId(value.creationMutationId, "创建请求");
+  if (value.iterationOpenIds) {
+    if ((!value.deletedAt && !value.iterationAgentId) || new Set(value.iterationOpenIds).size !== value.iterationOpenIds.length)
+      throw new InputError("迭代对话打开记录无效");
+    for (const requestId of value.iterationOpenIds) mainId(requestId, "打开请求");
+  }
   if (value.deletedAt !== undefined) {
     mainId(value.deletionMutationId, "删除请求");
     if (!Number.isFinite(Date.parse(value.deletedAt)) || !Number.isSafeInteger(value.deletionExpectedVersion) || value.deletionExpectedVersion! < 1
       || value.version !== value.deletionExpectedVersion! + 1 || value.messages.length || value.requests.length
       || Object.keys(value).some((key) => !["schemaVersion", "id", "title", "version", "messages", "requests", "createdAt", "updatedAt",
-        "creationMutationId", "deletedAt", "deletionMutationId", "deletionExpectedVersion"].includes(key))) throw new InputError("主对话删除记录格式无效");
+        "creationMutationId", "iterationOpenIds", "deletedAt", "deletionMutationId", "deletionExpectedVersion"].includes(key))) throw new InputError("主对话删除记录格式无效");
   }
   if (value.requirements !== undefined && !Array.isArray(value.requirements)) throw new InputError("主对话需求目录无效");
   const requirementIds = new Set<string>();
@@ -163,7 +168,7 @@ export class MainStore {
     if (typeof title !== "string" || !title.trim() || !textWithinLimit(title, 200)) throw new InputError("对话标题不能超过 200 字");
     return this.queue(async () => {
       const records = [...this.records.values()];
-      const replay = typeof mutationId === "string" ? records.find(item => item.creationMutationId === mutationId) : undefined;
+      const replay = typeof mutationId === "string" ? records.find(item => item.creationMutationId === mutationId || item.iterationOpenIds?.includes(mutationId)) : undefined;
       if (replay?.deletedAt) throw mainConversationFailure("conversation_deleted");
       if (replay && replay.iterationAgentId !== iteration?.agentId) throw mainConversationFailure("conversation_conflict", "这个请求已用于另一份对话。");
       const existing = replay ?? (iteration && records.find(item => !item.deletedAt && item.iterationAgentId === iteration.agentId));
@@ -174,9 +179,13 @@ export class MainStore {
       if (iteration) {
         record.iterationAgentId = iteration.agentId;
         const changed = await iteration.prepare(record);
-        if (existing && !changed) return record;
+        if (existing) {
+          const newRequest = !replay && typeof mutationId === "string";
+          if (!changed && !newRequest) return record;
+          if (newRequest) (record.iterationOpenIds ??= []).push(mutationId);
+          if (changed) { record.version++; record.updatedAt = now; }
+        }
       }
-      if (existing) { record.version++; record.updatedAt = now; }
       const saved = checked(record);
       await this.write(saved); this.records.set(saved.id, saved); return structuredClone(saved);
     });
@@ -221,7 +230,8 @@ export class MainStore {
       const now = new Date().toISOString();
       const tombstone = checked({ schemaVersion: 1, id, title: "已删除对话", version: current.version + 1, messages: [], requests: [],
         createdAt: current.createdAt, updatedAt: now, deletedAt: now, deletionMutationId: mutationId, deletionExpectedVersion: expectedVersion,
-        ...(current.creationMutationId ? { creationMutationId: current.creationMutationId } : {}) });
+        ...(current.creationMutationId ? { creationMutationId: current.creationMutationId } : {}),
+        ...(current.iterationOpenIds ? { iterationOpenIds: current.iterationOpenIds } : {}) });
       await this.write(tombstone); this.records.set(id, tombstone);
       return { removed: true, conversationId: id };
     });

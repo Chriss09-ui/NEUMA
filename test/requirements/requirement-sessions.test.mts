@@ -112,6 +112,33 @@ test("同版本并发修改只接受一个，已保存协商不会被迟到结�
   assert.equal(concurrent.find!((value) => value.status === "rejected")!.reason.reason, "requirement_conflict");
 });
 
+test("旧确认重试及并发编辑不能覆盖其他会话后来保存的需求", async t => {
+  const dataDir = await folder(t);
+  const agents = new PrototypeAgents({ config: {}, cwd: resolve("."), dataDir, enforceRequirementConfirmation: true });
+  const sessions = new RequirementSessions({ dataDir, agents });
+  const handler = createRequestHandler({ config: {}, dataDir, providers: {}, prototypeAgents: agents, projects: {}, projectAgent: {} });
+  t.after(() => handler.dispose());
+  async function confirm(sessionId: string, goal: string, edit = false) {
+    const source = withPreflight({ generateDraft: async () => ({ draft: validDraft(goal), proposedGap: "none", question: "" }) });
+    const initial = await sessions.turn({ requirementSessionId: sessionId, requestId: sessionId + "_edit",
+      ...(edit ? { agentId: "report" } : {}), message: goal }, source);
+    const approved = await sessions.turn({ requirementSessionId: sessionId, requestId: sessionId + "_ok",
+      requirementVersion: initial.requirementVersion, message: "确认" }, source);
+    assert.equal(approved.confirmed, true);
+    return { name: "报告助手", draft: approved.draft };
+  }
+  const weekly = await confirm("week", "整理周报");
+  await sessions.save("week", "report", weekly, agents);
+  const monthly = await confirm("month", "整理月报", true);
+  const concurrent = await confirm("quarter", "整理季报", true);
+  await sessions.save("month", "report", monthly, agents);
+  for (const [sessionId, body] of [["week", weekly], ["quarter", concurrent]] as const) {
+    const rejected = await invoke(handler, "POST", "/api/agents/report/requirements", { ...body, requirementSessionId: sessionId });
+    assert.equal(rejected.status, 409); assert.equal(rejected.body.reason, "requirement_version_conflict");
+  }
+  assert.equal((await agents.getRequirements()).requirements[0]!.draft.goal.value, "整理月报");
+});
+
 test("真实 HTTP 入口、模型适配器、需求保存门槛串联；确认重放不产生重复智能体", async (t) => {
   const dataDir = await folder(t);
   const config = { llmConfigured: true, model: "test", apiKey: "fixture", chatUrl: "https://fixture.invalid/chat" };

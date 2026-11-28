@@ -35,6 +35,8 @@ import { ManagedServiceManager } from "../../src/services/managed-service-manage
 import { ServiceRuntimeStore } from "../../src/services/service-runtime.mjs";
 import { processTurn } from "../../src/requirements/core.mjs";
 import { createPlatformSnapshot } from "../../src/architecture/platform-contract.mjs";
+import { createArchitectureStageSessionFactory } from "../helpers/architecture-stages.mjs";
+import { fidelityChecker } from "../helpers/fidelity.mjs";
 import { validDraft, validDesign, passingReview } from "../helpers/architecture.mjs";
 import { sufficientPreflight } from "../helpers/consultation.mjs";
 import { developmentReview } from "../helpers/development.mjs";
@@ -177,12 +179,20 @@ function plan(payload:{requirements:RequirementItem[];design:{acceptance:{id:str
 }
 
 function fixedModel(errors:unknown[]) {
+  const stages = createArchitectureStageSessionFactory(payload => candidate(payload.requirements));
+  const fidelity = fidelityChecker();
   return async (options: PiSessionOptions) => {
+    const staged = await stages(options);
+    if (staged) return staged;
+    if (options.customTools?.some(tool => tool.name === "submit_requirement_fidelity")) return fidelity(options);
     const tools = fixtureTools(options.customTools!);
-    const submit = ["submit_architecture", "submit_architecture_review", "submit_requirement_fidelity", "submit_development_plan", "submit_development_review", "submit_development_work"].find((name) => tools[name]);
+    const submit = ["submit_architecture", "submit_architecture_review", "submit_development_plan", "submit_development_review", "submit_development_work"].find((name) => tools[name]);
     assert.ok(submit, "业务执行不应调用模拟或真实模型");
     let listener:((event:SessionEvent)=>void)|null;
-    const session = { messages: [] as SessionMessage[], subscribe(fn:(event:SessionEvent)=>void) { listener = fn; return () => { listener = null; }; }, setAutoCompactionEnabled() {}, getContextUsage: () => ({ percent: 10 }),
+    const storage = options.sessionStorage;
+    const session = { messages: [] as SessionMessage[],
+      ...(storage ? { sessionFile: storage.file ?? join(storage.directory, "fixed-session.jsonl") } : {}),
+      subscribe(fn:(event:SessionEvent)=>void) { listener = fn; return () => { listener = null; }; }, setAutoCompactionEnabled() {}, getContextUsage: () => ({ percent: 10 }),
       async prompt(message: string) {
         try {
           const payload = JSON.parse(String(message));
@@ -205,9 +215,6 @@ function fixedModel(errors:unknown[]) {
           if (submit === "submit_architecture") value = candidate(payload.requirements);
           else if (submit === "submit_architecture_review") {
             value = passingReview(payload.candidateHash, payload.design);
-          } else if (submit === "submit_requirement_fidelity") {
-            value = { contextHash: payload.contextHash, verdict: "preserved", restrictions: [],
-              checks: payload.requirements.map((item:{id:string}) => ({ requirementId: item.id, admissionPreserved: true, deliveryPreserved: true, newUnconfirmedRestriction: false })) };
           } else if (submit === "submit_development_plan") {
             const { cases, ...index } = plan(payload);
             await tools.write!.execute("fixed_plan_index", { path: "index.json", content: JSON.stringify({ ...index, caseFiles: ["cases.json"] }, null, 2) });

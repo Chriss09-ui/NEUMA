@@ -43,8 +43,20 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
   function input(parent: E, title: string, schema: Partial<ValueSchema> & { title?: string | undefined } = {}): () => unknown {
     if (schema.type === "object") {
       const group = node("fieldset", "service-input-group"), fields = new Map<string, () => unknown>(); group.append(node("legend", "", title)); parent.append(group);
-      for (const [key, definition] of Object.entries(schema.properties || {})) fields.set(key, input(group, (definition as ValueSchema & { title?: string }).title || definition.description || key, definition));
-      return () => Object.fromEntries([...fields].map(([key, read]) => [key, read()]));
+      for (const [key, definition] of Object.entries(schema.properties || {})) {
+        const name = (definition as ValueSchema & { title?: string }).title || definition.description || key;
+        if (!schema.required || schema.required.includes(key)) {
+          fields.set(key, input(group, name, definition));
+        } else {
+          const label = node("label", "connection-field", `填写${name}（可选）`), include = node("input");
+          include.type = "checkbox"; label.append(include);
+          const value = node("div"); value.hidden = true; group.append(label, value);
+          const read = input(value, name, definition);
+          include.addEventListener("change", () => { value.hidden = !include.checked; });
+          fields.set(key, () => include.checked ? read() : undefined);
+        }
+      }
+      return () => Object.fromEntries([...fields].map(([key, read]) => [key, read()] as const).filter(([, value]) => value !== undefined));
     }
     if (schema.type === "array") {
       const group = node("fieldset", "service-input-group"), list = node("div");
@@ -72,11 +84,14 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
     const label = node("label", "connection-field", title);
     const field = node(schema.enum ? "select" : schema.type === "string" ? "textarea" : "input");
     if (schema.enum) for (const option of schema.enum) { const item = node("option", "", String(option)); item.value = JSON.stringify(option); field.append(item); }
-    else (field as E).type = schema.type === "boolean" ? "checkbox" : ["integer", "number"].includes(schema.type!) ? "number" : "text";
+    else if (schema.type !== "string") field.type = schema.type === "boolean" ? "checkbox" : ["integer", "number"].includes(schema.type!) ? "number" : "text";
     if (field.type === "number") (field as E).step = schema.type === "integer" ? "1" : "any";
     label.append(field); parent.append(label);
-    return () => schema.enum ? JSON.parse(field.value!) : schema.type === "boolean" ? (field as E).checked
-      : ["integer", "number"].includes(schema.type!) ? Number(field.value) : field.value;
+    return () => {
+      if (field.type === "number" && field.value === "") throw new Error(`请填写${title}的数值`);
+      return schema.enum ? JSON.parse(field.value!) : schema.type === "boolean" ? field.checked
+        : field.type === "number" ? Number(field.value) : field.value;
+    };
   }
   function state(id: string): ServiceItem<E> {
     if (states.has(id)) return states.get(id)!;
@@ -255,7 +270,8 @@ export function createServiceView<E extends FormElement<E> = HTMLElement>({ docu
       }
       row.task = task; row.form.hidden = false; row.note.textContent = task.waiting?.prompt || statuses[task.status]!; row.submit.disabled = item.busy;
       if (task.status === "needs_review") row.note.textContent = "上次操作可能已经产生结果，需要先核实，避免重复执行。";
-      const schemaKey = JSON.stringify([task.status, task.waiting?.inputSchema || null, task.waiting?.outputSchema || null]);
+      const schemaKey = JSON.stringify([task.status, task.waiting?.stepId, task.waiting?.index, task.waiting?.attemptId,
+        task.waiting?.inputSchema, task.waiting?.outputSchema]);
       if (row.schemaKey !== schemaKey) {
         row.fields.replaceChildren();
         if (task.status === "needs_review") {

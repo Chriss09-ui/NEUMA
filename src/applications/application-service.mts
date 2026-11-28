@@ -317,19 +317,21 @@ export class ApplicationService {
     await this.workflowReady;
     const workflow = await this.workflows.get(task.workflowId);
     if (workflow.agentId !== id || workflow.deliveryVersion !== task.deliveryVersion || workflow.scopeId !== scope) throw new InputError("检查点身份不匹配");
-    if (workflow.status === "waiting_input") validateActionValue(body.input, workflow.waiting!.inputSchema);
-    if (workflow.status === "needs_review") {
-      const resolution = objectFields(body.resolution);
-      if (!resolution || resolution.stepId !== workflow.waiting!.stepId || resolution.index !== workflow.waiting!.index || workflow.waiting!.attemptId !== undefined && resolution.attemptId !== workflow.waiting!.attemptId) throw new InputError("请先核实这个步骤是否已经完成");
-      if (resolution.outcome === "completed") validateActionValue(resolution.output, this.workflowWaiting(workflow, descriptor.manifest)!.outputSchema);
-      else if (resolution.outcome !== "retry" || resolution.explicitlyApproved !== true) throw new InputError("重试外部操作需要明确确认");
-    }
-    const connectionSnapshot = await this.agents.connections.snapshot(id);
-    for (const connectionId of action.connectionIds) await this.agents.connections.assertActive(connectionSnapshot, connectionId);
-    this.assertOpen(submission.epoch);
-    const resumed = await this.store.resume(id, taskId, { ...body, expectedVersion: body.expectedVersion, mutationId: body.mutationId }, { configVersion: connectionSnapshot.version,
-      connectionProfile: connectionSnapshot.profile, connectionVersions: connectionSnapshot.connections,
-      allowNetwork: task.allowNetwork !== false && allowNetwork });
+    let connectionSnapshot!: RunningTask["connectionSnapshot"];
+    const resumed = await this.store.resume(id, taskId, { ...body, expectedVersion: body.expectedVersion, mutationId: body.mutationId }, async () => {
+      if (workflow.status === "waiting_input") validateActionValue(body.input, workflow.waiting!.inputSchema);
+      if (workflow.status === "needs_review") {
+        const resolution = objectFields(body.resolution);
+        if (!resolution || resolution.stepId !== workflow.waiting!.stepId || resolution.index !== workflow.waiting!.index || workflow.waiting!.attemptId !== undefined && resolution.attemptId !== workflow.waiting!.attemptId) throw new InputError("请先核实这个步骤是否已经完成");
+        if (resolution.outcome === "completed") validateActionValue(resolution.output, this.workflowWaiting(workflow, descriptor.manifest)!.outputSchema);
+        else if (resolution.outcome !== "retry" || resolution.explicitlyApproved !== true) throw new InputError("重试外部操作需要明确确认");
+      }
+      connectionSnapshot = await this.agents.connections.snapshot(id);
+      for (const connectionId of action.connectionIds) await this.agents.connections.assertActive(connectionSnapshot, connectionId);
+      this.assertOpen(submission.epoch);
+      return { configVersion: connectionSnapshot.version, connectionProfile: connectionSnapshot.profile,
+        connectionVersions: connectionSnapshot.connections, allowNetwork: task.allowNetwork !== false && allowNetwork };
+    });
     submission.task = resumed.task; this.assertOpen(submission.epoch);
     if (resumed.created) {
       const item: RunningTask = { task: resumed.task, descriptor, action, connectionSnapshot, workspaceRoot, materialTools, heldLease, onFileWritten,

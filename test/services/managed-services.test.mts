@@ -128,6 +128,26 @@ test("service stop terminates every matching process even when catalog persisten
 });
 
 
+test("Python worker 可加载使用延迟注解的 dataclass 并执行动作", async t => {
+  const { spawnSync } = await import("node:child_process"), { fileURLToPath } = await import("node:url");
+  const interpreter = process.platform === "win32" ? "python" : "python3";
+  const directory = await mkdtemp(join(tmpdir(), "neuma-python-module-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const entry = join(directory, "report.py");
+  await writeFile(entry, `from __future__ import annotations
+from dataclasses import dataclass
+@dataclass
+class Report:
+    total: int
+def run(request, ctx):
+    return Report(request["input"]).total
+`);
+  const request = { type: "run", protocolVersion: 1, requestId: "report", actionId: "report", input: 12 };
+  const result = spawnSync(interpreter, ["-I", "-S", "-B", fileURLToPath(new URL("../../src/services/python-service-worker.py", import.meta.url)), entry, ""],
+    { input: JSON.stringify(request) + "\n", encoding: "utf8", timeout: 10_000 });
+  if (result.error && "code" in result.error && result.error.code === "ENOENT") { t.skip("当前环境没有 Python 解释器"); return; }
+  assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout.trim().split("\n")[1]!).value, 12);
+});
+
 test("Node service worker remains runnable as a standalone file", { timeout: 10000 }, async (t) => {
   const { copyFile } = await import("node:fs/promises");
   const { spawn } = await import("node:child_process");

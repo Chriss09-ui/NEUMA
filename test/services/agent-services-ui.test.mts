@@ -18,7 +18,10 @@ declare step: string;
 declare placeholder: string;
 declare readOnly: boolean;
 declare autocomplete: string;
-    constructor(tag: string) { this.tag = tag; }
+    constructor(tag: string) {
+      this.tag = tag;
+      if (tag === "textarea") Object.defineProperty(this, "type", { get: () => "textarea" });
+    }
     children: Element[] = []; attributes = new Map(); listeners = new Map<string,(event:{type:string;preventDefault():void})=>unknown>(); value = ""; checked = false; hidden = false; disabled = false; textContent = "";
     get parentElement() { return this.parent; }
     append(...nodes: Element[]) { for (const node of nodes) { node.remove(); node.parent = this; this.children.push(node); } }
@@ -160,7 +163,8 @@ test("等待输入的流程按字段填写并使用当前版本继续，刷新�
   const calls: Parameters<ApplicationApi["resumeTask"]>[] = [], ui = setup({ resumeTask: async (...args: Parameters<ApplicationApi["resumeTask"]>) => calls.push(args) });
   const snapshot = data(); snapshot.workflowTasks = [{ id: "task", version: 4, status: "waiting_input", waiting: { prompt: "请补充范围", inputSchema: { type: "object", properties: { range: { type: "string", title: "处理范围" } } } } }];
   ui.snapshot(snapshot); await ui.view.show("agent");
-  const field = all(ui.container).find((item) => item.tag === "textarea"); field!.value = "最近一周"; field!.focus(); await ui.view.reload();
+  const field = visible(ui.container).find((item) => item.tag === "textarea");
+  assert.ok(field, "等待文本输入时应能看到可填写的文本框"); field.value = "最近一周"; field!.focus(); await ui.view.reload();
   assert.equal(field!.value, "最近一周"); assert.equal(ui.document.activeElement, field);
   await all(ui.container).find((item) => item.tag === "form")!.dispatch("submit");
   assert.equal(calls[0]![0], "agent"); assert.equal(calls[0]![1], "task"); assert.deepEqual(calls[0]![2], { range: "最近一周" }); assert.equal(calls[0]![3], 4); ui.view.hide();
@@ -184,6 +188,33 @@ test("数组表单增删后保留数字类型与顺序，刷新保留草稿并�
   assert.equal(ui.document.activeElement, field); assert.equal(field.value, "1.25");
   assert.equal(field.step, "any", "小数输入不能被浏览器默认的整数步长拒绝");
   await form.dispatch("submit"); assert.deepEqual(inputs, [[1.25, 2.75]]);
+});
+
+test("同结构的下一步使用空表单，同一步状态刷新保留答案", async () => {
+  const ui = setup(), snapshot = data();
+  const waiting = { stepId: "quantity", inputSchema: { type: "integer" as const } };
+  snapshot.workflowTasks = [{ id: "task", version: 1, status: "waiting_input", waiting }];
+  ui.snapshot(snapshot); await ui.view.show("agent");
+  const field = () => visible(ui.container).find(item => item.type === "number")!;
+  field().value = "42"; await ui.view.reload(); assert.equal(field().value, "42");
+  waiting.stepId = "budget"; await ui.view.reload();
+  assert.equal(field().value, ""); ui.view.hide();
+});
+
+test("可选字段能省略或提交显式零和 false", async () => {
+  const schema: ValueSchema = { type: "object", required: [], additionalProperties: false,
+    properties: { limit: { type: "integer", minimum: 1 }, offset: { type: "integer" }, archive: { type: "boolean" } } };
+  const inputs: unknown[] = [], ui = setup({ resumeTask: async (_id, _task, input) => { validateActionValue(input, schema); inputs.push(input); } });
+  const snapshot = data(); snapshot.workflowTasks = [{ id: "task", version: 1, status: "waiting_input", waiting: { inputSchema: schema } }];
+  ui.snapshot(snapshot); await ui.view.show("agent");
+  const form = visible(ui.container).find(item => item.tag === "form")!;
+  await form.dispatch("submit"); assert.deepEqual(inputs, [{}]);
+  for (const key of ["offset", "archive"]) {
+    const toggle = visible(form).find(item => item.tag === "label" && item.textContent.includes(key))!.children[0]!;
+    toggle.checked = true; toggle.dispatch("change");
+  }
+  visible(form).find(item => item.type === "number")!.value = "0";
+  await form.dispatch("submit"); assert.deepEqual(inputs[1], { offset: 0, archive: false }); ui.view.hide();
 });
 
 test("对象数组逐项填写嵌套字段，布尔、枚举和空值保持原类型", async t => {

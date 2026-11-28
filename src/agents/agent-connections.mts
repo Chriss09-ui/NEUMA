@@ -20,6 +20,7 @@ import { MCPAdapter, contractHash } from "../connections/mcp-adapter.mjs";
 import { OAuthManager, refreshOAuth } from "../connections/oauth.mjs";
 
 const FILE = "private/connections.json", MAX_RECORD = 8 * 1024 * 1024;
+const CONNECTION_RESULT_BYTES = 25 * 1024 * 1024;
 const fail = (reason: string, message: string) => Object.assign(new InputError(message), { reason, ...(reason === "connection_conflict" ? { statusCode: 409 } : {}) });
 const idValue = (value: unknown) => {
   if (typeof value !== "string" || !/^[\w-]{1,80}$/.test(value) || Object.hasOwn(Object.prototype, value)) throw fail("invalid_connection", "连接标识无效");
@@ -411,8 +412,10 @@ export class AgentConnectionStore {
       if (Buffer.byteLength(JSON.stringify(data)) > 128 * 1024) {
         const resultRef = randomUUID();
         const connectionVersion = snapshot.connections.find((item) => item.id === connectionId);
-        try { await this.storage.writeJson(snapshot.agentId, `private/connection-results/${resultRef}.json`, { scope, connectionId, operationId,
-          profile: snapshot.profile ?? "legacy", connectionVersion, data }); }
+        const record = { scope, connectionId, operationId, profile: snapshot.profile ?? "legacy", connectionVersion, data };
+        if (Buffer.byteLength(JSON.stringify(record)) > CONNECTION_RESULT_BYTES)
+          throw fail("connection_persistence_failed", "接口已返回，但处理后的结果超过保存上限；请核对真实操作结果后再决定是否重试");
+        try { await this.storage.writeJson(snapshot.agentId, `private/connection-results/${resultRef}.json`, record, { compact: true }); }
         catch { throw fail("connection_persistence_failed", "接口已返回，但大结果保存失败；请核对真实操作结果后再决定是否重试"); }
         return { status: "ok", connectionId, operationId, resultRef, message: "结果较大，已保存，可分段读取" };
       }
@@ -426,7 +429,7 @@ export class AgentConnectionStore {
   async readResult(id: string, resultRef: string, { offset = 0, length = 32000, scope = "private", connectionIds }: { offset?: number; length?: number; scope?: string; connectionIds?: string[] } = {}) {
     agentId(id); if (!/^[a-f0-9-]{36}$/.test(resultRef)) throw fail("invalid_result", "连接结果标识无效");
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > 128000) throw fail("invalid_result", "连接结果读取范围无效");
-    const result = objectFields(await this.storage.readJson(id, `private/connection-results/${resultRef}.json`, { maxBytes: 25 * 1024 * 1024 }));
+    const result = objectFields(await this.storage.readJson(id, `private/connection-results/${resultRef}.json`, { maxBytes: CONNECTION_RESULT_BYTES, compact: true }));
     if (typeof result.connectionId !== "string" || result.scope !== scope || connectionIds && !connectionIds.includes(result.connectionId)) throw fail("missing_result", "当前任务无权读取这个连接结果或结果不存在");
     const record = await this.read(id, { profile: typeof result.profile === "string" ? result.profile : "legacy" }), current = record.connections[result.connectionId], reference = objectFields(result.connectionVersion);
     if (!reference || !current || record.revokedGenerations[current.generation] || current.generation !== reference.generation

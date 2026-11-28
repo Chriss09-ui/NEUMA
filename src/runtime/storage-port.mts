@@ -2,8 +2,8 @@ import { InputError } from "../requirements/core.mjs";
 import type { UnknownRecord } from "../contracts/json.mjs";
 export interface JsonStoragePort {
   readonly ready?: Promise<void>;
-  readJson(id: string, file: string, options?: { maxBytes?: number }): Promise<unknown>;
-  writeJson(id: string, file: string, value: unknown, options?: { signal?: AbortSignal | undefined }): Promise<void>;
+  readJson(id: string, file: string, options?: { maxBytes?: number; compact?: boolean }): Promise<unknown>;
+  writeJson(id: string, file: string, value: unknown, options?: { signal?: AbortSignal | undefined; compact?: boolean }): Promise<void>;
 }
 export interface AgentStoragePort extends JsonStoragePort {
   readonly dataDir?: string;

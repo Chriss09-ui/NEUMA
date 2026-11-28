@@ -23,7 +23,7 @@ export interface ServerPromptPort<Result = unknown> {
   cancel?(sessionId: string): Promise<unknown>;
   dispose?(): unknown | Promise<unknown>;
 }
-export interface ServerAgents extends ForwardedMethods, Omit<MainAgentAgents, "services" | "connections" | "prompt" | "capabilityCards">, ServerPromptPort<{ reply: string; status?: string }> {
+export interface ServerAgents extends ForwardedMethods, Omit<MainAgentAgents, "submitOperation" | "services" | "connections" | "prompt" | "capabilityCards">, ServerPromptPort<{ reply: string; status?: string }> {
   capabilityCards?: NonNullable<CollaborationAgents["capabilityCards"]>;
   executeCollaboration?: NonNullable<CollaborationAgents["executeCollaboration"]>;
   onLifecycle?: NonNullable<CollaborationAgents["onLifecycle"]>;
