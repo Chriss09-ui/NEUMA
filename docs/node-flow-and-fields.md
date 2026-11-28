@@ -1,9 +1,8 @@
 # NEUMA 节点流程与字段说明
 
-- 核对日期：2026-10-25；源码基线：主仓库 `6570f2b`。本文按当前源码契约整理：**每个节点收到什么、输出什么（最全形态），每个字段后附一个具体示例值**。
-- 2026-11-06 更新第 2 节蓝图派单、专项咨询和模块接收字段，按 v6 设计检查点及历史读取协议核对。
+- 本文给出各节点的收发字段和示例。初稿依据 2026-10-25 的 `6570f2b`。2026-11-28 按本地工作树（HEAD `f0fbe0d`）复核了阶段化设计的顺序、检查点与计数、独立评审的材料交接，以及研发恢复规则。
 - 全文示例统一使用同一个贯穿场景——**客户合同审查助手**（custom 路径，3 个模块、托管服务 + 页面 + 动作），这样各节点的示例值前后衔接，可以当一条完整数据流读下来。
-- 字段名与源码逐字一致（括注定义位置）；示例值仅为示意，哈希统一用 `9f86d081…0a08`（64 位 sha256），时间统一用 `2026-10-25T09:30:00.000Z`。行为规范以 [ARCHITECTURE.md](../ARCHITECTURE.md) 与源码为准。
+- 示例中的哈希缩写为 `9f86d081…0a08`，时间以 `2026-10-25T09:30:00.000Z` 为例。查具体字段可沿各节链接核对类型、运行校验和测试。[架构基线](../ARCHITECTURE.md)
 
 ## 一、总览：节点数量与主流程
 
@@ -12,7 +11,7 @@
 ```
 用户消息
  → ① 需求澄清与确认        出：RequirementDraft + TaskSpecV1 + 确认回执
- → ② 架构设计（三阶段+组装） 出：ArchitectureBlueprint → ArchitectureModule → {baseHash,updates} → CandidateDraft
+ → ② 架构设计：蓝图 → 模块 → 宿主组装基底 → 整合补丁 → 校验后的 CandidateDraft
  → ③ 独立评审              出：ArchitectureReview（verdict 决定 status/delivery）
  → ④ 研发五阶段            出：DevelopmentPlan → 代码快照 → DevelopmentEvidence + AcceptanceLedger → DevelopmentPackage
  → ⑤ 激活                  出：AgentDefinition（mode=designed）+ ActivationTransaction
@@ -94,9 +93,9 @@
 
 ---
 
-## 三、节点 2：架构设计（v3 阶段化管线，`src/architecture/`）
+## 三、节点 2：阶段化架构设计（`src/architecture/`）
 
-> 接收确认后的需求与平台快照，交付 schema 3 候选。进度保存在 `architecture.json` 的 `designProgressCheckpoint`。新建检查点的 `schemaVersion` 为 7，`moduleLimit` 为 3–6，另存 `pipelineId`、`bindingHash/schemaHash`、累计 `modelCalls`、`revisionHash/assignmentHash`、`blueprint/modules/integration/consultations` 和检查点 `hash`。各节点按已保存的会话、成果、摘要与累计轮次恢复。授权和修复规则见[架构基线第 4 节](../ARCHITECTURE.md)。
+> 蓝图派单后，各模块按依赖提交。宿主先组装候选并核验，再由整合节点处理允许修改的字段，通过程序检查后进入独立评审。新设计在 `architecture.json` 的 `designProgressCheckpoint` 保存 v7 检查点，蓝图派单协议为 `module-handoff-v3`，交付的候选为 schema 3。这三个版本分别标识恢复格式、节点交接和候选结构。历史检查点按各自版本读取。[设计管线](../src/architecture/architecture-design-pipeline.mts) · [架构基线](../ARCHITECTURE.md)
 
 ### 2.1 子节点：蓝图（blueprint）
 
@@ -107,7 +106,7 @@
 | `requirements[]` | `{id,text}` | 已确认正式需求 | `[{ id:"req-001", text:"单次最多 20 份合同…" }]` |
 | `draft.taskSpec` | `TaskSpecV1` | 任务规格 | 见节点 1 |
 | `platformSnapshot` | 平台快照 v4 | 公共工具、能力目录、验收适配器指南 | `platformHash:"9f86d081…0a08"` |
-| `designModelBudget` | `{limit,used,remaining,stageLimit}` | 预算事实提示 | `{ limit:25, used:0, remaining:25, stageLimit:5 }` |
+| `designModelBudget` | 管线请求用量与本责任节点的退回计数 | 启用 `submissionPolicy` 时，`used` 记录模型请求，`rejections` 和 `formatRejections` 分别记录内容退回和连续格式退回 | `{policy:"task_rejections",limit:null,used:0,remaining:null,stageLimit:null,rejectionLimit:5,rejections:0,formatRejectionLimit:3,formatRejections:0}` |
 | `blueprintProtocol` / `pipelineStage` | 标识 | 协议与阶段标识 | `"module-handoff-v3"` / `"blueprint"` |
 
 **输出**见 `src/contracts/architecture-stages.d.mts` 中的 `ArchitectureBlueprint`。
@@ -144,7 +143,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `blueprint` / `blueprintHash` | 蓝图及其摘要 | v6 及以后首包内联全局选择和各模块的编号、依赖，完整派单按路径读取 | `blueprintHash:"9f86d081…0a08"` |
 | `dependencyInterfaces[]` | `{moduleId,components,steps,handoffText?}` | 直接上游的接口和交接正文 | `[{ moduleId:"contract-ingest", components:[…], steps:[{id,componentId,input,output,completion}] }]` |
 | `requirements[]` | `{id,text}` | 过滤后的正式需求 | 本模块主责两条 |
-| `designModelBudget` / `pipelineStage` | 共享字段 | 预算与阶段，模块编号由 `assignment.id` 提供 | `stageLimit:5` / `"module"` |
+| `designModelBudget` / `pipelineStage` | 共享字段 | 用量和退回按上述策略记录，责任模块由 `assignment.id` 标识 | `stageLimit:null` / `"module"` |
 
 **输出**见 [ArchitectureModule 类型](../src/contracts/architecture-stages.d.mts)。
 
@@ -169,29 +168,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `unknowns[].question/blocking/resolution` | 未知项 | `{ question:"扫描件占比未知", blocking:false, resolution:"运行期统计" }` | — |
 | `platformClaims[]` | 平台声明 | 关联平台事实字段 | `[{ id:"claim-01", source:"runtimeCapabilities", path:"/tools/pdfRender", expected:true, decisionIds:["dec-01"], acceptanceIds:["acc-01"] }]` |
 
-### 2.3 子节点：整合（integration）
-
-**输入（最全形态）**：
-
-| 字段 | 类型 | 含义 | 示例 |
-| --- | --- | --- | --- |
-| `baseCandidate` | `CandidateDraft` | 程序组装出的候选 | 见 2.4 输出 |
-| `baseHash` | sha256 | 组装候选哈希 | `"9f86d081…0a08"` |
-| `conflicts[]` | `{path,reason,relatedPaths,moduleIds}` | 跨模块冲突清单 | `[{ path:"/instructions", reason:"两模块指令重叠", relatedPaths:[], moduleIds:["contract-ingest","clause-analysis"] }]` |
-| `integrationPolicy` | `{allowedRoots,frozenRoots,instruction}` | 可修改的根字段、冻结字段以及已有验收用例的修改条件 | `allowedRoots:["instructions","failureHandling",…]` |
-
-首次整合和继续原会话时，模型都直接收到当前 `baseHash`、`conflicts` 和这份规则。只有冲突清单明确覆盖某条已有用例时，才可修正该条。所有原用例保留编号和需求归属，其余用例的内容和验证分工照原稿保留。跨模块场景可用新编号追加。没有待解冲突且无需补充时，提交当前 `baseHash` 和 `updates: []`。
-
-**输出（最全形态）**：
-
-| 字段 | 类型 | 含义 | 示例 |
-| --- | --- | --- | --- |
-| `baseHash` | sha256 | 必须与当前组装候选一致 | `"9f86d081…0a08"` |
-| `path` / `value` | 单处替换 | 与当前 `baseHash` 一起提交，和批量格式互斥 | `"/instructions"` |
-| `updates[].path` | JSON Pointer（0–24 项） | 只能指向已存在字段，根字段限于派生字段或冲突许可路径 | `"/instructions"` |
-| `updates[].value` | 任意 JSON | 替换值 | `"合并后的总指令：解析→分级→组装报告"` |
-
-### 2.4 子节点：程序组装（宿主执行，非模型节点）
+### 2.3 程序组装（宿主执行）
 
 **输入**：`blueprint` + 全部已校验 `modules[]`（跨模块重名编号分配稳定全局编号）。
 
@@ -218,19 +195,41 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `selectionBasis` | 选型依据 | `{ capacity:…, process:…, quality:…, requirementIds:[…], assumptions:[…] }` | — |
 | `platformClaims[]` | 平台声明 | expected 与公开平台材料逐字相同 | `[{ id:"claim-01", source:"runtimeCapabilities", path:"/tools/pdfRender", expected:true, … }]` |
 
+### 2.4 整合（integration）
+
+**输入（最全形态）**：
+
+| 字段 | 类型 | 含义 | 示例 |
+| --- | --- | --- | --- |
+| `baseCandidate` | `CandidateDraft` | 程序组装出的候选 | 见 2.3 输出 |
+| `baseHash` | sha256 | 组装候选哈希 | `"9f86d081…0a08"` |
+| `conflicts[]` | `{path,reason,relatedPaths,moduleIds}` | 跨模块冲突清单 | `[{ path:"/instructions", reason:"两模块指令重叠", relatedPaths:[], moduleIds:["contract-ingest","clause-analysis"] }]` |
+| `integrationPolicy` | `{allowedRoots,frozenRoots,instruction}` | 可修改的根字段、冻结字段以及已有验收用例的修改条件 | `allowedRoots:["instructions","failureHandling",…]` |
+
+首次整合和继续原会话时，模型都直接收到当前 `baseHash`、`conflicts` 和这份规则。只有冲突清单明确覆盖某条已有用例时，才可修正该条。所有原用例保留编号和需求归属，其余用例的内容和验证分工照原稿保留。跨模块场景可用新编号追加。没有待解冲突且无需补充时，提交当前 `baseHash` 和 `updates: []`。
+
+**输出（最全形态）**：
+
+| 字段 | 类型 | 含义 | 示例 |
+| --- | --- | --- | --- |
+| `baseHash` | sha256 | 必须与当前组装候选一致 | `"9f86d081…0a08"` |
+| `path` / `value` | 单处替换 | 与当前 `baseHash` 一起提交，和批量格式互斥 | `"/instructions"` |
+| `updates[].path` | JSON Pointer（0–24 项） | 只能指向已存在字段，根字段限于派生字段或冲突许可路径 | `"/instructions"` |
+| `updates[].value` | 任意 JSON | 替换值 | `"合并后的总指令：解析→分级→组装报告"` |
+
 ---
 
 ## 四、节点 3：独立评审（评估者角色）
 
-> 收：完整候选 + 需求 + 证据目录 + 平台快照 → 出：`ArchitectureReview`；宿主另核候选/平台 SHA-256。持久化：`architecture.json`（`review`、`attempts[]`）。流向：pass → `status:"passed"`；revise/insufficient/infeasible/needs_input → 对应状态并走修订或返需。
+> 宿主绑定完整候选、正式需求、证据和平台快照。主评审及分组评审收到任务、当前进度和只读资料目录 `materialFiles`，用 `read_architecture_file` 按文件名和路径读取所需原文。报告可用 `{file:"candidate.json",path:"/components"}` 指明依据。宿主校验位置与版本后，在 `architecture.json` 保存评审结果和尝试记录。[评审输入](../src/architecture/architecture-model-context.mts) · [资料文件](../src/architecture/architecture-material-files.mts)
 
-评审模型收到的 `modelBudget` 包含 `policy: "task_rejections"`、`limit: null` 和累计请求数 `used`。子组的提交工具只显示本组结果字段、问题意见和摘要，宿主在存储时补齐其他类别的空数组。子组、主评审和范围复核各自跟踪正式提交的连续退回次数。查证、翻页和分项暂存都属于同一任务；同一问题连续退回三次时暂停。中断恢复带上原分项、会话引用和累计用量。
+评审的 `modelBudget` 使用 `policy:"task_rejections"`、`limit:null` 和累计请求数 `used`。子组只提交自己负责的分项。已配置 JEV 时，子组的负评逐条判定，再汇总通过或打回的结果。格式、类型、字段和数量错误连续三轮时暂停，即使每轮错在不同字段也累计。其他可诊断的正式提交退回按同因三次处理。读取工具另记纠正机会。中断恢复沿用原分项、会话和已用次数。[分组评审](../src/architecture/architecture-review-dispatch.mts) · [JEV 判定](../src/architecture/architecture-review-judgment.mts)
 
-### 输入（最全形态）
+### 宿主绑定的评审材料
 
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
-| `candidate` | `CandidateDraft` | 被评审候选 | 见 2.4 |
+| `candidate` | `CandidateDraft` | 经过组装、整合和校验的候选，可读取 `candidate.json` 中的具体位置 | `/components` |
 | `reviewEvidenceIndex.candidateSections` | 名称到 `{source,pointer}` 的目录 | 主评审和分组评审可直接选择设计稿中存在的项目 | `"能力清单": {"source":"candidate","pointer":"/capabilities"}` |
 | `requirements[]` | `{id,text}` | 正式需求清单 | `[{ id:"req-001", … }]` |
 | `evidence[]` | `EvidenceItem` | 证据目录（decisions 引用） | `[{ id:"ev-01", … }]` |
@@ -252,7 +251,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | `issues[].id/blocking/description/remedy` | 问题 | `{ id:"iss-01", blocking:false, description:"unknowns 未给占比来源", remedy:"运行期统计即可" }` | — |
 | `issues[].checkId/kind/candidatePaths/references/factClaims` | 证据属性 | 非阻断的 `context` 待验证项引用候选或验证安排，可省略 `factClaims` 或填 `[]`。断言平台能力时用 `platform`，须给出 `runtimeCapabilities` 的路径和实际值。 | `candidatePaths:["/unknowns/0"]` |
 | `summary` | string ≤4000 | 结论摘要 | `"方案可行、最小，验收可区分质量"` |
-| `acceptanceScopeChecks[]` | 每项验收一行 | `{ acceptanceId:"acc-01", adapterId:"action", scope:"动作执行断言", sufficient:true, reason:…, criterionQuote:…, adapterQuote:… }` | — |
+| `acceptanceScopeChecks[]` | 每项验收一行 | 指定本项验收、规则位置、判断与理由，宿主核对适配器及规则 | `{acceptanceId:"acc-01",adapterRulePath:"/adapters/action/proves",sufficient:true,reason:"冻结用例实际调用已实现动作并核对输出"}` |
 | `priorFindingDecisions[]` | 历史问题处置 | `{ findingId:"f-07", status:"resolved", reason:…, checkIds:[…], candidatePaths:[…] }` | — |
 
 记录状态流转（`architecture.json`）：`status`：`designing`→`evaluating`→`passed` / `needs_changes` / `needs_evidence` / `infeasible` / `needs_input` / `failed` / `cancelled` / `pending`；`delivery`：`blocked`→`ready` / `needs_connection` / `needs_development`。本例通过后 `delivery:"needs_development"`（custom 需研发）。
@@ -261,7 +260,9 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 
 ## 五、节点 4：研发（五阶段，`src/development/`）
 
-> 收：已通过架构 → 出：交付包 `DevelopmentPackage`。持久化：`.neuma/agents/<id>/development/`（`records/`、`workspaces/<runId>/code|planning/`、`snapshots/`、`sessions/`）。研发记录 `DevelopmentRunRecord`（`development-controller-types.mts:41-56`）关键字段：`id`（runId）、`agentId`、`version`、`revision`、`architectureRef:{version,candidateHash}`、`status`（`running`/`interrupted`/`blocked`/`completed`/`failed`/`cancelled`）、`phase`、`delivery`、`budgets:{corrections,planRevisions,integrationRepairs}`、`planning.turns`（≤12）、`tasks[]`、`plan/planHash`、`reviews[]`、`reports[]`、`handoffs[]`、`snapshot/verifiedSnapshot`、`package/deliveries[]`、`acceptanceLedger`、`sessions`。
+> 研发从已通过的架构生成交付包 `DevelopmentPackage`。记录、工作区、快照和会话分别保存在 `.neuma/agents/<id>/development/` 下的 `records/`、`workspaces/<runId>/`、`snapshots/`、`sessions/`。记录通过 `architectureRef` 绑定架构，通过 `planHash`、代码快照和验收台账绑定交付对象。
+
+当前 `retryPolicy` 按责任任务累计内容退回，默认第 5 次停止。格式错误先向原会话反馈，再给 3 次实际纠正机会。`planning.turns` 和任务的 `turns` 是累计用量。旧预算和退回回执保存在记录中，恢复沿用已用次数。每轮使用当前材料、最新稿和待解决问题，需要旧计划或会话时可调用 `read_development_history`。[研发计数](../src/development/development-policy.mts) · [会话恢复测试](../test/development/development-session-recovery.test.mts)
 
 ### 4.1 阶段节点：intake 接收设计
 
@@ -304,7 +305,7 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | 字段 | 类型 | 含义 | 示例 |
 | --- | --- | --- | --- |
 | `TaskProgress.status` | string | 任务状态 | `"passed"` |
-| `TaskProgress.attempts/repairs/turns` | int | 尝试/修复次数/已用回合（≤40） | `1` / `0` / `6` |
+| `TaskProgress.attempts/repairs/turns` | int | 已发生的尝试、修复和模型轮次，内容退回另记在 `retryPolicy` | `1` / `0` / `6` |
 | `TaskProgress.taskHash` / `verifiedCodeHash` | sha256 | 任务/已验证代码哈希 | `"9f86d081…0a08"` |
 | `TaskProgress.nextAction` / `summary` | string | 下一步 / 摘要 | `"等待验收"` / `"分级器已实现并自测"` |
 | `handoffs[].summary/changedFiles/knownIssues/nextAction/continue` | `DevelopmentWork` 交接（`development.d.mts:39`） | 给下一任务的接口与未决问题 | `{ summary:"分级器完成", changedFiles:["src/classify.js"], knownIssues:["长合同截断待观察"], nextAction:"接入报告组装", continue:true }` |
@@ -419,8 +420,8 @@ v7 可在顶层提交全局字段，以 `handoffText` 对应规范蓝图的 `glo
 | 1 需求澄清与确认 | 用户消息 + 材料 + 评估 | `RequirementDraft` + `TaskSpecV1` + `RequirementReceipt` | `requirements.json` |
 | 2.1 蓝图 | requirements + taskSpec + 平台快照 + 预算 | `ArchitectureBlueprint` | `architecture.json`→checkpoint.blueprint |
 | 2.2 模块（最多同时 3 个） | assignment + blueprint + dependencyInterfaces + requirements | `ArchitectureModule` | →checkpoint.modules[] |
-| 2.3 整合 | baseCandidate + baseHash + conflicts + policy | `{baseHash, updates[]}` | →checkpoint.integration |
-| 2.4 程序组装 | blueprint + modules | `CandidateDraft` | architecture.json 候选 |
+| 2.3 程序组装 | blueprint + modules | 基底候选及冲突清单 | 交整合节点，以 baseHash 绑定 |
+| 2.4 整合 | baseCandidate + baseHash + conflicts + policy | 单处或批量补丁，通过校验后形成候选 | →checkpoint.integration |
 | 3 独立评审 | CandidateDraft + requirements + evidence + 平台 | `ArchitectureReview`（verdict） | →review/attempts |
 | 4.1 intake | PassedDevelopmentArchitecture | running/intake 记录 + 工作区 | development/records/ |
 | 4.2 planning | 冻结架构 + 需求 | `DevelopmentPlan` + 规划材料 + 计划评审 | workspaces/<runId>/planning/ |

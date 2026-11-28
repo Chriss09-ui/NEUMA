@@ -22,18 +22,18 @@ NEUMA 保留现有的需求澄清、架构设计、独立评审、研发验收�
 
 ### 2.1 以现行源码为准
 
-架构依据为 [ARCHITECTURE.md](../ARCHITECTURE.md)，研发规则依据为 [研发层设计](development-layer-design.md)。现有测试中的模型返回和外部服务替身不证明真实模型质量或真实业务服务已验收。
+架构依据为 [ARCHITECTURE.md](../../ARCHITECTURE.md)，研发规则依据为 [研发层设计](../development-layer-design.md)。现有测试中的模型返回和外部服务替身不证明真实模型质量或真实业务服务已验收。
 
 本计划涉及的主要现行入口如下。具体实现前应重新核对工作树和调用关系，不依赖固定行号。
 
 | 领域 | 现行源码与测试入口 |
 | --- | --- |
-| HTTP 与任务入口 | [server.mts](../src/server.mts)、[collaboration-api.mts](../src/collaboration/collaboration-api.mts)、[main-agent.mts](../src/main/main-agent.mts) |
-| 架构与研发 | [architecture.mts](../src/architecture/architecture.mts)、[architecture-design-pipeline.mts](../src/architecture/architecture-design-pipeline.mts)、[development.mts](../src/development/development.mts)、[development-sessions.mts](../src/development/development-sessions.mts) |
-| 运行适配 | [pi-port.mts](../src/runtime/pi-port.mts)、[pi-runtime.mts](../src/runtime/pi-runtime.mts)、[pi-session-state.mts](../src/runtime/pi-session-state.mts) |
-| 已有后台执行 | [groups.mts](../src/collaboration/groups.mts)、[application-service.mts](../src/applications/application-service.mts)、[task-store.mts](../src/applications/task-store.mts)、[agent-scheduler.mts](../src/runtime/agent-scheduler.mts) |
-| 外部操作与恢复 | [workflow-controller.mts](../src/services/workflow-controller.mts)、[workflow-records.mts](../src/services/workflow-records.mts)、[agent-connections.mts](../src/agents/agent-connections.mts)、[http-adapter.mts](../src/connections/http-adapter.mts)、[mcp-adapter.mts](../src/connections/mcp-adapter.mts) |
-| 测试基础 | [http-model.mts](../test/helpers/http-model.mts)、[失败模式说明](../test/fixtures/architecture-recorded-failures.md)、[development-session-recovery.test.mts](../test/development/development-session-recovery.test.mts)、[测试分层登记](../scripts/run-tests.mts) |
+| HTTP 与任务入口 | [server.mts](../../src/server.mts)、[collaboration-api.mts](../../src/collaboration/collaboration-api.mts)、[main-agent.mts](../../src/main/main-agent.mts) |
+| 架构与研发 | [architecture.mts](../../src/architecture/architecture.mts)、[architecture-design-pipeline.mts](../../src/architecture/architecture-design-pipeline.mts)、[development.mts](../../src/development/development.mts)、[development-sessions.mts](../../src/development/development-sessions.mts) |
+| 运行适配 | [pi-port.mts](../../src/runtime/pi-port.mts)、[pi-runtime.mts](../../src/runtime/pi-runtime.mts)、[pi-session-state.mts](../../src/runtime/pi-session-state.mts) |
+| 已有后台执行 | [groups.mts](../../src/collaboration/groups.mts)、[application-service.mts](../../src/applications/application-service.mts)、[task-store.mts](../../src/applications/task-store.mts)、[agent-scheduler.mts](../../src/runtime/agent-scheduler.mts) |
+| 外部操作与恢复 | [workflow-controller.mts](../../src/services/workflow-controller.mts)、[workflow-records.mts](../../src/services/workflow-records.mts)、[agent-connections.mts](../../src/agents/agent-connections.mts)、[http-adapter.mts](../../src/connections/http-adapter.mts)、[mcp-adapter.mts](../../src/connections/mcp-adapter.mts) |
+| 测试基础 | [http-model.mts](../../test/helpers/http-model.mts)、[失败模式说明](../../test/fixtures/architecture-recorded-failures.md)、[development-session-recovery.test.mts](../../test/development/development-session-recovery.test.mts)、[测试分层登记](../../scripts/run-tests.mts) |
 
 ### 2.2 保留的业务规则
 
@@ -100,9 +100,9 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 
 | 类型 | 文件或位置 | 改动责任 |
 | --- | --- | --- |
-| 现有 | [server.mts](../src/server.mts)、[collaboration-api.mts](../src/collaboration/collaboration-api.mts)、[main-agent.mts](../src/main/main-agent.mts)、[main-store.mts](../src/main/main-store.mts) | 切分接受点、后台执行所有权和旧流兼容 |
-| 现有 | [agent-prototype.mts](../src/agents/agent-prototype.mts)、[architecture.mts](../src/architecture/architecture.mts)、[development.mts](../src/development/development.mts) | 构建与研发操作身份、取消和状态引用 |
-| 现有 | [main-agent.ts](../public/main-agent.ts)、[agent-runtime.ts](../public/agent-runtime.ts)、[agent-build-view.ts](../public/agent-build-view.ts)、[application-tasks.ts](../public/application-tasks.ts) | 续看、去重、重新同步、精确停止 |
+| 现有 | [server.mts](../../src/server.mts)、[collaboration-api.mts](../../src/collaboration/collaboration-api.mts)、[main-agent.mts](../../src/main/main-agent.mts)、[main-store.mts](../../src/main/main-store.mts) | 切分接受点、后台执行所有权和旧流兼容 |
+| 现有 | [agent-prototype.mts](../../src/agents/agent-prototype.mts)、[architecture.mts](../../src/architecture/architecture.mts)、[development.mts](../../src/development/development.mts) | 构建与研发操作身份、取消和状态引用 |
+| 现有 | [main-agent.ts](../../public/main-agent.ts)、[agent-runtime.ts](../../public/agent-runtime.ts)、[agent-build-view.ts](../../public/agent-build-view.ts)、[application-tasks.ts](../../public/application-tasks.ts) | 续看、去重、重新同步、精确停止 |
 | 拟新增 | `src/runtime/operation-view.mts` | 公共操作引用、快照与游标规则；只提供查看能力，不接管业务审批状态 |
 
 ### 4.4 验收标准
@@ -125,7 +125,7 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 
 ### 5.1 目标与已有基础
 
-为固定的模型行为提供可重复的测试过程，检查工具调用、正式提交、预算、恢复和最终状态。现有 [失败模式说明](../test/fixtures/architecture-recorded-failures.md) 已明确其夹具是脱敏最小模式，部分原始回复缺失；这些用例继续作为局部回归，不能改称完整原始转录。
+为固定的模型行为提供可重复的测试过程，检查工具调用、正式提交、预算、恢复和最终状态。现有 [失败模式说明](../../test/fixtures/architecture-recorded-failures.md) 已明确其夹具是脱敏最小模式，部分原始回复缺失；这些用例继续作为局部回归，不能改称完整原始转录。
 
 ### 5.2 第一版回放格式
 
@@ -140,7 +140,7 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 | 期望结果 | 请求与工具次数、正式提交结果、业务状态、预算变化、持久化产物 |
 | 故障控制 | 属于测试进程的注入点、触发依据、清理要求；不成为生产绕过开关 |
 
-先复用 [http-model.mts](../test/helpers/http-model.mts) 和真实控制器。涉及 SDK 映射时通过真实 Pi 及回环模型服务运行；只测试上层业务分支时允许注入自有运行接口的替身，避免所有测试都支付同样的启动成本。
+先复用 [http-model.mts](../../test/helpers/http-model.mts) 和真实控制器。涉及 SDK 映射时通过真实 Pi 及回环模型服务运行；只测试上层业务分支时允许注入自有运行接口的替身，避免所有测试都支付同样的启动成本。
 
 ### 5.3 实施步骤
 
@@ -204,7 +204,7 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 3. 先迁一次性会话，再迁研发会话，最后处理长期工作会话和群协作。任务结束只释放本次拥有的资源，不能关闭跨轮复用会话、共享连接或其他任务仍在使用的服务。
 4. 提取模型准入顺序。候选模块为拟新增 `src/runtime/model-admission.mts`：调用领域检查与保存回调，确认保存成功，再检查取消和当前绑定，最后放行请求。公共代码不自行读写领域预算，也不选择新的默认额度。
 5. 每迁一个领域，分别验证网络重试、工具后续请求、压缩、正常提交和取消。架构与研发的重试不重复扣逻辑轮次；压缩及群预留继续按各自原有账本处理。
-6. 优先复用 [agent-scheduler.mts](../src/runtime/agent-scheduler.mts)、[model-limits.mts](../src/runtime/model-limits.mts) 和 [pi-session-state.mts](../src/runtime/pi-session-state.mts)。公共运行索引和查看层不得新增第二套工作槽或模型预算。
+6. 优先复用 [agent-scheduler.mts](../../src/runtime/agent-scheduler.mts)、[model-limits.mts](../../src/runtime/model-limits.mts) 和 [pi-session-state.mts](../../src/runtime/pi-session-state.mts)。公共运行索引和查看层不得新增第二套工作槽或模型预算。
 7. 最后核对检查点的外围重复。只有语义相同的串行化、原子性和绑定传递才提取；原 schema、恢复验证和权限条件继续留在原模块。
 
 ### 6.3 验收标准
@@ -248,7 +248,7 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 
 ### 7.4 实施步骤
 
-1. 为 [workflow-controller.mts](../src/services/workflow-controller.mts) 先完成一个尝试所有权闭环，复用已有 running/attempts 先保存规则；同步 [workflow-records.mts](../src/services/workflow-records.mts) 与 [service-port.mts](../src/services/service-port.mts) 的版本和读取校验。
+1. 为 [workflow-controller.mts](../../src/services/workflow-controller.mts) 先完成一个尝试所有权闭环，复用已有 running/attempts 先保存规则；同步 [workflow-records.mts](../../src/services/workflow-records.mts) 与 [service-port.mts](../../src/services/service-port.mts) 的版本和读取校验。
 2. 在参数、权限、版本和绑定验证通过后，真实工具正文前持久保存分派标记。保存失败即停止；保存完成后重新检查取消信号。
 3. 工具返回结果后，先保存结果引用和已知分类，再回填模型或推进业务状态。保存失败时不发布成功；如果副作用可能已发生，恢复仍按未知结果处理。
 4. 按工作流、受管操作、HTTP/MCP 连接、模型工具的顺序接入。只有覆盖了真实分派位置，才能将“没有分派标记”解释为未执行；SDK 的开始通知不能替代持久化屏障。
@@ -263,7 +263,7 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 - 成功结果保存后崩溃，恢复消费原结果，副作用调用次数仍为一次。
 - 连续点击继续、刷新、控制器重建和重复回执不能创建新的隐式授权、补发预算或绕过核实。
 - 非幂等、只读和幂等能力均来自可信设计与适配器约束，不信任模型自行声明安全。
-- 既有 [service-workflows.test.mts](../test/services/service-workflows.test.mts) 和 [connections-protocols.test.mts](../test/services/connections-protocols.test.mts) 保持有效；新增测试覆盖独立分派与崩溃边界，不复制无关参数组合。
+- 既有 [service-workflows.test.mts](../../test/services/service-workflows.test.mts) 和 [connections-protocols.test.mts](../../test/services/connections-protocols.test.mts) 保持有效；新增测试覆盖独立分派与崩溃边界，不复制无关参数组合。
 
 ### 7.6 回退边界
 
@@ -296,13 +296,13 @@ M1 先复用当前 SessionFactory 和回环模型服务，避免等待新接口�
 ### 8.3 实施步骤
 
 1. 根据现有控制器消费字段建立判别联合事件和自有消息类型。自有事件不得继续通过 Exclude 或继承上游事件集合获得定义。
-2. 在 [pi-runtime.mts](../src/runtime/pi-runtime.mts) 和相邻适配模块中完成 Pi 到自有语义的转换，先保留旧导出作为过渡。按需将项目管理专属工具和提示词移回所属领域，避免适配器继续承担项目业务。
+2. 在 [pi-runtime.mts](../../src/runtime/pi-runtime.mts) 和相邻适配模块中完成 Pi 到自有语义的转换，先保留旧导出作为过渡。按需将项目管理专属工具和提示词移回所属领域，避免适配器继续承担项目业务。
 3. 保留每次 HTTP 尝试检查、逻辑调用记账、网络重试和压缩的区别。取消、截断和底层失败不能丢失原因，也不能从未知用量推算消耗。
 4. 先迁主对话等较小调用面，再迁工作 Agent、架构、研发和独立复核；首个领域完成后必须跑 M1 回放，再扩大范围。
 5. 收口历史访问。原只读历史的路径、符号链接、硬链接、UTF-8、树结构、bindingHash 和 sessionHash 校验由 Pi 适配能力保留，领域获取受限数据与来源证明。
-6. 收口上下文和文件工具。迁移 [architecture-model-context.mts](../src/architecture/architecture-model-context.mts)、[development-context.mts](../src/development/development-context.mts)、[development-controller-types.mts](../src/development/development-controller-types.mts) 的 SDK 类型依赖；[development-file-tools.mts](../src/development/development-file-tools.mts) 保留 NEUMA 注入的安全文件操作，原生工具工厂仅留在适配层。
+6. 收口上下文和文件工具。迁移 [architecture-model-context.mts](../../src/architecture/architecture-model-context.mts)、[development-context.mts](../../src/development/development-context.mts)、[development-controller-types.mts](../../src/development/development-controller-types.mts) 的 SDK 类型依赖；[development-file-tools.mts](../../src/development/development-file-tools.mts) 保留 NEUMA 注入的安全文件操作，原生工具工厂仅留在适配层。
 7. 使用同一套契约测试检查真实 Pi 适配器与业务测试替身。真实 Pi 通过回环模型服务验证映射，业务替身验证相同的上层义务。
-8. 扩展 [hygiene-graph.mts](../scripts/hygiene-graph.mts)，明确允许导入 Pi 的适配文件和纯模型能力配置位置，禁止业务控制器重新导入 SDK 或直接打开原生会话。过渡例外逐项登记，在迁移结束后移除。
+8. 扩展 [hygiene-graph.mts](../../scripts/hygiene-graph.mts)，明确允许导入 Pi 的适配文件和纯模型能力配置位置，禁止业务控制器重新导入 SDK 或直接打开原生会话。过渡例外逐项登记，在迁移结束后移除。
 
 ### 8.4 历史兼容与验收
 
@@ -320,7 +320,7 @@ Pi 适配器按原规则打开旧原生会话及受限文件引用；预算、�
 
 ### 9.1 按改动范围验证
 
-先运行最快的相关检查，再运行受影响领域测试。新增测试在 [scripts/run-tests.mts](../scripts/run-tests.mts) 登记 unit 或 integration；真实 SDK、子进程、磁盘崩溃和回环服务测试归入 integration。
+先运行最快的相关检查，再运行受影响领域测试。新增测试在 [scripts/run-tests.mts](../../scripts/run-tests.mts) 登记 unit 或 integration；真实 SDK、子进程、磁盘崩溃和回环服务测试归入 integration。
 
 当前已经存在的命令如下，全部在项目根目录执行。
 

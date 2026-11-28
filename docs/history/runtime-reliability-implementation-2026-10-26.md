@@ -2,7 +2,7 @@
 
 日期：2026-10-26。状态：代码与文档已完成，最终全量回归通过；安装包验证见下方记录。提交与远端同步状态以 Git 记录为准。
 
-原计划见 [五项改进计划](runtime-reliability-improvement-plan-2026-10-26.md)，现行行为以 [ARCHITECTURE.md](../ARCHITECTURE.md) 为准。保留原工作树已有的测试调整和 `domain-contract-ports.mts` 删除；本次没有恢复或覆盖这些改动。
+原计划见 [五项改进计划](runtime-reliability-improvement-plan-2026-10-26.md)，现行行为以 [ARCHITECTURE.md](../../ARCHITECTURE.md) 为准。保留原工作树已有的测试调整和 `domain-contract-ports.mts` 删除；本次没有恢复或覆盖这些改动。
 
 ## 用户现在可以做什么
 
@@ -29,12 +29,12 @@
 
 ## M1 回放与故障证据
 
-- [session-replay.mts](../test/helpers/session-replay.mts)：带来源/版本的有限脚本和严格消费检查；记录白名单仅输出角色、阶段、工具名与摘要，不复制任意对象、提示词、凭据或思考正文。
-- [execution-runtime.test.mts](../test/runtime/execution-runtime.test.mts)：真实 Pi + 本机模型协议回放，覆盖普通回复未提交、参数失败后修正并正式提交。
-- [architecture-recorded-failures.test.mts](../test/architecture/architecture-recorded-failures.test.mts)：既有去标识失败模式接入严格回放；不改称完整原始转录。
-- [development-session-recovery.test.mts](../test/development/development-session-recovery.test.mts)：保留开发者与独立评审各自恢复、同对象历史及原预算的原有主证明。
-- [development-crash-recovery.test.mts](../test/development/development-crash-recovery.test.mts)：真实子进程在预算持久化后、模型请求前，以及正式规划结果保存后、消费前被 SIGKILL；新进程保持已用额度，消费原提案后继续独立评审，不把提案当作已通过计划。
-- [workflow-crash-recovery.test.mts](../test/services/workflow-crash-recovery.test.mts)：prepared、dispatched、外部已生效但未保存结果、结果已保存四个真实 SIGKILL 边界。父进程持有外部测试服务并检查实际副作用次数。
+- [session-replay.mts](../../test/helpers/session-replay.mts)：带来源/版本的有限脚本和严格消费检查；记录白名单仅输出角色、阶段、工具名与摘要，不复制任意对象、提示词、凭据或思考正文。
+- [execution-runtime.test.mts](../../test/runtime/execution-runtime.test.mts)：真实 Pi + 本机模型协议回放，覆盖普通回复未提交、参数失败后修正并正式提交。
+- [architecture-recorded-failures.test.mts](../../test/architecture/architecture-recorded-failures.test.mts)：既有去标识失败模式接入严格回放；不改称完整原始转录。
+- [development-session-recovery.test.mts](../../test/development/development-session-recovery.test.mts)：保留开发者与独立评审各自恢复、同对象历史及原预算的原有主证明。
+- [development-crash-recovery.test.mts](../../test/development/development-crash-recovery.test.mts)：真实子进程在预算持久化后、模型请求前，以及正式规划结果保存后、消费前被 SIGKILL；新进程保持已用额度，消费原提案后继续独立评审，不把提案当作已通过计划。
+- [workflow-crash-recovery.test.mts](../../test/services/workflow-crash-recovery.test.mts)：prepared、dispatched、外部已生效但未保存结果、结果已保存四个真实 SIGKILL 边界。父进程持有外部测试服务并检查实际副作用次数。
 
 真实进程测试使用测试进程内双向 IPC 门控；持久写入完成后暂停，父进程再终止，不靠固定 sleep 猜测。没有生产崩溃开关、生产历史扫描或自动收集。
 
@@ -42,19 +42,19 @@
 
 | 主要文件 | 职责 |
 | --- | --- |
-| [execution-port.mts](../src/runtime/execution-port.mts) | 自有消息、事件、工具、会话、准入与能力类型；事件名沿用兼容词汇，不从 SDK 联合类型派生 |
-| [execution-runtime.mts](../src/runtime/execution-runtime.mts) | 正式 Pi 适配、事件映射、上下文容量；业务对象不包含原生 manager/settings |
-| [execution-history.mts](../src/runtime/execution-history.mts)、[pi-session-state.mts](../src/runtime/pi-session-state.mts) | 自有只读历史/来源接口；适配器继续执行原路径、链接、UTF-8、树结构、绑定及摘要校验 |
-| [pi-file-tools.mts](../src/runtime/pi-file-tools.mts) | 原生文件工具工厂；所有实际文件操作仍通过原安全工作区实现 |
-| [model-admission.mts](../src/runtime/model-admission.mts) | 持久化成功后再次检查取消，再放行请求；不读写领域预算 |
-| [execution-lifecycle.mts](../src/runtime/execution-lifecycle.mts) | 幂等释放本次拥有的资源，继续清理其余资源并汇总异常 |
-| [hygiene-graph.mts](../scripts/hygiene-graph.mts) | 同时限制业务的 SDK 类型/运行时依赖及原生会话管理器入口 |
+| [execution-port.mts](../../src/runtime/execution-port.mts) | 自有消息、事件、工具、会话、准入与能力类型；事件名沿用兼容词汇，不从 SDK 联合类型派生 |
+| [execution-runtime.mts](../../src/runtime/execution-runtime.mts) | 正式 Pi 适配、事件映射、上下文容量；业务对象不包含原生 manager/settings |
+| [execution-history.mts](../../src/runtime/execution-history.mts)、[pi-session-state.mts](../../src/runtime/pi-session-state.mts) | 自有只读历史/来源接口；适配器继续执行原路径、链接、UTF-8、树结构、绑定及摘要校验 |
+| [pi-file-tools.mts](../../src/runtime/pi-file-tools.mts) | 原生文件工具工厂；所有实际文件操作仍通过原安全工作区实现 |
+| [model-admission.mts](../../src/runtime/model-admission.mts) | 持久化成功后再次检查取消，再放行请求；不读写领域预算 |
+| [execution-lifecycle.mts](../../src/runtime/execution-lifecycle.mts) | 幂等释放本次拥有的资源，继续清理其余资源并汇总异常 |
+| [hygiene-graph.mts](../../scripts/hygiene-graph.mts) | 同时限制业务的 SDK 类型/运行时依赖及原生会话管理器入口 |
 
 主对话、工作 Agent、架构、研发和独立复核已改用自有契约。主对话、架构、研发、私聊当次资源和群执行使用公共清理；长期成功私聊会话仍由原所有者复用。兼容 pi-port 和原始 createPiSession 保留给既有 SDK 层测试/集成；项目助手的既有独立请求语义未扩大为后台操作。
 
 ## M4 执行结果核实
 
-[execution-attempt.mts](../src/runtime/execution-attempt.mts) 提供版本化尝试及分类。新字段可嵌入现有领域记录，不批量重写旧历史。
+[execution-attempt.mts](../../src/runtime/execution-attempt.mts) 提供版本化尝试及分类。新字段可嵌入现有领域记录，不批量重写旧历史。
 
 - prepared：屏障尚未放行，才可解释为未执行。
 - dispatched：已有分派事实，没有持久完成结果时保守视为未知。
@@ -65,15 +65,15 @@
 
 非幂等流程沿用 needs_review。新记录的人工核实绑定 task/version/step/index/attemptId；确认完成记录核实结果，明确重试保留原尝试和已用次数。旧记录没有 attemptId 时保持原协议。普通应用任务不自动重启，未知结果通过原任务记录保留。
 
-独立证明见 [service-workflows.test.mts](../test/services/service-workflows.test.mts)：真实 HTTP 服务已生效但连接中断，动作代码连续尝试两次并吞掉异常，外部调用仍只发生一次，流程留在待核实。
+独立证明见 [service-workflows.test.mts](../../test/services/service-workflows.test.mts)：真实 HTTP 服务已生效但连接中断，动作代码连续尝试两次并吞掉异常，外部调用仍只发生一次，流程留在待核实。
 
 ## M5 / M6 查看协议与页面
 
-- [MainAgent](../src/main/main-agent.mts) 提供 submit / operation / cancel；[AgentOperations](../src/agents/agent-operations.mts) 提供构建与研发的接受、查询和精确停止。
-- [operation-view.mts](../src/runtime/operation-view.mts) 返回操作身份、代次与已提交快照游标；游标相同省略正文，变化或过期时 reset 并返回完整快照。
-- [operation-view.ts](../public/operation-view.ts) 串行观察、核对身份、取消监听与有限断线重试。前端用快照替换内容，避免重复拼接；主对话重新打开时依据原请求恢复查看，制作页面通过 operationReference 找到后台任务。
+- [MainAgent](../../src/main/main-agent.mts) 提供 submit / operation / cancel；[AgentOperations](../../src/agents/agent-operations.mts) 提供构建与研发的接受、查询和精确停止。
+- [operation-view.mts](../../src/runtime/operation-view.mts) 返回操作身份、代次与已提交快照游标；游标相同省略正文，变化或过期时 reset 并返回完整快照。
+- [operation-view.ts](../../public/operation-view.ts) 串行观察、核对身份、取消监听与有限断线重试。前端用快照替换内容，避免重复拼接；主对话重新打开时依据原请求恢复查看，制作页面通过 operationReference 找到后台任务。
 - 群和应用有相同快照格式的 view 入口，复用原 Store、事件序号、作用范围及调度；旧 events 接口保持兼容。
-- 原主 messages、agents/build、development/stream 等接口继续保留既有语义。默认桌面入口已切换新后台协议；完整路径见 [用户指南](user-guide.md)。
+- 原主 messages、agents/build、development/stream 等接口继续保留既有语义。默认桌面入口已切换新后台协议；完整路径见 [用户指南](../user-guide.md)。
 
 本轮采用持久快照重同步，未增加独立的逐 token 日志。已有定时保存和领域事件是权威来源，因此不需要处理两套“成功状态”一致性。查看接口不会启动任务，重启不会自动恢复模型或外部动作。
 

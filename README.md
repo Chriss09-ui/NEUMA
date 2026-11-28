@@ -128,7 +128,7 @@ npm run package:pack         # 编译并生成试用安装包到 dist/npm/
 | 想了解的内容 | 文档 |
 | --- | --- |
 | 创建助手、共享材料、管理项目和本机技能 | [使用指南](docs/user-guide.md) |
-| 各层的职责、状态、数据流与中断恢复 | [架构基线](ARCHITECTURE.md) · [节点与字段](docs/node-flow-and-fields.md) · [运行可靠性实施记录](docs/runtime-reliability-implementation-2026-10-26.md) |
+| 各层的职责、状态、数据流与中断恢复 | [架构基线](ARCHITECTURE.md) · [节点与字段](docs/node-flow-and-fields.md) |
 | 代码型智能体怎样从任务拆分走到验收与交付 | [研发层设计](docs/development-layer-design.md) |
 | 修改代码时需要同步的文档和提交前检查 | [开发约定](AGENTS.md) |
 

@@ -1,7 +1,7 @@
 # NEUMA 架构基线
 
 - 本文是当前正式架构基线，按主题描述各领域的职责、调用关系、状态归属、关键约束和验证入口。2026-10-25 由按日期追加的编年版整理而来；整理前的原文逐字冻结于 [docs/history/architecture-chronicle-2026-10.md](docs/history/architecture-chronicle-2026-10.md)，仅用于追溯规则演进和当时的验证记录。
-- [docs/history](docs/history) 与 `AGENT_PROTOTYPE.md` 中的档案没有规范效力，其中的临时取舍不能覆盖本文或限制技术选型；`本地测试记录/` 同属冻结历史证据。与当前源码不一致时，以源码和对应测试为准，并更新本文。
+- [docs/history](docs/history) 收录原型、旧方案和实施记录，`本地测试记录/` 保存各次验证的冻结证据。追溯当时的决定时按需查阅。现行架构以源码和对应测试为准，若本文与实现有出入，应同步修订。
 - 文中"当前""本版"是对现有实现的描述，不是永久架构要求。修改 Agent 的架构、构建、执行、会话或交互前先读本文（[AGENTS.md](AGENTS.md) 同样要求）；修改研发层节点、上下文、预算、验收或交付时，同步更新 [docs/development-layer-design.md](docs/development-layer-design.md)。
 - 2026-10-25 按源码基线 `e4f1974` 核对执行适配、连接与文档入口；后续代码变更按 AGENTS 的文档同步表更新对应主题。本次文档核对不代表重新执行全部业务、安装或平台认证。
 
@@ -25,6 +25,16 @@
 - **需求澄清**（`src/requirements/`）与**项目助手**（`src/projects/`）相互独立，不与工作 Agent 混用会话或权限。
 
 服务端源码在 `src/`，入口 `src/server.mts`；前端资源在 `public/`，测试在 `test/`，开发脚本在 `scripts/`。当前底座是 Node + 已锁定 Pi SDK。业务使用 NEUMA 的 `execution-port`、`execution-runtime`、`execution-history`；Pi 原生事件映射、只读历史校验和原生文件工具留在运行适配边界。控制器以普通 Node 模块实现，未引入编排框架、数据库或遥测。框架、SDK 按能力比较，可以组合，不是固定升级顺序。
+
+### 按问题找源码
+
+| 要查的问题 | 从哪里看 | 对应测试 |
+| --- | --- | --- |
+| 主对话页面怎样打开历史、接收消息或进入助手迭代 | [主对话页面](public/main-agent.ts) → [HTTP 路由](src/server.mts) → [主助理控制器](src/main/main-agent.mts) | [协作界面](test/collaboration/collaboration-ui.test.mts)、[主助理](test/collaboration/main-agent.test.mts) |
+| 一份需求何时可以确认并交给架构层 | [主对话的需求处理](src/main/main-requirements.mts)、[预审与确认回执](src/requirements/consultation.mts) | [需求测试](test/requirements) |
+| 蓝图如何派单、模块如何组装，评审模型能看到哪些材料 | [架构控制器](src/architecture/architecture.mts)、[设计管线](src/architecture/architecture-design-pipeline.mts)、[各角色的输入](src/architecture/architecture-model-context.mts) | [设计管线](test/architecture/architecture-design-pipeline.test.mts)、[模型实际收到的材料](test/architecture/architecture-model-context.test.mts) |
+| 研发在哪个任务停下，恢复后怎样计算退回次数 | [研发控制器](src/development/development.mts)、[按责任任务计数的策略](src/development/development-policy.mts) | [研发会话恢复](test/development/development-session-recovery.test.mts) |
+| 已交付的助手如何处理私聊和应用页面信息 | [工作助手](src/agents/agent-prototype.mts)、[应用对话上下文](src/applications/application-context.mts) | [工作助手测试](test/agents/agent-prototype.test.mts)、[应用上下文测试](test/applications/application-context.test.mts) |
 
 ## 2. 系统入口与生命周期
 
@@ -363,10 +373,18 @@ v1–v6 检查点按原契约验证、续跑并保存结果。v6 派单已用正
 | [AGENTS.md](AGENTS.md) | 日常开发约定、阅读入口与验证要求 | 现行 |
 | 本文 | 当前架构基线（职责、约束、状态归属、验证入口） | 现行 |
 | [docs/development-layer-design.md](docs/development-layer-design.md) | 研发层五阶段详细设计 | 现行（AGENTS 指定同步维护） |
+| [节点流程与字段说明](docs/node-flow-and-fields.md) | 节点的输入、输出及字段示例 | 现行说明 |
 | [docs/user-guide.md](docs/user-guide.md)、[docs/agent-capabilities-and-services.md](docs/agent-capabilities-and-services.md)、[docs/connections-guide.md](docs/connections-guide.md)、[docs/npm-installation.md](docs/npm-installation.md) | 用户说明、能力与连接、安装 | 现行说明 |
-| [docs/runtime-reliability-improvement-plan-2026-10-26.md](docs/runtime-reliability-improvement-plan-2026-10-26.md) | 断线续看、失败回放、公共执行规则、执行结果核实与自有运行接口的分阶段实施计划 | 已实施；实际取舍与验证见实施记录 |
-| [docs/runtime-reliability-implementation-2026-10-26.md](docs/runtime-reliability-implementation-2026-10-26.md) | 五项运行可靠性改造的文件、协议、恢复与验证证据 | 实施记录 |
+
+<details>
+<summary>追溯旧方案或验证结果时查阅的历史档案</summary>
+
+| 文档 | 内容 | 状态 |
+| --- | --- | --- |
+| [运行可靠性改造计划](docs/history/runtime-reliability-improvement-plan-2026-10-26.md)及[实施记录](docs/history/runtime-reliability-implementation-2026-10-26.md) | 断线续看、失败回放、公共执行规则、执行结果核实与自有运行接口 | 2026-10-26 已实施 |
 | [docs/history/typescript-migration-completion-2026-10-25.md](docs/history/typescript-migration-completion-2026-10-25.md) 及同目录 `typescript-m*-results-*.md` | TypeScript 迁移 M0–M8 完成说明与各阶段验证证据 | 历史档案；迁移已实施，仅 Mac ARM64 发布验证 |
 | [docs/history/repository-organization-completion-2026-10-25.md](docs/history/repository-organization-completion-2026-10-25.md) 及同目录 R1–R6 实施记录 | 仓库整理 R1、R3–R6 完成状态与实施证据 | 历史档案；已实施，原始方案另行冻结 |
 | [docs/history/architecture-chronicle-2026-10.md](docs/history/architecture-chronicle-2026-10.md) 及 docs/history 其他档案 | 本文前身的编年原文、各次改造交付记录 | 历史档案，无规范效力 |
-| `AGENT_PROTOTYPE.md`、`本地测试记录/` | 原型档案、本机测试冻结证据 | 历史档案，无规范效力 |
+| [原型说明](docs/history/agent-prototype-2026-10-04.md)、`本地测试记录/` | 原型档案、本机测试冻结证据 | 历史档案，无规范效力 |
+
+</details>
