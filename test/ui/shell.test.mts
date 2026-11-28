@@ -57,7 +57,7 @@ function setup({ compact = false, reduced = false, transitions = false, hash = "
         || (this.id === "sidebar-details" && element === get("sidebar-groups-link"))
         || (this.id === "sidebar-agent-rail" && element === get("collapsed-agent-one"))
         || (this.id === "sidebar-group-rail" && element === get("collapsed-group-one"))
-        || (this.id === "main-history" && ["sidebar-main-link", "main-history-more-toggle", "sidebar-main-new-chat"].some((id) => element === get(id)));
+        || (this.id === "main-history" && ["sidebar-main-link", "sidebar-main-new-chat"].some((id) => element === get(id)));
     }
     focus() { document.activeElement = this; }
     click() { this.dispatchEvent({ type: "click" }); }
@@ -250,7 +250,7 @@ test("主导航和项目栏独立恢复、独立折叠，快速切换取最后�
 
 test("主导航折叠会将主历史按钮焦点移回开关，保留可见NEUMA入口的焦点", () => {
   const { get, document } = setup();
-  get("main-history-more-toggle").focus(); get("sidebar-toggle").click();
+  get("sidebar-main-new-chat").focus(); get("sidebar-toggle").click();
   assert.equal(document.activeElement, get("sidebar-toggle"));
   get("sidebar-toggle").click(); get("sidebar-main-link").focus(); get("sidebar-toggle").click();
   assert.equal(document.activeElement, get("sidebar-main-link"));

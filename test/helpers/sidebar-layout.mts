@@ -124,10 +124,23 @@ function inspectSidebarLayout({ markup, stylesheet, avatarAssets }: { markup: st
   byId("main-history")!.classList.remove("history-collapsed");
   byId("main-history-body")!.inert = false; byId("main-history-body")!.setAttribute("aria-hidden", "false");
   byId("sidebar-main-link")!.setAttribute("aria-expanded", "true");
-  byId("main-history-list")!.replaceChildren(...Array.from({ length: 25 }, (_, index) => {
-    const row = make("button", "sidebar-history-item", `主助理历史对话 ${index + 1}`); row.type = "button"; return row;
+  const mainHistory = byId("main-history-list");
+  mainHistory.replaceChildren(...Array.from({ length: 25 }, (_, index) => {
+    const row = make("div", "main-history-row");
+    row.append(make("button", "collaboration-history-item", `主助理历史对话 ${index + 1}`));
+    return row;
   }));
-  reset(agentList, groupList, byId("sidebar-scroll")); const crowded = snapshot();
+  const visibleHistory = () => {
+    const view = rect(mainHistory);
+    return [...mainHistory.children].flatMap((row, index) => {
+      const bounds = rect(row);
+      return bounds.bottom > view.top && bounds.top < view.bottom ? [index + 1] : [];
+    });
+  };
+  reset(agentList, groupList, byId("sidebar-scroll"), mainHistory);
+  const recent = visibleHistory();
+  mainHistory.scrollTop = mainHistory.scrollHeight;
+  const crowded = { ...snapshot(), recent, oldest: visibleHistory() };
   return { initial, agentScrolled, groupScrolled, agentFocused, groupFocused, expanded, expandedScrolled,
     collapsed, collapsedAgentScrolled, collapsedGroupScrolled, collapsedAgentFocused, collapsedGroupFocused, crowded };
 }
@@ -217,6 +230,8 @@ export function assertSidebarLayout(facts: ReturnType<typeof inspectSidebarLayou
     assert.ok(heading.top >= 0 && heading.bottom < facts.initial.settings.top, "短桌面分区标题应保持可见且位于设置入口上方");
   stable(facts.initial, facts.expandedScrolled, "展开历史后滚动");
   stable(facts.initial, facts.crowded, "主助理长历史展开", false);
+  assert.deepEqual(facts.crowded.recent, [1, 2, 3], "主对话列表首屏只显示最近三条");
+  assert.deepEqual(facts.crowded.oldest, [23, 24, 25], "列表内滚动可以看到最早的三条对话");
   assert.ok(facts.crowded.agents.clientHeight >= 44 && facts.crowded.groups.clientHeight >= 44,
     "主助理长历史展开后两列表仍应至少保留一行滚动高度");
   assert.ok(facts.crowded.agentHeading.bottom < facts.crowded.agents.top

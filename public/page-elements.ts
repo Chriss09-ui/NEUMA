@@ -265,10 +265,7 @@ export interface PageElements {
   "main-file-input": HTMLElementTagNameMap["input"];
   "main-history": HTMLElementTagNameMap["section"];
   "main-history-body": HTMLElementTagNameMap["div"];
-  "main-history-delete": HTMLElementTagNameMap["button"];
   "main-history-list": HTMLElementTagNameMap["nav"];
-  "main-history-menu": HTMLElementTagNameMap["div"];
-  "main-history-more-toggle": HTMLElementTagNameMap["button"];
   "main-history-status": HTMLElementTagNameMap["p"];
   "sidebar-main-new-chat": HTMLElementTagNameMap["button"];
   "main-material-close": HTMLElementTagNameMap["button"];

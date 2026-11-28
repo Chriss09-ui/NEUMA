@@ -16,8 +16,8 @@ let selected: MainConversation | null = null, records: MainConversation[] = [], 
 let openingIteration: string | null = null;
 let retryRequest: { id: string; fingerprint: string; body: MutationRequest } | null = null, page = "chat", listing: Promise<void> | null = null, activationSequence = 0, activationRetry: { key: string; body: MutationRequest } | null = null;
 let needsConversationReload = false, needsHistoryReload = false;
-let removing: string | null = null, historyMenu: { id: string; trigger: HTMLButtonElement; row: HTMLElement } | null = null, historyRevision = 0;
-let historyShowAll = false, historyNavigation = 0, pendingHistoryNavigation = false;
+let removing: string | null = null, historyRevision = 0;
+let historyNavigation = 0, pendingHistoryNavigation = false;
 const removedIds = new Set<string>(), removalRetries = new Map<string, { confirm: boolean; expectedVersion: number; mutationId: string }>();
 const drafts = new Map<string, string>();
 const ACTIVE_KEY = "neuma.main.active-conversation.v1";
@@ -36,7 +36,7 @@ function historyLayout() {
   byId("sidebar-main-link").setAttribute("aria-expanded", String(!historyCollapsed));
 }
 function setHistoryCollapsed(value: boolean) {
-  closeHistoryMenu(); historyCollapsed = value;
+  historyCollapsed = value;
   if (historyCollapsed && byId("main-history-body").contains?.(document.activeElement)) byId("sidebar-main-link").focus();
   historyLayout(); try { localStorage.setItem(HISTORY_KEY, String(historyCollapsed)); } catch { /* Only persistence is unavailable. */ }
 }
@@ -76,36 +76,12 @@ function setComposerProgress(text: string) {
   status.textContent = text;
   messageInput.placeholder = text || idlePlaceholder;
 }
-function closeHistoryMenu(restoreFocus = false) {
-  if (!historyMenu) return;
-  const { trigger, row } = historyMenu; historyMenu = null;
-  byId("main-history-menu").hidden = true;
-  trigger.setAttribute("aria-expanded", "false"); row.classList.toggle("has-open-menu", false);
-  if (restoreFocus) trigger.focus({ preventScroll: true });
-}
-function openHistoryMenu(record: MainConversation, trigger: HTMLButtonElement, row: HTMLElement, focusItem = false) {
-  const wasOpen = historyMenu?.trigger === trigger;
-  closeHistoryMenu();
-  if (wasOpen || busy()) return;
-  historyMenu = { id: record.id, trigger, row };
-  trigger.setAttribute("aria-expanded", "true"); row.classList.toggle("has-open-menu", true);
-  const menu = byId("main-history-menu"), remove = byId("main-history-delete");
-  menu.setAttribute("aria-label", `对话操作：${record.title || "新对话"}`);
-  remove.setAttribute("aria-label", `删除对话：${record.title || "新对话"}`); menu.hidden = false;
-  const bounds = byId("main-history").getBoundingClientRect(), anchor = trigger.getBoundingClientRect();
-  const { height, width } = menu.getBoundingClientRect(), below = anchor.bottom + 4;
-  menu.style.left = `${Math.max(8, Math.min(bounds.right - width - 8, window.innerWidth - width - 8))}px`;
-  menu.style.top = `${Math.max(8, below + height <= window.innerHeight - 8 ? below : anchor.top - height - 4)}px`;
-  if (focusItem) remove.focus({ preventScroll: true });
-}
 function controls() {
-  if (busy()) closeHistoryMenu();
   byId("main-send").disabled = busy();
   byId("sidebar-main-new-chat").disabled = busy();
   byId("main-refresh").disabled = busy();
   byId("main-refresh").hidden = !(needsConversationReload || needsHistoryReload);
   byId("main-recovery").hidden = byId("main-refresh").hidden;
-  byId("main-history-delete").disabled = busy();
   for (const item of byId("main-history-list").querySelectorAll("button")) item.disabled = busy();
   byId("main-send").hidden = Boolean(operation);
   byId("main-cancel").hidden = !operation;
@@ -147,36 +123,30 @@ function render() {
   }
   if (operation?.reply) target.append(messageRow(operation.reply, { bubble: true }));
   if (wasBottom) target.scrollTop = target.scrollHeight;
-  closeHistoryMenu(true);
   const list = byId("main-history-list"), focused = document.activeElement as HTMLElement | null;
+  const scrollTop = list.scrollTop;
   const focusedId = list.contains(focused) ? focused?.dataset?.conversationId : null;
-  const focusedMore = focused?.className?.split(/\s+/).includes("main-history-more");
+  const focusedDelete = focused?.classList.contains("main-history-delete");
   list.replaceChildren();
-  for (const [index, record] of records.entries()) {
+  for (const record of records) {
     const row = node("div", "main-history-row"); row.dataset.conversationId = record.id;
-    row.hidden = !historyShowAll && index >= 4;
     row.classList.toggle("is-current", record.id === selected?.id);
     const item = button(record.title || "新对话", () => openHistoryConversation(record.id), "collaboration-history-item");
     item.title = record.title || "新对话"; item.dataset.conversationId = record.id;
     item.setAttribute("aria-label", `打开对话：${item.title}`);
     item.disabled = busy(); item.setAttribute("aria-current", record.id === selected?.id ? "true" : "false");
-    const more = button("", () => openHistoryMenu(record, more, row), "main-history-more");
-    more.dataset.conversationId = record.id; more.disabled = busy(); more.title = "更多操作";
-    more.setAttribute("aria-label", `对话操作：${item.title}`); more.setAttribute("aria-haspopup", "menu");
-    more.setAttribute("aria-expanded", "false"); more.setAttribute("aria-controls", "main-history-menu");
-    const dots = node("span", "agent-history-more-icon"); dots.setAttribute("aria-hidden", "true"); more.append(dots);
-    more.addEventListener("keydown", (event) => {
-      if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
-      event.preventDefault();
-      if (historyMenu?.trigger === more) byId("main-history-delete").focus({ preventScroll: true });
-      else openHistoryMenu(record, more, row, true);
-    });
-    row.append(item, more); list.append(row);
-    if (record.id === focusedId && !busy() && !row.hidden) (focusedMore ? more : item).focus({ preventScroll: true });
+    const remove = button("", () => removeConversation(record.id), "main-history-delete");
+    remove.dataset.conversationId = record.id; remove.title = "删除对话";
+    remove.setAttribute("aria-label", `删除对话：${item.title}`);
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("aria-hidden", "true");
+    path.setAttribute("d", "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5");
+    icon.append(path); remove.append(icon);
+    row.append(item, remove); list.append(row);
+    if (record.id === focusedId && !busy()) (focusedDelete ? remove : item).focus({ preventScroll: true });
   }
-  const showMore = byId("main-history-more-toggle");
-  showMore.hidden = records.length <= 4; showMore.textContent = historyShowAll ? "收起显示" : "展开显示";
-  showMore.setAttribute("aria-expanded", String(historyShowAll));
+  list.scrollTop = scrollTop;
   materials.render(); controls();
 }
 function displayConversation(conversation: MainConversation, input: string) {
@@ -254,9 +224,9 @@ async function removeConversation(id: string) {
     if (page === "chat" && restoreFocus()) byId("main-message").focus();
   } else if (restoreFocus() && !byId("sidebar-scroll").inert) {
     const row = ([...byId("main-history-list").children] as HTMLElement[]).find((item) => item.dataset.conversationId === id);
-    const target = byId("main-history-body").inert ? byId("sidebar-main-link")
-      : row && !row.hidden ? row.querySelector<HTMLElement>(".main-history-more") : byId("main-history-more-toggle");
-    target?.focus({ preventScroll: true });
+    const retry = row?.querySelector<HTMLButtonElement>(".main-history-delete");
+    const target = !byId("main-history-body").inert && retry ? retry : byId("sidebar-main-link");
+    target.focus({ preventScroll: true });
   }
 }
 async function create({ preserveInput = true } = {}) {
@@ -274,6 +244,7 @@ async function create({ preserveInput = true } = {}) {
     notice(byId("main-error"), "");
     if (listing) await listing;
     await list();
+    byId("main-history-list").scrollTop = 0;
   } catch (caught) { const error = errorInfo(caught); showRecovery(error.message); }
   finally {
     loading = false; render();
@@ -440,30 +411,6 @@ byId("sidebar-main-heading").addEventListener("click", (event) => {
   if (event.target === byId("sidebar-main-heading")) byId("sidebar-main-link").click();
 });
 byId("main-refresh").addEventListener("click", async () => { if (selected) await select(selected.id); await list(); });
-byId("main-history-more-toggle").addEventListener("click", () => {
-  closeHistoryMenu(); historyShowAll = !historyShowAll;
-  if (!historyShowAll && byId("main-history-list").contains(document.activeElement)) byId("main-history-more-toggle").focus({ preventScroll: true });
-  render();
-});
-byId("main-history-delete").addEventListener("click", () => {
-  const target = historyMenu; closeHistoryMenu(true);
-  if (target) return removeConversation(target.id);
-});
-byId("main-history-list").addEventListener("scroll", () => closeHistoryMenu(true));
-byId("sidebar-details").addEventListener("scroll", () => closeHistoryMenu(true));
-byId("sidebar-scroll").addEventListener("scroll", () => closeHistoryMenu(true));
-window.addEventListener?.("resize", () => closeHistoryMenu(true));
-document.addEventListener("click", (event) => {
-  if (historyMenu && !historyMenu.trigger.contains(event.target as Node | null) && !byId("main-history-menu").contains(event.target as Node | null)) closeHistoryMenu();
-});
-document.addEventListener("keydown", (event) => {
-  if (!historyMenu) return;
-  if (event.key === "Escape" || event.key === "Tab") {
-    if (event.key === "Escape") event.preventDefault(); closeHistoryMenu(true);
-  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && byId("main-history-menu").contains(event.target as Node | null)) {
-    event.preventDefault(); byId("main-history-delete").focus({ preventScroll: true });
-  }
-});
 byId("main-cancel").addEventListener("click", async () => {
   const current = operation; if (!current) return;
   byId("main-cancel").disabled = true;
@@ -472,7 +419,6 @@ byId("main-cancel").addEventListener("click", async () => {
   finally { byId("main-cancel").disabled = false; }
 });
 document.addEventListener("neuma:route", (event) => {
-  closeHistoryMenu();
   if (openingIteration) { openingIteration = null; activationSequence++; controls(); }
   page = event.detail.page;
   contextPanel.route(page);

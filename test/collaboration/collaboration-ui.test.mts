@@ -129,8 +129,8 @@ function setup(source: string, request: (path: string, options?: RequestInit) =>
     if (!nodes.has(id)) nodes.set(id, Object.assign(new Element(id === "group-message" || id === "main-message" ? "textarea" : id === "group-share-agent" ? "select"
       : ["group-editor", "group-files-dialog", "group-share-dialog", "main-material-dialog"].includes(id) ? "dialog" : "div"), {
       id, ...(id === "main-message" ? { placeholder: "给 NEUMA 发消息…" } : {}),
-      ...(["main-history-menu", "group-history-menu"].includes(id) ? { hidden: true } : {}),
-      ...(["main-history-delete", "group-history-delete"].includes(id) ? { textContent: "删除对话" } : {}),
+      ...(id === "group-history-menu" ? { hidden: true } : {}),
+      ...(id === "group-history-delete" ? { textContent: "删除对话" } : {}),
       ...(id === "group-panel" ? { hidden: true } : {}),
     }));
     return nodes.get(id)!;
@@ -154,7 +154,7 @@ function setup(source: string, request: (path: string, options?: RequestInit) =>
   get("sidebar-main-link").append(document.createElement("svg"), document.createElement("span"));
   const compose = document.createElement("svg"); compose.append(document.createElement("path"));
   get("sidebar-main-new-chat").append(compose);
-  get("main-history-body").append(get("main-history-list"), get("main-history-status"), get("main-history-more-toggle"));
+  get("main-history-body").append(get("main-history-list"), get("main-history-status"));
   get("page-group").hidden = true;
   get("page-group").append(get("group-page-shell"), get("group-editor"), get("group-files-dialog"), get("group-share-dialog"));
   get("group-page-shell").append(get("group-primary"), get("group-panel"));
@@ -171,7 +171,6 @@ function setup(source: string, request: (path: string, options?: RequestInit) =>
   get("group-share-dialog").append(get("group-share-close"), get("group-share-agent-trigger"), get("group-share-agent-menu"), get("group-share-list"));
   get("group-editor").append(get("group-editor-close"), get("group-editor-form"));
   get("group-editor-form").append(get("group-name"), get("group-purpose-input"), get("group-member-picker"), get("group-editor-save"));
-  get("main-history-menu").append(get("main-history-delete"));
   get("group-history-menu").append(get("group-history-delete"));
   class Event implements FixtureEvent { [key: string]: unknown; declare type: string; declare defaultPrevented?: boolean; constructor(type: string, init = {}) { this.type = type; Object.assign(this, init); } }
   document.defaultView = { Event };
@@ -228,9 +227,13 @@ const removeGroupHistory = async (ui: TestUI, conversationId: string, id = "one"
 };
 const selectedGroupTask = (ui: TestUI) => vm.runInContext("selectedTask", ui.context);
 const mainHistoryItems = (ui: TestUI) => ui.get("main-history-list").querySelectorAll(".collaboration-history-item");
-const mainHistoryMore = (ui: TestUI, id: string) => ui.get("main-history-list").children
-  .find((row) => row.dataset.conversationId === id)?.querySelector(".main-history-more");
-const removeMainHistory = async (ui: TestUI, id: string) => { await mainHistoryMore(ui, id)!.click(); await ui.get("main-history-delete").click(); await settle(); };
+const mainHistoryDelete = (ui: TestUI, id: string) => {
+  const row = ui.get("main-history-list").children.find((item) => item.dataset.conversationId === id);
+  const remove = row?.querySelectorAll("button").find((item) => item.getAttribute("aria-label")?.startsWith("删除对话"));
+  assert.ok(remove, "每条主对话应直接提供删除按钮");
+  return remove;
+};
+const removeMainHistory = async (ui: TestUI, id: string) => { await mainHistoryDelete(ui, id).click(); await settle(); };
 const assertDisclosure = (element: { getAttribute: (arg0: string) => unknown; id: string|Error|undefined; inert: unknown; hidden: unknown; }, visible: boolean) => {
   assert.equal(element.getAttribute("aria-hidden"), String(!visible), element.id);
   assert.equal(element.inert, !visible, element.id);
@@ -2400,9 +2403,9 @@ test("主流式纯气泡先显示处理占位，再显示增量正文和流式�
   await ui.submit("main-chat-form"); await new Promise(resolve => setTimeout(resolve, 800));
   assert.equal(ui.get("main-send").hidden, true); assert.equal(ui.get("main-cancel").hidden, false);
   assert.equal(ui.get("sidebar-main-new-chat").disabled, true); assert.equal(ui.get("sidebar-main-new-chat").hidden, false);
-  assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, true);
-  await mainHistoryMore(ui, conversation.id)!.click();
-  assert.equal(ui.get("main-history-menu").hidden, true); assert.equal(ui.confirmations.length, 0);
+  assert.equal(mainHistoryDelete(ui, conversation.id).disabled, true);
+  await mainHistoryDelete(ui, conversation.id).click();
+  assert.equal(ui.confirmations.length, 0);
   let reply = ui.get("main-messages").children.find((item) => item.className === "message assistant");
   assert.equal(reply!.children.find(isBubble)!.textContent, "正在处理…");
   assert.equal(reply!.children.some((item) => item.className === "collaboration-message-heading"), false);
@@ -2515,24 +2518,18 @@ test("主对话历史保留完整标题提示，选中状态随切换更新", as
   assert.equal(ui.document.activeElement, ui.get("sidebar-main-link"));
 });
 
-test("主导航历史默认只展示前四条，展开全部及收起不改变主对话草稿", async () => {
+test("主导航在同一个列表中提供全部历史，可直接打开较早对话", async () => {
   const conversations = Array.from({ length: 6 }, (_, index) => ({ id: `main-${index}`, title: `对话 ${index + 1}`, messages: [] }));
   const ui = setup(mainSource, async (path: string) => Response.json(path === "/api/main/conversations" ? { conversations }
     : { conversation: conversations.find((record) => path.endsWith(record.id)) }));
-  await ui.route({ page: "agents" }); await settle();
-  const visible = () => ui.get("main-history-list").children.filter((row) => !row.hidden);
-  const more = ui.get("main-history-more-toggle");
-  assert.equal(visible().length, 4); assert.equal(more.hidden, false); assert.equal(more.getAttribute("aria-expanded"), "false");
+  await ui.route({ page: "chat" }); await settle();
+  const rows = ui.get("main-history-list").children.filter((row) => !row.hidden);
+  assert.deepEqual(rows.map((row) => row.dataset.conversationId), conversations.map((record) => record.id));
   ui.get("main-message").value = "独立的主对话草稿";
-  await more.click(); assert.equal(visible().length, 6); assert.equal(more.textContent, "收起显示");
-  assert.equal(more.getAttribute("aria-expanded"), "true");
-  mainHistoryItems(ui)[5]!.focus(); await more.click();
-  assert.equal(visible().length, 4); assert.equal(ui.document.activeElement, more); assert.equal(more.textContent, "展开显示");
+  await mainHistoryItems(ui).at(-1)!.click(); await settle();
+  assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), conversations.at(-1)!.id);
+  await mainHistoryItems(ui)[0]!.click(); await settle();
   assert.equal(ui.get("main-message").value, "独立的主对话草稿");
-  await ui.get("sidebar-main-link").click(); await ui.route({ page: "projects" });
-  assertDisclosure(ui.get("main-history-body"), false);
-  await ui.get("sidebar-main-link").click(); assertDisclosure(ui.get("main-history-body"), true);
-  assert.equal(visible().length, 4); assert.equal(ui.get("main-message").value, "独立的主对话草稿");
 });
 
 test("NEUMA整行标题、图标和空白反复折叠，空格不因长按重复", async () => {
@@ -2622,32 +2619,26 @@ test("离页主历史删除失败返回仍可见的操作按钮，用户已移�
       release = () => resolve(Response.json({ error: "服务暂时不可用" }, { status: 503 }));
     }) : Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation }), [], { confirm: () => true });
     await ui.route({ page: "projects" }); await settle();
-    await mainHistoryMore(ui, conversation.id)!.click();
-    const removing = ui.get("main-history-delete").click(); await settle();
+    const removing = mainHistoryDelete(ui, conversation.id).click(); await settle();
     const target = moved ? ui.get("project-message") : ui.document.body; target.focus();
     release!(); await removing; await settle();
     assert.match(ui.text("main-history-status"), /删除未完成/);
-    assert.equal(ui.document.activeElement, moved ? target : mainHistoryMore(ui, conversation.id));
+    assert.equal(ui.document.activeElement, moved ? target : mainHistoryDelete(ui, conversation.id));
   }
 });
 
-test("主历史删除菜单标识完整对话，键盘关闭归还焦点，取消确认不写入", async () => {
+test("主历史垃圾桶直接要求确认完整对话标题，取消后保留焦点和草稿", async () => {
   const conversation = { id: "main-one", title: "完整的历史对话标题", version: 4, messages: [] }, requests: ({ "path": (string); "method": (string); })[] = [];
   const ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
     requests.push({ path, method: options.method || "GET" });
     return Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation });
   });
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "尚未发送的草稿";
-  const more = mainHistoryMore(ui, conversation.id), menu = ui.get("main-history-menu"), remove = ui.get("main-history-delete");
-  assert.equal(more!.getAttribute("aria-label"), `对话操作：${conversation.title}`);
-  assert.equal(more!.getAttribute("aria-haspopup"), "menu");
-  await more!.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() {} });
-  assert.equal(menu.hidden, false); assert.equal(ui.document.activeElement, remove);
-  assert.equal(remove.textContent, "删除对话");
-  await ui.document.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
-  assert.equal(menu.hidden, true); assert.equal(ui.document.activeElement, more);
-  await removeMainHistory(ui, conversation.id);
+  const remove = mainHistoryDelete(ui, conversation.id);
+  assert.equal(remove.getAttribute("aria-label"), `删除对话：${conversation.title}`);
+  remove.focus(); await remove.click(); await settle();
   assert.equal(ui.confirmations.length, 1); assert.match(ui.confirmations[0]!, /完整的历史对话标题/);
+  assert.equal(ui.document.activeElement, remove);
   assert.equal(requests.some(({ method }) => method !== "GET"), false);
   assert.equal(mainHistoryItems(ui).length, 1); assert.equal(ui.get("main-message").value, "尚未发送的草稿");
 });
@@ -2751,14 +2742,13 @@ test("主历史删除待确认期间锁定发送、切换、材料和需求激�
     return Response.json(path === "/api/main/conversations" ? { conversations } : { conversation: conversations[0] });
   }, [], { confirm: () => true });
   await ui.route({ page: "chat" }); await settle(); ui.get("main-message").value = "删除期间保留的草稿";
-  await mainHistoryMore(ui, "main-b")!.click(); const removal = ui.get("main-history-delete").click(); await settle();
+  const removal = mainHistoryDelete(ui, "main-b").click(); await settle();
   assert.equal(typeof finish, "function");
-  for (const id of ["main-send", "sidebar-main-new-chat", "main-refresh", "main-attachment-menu-toggle", "main-upload", "main-materials-open", "main-history-delete"])
+  for (const id of ["main-send", "sidebar-main-new-chat", "main-refresh", "main-attachment-menu-toggle", "main-upload", "main-materials-open"])
     assert.equal(ui.get(id).disabled, true, id);
-  for (const item of mainHistoryItems(ui)) assert.equal(item.disabled, true);
-  for (const item of ui.get("main-history-list").querySelectorAll(".main-history-more")) assert.equal(item.disabled, true);
+  for (const item of ui.get("main-history-list").querySelectorAll("button")) assert.equal(item.disabled, true);
   await ui.submit("main-chat-form"); await ui.get("sidebar-main-new-chat").click(); await mainHistoryItems(ui)[1]!.click();
-  await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: {} }); await ui.get("main-history-delete").click(); await settle();
+  await ui.document.dispatchEvent({ type: "neuma:main-requirements", detail: {} }); await mainHistoryDelete(ui, "main-b").click(); await settle();
   assert.equal(requests.filter(({ options }) => options.method === "POST").length, 1);
   assert.equal(ui.get("main-message").value, "删除期间保留的草稿");
   finish!(); await removal; await settle(); assert.equal(ui.get("main-send").disabled, false); assert.equal(mainHistoryItems(ui).length, 1);
@@ -2778,14 +2768,14 @@ test("主历史删除后迟到的旧列表不能复活历史或替换当前会�
   }, [], { confirm: () => true });
   await ui.route({ page: "chat" }); await settle();
   vm.runInContext("void list()", ui.context); await settle(); assert.equal(typeof release, "function");
-  await mainHistoryMore(ui, conversation.id)!.click(); const removal = ui.get("main-history-delete").click(); await settle();
+  const removal = mainHistoryDelete(ui, conversation.id).click(); await settle();
   release!(); await removal; await settle();
   assert.equal(mainHistoryItems(ui).length, 0); assert.equal(ui.stored.get("neuma.main.active-conversation.v1"), "");
   assert.match(ui.text("main-messages"), /今天，想先完成什么/);
   assert.equal(ui.get("main-send").disabled, false);
 });
 
-test("主历史详情读取和材料上传期间不能打开删除菜单", async () => {
+test("主历史详情读取和材料上传期间禁用删除按钮", async () => {
   const conversation = { id: "main-one", title: "安全保存的对话", version: 1, messages: [] };
   let finishDetail, finishUpload;
   const writes: ((string))[] = [], ui = setup(mainSource, async (path: string, options:RequestInit = {}) => {
@@ -2795,15 +2785,15 @@ test("主历史详情读取和材料上传期间不能打开删除菜单", async
     return Response.json({ conversations: [conversation] });
   }, [], { confirm: () => true });
   await ui.route({ page: "chat" }); await settle();
-  assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, true);
-  await mainHistoryMore(ui, conversation.id)!.click(); assert.equal(ui.get("main-history-menu").hidden, true);
-  finishDetail!(); await settle(); assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, false);
+  assert.equal(mainHistoryDelete(ui, conversation.id).disabled, true);
+  await mainHistoryDelete(ui, conversation.id).click();
+  finishDetail!(); await settle(); assert.equal(mainHistoryDelete(ui, conversation.id).disabled, false);
   const file = Object.assign(new Blob(["资料"], { type: "text/plain" }), { name: "资料.txt" });
   await ui.get("main-file-input").dispatchEvent({ type: "change", target: { files: [file] } }); await settle();
-  assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, true);
-  await mainHistoryMore(ui, conversation.id)!.click(); assert.equal(ui.get("main-history-menu").hidden, true);
+  assert.equal(mainHistoryDelete(ui, conversation.id).disabled, true);
+  await mainHistoryDelete(ui, conversation.id).click();
   assert.equal(ui.confirmations.length, 0); assert.deepEqual(writes, ["/api/main/conversations/main-one/materials"]);
-  finishUpload!(); await settle(); assert.equal(mainHistoryMore(ui, conversation.id)!.disabled, false);
+  finishUpload!(); await settle(); assert.equal(mainHistoryDelete(ui, conversation.id).disabled, false);
 });
 
 test("当前主历史删除使用详情的最新版本，缺少版本时提示重新读取而不提交", async () => {
@@ -2855,14 +2845,13 @@ test("另一页面删除当前主历史后刷新切换，不把旧会话草稿�
   assert.deepEqual(mainHistoryItems(ui).map((item) => item.textContent), [remaining.title]);
 });
 
-test("主历史菜单被列表刷新关闭时焦点回到仍存在的对应操作按钮", async () => {
+test("主历史列表刷新后键盘焦点留在同一对话的删除按钮", async () => {
   const conversation = { id: "main-one", title: "可继续操作的历史", version: 1, messages: [] };
   const ui = setup(mainSource, async (path: string) => Response.json(path === "/api/main/conversations" ? { conversations: [conversation] } : { conversation }));
   await ui.route({ page: "chat" }); await settle();
-  await mainHistoryMore(ui, conversation.id)!.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() {} });
-  assert.equal(ui.document.activeElement, ui.get("main-history-delete"));
+  mainHistoryDelete(ui, conversation.id).focus();
   await vm.runInContext("list()", ui.context); await settle();
-  assert.equal(ui.get("main-history-menu").hidden, true); assert.equal(ui.document.activeElement, mainHistoryMore(ui, conversation.id));
+  assert.equal(ui.document.activeElement, mainHistoryDelete(ui, conversation.id));
 });
 
 test("主助理失败后保留输入并复用消息操作，群外联系不会伪造群成员", async () => {
